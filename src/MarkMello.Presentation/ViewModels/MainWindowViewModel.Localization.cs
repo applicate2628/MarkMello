@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.Input;
 using MarkMello.Application.Updates;
 using MarkMello.Application.UseCases;
 using MarkMello.Domain;
+using MarkMello.Presentation.Localization;
 using System.ComponentModel;
 
 namespace MarkMello.Presentation.ViewModels;
@@ -58,10 +59,7 @@ public partial class MainWindowViewModel
 
     private void OnLocalizationChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is not nameof(_localization.SelectedLanguage)
-            and not nameof(_localization.EffectiveLanguage)
-            and not nameof(_localization.Culture)
-            and not "Item[]")
+        if (!IsLocalizationChangeNotification(e.PropertyName))
         {
             return;
         }
@@ -73,6 +71,14 @@ public partial class MainWindowViewModel
     {
         OnPropertyChanged(nameof(SelectedLanguageOption));
     }
+
+    private static bool IsLocalizationChangeNotification(string? propertyName)
+        => string.IsNullOrEmpty(propertyName)
+           || propertyName == nameof(ILocalizationService.SelectedLanguage)
+           || propertyName == nameof(ILocalizationService.EffectiveLanguage)
+           || propertyName == nameof(ILocalizationService.Culture)
+           || propertyName == "Item"
+           || propertyName == "Item[]";
 
     private void ApplyLanguageSelection(AppLanguage language, bool persist = true)
     {
@@ -109,6 +115,8 @@ public partial class MainWindowViewModel
     {
         _languageOptions = CreateLanguageOptions();
 
+        NotifyLocalizedIndexerBindingsChanged();
+
         OnPropertyChanged(nameof(EditToggleLabel));
         OnPropertyChanged(nameof(EditShortcutLabel));
         OnPropertyChanged(nameof(NextThemeHint));
@@ -129,6 +137,13 @@ public partial class MainWindowViewModel
         RefreshDirtyPromptTexts();
         RefreshLoadErrorTexts();
         RefreshUpdateStatusTexts();
+    }
+
+    private void NotifyLocalizedIndexerBindingsChanged()
+    {
+        OnPropertyChanged("Item");
+        OnPropertyChanged("Item[]");
+        OnPropertyChanged(string.Empty);
     }
 
     private IReadOnlyList<LanguageSelectionItem> CreateLanguageOptions() =>

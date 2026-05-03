@@ -73,6 +73,8 @@ public partial class MainWindowViewModel : ObservableObject
 
     public IImageSourceResolver? ImageSourceResolver => _imageSourceResolver;
 
+    public string this[string key] => _localization[key];
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsWelcome))]
     [NotifyPropertyChangedFor(nameof(IsViewer))]

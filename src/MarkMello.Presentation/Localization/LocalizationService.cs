@@ -347,7 +347,18 @@ public sealed class LocalizationService : ObservableObject, ILocalizationService
         OnPropertyChanged(nameof(SelectedLanguage));
         OnPropertyChanged(nameof(EffectiveLanguage));
         OnPropertyChanged(nameof(Culture));
+        NotifyLocalizedTextChanged();
+    }
+
+    private void NotifyLocalizedTextChanged()
+    {
+        // Avalonia indexer bindings may subscribe to either the CLR indexer
+        // property name (Item) or the common WPF-style indexer marker (Item[]).
+        // Raising both keeps every active shell/view binding refreshed when the
+        // language changes. The empty name is the standard full-refresh signal.
+        OnPropertyChanged("Item");
         OnPropertyChanged("Item[]");
+        OnPropertyChanged(string.Empty);
     }
 
     private string ResolveString(string key)

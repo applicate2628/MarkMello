@@ -476,6 +476,24 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("Слов: 0", harness.ViewModel.WordCountStatusLabel);
     }
 
+
+    [Fact]
+    public void SelectedLanguageOptionRaisesIndexerNotificationsForVisibleShellBindings()
+    {
+        var harness = CreateHarness();
+        var names = new List<string?>();
+        harness.ViewModel.PropertyChanged += (_, e) => names.Add(e.PropertyName);
+        var russianOption = harness.ViewModel.LanguageOptions.Single(option => option.Language == AppLanguage.Russian);
+
+        harness.ViewModel.SelectedLanguageOption = russianOption;
+
+        Assert.Contains("Item", names);
+        Assert.Contains("Item[]", names);
+        Assert.Contains(string.Empty, names);
+        Assert.Equal("Тихое место для чтения Markdown.", harness.ViewModel["WelcomeTagline"]);
+        Assert.Equal("МЕНЮ", harness.ViewModel["AppMenuHeader"]);
+    }
+
     [Fact]
     public void LanguageOptionsKeepsStableItemReferencesBetweenLocalizationChanges()
     {
