@@ -4,7 +4,6 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:MarkMello.Presentation.ViewModels"
              mc:Ignorable="d"
-             x:CompileBindings="False"
              x:Class="MarkMello.Presentation.Views.ReadingSettingsPanelView"
              x:DataType="vm:MainWindowViewModel">
       <Border
@@ -16,11 +15,11 @@
                   ColumnSpacing="12">
               <TextBlock Classes="mm-settings-title"
                          Grid.Column="0"
-                         Text="{Binding [ReadingHeader], Source={StaticResource Localization}}" />
+                         Text="{Binding ReadingHeader}" />
               <Button Grid.Column="1"
                       Classes="mm-settings-close"
                       Command="{Binding CloseSettingsCommand}"
-                      ToolTip.Tip="{Binding [OverlayCloseSettings], Source={StaticResource Localization}}">
+                      ToolTip.Tip="{Binding OverlayCloseSettings}">
                 <Path Data="M0,0 L10,10 M10,0 L0,10"
                       Stroke="{DynamicResource MmTextFaintBrush}"
                       StrokeThickness="1.4"
@@ -38,9 +37,9 @@
                               Spacing="2"
                               VerticalAlignment="Center">
                     <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [ReadingFontLabel], Source={StaticResource Localization}}" />
+                               Text="{Binding ReadingFontLabel}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [ReadingFontHint], Source={StaticResource Localization}}" />
+                               Text="{Binding ReadingFontHint}" />
                   </StackPanel>
                   <Border Grid.Column="1"
                           Classes="mm-segmented"
@@ -49,15 +48,15 @@
                                 Spacing="1">
                       <ToggleButton Classes="mm-segmented-item"
                                     IsChecked="{Binding IsSerifFontSelected}">
-                        <TextBlock Text="{Binding [ReadingFontSerif], Source={StaticResource Localization}}" />
+                        <TextBlock Text="{Binding ReadingFontSerif}" />
                       </ToggleButton>
                       <ToggleButton Classes="mm-segmented-item"
                                     IsChecked="{Binding IsSansFontSelected}">
-                        <TextBlock Text="{Binding [ReadingFontSans], Source={StaticResource Localization}}" />
+                        <TextBlock Text="{Binding ReadingFontSans}" />
                       </ToggleButton>
                       <ToggleButton Classes="mm-segmented-item"
                                     IsChecked="{Binding IsMonoFontSelected}">
-                        <TextBlock Text="{Binding [ReadingFontMono], Source={StaticResource Localization}}" />
+                        <TextBlock Text="{Binding ReadingFontMono}" />
                       </ToggleButton>
                     </StackPanel>
                   </Border>
@@ -75,9 +74,9 @@
                                 Spacing="2"
                                 VerticalAlignment="Center">
                       <TextBlock Classes="mm-setting-label"
-                                 Text="{Binding [ReadingSizeLabel], Source={StaticResource Localization}}" />
+                                 Text="{Binding ReadingSizeLabel}" />
                       <TextBlock Classes="mm-setting-hint"
-                                 Text="{Binding [ReadingSizeHint], Source={StaticResource Localization}}" />
+                                 Text="{Binding ReadingSizeHint}" />
                     </StackPanel>
                     <StackPanel Grid.Column="1"
                                 Orientation="Horizontal"
@@ -107,9 +106,9 @@
                                 Spacing="2"
                                 VerticalAlignment="Center">
                       <TextBlock Classes="mm-setting-label"
-                                 Text="{Binding [ReadingLineHeightLabel], Source={StaticResource Localization}}" />
+                                 Text="{Binding ReadingLineHeightLabel}" />
                       <TextBlock Classes="mm-setting-hint"
-                                 Text="{Binding [ReadingLineHeightHint], Source={StaticResource Localization}}" />
+                                 Text="{Binding ReadingLineHeightHint}" />
                     </StackPanel>
                     <StackPanel Grid.Column="1"
                                 Orientation="Horizontal"
@@ -139,9 +138,9 @@
                                 Spacing="2"
                                 VerticalAlignment="Center">
                       <TextBlock Classes="mm-setting-label"
-                                 Text="{Binding [ReadingWidthLabel], Source={StaticResource Localization}}" />
+                                 Text="{Binding ReadingWidthLabel}" />
                       <TextBlock Classes="mm-setting-hint"
-                                 Text="{Binding [ReadingWidthHint], Source={StaticResource Localization}}" />
+                                 Text="{Binding ReadingWidthHint}" />
                     </StackPanel>
                     <Border Grid.Column="1"
                             Classes="mm-segmented"
@@ -150,15 +149,15 @@
                                   Spacing="1">
                         <ToggleButton Classes="mm-segmented-item"
                                       IsChecked="{Binding IsNarrowWidthSelected}">
-                          <TextBlock Text="{Binding [ReadingWidthNarrow], Source={StaticResource Localization}}" />
+                          <TextBlock Text="{Binding ReadingWidthNarrow}" />
                         </ToggleButton>
                         <ToggleButton Classes="mm-segmented-item"
                                       IsChecked="{Binding IsMediumWidthSelected}">
-                          <TextBlock Text="{Binding [ReadingWidthMedium], Source={StaticResource Localization}}" />
+                          <TextBlock Text="{Binding ReadingWidthMedium}" />
                         </ToggleButton>
                         <ToggleButton Classes="mm-segmented-item"
                                       IsChecked="{Binding IsWideWidthSelected}">
-                          <TextBlock Text="{Binding [ReadingWidthWide], Source={StaticResource Localization}}" />
+                          <TextBlock Text="{Binding ReadingWidthWide}" />
                         </ToggleButton>
                       </StackPanel>
                     </Border>

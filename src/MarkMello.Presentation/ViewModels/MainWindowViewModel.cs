@@ -997,7 +997,8 @@ public partial class MainWindowViewModel : ObservableObject
             string.Empty,
             ReadingPreferences,
             _renderMarkdown,
-            _imageSourceResolver);
+            _imageSourceResolver,
+            _localization);
 
         if (!_editorActivationMarked)
         {
@@ -1046,7 +1047,8 @@ public partial class MainWindowViewModel : ObservableObject
                 Document,
                 ReadingPreferences,
                 _renderMarkdown,
-                _imageSourceResolver);
+                _imageSourceResolver,
+                _localization);
         }
 
         if (!_editorActivationMarked)
@@ -1109,7 +1111,8 @@ public partial class MainWindowViewModel : ObservableObject
                     source,
                     ReadingPreferences,
                     _renderMarkdown,
-                    _imageSourceResolver);
+                    _imageSourceResolver,
+                    _localization);
             }
             else
             {
@@ -1170,7 +1173,8 @@ public partial class MainWindowViewModel : ObservableObject
                 source,
                 ReadingPreferences,
                 _renderMarkdown,
-                _imageSourceResolver);
+                _imageSourceResolver,
+                _localization);
         }
         else
         {

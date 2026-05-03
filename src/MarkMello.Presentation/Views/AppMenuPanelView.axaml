@@ -4,7 +4,6 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:MarkMello.Presentation.ViewModels"
              mc:Ignorable="d"
-             x:CompileBindings="False"
              x:Class="MarkMello.Presentation.Views.AppMenuPanelView"
              x:DataType="vm:MainWindowViewModel">
       <Border
@@ -16,11 +15,11 @@
                   ColumnSpacing="12">
               <TextBlock Classes="mm-settings-title"
                          Grid.Column="0"
-                         Text="{Binding [AppMenuHeader], Source={StaticResource Localization}}" />
+                         Text="{Binding AppMenuHeader}" />
               <Button Grid.Column="1"
                       Classes="mm-settings-close"
                       Command="{Binding CloseOverlayCommand}"
-                      ToolTip.Tip="{Binding [OverlayCloseMenu], Source={StaticResource Localization}}">
+                      ToolTip.Tip="{Binding OverlayCloseMenu}">
                 <Path Data="M0,0 L10,10 M10,0 L0,10"
                       Stroke="{DynamicResource MmTextFaintBrush}"
                       StrokeThickness="1.4"
@@ -39,9 +38,9 @@
                               Spacing="2"
                               HorizontalAlignment="Left">
                     <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [AppMenuOpenFileLabel], Source={StaticResource Localization}}" />
+                               Text="{Binding AppMenuOpenFileLabel}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [AppMenuOpenFileHint], Source={StaticResource Localization}}" />
+                               Text="{Binding AppMenuOpenFileHint}" />
                   </StackPanel>
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
@@ -61,13 +60,13 @@
                               Spacing="2"
                               HorizontalAlignment="Left">
                     <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [AppMenuCloseFileLabel], Source={StaticResource Localization}}" />
+                               Text="{Binding AppMenuCloseFileLabel}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [AppMenuCloseFileHint], Source={StaticResource Localization}}" />
+                               Text="{Binding AppMenuCloseFileHint}" />
                   </StackPanel>
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
-                             Text="{Binding [MetaCurrent], Source={StaticResource Localization}}" />
+                             Text="{Binding MetaCurrent}" />
                 </Grid>
               </Button>
 
@@ -83,13 +82,13 @@
                               Spacing="2"
                               HorizontalAlignment="Left">
                     <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [AppMenuSettingsLabel], Source={StaticResource Localization}}" />
+                               Text="{Binding AppMenuSettingsLabel}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [AppMenuSettingsHint], Source={StaticResource Localization}}" />
+                               Text="{Binding AppMenuSettingsHint}" />
                   </StackPanel>
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
-                             Text="{Binding [MetaOpen], Source={StaticResource Localization}}" />
+                             Text="{Binding MetaOpen}" />
                 </Grid>
               </Button>
             </StackPanel>

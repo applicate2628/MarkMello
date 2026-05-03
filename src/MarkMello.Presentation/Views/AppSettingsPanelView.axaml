@@ -4,7 +4,6 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:MarkMello.Presentation.ViewModels"
              mc:Ignorable="d"
-             x:CompileBindings="False"
              x:Class="MarkMello.Presentation.Views.AppSettingsPanelView"
              x:DataType="vm:MainWindowViewModel">
       <Border
@@ -17,7 +16,7 @@
               <Button Grid.Column="0"
                       Classes="mm-settings-close"
                       Command="{Binding ReturnToAppMenuCommand}"
-                      ToolTip.Tip="{Binding [OverlayBackToMenu], Source={StaticResource Localization}}">
+                      ToolTip.Tip="{Binding OverlayBackToMenu}">
                 <Path Data="M9.5,1.5 L2.5,5.5 L9.5,9.5"
                       Stroke="{DynamicResource MmTextFaintBrush}"
                       StrokeThickness="1.4"
@@ -28,11 +27,11 @@
               <TextBlock Classes="mm-settings-title"
                          Grid.Column="1"
                          VerticalAlignment="Center"
-                         Text="{Binding [AppSettingsHeader], Source={StaticResource Localization}}" />
+                         Text="{Binding AppSettingsHeader}" />
               <Button Grid.Column="2"
                       Classes="mm-settings-close"
                       Command="{Binding CloseOverlayCommand}"
-                      ToolTip.Tip="{Binding [OverlayCloseSettings], Source={StaticResource Localization}}">
+                      ToolTip.Tip="{Binding OverlayCloseSettings}">
                 <Path Data="M0,0 L10,10 M10,0 L0,10"
                       Stroke="{DynamicResource MmTextFaintBrush}"
                       StrokeThickness="1.4"
@@ -50,9 +49,9 @@
                               Spacing="2"
                               VerticalAlignment="Center">
                     <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [LanguageLabel], Source={StaticResource Localization}}" />
+                               Text="{Binding LanguageLabel}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [LanguageHint], Source={StaticResource Localization}}" />
+                               Text="{Binding LanguageHint}" />
                   </StackPanel>
                   <ComboBox Grid.Column="1"
                             Classes="mm-language-select"
@@ -60,7 +59,7 @@
                             ItemsSource="{Binding LanguageOptions}"
                             SelectedItem="{Binding SelectedLanguageOption, Mode=TwoWay}">
                     <ComboBox.ItemTemplate>
-                      <DataTemplate>
+                      <DataTemplate x:DataType="vm:LanguageSelectionItem">
                         <TextBlock Text="{Binding Label}" />
                       </DataTemplate>
                     </ComboBox.ItemTemplate>
@@ -79,9 +78,9 @@
                     <StackPanel Grid.Column="0"
                                 Spacing="2">
                       <TextBlock Classes="mm-setting-label"
-                                 Text="{Binding [UpdatesLabel], Source={StaticResource Localization}}" />
+                                 Text="{Binding UpdatesLabel}" />
                       <TextBlock Classes="mm-setting-hint"
-                                 Text="{Binding [UpdatesHint], Source={StaticResource Localization}}" />
+                                 Text="{Binding UpdatesHint}" />
                     </StackPanel>
                     <TextBlock Grid.Column="1"
                                Classes="mm-setting-meta"
@@ -128,13 +127,13 @@
                   <StackPanel Grid.Column="0"
                               Spacing="2">
                     <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [AboutLabel], Source={StaticResource Localization}}" />
+                               Text="{Binding AboutLabel}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [AboutHint], Source={StaticResource Localization}}" />
+                               Text="{Binding AboutHint}" />
                   </StackPanel>
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
-                             Text="{Binding [MetaOpen], Source={StaticResource Localization}}" />
+                             Text="{Binding MetaOpen}" />
                 </Grid>
               </Button>
             </StackPanel>

@@ -4,7 +4,6 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:MarkMello.Presentation.ViewModels"
              mc:Ignorable="d"
-             x:CompileBindings="False"
              x:Class="MarkMello.Presentation.Views.WelcomeView"
              x:DataType="vm:MainWindowViewModel">
 
@@ -29,7 +28,7 @@
              Foreground="{DynamicResource MmAccentBrush}" />
       </TextBlock>
 
-      <TextBlock Text="{Binding [WelcomeTagline], Source={StaticResource Localization}}"
+      <TextBlock Text="{Binding WelcomeTagline}"
                  FontFamily="{DynamicResource MmDocumentSansFontFamily}"
                  FontSize="13"
                  HorizontalAlignment="Center"
@@ -47,11 +46,11 @@
                   Stroke="{DynamicResource MmTextSoftBrush}"
                   StrokeThickness="1.5"
                   StrokeLineCap="Round" />
-            <TextBlock Text="{Binding [WelcomeCreateMd], Source={StaticResource Localization}}" />
+            <TextBlock Text="{Binding WelcomeCreateMd}" />
           </StackPanel>
         </Button>
         <Button Classes="welcome-primary"
-                Content="{Binding [WelcomeOpenFile], Source={StaticResource Localization}}"
+                Content="{Binding WelcomeOpenFile}"
                 Command="{Binding OpenFileCommand}" />
       </StackPanel>
 
@@ -64,7 +63,7 @@
         <Border Classes="kbd">
           <TextBlock Text="O" FontFamily="{DynamicResource MmDocumentMonoFontFamily}" FontSize="10" />
         </Border>
-        <TextBlock Text="{Binding [WelcomeDropHint], Source={StaticResource Localization}}"
+        <TextBlock Text="{Binding WelcomeDropHint}"
                    FontSize="11"
                    Foreground="{DynamicResource MmTextFaintBrush}"
                    VerticalAlignment="Center" />

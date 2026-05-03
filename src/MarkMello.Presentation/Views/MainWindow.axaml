@@ -5,7 +5,6 @@
         xmlns:vm="using:MarkMello.Presentation.ViewModels"
         xmlns:views="using:MarkMello.Presentation.Views"
         mc:Ignorable="d"
-        x:CompileBindings="False"
         x:Class="MarkMello.Presentation.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Width="1280" Height="840"
@@ -17,10 +16,12 @@
         DragDrop.AllowDrop="True"
         UseLayoutRounding="True">
   <Window.DataTemplates>
-    <DataTemplate DataType="vm:MainWindowViewModel">
+    <DataTemplate DataType="vm:MainWindowViewModel"
+                  x:DataType="vm:MainWindowViewModel">
       <views:ViewerView />
     </DataTemplate>
-    <DataTemplate DataType="vm:EditorSessionViewModel">
+    <DataTemplate DataType="vm:EditorSessionViewModel"
+                  x:DataType="vm:EditorSessionViewModel">
       <views:EditWorkspaceView />
     </DataTemplate>
   </Window.DataTemplates>
@@ -121,14 +122,14 @@
                     IsVisible="{Binding ShowCustomTitleBar}">
           <Button Classes="titlebar"
                   Click="OnMinimizeClick"
-                  ToolTip.Tip="{Binding [TitleBarMinimize], Source={StaticResource Localization}}">
+                  ToolTip.Tip="{Binding TitleBarMinimize}">
             <Path Data="M0,5 L10,5"
                   Stroke="{DynamicResource MmTitleBarTextBrush}"
                   StrokeThickness="1" />
           </Button>
           <Button Classes="titlebar"
                   Click="OnMaximizeClick"
-                  ToolTip.Tip="{Binding [TitleBarMaximize], Source={StaticResource Localization}}">
+                  ToolTip.Tip="{Binding TitleBarMaximize}">
             <Path Data="M0,0 L10,0 L10,10 L0,10 Z"
                   Stroke="{DynamicResource MmTitleBarTextBrush}"
                   StrokeThickness="1"
@@ -136,7 +137,7 @@
           </Button>
           <Button Classes="titlebar close"
                   Click="OnCloseClick"
-                  ToolTip.Tip="{Binding [TitleBarClose], Source={StaticResource Localization}}">
+                  ToolTip.Tip="{Binding TitleBarClose}">
             <Path Data="M0,0 L10,10 M10,0 L0,10"
                   Stroke="{DynamicResource MmTitleBarTextBrush}"
                   StrokeThickness="1" />
@@ -171,7 +172,7 @@
                       Classes="topbar-ghost"
                       IsChecked="{Binding IsAppOverlayOpen, Mode=OneWay}"
                       Command="{Binding ToggleAppMenuCommand}"
-                      ToolTip.Tip="{Binding [AppMenuTooltip], Source={StaticResource Localization}}">
+                      ToolTip.Tip="{Binding AppMenuTooltip}">
           <Grid Width="14"
                 Height="14">
             <Path Data="M2.5 4H11.5 M2.5 7H11.5 M2.5 10H11.5"
@@ -251,7 +252,7 @@
                         IsVisible="{Binding ShowsEditToggle}"
                         IsChecked="{Binding IsEditMode, Mode=OneWay}"
                         Command="{Binding ToggleEditModeCommand}"
-                        ToolTip.Tip="{Binding [EditToggleTooltip], Source={StaticResource Localization}}">
+                        ToolTip.Tip="{Binding EditToggleTooltip}">
             <StackPanel Orientation="Horizontal"
                         Spacing="6"
                         VerticalAlignment="Center">
@@ -302,7 +303,7 @@
                         IsVisible="{Binding IsViewer}"
                         Command="{Binding ToggleSettingsCommand}"
                         IsChecked="{Binding IsSettingsOpen, Mode=OneWay}"
-                        ToolTip.Tip="{Binding [ReadingSettingsTooltip], Source={StaticResource Localization}}">
+                        ToolTip.Tip="{Binding ReadingSettingsTooltip}">
             <Grid Width="14"
                   Height="14">
               <Viewbox Stretch="Uniform">
@@ -347,7 +348,7 @@
                       Margin="16,54,0,0"
                       Content="{Binding AppMenuOverlayContent}">
         <ContentControl.ContentTemplate>
-          <DataTemplate>
+          <DataTemplate x:DataType="vm:MainWindowViewModel">
             <views:AppMenuPanelView />
           </DataTemplate>
         </ContentControl.ContentTemplate>
@@ -359,7 +360,7 @@
                       Margin="16,54,0,0"
                       Content="{Binding AppSettingsOverlayContent}">
         <ContentControl.ContentTemplate>
-          <DataTemplate>
+          <DataTemplate x:DataType="vm:MainWindowViewModel">
             <views:AppSettingsPanelView />
           </DataTemplate>
         </ContentControl.ContentTemplate>
@@ -371,7 +372,7 @@
                       Margin="16,54,0,0"
                       Content="{Binding AppAboutOverlayContent}">
         <ContentControl.ContentTemplate>
-          <DataTemplate>
+          <DataTemplate x:DataType="vm:MainWindowViewModel">
             <views:AppAboutPanelView />
           </DataTemplate>
         </ContentControl.ContentTemplate>
@@ -383,7 +384,7 @@
                       Margin="0,54,16,0"
                       Content="{Binding ReadingSettingsOverlayContent}">
         <ContentControl.ContentTemplate>
-          <DataTemplate>
+          <DataTemplate x:DataType="vm:MainWindowViewModel">
             <views:ReadingSettingsPanelView />
           </DataTemplate>
         </ContentControl.ContentTemplate>
@@ -426,7 +427,7 @@
                            FontFamily="{DynamicResource MmDocumentMonoFontFamily}"
                            FontSize="10" />
               </Border>
-              <TextBlock Text="{Binding [StatusOpen], Source={StaticResource Localization}}"
+              <TextBlock Text="{Binding StatusOpen}"
                          FontSize="11"
                          Foreground="{DynamicResource MmTextFaintBrush}"
                          VerticalAlignment="Center"
@@ -464,7 +465,7 @@
                            FontFamily="{DynamicResource MmDocumentMonoFontFamily}"
                            FontSize="10" />
               </Border>
-              <TextBlock Text="{Binding [StatusPrefs], Source={StaticResource Localization}}"
+              <TextBlock Text="{Binding StatusPrefs}"
                          FontSize="11"
                          Foreground="{DynamicResource MmTextFaintBrush}"
                          VerticalAlignment="Center"
@@ -481,7 +482,7 @@
               BorderThickness="2"
               CornerRadius="10"
               Margin="12">
-        <TextBlock Text="{Binding [DragDropHint], Source={StaticResource Localization}}"
+        <TextBlock Text="{Binding DragDropHint}"
                    FontFamily="{DynamicResource MmDocumentSansFontFamily}"
                    FontSize="14"
                    Foreground="{DynamicResource MmAccentBrush}"
@@ -510,13 +511,13 @@
                         Spacing="8"
                         Margin="0,18,0,0">
               <Button Classes="mm-dialog-secondary"
-                      Content="{Binding [DirtyPromptCancel], Source={StaticResource Localization}}"
+                      Content="{Binding DirtyPromptCancel}"
                       Command="{Binding CancelDirtyPromptCommand}" />
               <Button Classes="mm-dialog-secondary"
-                      Content="{Binding [DirtyPromptDiscard], Source={StaticResource Localization}}"
+                      Content="{Binding DirtyPromptDiscard}"
                       Command="{Binding ConfirmDirtyDiscardCommand}" />
               <Button Classes="mm-dialog-primary"
-                      Content="{Binding [DirtyPromptSave], Source={StaticResource Localization}}"
+                      Content="{Binding DirtyPromptSave}"
                       Command="{Binding ConfirmDirtySaveCommand}" />
             </StackPanel>
           </StackPanel>

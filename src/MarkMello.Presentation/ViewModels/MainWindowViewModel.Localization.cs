@@ -44,6 +44,139 @@ public partial class MainWindowViewModel
         }
     }
 
+    private static readonly string[] LocalizedBindingPropertyNames =
+    [
+        nameof(AboutCreatedByPrefix),
+        nameof(AboutCreditsLabel),
+        nameof(AboutCreditsPeriod),
+        nameof(AboutHeader),
+        nameof(AboutHint),
+        nameof(AboutLabel),
+        nameof(AboutLicenseHint),
+        nameof(AboutLicenseLabel),
+        nameof(AboutVersionHint),
+        nameof(AboutVersionLabel),
+        nameof(AppMenuCloseFileHint),
+        nameof(AppMenuCloseFileLabel),
+        nameof(AppMenuHeader),
+        nameof(AppMenuOpenFileHint),
+        nameof(AppMenuOpenFileLabel),
+        nameof(AppMenuSettingsHint),
+        nameof(AppMenuSettingsLabel),
+        nameof(AppMenuTooltip),
+        nameof(AppSettingsHeader),
+        nameof(DirtyPromptCancel),
+        nameof(DirtyPromptDiscard),
+        nameof(DirtyPromptSave),
+        nameof(DragDropHint),
+        nameof(EditToggleTooltip),
+        nameof(LanguageHint),
+        nameof(LanguageLabel),
+        nameof(LoadErrorOpenAnotherFile),
+        nameof(LoadErrorPress),
+        nameof(LoadErrorToDismiss),
+        nameof(LoadErrorTryAgain),
+        nameof(MetaCurrent),
+        nameof(MetaOpen),
+        nameof(OverlayBackToMenu),
+        nameof(OverlayBackToSettings),
+        nameof(OverlayCloseAbout),
+        nameof(OverlayCloseMenu),
+        nameof(OverlayCloseSettings),
+        nameof(ReadingFontHint),
+        nameof(ReadingFontLabel),
+        nameof(ReadingFontMono),
+        nameof(ReadingFontSans),
+        nameof(ReadingFontSerif),
+        nameof(ReadingHeader),
+        nameof(ReadingLineHeightHint),
+        nameof(ReadingLineHeightLabel),
+        nameof(ReadingSettingsTooltip),
+        nameof(ReadingSizeHint),
+        nameof(ReadingSizeLabel),
+        nameof(ReadingWidthHint),
+        nameof(ReadingWidthLabel),
+        nameof(ReadingWidthMedium),
+        nameof(ReadingWidthNarrow),
+        nameof(ReadingWidthWide),
+        nameof(StatusOpen),
+        nameof(StatusPrefs),
+        nameof(TitleBarClose),
+        nameof(TitleBarMaximize),
+        nameof(TitleBarMinimize),
+        nameof(UpdatesHint),
+        nameof(UpdatesLabel),
+        nameof(WelcomeCreateMd),
+        nameof(WelcomeDropHint),
+        nameof(WelcomeOpenFile),
+        nameof(WelcomeTagline),
+    ];
+
+    public string AboutCreatedByPrefix => _localization["AboutCreatedByPrefix"];
+    public string AboutCreditsLabel => _localization["AboutCreditsLabel"];
+    public string AboutCreditsPeriod => _localization["AboutCreditsPeriod"];
+    public string AboutHeader => _localization["AboutHeader"];
+    public string AboutHint => _localization["AboutHint"];
+    public string AboutLabel => _localization["AboutLabel"];
+    public string AboutLicenseHint => _localization["AboutLicenseHint"];
+    public string AboutLicenseLabel => _localization["AboutLicenseLabel"];
+    public string AboutVersionHint => _localization["AboutVersionHint"];
+    public string AboutVersionLabel => _localization["AboutVersionLabel"];
+    public string AppMenuCloseFileHint => _localization["AppMenuCloseFileHint"];
+    public string AppMenuCloseFileLabel => _localization["AppMenuCloseFileLabel"];
+    public string AppMenuHeader => _localization["AppMenuHeader"];
+    public string AppMenuOpenFileHint => _localization["AppMenuOpenFileHint"];
+    public string AppMenuOpenFileLabel => _localization["AppMenuOpenFileLabel"];
+    public string AppMenuSettingsHint => _localization["AppMenuSettingsHint"];
+    public string AppMenuSettingsLabel => _localization["AppMenuSettingsLabel"];
+    public string AppMenuTooltip => _localization["AppMenuTooltip"];
+    public string AppSettingsHeader => _localization["AppSettingsHeader"];
+    public string DirtyPromptCancel => _localization["DirtyPromptCancel"];
+    public string DirtyPromptDiscard => _localization["DirtyPromptDiscard"];
+    public string DirtyPromptSave => _localization["DirtyPromptSave"];
+    public string DragDropHint => _localization["DragDropHint"];
+    public string EditToggleTooltip => _localization["EditToggleTooltip"];
+    public string LanguageHint => _localization["LanguageHint"];
+    public string LanguageLabel => _localization["LanguageLabel"];
+    public string LoadErrorOpenAnotherFile => _localization["LoadErrorOpenAnotherFile"];
+    public string LoadErrorPress => _localization["LoadErrorPress"];
+    public string LoadErrorToDismiss => _localization["LoadErrorToDismiss"];
+    public string LoadErrorTryAgain => _localization["LoadErrorTryAgain"];
+    public string MetaCurrent => _localization["MetaCurrent"];
+    public string MetaOpen => _localization["MetaOpen"];
+    public string OverlayBackToMenu => _localization["OverlayBackToMenu"];
+    public string OverlayBackToSettings => _localization["OverlayBackToSettings"];
+    public string OverlayCloseAbout => _localization["OverlayCloseAbout"];
+    public string OverlayCloseMenu => _localization["OverlayCloseMenu"];
+    public string OverlayCloseSettings => _localization["OverlayCloseSettings"];
+    public string ReadingFontHint => _localization["ReadingFontHint"];
+    public string ReadingFontLabel => _localization["ReadingFontLabel"];
+    public string ReadingFontMono => _localization["ReadingFontMono"];
+    public string ReadingFontSans => _localization["ReadingFontSans"];
+    public string ReadingFontSerif => _localization["ReadingFontSerif"];
+    public string ReadingHeader => _localization["ReadingHeader"];
+    public string ReadingLineHeightHint => _localization["ReadingLineHeightHint"];
+    public string ReadingLineHeightLabel => _localization["ReadingLineHeightLabel"];
+    public string ReadingSettingsTooltip => _localization["ReadingSettingsTooltip"];
+    public string ReadingSizeHint => _localization["ReadingSizeHint"];
+    public string ReadingSizeLabel => _localization["ReadingSizeLabel"];
+    public string ReadingWidthHint => _localization["ReadingWidthHint"];
+    public string ReadingWidthLabel => _localization["ReadingWidthLabel"];
+    public string ReadingWidthMedium => _localization["ReadingWidthMedium"];
+    public string ReadingWidthNarrow => _localization["ReadingWidthNarrow"];
+    public string ReadingWidthWide => _localization["ReadingWidthWide"];
+    public string StatusOpen => _localization["StatusOpen"];
+    public string StatusPrefs => _localization["StatusPrefs"];
+    public string TitleBarClose => _localization["TitleBarClose"];
+    public string TitleBarMaximize => _localization["TitleBarMaximize"];
+    public string TitleBarMinimize => _localization["TitleBarMinimize"];
+    public string UpdatesHint => _localization["UpdatesHint"];
+    public string UpdatesLabel => _localization["UpdatesLabel"];
+    public string WelcomeCreateMd => _localization["WelcomeCreateMd"];
+    public string WelcomeDropHint => _localization["WelcomeDropHint"];
+    public string WelcomeOpenFile => _localization["WelcomeOpenFile"];
+    public string WelcomeTagline => _localization["WelcomeTagline"];
+
     public string WordCountStatusLabel => _localization.Format("StatusWordCount", WordCount);
 
     public string ReadTimeStatusLabel => _localization.Format("StatusReadTime", ReadTimeMinutes);
@@ -115,7 +248,8 @@ public partial class MainWindowViewModel
     {
         _languageOptions = CreateLanguageOptions();
 
-        NotifyLocalizedIndexerBindingsChanged();
+        NotifyLocalizedBindingPropertiesChanged();
+        EditorSession?.RefreshLocalizedProperties();
 
         OnPropertyChanged(nameof(EditToggleLabel));
         OnPropertyChanged(nameof(EditShortcutLabel));
@@ -139,11 +273,12 @@ public partial class MainWindowViewModel
         RefreshUpdateStatusTexts();
     }
 
-    private void NotifyLocalizedIndexerBindingsChanged()
+    private void NotifyLocalizedBindingPropertiesChanged()
     {
-        OnPropertyChanged("Item");
-        OnPropertyChanged("Item[]");
-        OnPropertyChanged(string.Empty);
+        foreach (var propertyName in LocalizedBindingPropertyNames)
+        {
+            OnPropertyChanged(propertyName);
+        }
     }
 
     private IReadOnlyList<LanguageSelectionItem> CreateLanguageOptions() =>

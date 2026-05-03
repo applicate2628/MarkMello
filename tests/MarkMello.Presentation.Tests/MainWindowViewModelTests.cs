@@ -478,7 +478,7 @@ public sealed class MainWindowViewModelTests
 
 
     [Fact]
-    public void SelectedLanguageOptionRaisesIndexerNotificationsForVisibleShellBindings()
+    public void SelectedLanguageOptionRaisesTypedNotificationsForVisibleShellBindings()
     {
         var harness = CreateHarness();
         var names = new List<string?>();
@@ -487,11 +487,14 @@ public sealed class MainWindowViewModelTests
 
         harness.ViewModel.SelectedLanguageOption = russianOption;
 
-        Assert.Contains("Item", names);
-        Assert.Contains("Item[]", names);
-        Assert.Contains(string.Empty, names);
-        Assert.Equal("Тихое место для чтения Markdown.", harness.ViewModel["WelcomeTagline"]);
-        Assert.Equal("МЕНЮ", harness.ViewModel["AppMenuHeader"]);
+        Assert.Contains(nameof(MainWindowViewModel.WelcomeTagline), names);
+        Assert.Contains(nameof(MainWindowViewModel.AppMenuHeader), names);
+        Assert.Contains(nameof(MainWindowViewModel.LanguageOptions), names);
+        Assert.Contains(nameof(MainWindowViewModel.SelectedLanguageOption), names);
+        Assert.DoesNotContain("Item", names);
+        Assert.DoesNotContain("Item[]", names);
+        Assert.Equal("Тихое место для чтения Markdown.", harness.ViewModel.WelcomeTagline);
+        Assert.Equal("МЕНЮ", harness.ViewModel.AppMenuHeader);
     }
 
     [Fact]

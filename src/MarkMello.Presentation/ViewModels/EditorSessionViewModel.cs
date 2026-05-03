@@ -2,6 +2,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using MarkMello.Application.Abstractions;
 using MarkMello.Application.UseCases;
 using MarkMello.Domain;
+using MarkMello.Presentation.Localization;
 
 namespace MarkMello.Presentation.ViewModels;
 
@@ -12,6 +13,7 @@ namespace MarkMello.Presentation.ViewModels;
 public sealed class EditorSessionViewModel : ObservableObject
 {
     private readonly RenderMarkdownDocumentUseCase _renderMarkdown;
+    private readonly ILocalizationService _localization;
     private string _sourceText;
     private string _lastPersistedSource;
     private string? _currentPath;
@@ -25,14 +27,16 @@ public sealed class EditorSessionViewModel : ObservableObject
         MarkdownSource source,
         ReadingPreferences readingPreferences,
         RenderMarkdownDocumentUseCase renderMarkdown,
-        IImageSourceResolver? imageSourceResolver)
+        IImageSourceResolver? imageSourceResolver,
+        ILocalizationService? localization = null)
         : this(
             source.Path,
             source.FileName,
             source.Content,
             readingPreferences,
             renderMarkdown,
-            imageSourceResolver)
+            imageSourceResolver,
+            localization)
     {
         ArgumentNullException.ThrowIfNull(source);
     }
@@ -42,14 +46,16 @@ public sealed class EditorSessionViewModel : ObservableObject
         string initialContent,
         ReadingPreferences readingPreferences,
         RenderMarkdownDocumentUseCase renderMarkdown,
-        IImageSourceResolver? imageSourceResolver)
+        IImageSourceResolver? imageSourceResolver,
+        ILocalizationService? localization = null)
         : this(
             currentPath: null,
             fileName,
             initialContent,
             readingPreferences,
             renderMarkdown,
-            imageSourceResolver)
+            imageSourceResolver,
+            localization)
     {
     }
 
@@ -59,12 +65,14 @@ public sealed class EditorSessionViewModel : ObservableObject
         string initialContent,
         ReadingPreferences readingPreferences,
         RenderMarkdownDocumentUseCase renderMarkdown,
-        IImageSourceResolver? imageSourceResolver)
+        IImageSourceResolver? imageSourceResolver,
+        ILocalizationService? localization)
     {
         ArgumentNullException.ThrowIfNull(renderMarkdown);
         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
 
         _renderMarkdown = renderMarkdown;
+        _localization = localization ?? new LocalizationService();
         ImageSourceResolver = imageSourceResolver;
         _currentPath = currentPath;
         _fileName = fileName;
@@ -77,6 +85,33 @@ public sealed class EditorSessionViewModel : ObservableObject
     }
 
     public IImageSourceResolver? ImageSourceResolver { get; }
+
+    private static readonly string[] LocalizedBindingPropertyNames =
+    [
+        nameof(EditorBoldTooltip),
+        nameof(EditorCodeTooltip),
+        nameof(EditorItalicTooltip),
+        nameof(EditorLinkTooltip),
+        nameof(EditorListTooltip),
+        nameof(EditorQuoteTooltip),
+        nameof(EditorSourceLabel),
+    ];
+
+    public string EditorBoldTooltip => _localization["EditorBoldTooltip"];
+    public string EditorCodeTooltip => _localization["EditorCodeTooltip"];
+    public string EditorItalicTooltip => _localization["EditorItalicTooltip"];
+    public string EditorLinkTooltip => _localization["EditorLinkTooltip"];
+    public string EditorListTooltip => _localization["EditorListTooltip"];
+    public string EditorQuoteTooltip => _localization["EditorQuoteTooltip"];
+    public string EditorSourceLabel => _localization["EditorSourceLabel"];
+
+    public void RefreshLocalizedProperties()
+    {
+        foreach (var propertyName in LocalizedBindingPropertyNames)
+        {
+            OnPropertyChanged(propertyName);
+        }
+    }
 
     public string SourceText
     {

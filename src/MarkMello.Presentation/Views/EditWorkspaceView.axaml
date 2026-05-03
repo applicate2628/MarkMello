@@ -5,7 +5,6 @@
              xmlns:vm="using:MarkMello.Presentation.ViewModels"
              xmlns:views="using:MarkMello.Presentation.Views"
              mc:Ignorable="d"
-             x:CompileBindings="False"
              x:Class="MarkMello.Presentation.Views.EditWorkspaceView"
              x:DataType="vm:EditorSessionViewModel">
 
@@ -31,7 +30,7 @@
               <Button Classes="mm-editor-toolbar-button"
                       Tag="Bold"
                       Click="OnFormatButtonClick"
-                      ToolTip.Tip="{Binding [EditorBoldTooltip], Source={StaticResource Localization}}">
+                      ToolTip.Tip="{Binding EditorBoldTooltip}">
                 <Viewbox Width="14"
                          Height="14"
                          Stretch="Uniform">
@@ -49,7 +48,7 @@
               <Button Classes="mm-editor-toolbar-button"
                       Tag="Italic"
                       Click="OnFormatButtonClick"
-                      ToolTip.Tip="{Binding [EditorItalicTooltip], Source={StaticResource Localization}}">
+                      ToolTip.Tip="{Binding EditorItalicTooltip}">
                 <Viewbox Width="14"
                          Height="14"
                          Stretch="Uniform">
@@ -67,7 +66,7 @@
               <Button Classes="mm-editor-toolbar-button"
                       Tag="Code"
                       Click="OnFormatButtonClick"
-                      ToolTip.Tip="{Binding [EditorCodeTooltip], Source={StaticResource Localization}}">
+                      ToolTip.Tip="{Binding EditorCodeTooltip}">
                 <Viewbox Width="14"
                          Height="14"
                          Stretch="Uniform">
@@ -86,7 +85,7 @@
               <Button Classes="mm-editor-toolbar-button"
                       Tag="Link"
                       Click="OnFormatButtonClick"
-                      ToolTip.Tip="{Binding [EditorLinkTooltip], Source={StaticResource Localization}}">
+                      ToolTip.Tip="{Binding EditorLinkTooltip}">
                 <Viewbox Width="14"
                          Height="14"
                          Stretch="Uniform">
@@ -104,7 +103,7 @@
               <Button Classes="mm-editor-toolbar-button"
                       Tag="List"
                       Click="OnFormatButtonClick"
-                      ToolTip.Tip="{Binding [EditorListTooltip], Source={StaticResource Localization}}">
+                      ToolTip.Tip="{Binding EditorListTooltip}">
                 <Viewbox Width="14"
                          Height="14"
                          Stretch="Uniform">
@@ -122,7 +121,7 @@
               <Button Classes="mm-editor-toolbar-button"
                       Tag="Quote"
                       Click="OnFormatButtonClick"
-                      ToolTip.Tip="{Binding [EditorQuoteTooltip], Source={StaticResource Localization}}">
+                      ToolTip.Tip="{Binding EditorQuoteTooltip}">
                 <Viewbox Width="14"
                          Height="14"
                          Stretch="Uniform">
@@ -141,7 +140,7 @@
 
             <TextBlock Grid.Column="2"
                        Classes="mm-editor-toolbar-label"
-                       Text="{Binding [EditorSourceLabel], Source={StaticResource Localization}}" />
+                       Text="{Binding EditorSourceLabel}" />
           </Grid>
         </Border>
 
