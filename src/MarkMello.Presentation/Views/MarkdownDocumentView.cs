@@ -65,6 +65,8 @@ public sealed class MarkdownDocumentView : UserControl
     private MenuItem? _copyMenuItem;
     private MenuItem? _selectAllMenuItem;
     private CancellationTokenSource? _readingPreferencesRefreshCts;
+    private long _renderGeneration;
+    private bool _hasPendingRenderedNotification;
 
     static MarkdownDocumentView()
     {
@@ -81,6 +83,7 @@ public sealed class MarkdownDocumentView : UserControl
         HorizontalAlignment = HorizontalAlignment.Stretch;
         _root.UseLayoutRounding = true;
         AttachedToVisualTree += OnAttachedToVisualTree;
+        DetachedFromVisualTree += OnDetachedFromVisualTree;
         EnsureRootTransitions();
 
         AddHandler(PointerPressedEvent, OnPointerPressed, RoutingStrategies.Tunnel);
@@ -105,6 +108,15 @@ public sealed class MarkdownDocumentView : UserControl
     {
         EnsureRootTransitions();
         EnsureContextMenu();
+    }
+
+    private void OnDetachedFromVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
+    {
+        LayoutUpdated -= OnLayoutUpdatedAfterDocumentRebuild;
+        _hasPendingRenderedNotification = false;
+        _readingPreferencesRefreshCts?.Cancel();
+        _readingPreferencesRefreshCts?.Dispose();
+        _readingPreferencesRefreshCts = null;
     }
 
     private void EnsureRootTransitions()
@@ -183,6 +195,8 @@ public sealed class MarkdownDocumentView : UserControl
         ? _textMap.GetText(new DocumentTextRange(SelectionStart, SelectionEnd))
         : string.Empty;
 
+    public event EventHandler? DocumentRendered;
+
     public void SelectAll()
     {
         if (_textMap.Text.Length == 0)
@@ -237,6 +251,9 @@ public sealed class MarkdownDocumentView : UserControl
         _textMap = document is null ? MarkdownDocumentTextMap.Empty : MarkdownDocumentTextMap.Create(document);
         ClearSelection();
 
+        var generation = ++_renderGeneration;
+        _hasPendingRenderedNotification = false;
+
         if (document is null || document.Blocks.Count == 0)
         {
             return;
@@ -246,6 +263,34 @@ public sealed class MarkdownDocumentView : UserControl
         {
             _root.Children.Add(BuildBlock(document.Blocks[index], $"b{index}", nested: false));
         }
+
+        QueueDocumentRenderedNotification(generation);
+    }
+
+    private void QueueDocumentRenderedNotification(long generation)
+    {
+        _hasPendingRenderedNotification = true;
+        LayoutUpdated -= OnLayoutUpdatedAfterDocumentRebuild;
+        LayoutUpdated += OnLayoutUpdatedAfterDocumentRebuild;
+
+        Dispatcher.UIThread.Post(
+            () => CompleteDocumentRenderedNotification(generation),
+            DispatcherPriority.Render);
+    }
+
+    private void OnLayoutUpdatedAfterDocumentRebuild(object? sender, EventArgs e)
+        => CompleteDocumentRenderedNotification(_renderGeneration);
+
+    private void CompleteDocumentRenderedNotification(long generation)
+    {
+        if (!_hasPendingRenderedNotification || generation != _renderGeneration || Document is null)
+        {
+            return;
+        }
+
+        _hasPendingRenderedNotification = false;
+        LayoutUpdated -= OnLayoutUpdatedAfterDocumentRebuild;
+        DocumentRendered?.Invoke(this, EventArgs.Empty);
     }
 
     private void RefreshForReadingPreferencesChange()

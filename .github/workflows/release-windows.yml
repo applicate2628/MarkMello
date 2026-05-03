@@ -211,6 +211,7 @@ jobs:
             -c Release `
             -r "${{ matrix.runtime_id }}" `
             --self-contained true `
+            -p:PublishAot=true `
             -p:PublishSingleFile=false `
             -p:Version=$env:RELEASE_VERSION `
             -p:FileVersion=$env:RELEASE_VERSION_WINDOWS `
@@ -341,6 +342,7 @@ jobs:
             -c Release \
             -r "${{ matrix.runtime_id }}" \
             --self-contained true \
+            -p:PublishAot=true \
             -p:PublishSingleFile=false \
             -p:Version="$RELEASE_VERSION" \
             -p:FileVersion="$RELEASE_VERSION_WINDOWS" \

@@ -12,12 +12,15 @@ public enum StartupStage
     /// <summary>Stage 2: главное окно создано и показано.</summary>
     FirstWindow = 2,
 
-    /// <summary>Stage 3: документ прочитан, преобразован и отображён.</summary>
-    ReadableDocument = 3,
+    /// <summary>Stage 3a: файл прочитан, Markdown преобразован в отображаемую модель.</summary>
+    DocumentModelReady = 3,
+
+    /// <summary>Stage 3b: документ прошёл layout/render path и стал читаемым пользователю.</summary>
+    ReadableDocument = 4,
 
     /// <summary>Stage 4: вторичные controls и команды активны.</summary>
-    SecondaryFeatures = 4,
+    SecondaryFeatures = 5,
 
     /// <summary>Stage 5: editor subsystem загружен (по явному действию пользователя).</summary>
-    EditorActivation = 5
+    EditorActivation = 6
 }

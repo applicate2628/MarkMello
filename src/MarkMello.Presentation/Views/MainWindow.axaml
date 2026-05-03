@@ -165,7 +165,8 @@
       <Border Classes="mm-top-chrome"
               HorizontalAlignment="Left"
               VerticalAlignment="Top"
-              Margin="16,12,0,0">
+              Margin="16,12,0,0"
+              IsVisible="{Binding ShowsAppMenuControl}">
         <ToggleButton Name="AppMenuTriggerButton"
                       Classes="topbar-ghost"
                       IsChecked="{Binding IsAppOverlayOpen, Mode=OneWay}"

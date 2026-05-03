@@ -29,7 +29,9 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly IUpdateService _updateService;
     private readonly IImageSourceResolver? _imageSourceResolver;
 
-    private bool _stage3Marked;
+    private bool _documentModelReadyMarked;
+    private bool _readableDocumentMarked;
+    private bool _secondaryFeaturesMarked;
     private bool _editorActivationMarked;
     private string? _currentPath;
     private Func<Task>? _pendingDirtyAction;
@@ -123,6 +125,15 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(EditShortcutLabel))]
     [NotifyPropertyChangedFor(nameof(ShowsEditPencilIcon))]
     [NotifyPropertyChangedFor(nameof(ShowsReadEyeIcon))]
+    [NotifyPropertyChangedFor(nameof(ShowsAppMenuControl))]
+    [NotifyPropertyChangedFor(nameof(IsAppMenuOpen))]
+    [NotifyPropertyChangedFor(nameof(IsAppSettingsOpen))]
+    [NotifyPropertyChangedFor(nameof(IsAppAboutOpen))]
+    [NotifyPropertyChangedFor(nameof(IsAppOverlayOpen))]
+    [NotifyPropertyChangedFor(nameof(HasOpenOverlay))]
+    [NotifyPropertyChangedFor(nameof(AppMenuOverlayContent))]
+    [NotifyPropertyChangedFor(nameof(AppSettingsOverlayContent))]
+    [NotifyPropertyChangedFor(nameof(AppAboutOverlayContent))]
     private bool _isEditMode;
 
     [ObservableProperty]
@@ -186,15 +197,18 @@ public partial class MainWindowViewModel : ObservableObject
 
     public bool IsSettingsOpen => ShellOverlay == ShellOverlayKind.ReadingSettings;
 
-    public bool IsAppMenuOpen => ShellOverlay == ShellOverlayKind.AppMenu;
+    public bool ShowsAppMenuControl => !IsEditMode;
 
-    public bool IsAppSettingsOpen => ShellOverlay == ShellOverlayKind.AppSettings;
+    public bool IsAppMenuOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppMenu;
 
-    public bool IsAppAboutOpen => ShellOverlay == ShellOverlayKind.AppAbout;
+    public bool IsAppSettingsOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppSettings;
 
-    public bool IsAppOverlayOpen => ShellOverlay is ShellOverlayKind.AppMenu or ShellOverlayKind.AppSettings or ShellOverlayKind.AppAbout;
+    public bool IsAppAboutOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppAbout;
 
-    public bool HasOpenOverlay => ShellOverlay != ShellOverlayKind.None;
+    public bool IsAppOverlayOpen => ShowsAppMenuControl
+        && ShellOverlay is ShellOverlayKind.AppMenu or ShellOverlayKind.AppSettings or ShellOverlayKind.AppAbout;
+
+    public bool HasOpenOverlay => IsSettingsOpen || IsAppOverlayOpen;
 
     public object? AppMenuOverlayContent => IsAppMenuOpen ? this : null;
 
@@ -605,6 +619,8 @@ public partial class MainWindowViewModel : ObservableObject
     [RelayCommand]
     private void ToggleSettings()
     {
+        MarkSecondaryFeaturesReady();
+
         ShellOverlay = IsSettingsOpen
             ? ShellOverlayKind.None
             : ShellOverlayKind.ReadingSettings;
@@ -622,6 +638,14 @@ public partial class MainWindowViewModel : ObservableObject
     [RelayCommand]
     private void ToggleAppMenu()
     {
+        if (!ShowsAppMenuControl)
+        {
+            CloseAppOverlayCore();
+            return;
+        }
+
+        MarkSecondaryFeaturesReady();
+
         ShellOverlay = IsAppOverlayOpen
             ? ShellOverlayKind.None
             : ShellOverlayKind.AppMenu;
@@ -630,24 +654,56 @@ public partial class MainWindowViewModel : ObservableObject
     [RelayCommand]
     private void OpenAppSettings()
     {
+        if (!ShowsAppMenuControl)
+        {
+            CloseAppOverlayCore();
+            return;
+        }
+
+        MarkSecondaryFeaturesReady();
+
         ShellOverlay = ShellOverlayKind.AppSettings;
     }
 
     [RelayCommand]
     private void OpenAbout()
     {
+        if (!ShowsAppMenuControl)
+        {
+            CloseAppOverlayCore();
+            return;
+        }
+
+        MarkSecondaryFeaturesReady();
+
         ShellOverlay = ShellOverlayKind.AppAbout;
     }
 
     [RelayCommand]
     private void ReturnToAppMenu()
     {
+        if (!ShowsAppMenuControl)
+        {
+            CloseAppOverlayCore();
+            return;
+        }
+
+        MarkSecondaryFeaturesReady();
+
         ShellOverlay = ShellOverlayKind.AppMenu;
     }
 
     [RelayCommand]
     private void ReturnToAppSettings()
     {
+        if (!ShowsAppMenuControl)
+        {
+            CloseAppOverlayCore();
+            return;
+        }
+
+        MarkSecondaryFeaturesReady();
+
         ShellOverlay = ShellOverlayKind.AppSettings;
     }
 
@@ -845,11 +901,25 @@ public partial class MainWindowViewModel : ObservableObject
 
     partial void OnIsEditModeChanged(bool value)
     {
+        if (value)
+        {
+            CloseAppOverlayCore();
+        }
+
         OnPropertyChanged(nameof(EditToggleLabel));
         OnPropertyChanged(nameof(EditShortcutLabel));
         OnPropertyChanged(nameof(ShowsEditPencilIcon));
         OnPropertyChanged(nameof(ShowsReadEyeIcon));
         OnPropertyChanged(nameof(ShowsReadingStatus));
+        OnPropertyChanged(nameof(ShowsAppMenuControl));
+        OnPropertyChanged(nameof(IsAppMenuOpen));
+        OnPropertyChanged(nameof(IsAppSettingsOpen));
+        OnPropertyChanged(nameof(IsAppAboutOpen));
+        OnPropertyChanged(nameof(IsAppOverlayOpen));
+        OnPropertyChanged(nameof(HasOpenOverlay));
+        OnPropertyChanged(nameof(AppMenuOverlayContent));
+        OnPropertyChanged(nameof(AppSettingsOverlayContent));
+        OnPropertyChanged(nameof(AppAboutOverlayContent));
         OnPropertyChanged(nameof(ActiveDocumentContent));
         UpdateCommandStates();
     }
@@ -1052,14 +1122,36 @@ public partial class MainWindowViewModel : ObservableObject
             EditorSession = null;
         }
 
-        if (!_stage3Marked)
+        if (!_documentModelReadyMarked)
         {
-            _stage3Marked = true;
-            _startupMetrics.Mark(StartupStage.ReadableDocument);
+            _documentModelReadyMarked = true;
+            _startupMetrics.Mark(StartupStage.DocumentModelReady);
         }
 
         RefreshWindowTitle();
         UpdateCommandStates();
+    }
+
+    private void MarkSecondaryFeaturesReady()
+    {
+        if (_secondaryFeaturesMarked)
+        {
+            return;
+        }
+
+        _secondaryFeaturesMarked = true;
+        _startupMetrics.Mark(StartupStage.SecondaryFeatures);
+    }
+
+    public void MarkReadableDocumentRendered()
+    {
+        if (_readableDocumentMarked || State != ViewState.Viewing || RenderedDocument.Blocks.Count == 0)
+        {
+            return;
+        }
+
+        _readableDocumentMarked = true;
+        _startupMetrics.Mark(StartupStage.ReadableDocument);
     }
 
     private void ApplySavedDocument(MarkdownSource source)
@@ -1315,6 +1407,14 @@ public partial class MainWindowViewModel : ObservableObject
     private void CloseOverlayCore()
     {
         ShellOverlay = ShellOverlayKind.None;
+    }
+
+    private void CloseAppOverlayCore()
+    {
+        if (ShellOverlay is ShellOverlayKind.AppMenu or ShellOverlayKind.AppSettings or ShellOverlayKind.AppAbout)
+        {
+            ShellOverlay = ShellOverlayKind.None;
+        }
     }
 
     private string? CurrentDocumentPath => EditorSession?.CurrentPath ?? _currentPath ?? Document?.Path;

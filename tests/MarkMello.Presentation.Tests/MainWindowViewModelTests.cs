@@ -22,7 +22,8 @@ public sealed class MainWindowViewModelTests
         Assert.False(harness.ViewModel.IsEditMode);
         Assert.Null(harness.ViewModel.EditorSession);
         Assert.Same(harness.ViewModel, harness.ViewModel.ActiveDocumentContent);
-        Assert.Contains(StartupStage.ReadableDocument, harness.StartupMetrics.Marks);
+        Assert.Contains(StartupStage.DocumentModelReady, harness.StartupMetrics.Marks);
+        Assert.DoesNotContain(StartupStage.ReadableDocument, harness.StartupMetrics.Marks);
 
         await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
 
@@ -103,6 +104,47 @@ public sealed class MainWindowViewModelTests
 
         Assert.False(harness.ViewModel.IsAppMenuOpen);
         Assert.False(harness.ViewModel.HasOpenOverlay);
+    }
+
+    [Fact]
+    public async Task EnteringEditModeClosesAndHidesAppMenuOverlay()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "one.md");
+        harness.Loader.Sources[path] = CreateSource(path, "alpha beta");
+
+        await harness.ViewModel.OpenPathAsync(path);
+        harness.ViewModel.ToggleAppMenuCommand.Execute(null);
+
+        Assert.True(harness.ViewModel.IsAppMenuOpen);
+        Assert.True(harness.ViewModel.ShowsAppMenuControl);
+        Assert.NotNull(harness.ViewModel.AppMenuOverlayContent);
+
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+
+        Assert.True(harness.ViewModel.IsEditMode);
+        Assert.False(harness.ViewModel.ShowsAppMenuControl);
+        Assert.False(harness.ViewModel.IsAppMenuOpen);
+        Assert.False(harness.ViewModel.IsAppOverlayOpen);
+        Assert.Null(harness.ViewModel.AppMenuOverlayContent);
+    }
+
+    [Fact]
+    public async Task ReadableDocumentMetricIsMarkedOnlyAfterViewReportsRender()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "one.md");
+        harness.Loader.Sources[path] = CreateSource(path, "alpha beta");
+
+        await harness.ViewModel.OpenPathAsync(path);
+
+        Assert.Contains(StartupStage.DocumentModelReady, harness.StartupMetrics.Marks);
+        Assert.DoesNotContain(StartupStage.ReadableDocument, harness.StartupMetrics.Marks);
+
+        harness.ViewModel.MarkReadableDocumentRendered();
+        harness.ViewModel.MarkReadableDocumentRendered();
+
+        Assert.Equal(1, harness.StartupMetrics.Marks.Count(stage => stage == StartupStage.ReadableDocument));
     }
 
     [Fact]

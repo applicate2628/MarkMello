@@ -27,7 +27,7 @@ winget install MarkMello
 
 # Linux (AppImage)
 curl -LO https://markmello.app/latest.AppImage
-chmod +x latest.AppImage
+chmod +x latest.AppImage 
 ```
 
 After install, associate `.md` files with MarkMello and you're done.

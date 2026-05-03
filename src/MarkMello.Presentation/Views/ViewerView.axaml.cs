@@ -10,6 +10,7 @@ public partial class ViewerView : UserControl
 {
     private const double WheelStepMultiplier = 6.0;
     private ScrollViewer? _scroll;
+    private MarkdownDocumentView? _documentView;
 
     public ViewerView()
     {
@@ -25,6 +26,12 @@ public partial class ViewerView : UserControl
             _scroll.ScrollChanged += OnScrollChanged;
             _scroll.AddHandler(InputElement.PointerWheelChangedEvent, OnPointerWheelChanged, RoutingStrategies.Tunnel);
         }
+
+        _documentView = this.FindControl<MarkdownDocumentView>("DocumentView");
+        if (_documentView is not null)
+        {
+            _documentView.DocumentRendered += OnDocumentRendered;
+        }
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
@@ -35,6 +42,13 @@ public partial class ViewerView : UserControl
             _scroll.RemoveHandler(InputElement.PointerWheelChangedEvent, OnPointerWheelChanged);
             _scroll = null;
         }
+
+        if (_documentView is not null)
+        {
+            _documentView.DocumentRendered -= OnDocumentRendered;
+            _documentView = null;
+        }
+
         base.OnDetachedFromVisualTree(e);
     }
 
@@ -70,6 +84,14 @@ public partial class ViewerView : UserControl
 
         _scroll.Offset = new Vector(_scroll.Offset.X, nextOffset);
         e.Handled = true;
+    }
+
+    private void OnDocumentRendered(object? sender, EventArgs e)
+    {
+        if (DataContext is MainWindowViewModel vm)
+        {
+            vm.MarkReadableDocumentRendered();
+        }
     }
 
     private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)

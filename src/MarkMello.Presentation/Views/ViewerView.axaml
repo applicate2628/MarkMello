@@ -22,7 +22,8 @@
                               Duration="0:0:0.18" />
           </Transitions>
         </Border.Transitions>
-        <views:MarkdownDocumentView Document="{Binding RenderedDocument}"
+        <views:MarkdownDocumentView Name="DocumentView"
+                                    Document="{Binding RenderedDocument}"
                                     DocumentPadding="72,96,72,160"
                                     ReadingPreferences="{Binding ReadingPreferences}"
                                     ImageSourceResolver="{Binding ImageSourceResolver}"
