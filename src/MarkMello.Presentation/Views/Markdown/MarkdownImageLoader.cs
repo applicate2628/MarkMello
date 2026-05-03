@@ -1,7 +1,6 @@
 using System.Text;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
-using Avalonia.Svg.Skia;
 using Avalonia.Threading;
 using MarkMello.Application.Abstractions;
 
@@ -80,12 +79,12 @@ internal static class MarkdownImageLoader
         {
             if (IsSvgStream(stream))
             {
-                return (
-                    new SvgImage
-                    {
-                        Source = SvgSource.LoadFromStream(stream)
-                    },
-                    stream);
+                if (AotSafeSvgImage.TryLoad(imageBytes, out var svgImage))
+                {
+                    return (svgImage, stream);
+                }
+
+                throw new InvalidDataException("Unsupported SVG image.");
             }
 
             return (new Bitmap(stream), stream);
