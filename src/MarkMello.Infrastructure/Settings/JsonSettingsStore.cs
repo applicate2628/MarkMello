@@ -1,7 +1,7 @@
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using MarkMello.Application.Abstractions;
 using MarkMello.Domain;
+using MarkMello.Infrastructure.Serialization;
 
 namespace MarkMello.Infrastructure.Settings;
 
@@ -12,8 +12,6 @@ namespace MarkMello.Infrastructure.Settings;
 /// </summary>
 public sealed class JsonSettingsStore : ISettingsStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
-
     private readonly Lock _gate = new();
     private readonly string _settingsFilePath;
 
@@ -117,7 +115,9 @@ public sealed class JsonSettingsStore : ISettingsStore
                 var json = File.ReadAllText(_settingsFilePath);
                 if (!string.IsNullOrWhiteSpace(json))
                 {
-                    var fileModel = JsonSerializer.Deserialize<SettingsFileModel>(json, JsonOptions);
+                    var fileModel = JsonSerializer.Deserialize(
+                        json,
+                        MarkMelloJsonSerializerContext.Default.SettingsFileModel);
                     if (fileModel is not null)
                     {
                         _theme = NormalizeTheme(fileModel.Theme);
@@ -153,7 +153,9 @@ public sealed class JsonSettingsStore : ISettingsStore
 
             var tempFilePath = _settingsFilePath + ".tmp";
             var fileModel = new SettingsFileModel(_theme, _preferences, _language);
-            var json = JsonSerializer.Serialize(fileModel, JsonOptions);
+            var json = JsonSerializer.Serialize(
+                fileModel,
+                MarkMelloJsonSerializerContext.Default.SettingsFileModel);
 
             File.WriteAllText(tempFilePath, json);
             File.Move(tempFilePath, _settingsFilePath, overwrite: true);
@@ -196,22 +198,4 @@ public sealed class JsonSettingsStore : ISettingsStore
 
         return Path.Combine(appDataDirectory, "MarkMello");
     }
-
-    private static JsonSerializerOptions CreateJsonOptions()
-        => new()
-        {
-            AllowTrailingCommas = true,
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            ReadCommentHandling = JsonCommentHandling.Skip,
-            WriteIndented = true,
-            Converters =
-            {
-                new JsonStringEnumConverter()
-            }
-        };
-
-    private sealed record SettingsFileModel(
-        ThemeMode Theme,
-        ReadingPreferences Preferences,
-        AppLanguage Language);
 }

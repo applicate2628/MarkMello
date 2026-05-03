@@ -2,9 +2,9 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using MarkMello.Application.Abstractions;
 using MarkMello.Application.Updates;
+using MarkMello.Infrastructure.Serialization;
 
 namespace MarkMello.Infrastructure.Updates;
 
@@ -12,11 +12,6 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
 {
     private const string ReleaseOwnerMetadataKey = "MarkMelloReleaseOwner";
     private const string ReleaseRepoMetadataKey = "MarkMelloReleaseRepo";
-
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true
-    };
 
     private readonly HttpClient _httpClient;
     private readonly string _releaseOwner;
@@ -68,9 +63,9 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
                 .ReadAsStreamAsync(cancellationToken)
                 .ConfigureAwait(false);
 
-            var release = await JsonSerializer.DeserializeAsync<GitHubReleaseResponse>(
+            var release = await JsonSerializer.DeserializeAsync(
                     responseStream,
-                    JsonOptions,
+                    MarkMelloJsonSerializerContext.Default.GitHubReleaseResponse,
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -480,34 +475,4 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
         string ArchitectureName,
         string AssetName,
         AppUpdateInstallAction InstallAction);
-
-    private sealed class GitHubReleaseResponse
-    {
-        [JsonPropertyName("tag_name")]
-        public string? TagName { get; init; }
-
-        [JsonPropertyName("name")]
-        public string? Name { get; init; }
-
-        [JsonPropertyName("html_url")]
-        public string? HtmlUrl { get; init; }
-
-        [JsonPropertyName("published_at")]
-        public DateTimeOffset? PublishedAt { get; init; }
-
-        [JsonPropertyName("assets")]
-        public GitHubReleaseAssetResponse[] Assets { get; init; } = [];
-    }
-
-    private sealed class GitHubReleaseAssetResponse
-    {
-        [JsonPropertyName("name")]
-        public string? Name { get; init; }
-
-        [JsonPropertyName("browser_download_url")]
-        public string? BrowserDownloadUrl { get; init; }
-
-        [JsonPropertyName("state")]
-        public string? State { get; init; }
-    }
 }
