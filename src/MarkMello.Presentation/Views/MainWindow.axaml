@@ -9,6 +9,7 @@
         x:Class="MarkMello.Presentation.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Width="1280" Height="840"
+        WindowStartupLocation="CenterScreen"
         MinWidth="640" MinHeight="480"
         Title="{Binding WindowTitle}"
         Icon="/Assets/Icons/markmello.ico"
@@ -339,524 +340,53 @@
         </StackPanel>
       </Border>
 
-      <Border Name="AppMenuPanel"
-              Classes="mm-settings-panel mm-popover-left mm-app-menu-panel"
-              HorizontalAlignment="Left"
-              VerticalAlignment="Top"
-              Margin="16,54,0,0"
-              Width="320">
-        <StackPanel>
-          <Border Classes="mm-settings-head-shell">
-            <Grid ColumnDefinitions="*,Auto"
-                  ColumnSpacing="12">
-              <TextBlock Classes="mm-settings-title"
-                         Grid.Column="0"
-                         Text="{Binding [AppMenuHeader], Source={StaticResource Localization}}" />
-              <Button Grid.Column="1"
-                      Classes="mm-settings-close"
-                      Command="{Binding CloseOverlayCommand}"
-                      ToolTip.Tip="{Binding [OverlayCloseMenu], Source={StaticResource Localization}}">
-                <Path Data="M0,0 L10,10 M10,0 L0,10"
-                      Stroke="{DynamicResource MmTextFaintBrush}"
-                      StrokeThickness="1.4"
-                      StrokeLineCap="Round" />
-              </Button>
-            </Grid>
-          </Border>
+      <ContentControl Name="AppMenuPanel"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top"
+                      Margin="16,54,0,0"
+                      Content="{Binding AppMenuOverlayContent}">
+        <ContentControl.ContentTemplate>
+          <DataTemplate>
+            <views:AppMenuPanelView />
+          </DataTemplate>
+        </ContentControl.ContentTemplate>
+      </ContentControl>
 
-          <Border Classes="mm-settings-body-shell">
-            <StackPanel Spacing="0">
-              <Button Classes="mm-menu-item"
-                      Command="{Binding OpenFileCommand}">
-                <Grid ColumnDefinitions="*,Auto"
-                      ColumnSpacing="12">
-                  <StackPanel Grid.Column="0"
-                              Spacing="2"
-                              HorizontalAlignment="Left">
-                    <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [AppMenuOpenFileLabel], Source={StaticResource Localization}}" />
-                    <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [AppMenuOpenFileHint], Source={StaticResource Localization}}" />
-                  </StackPanel>
-                  <TextBlock Grid.Column="1"
-                             Classes="mm-setting-meta"
-                             Text="Ctrl O" />
-                </Grid>
-              </Button>
+      <ContentControl Name="AppSettingsPanel"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top"
+                      Margin="16,54,0,0"
+                      Content="{Binding AppSettingsOverlayContent}">
+        <ContentControl.ContentTemplate>
+          <DataTemplate>
+            <views:AppSettingsPanelView />
+          </DataTemplate>
+        </ContentControl.ContentTemplate>
+      </ContentControl>
 
-              <Line Classes="mm-setting-divider"
-                    StartPoint="0,0.5"
-                    EndPoint="1,0.5" />
+      <ContentControl Name="AppAboutPanel"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top"
+                      Margin="16,54,0,0"
+                      Content="{Binding AppAboutOverlayContent}">
+        <ContentControl.ContentTemplate>
+          <DataTemplate>
+            <views:AppAboutPanelView />
+          </DataTemplate>
+        </ContentControl.ContentTemplate>
+      </ContentControl>
 
-              <Button Classes="mm-menu-item"
-                      Command="{Binding CloseFileCommand}">
-                <Grid ColumnDefinitions="*,Auto"
-                      ColumnSpacing="12">
-                  <StackPanel Grid.Column="0"
-                              Spacing="2"
-                              HorizontalAlignment="Left">
-                    <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [AppMenuCloseFileLabel], Source={StaticResource Localization}}" />
-                    <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [AppMenuCloseFileHint], Source={StaticResource Localization}}" />
-                  </StackPanel>
-                  <TextBlock Grid.Column="1"
-                             Classes="mm-setting-meta"
-                             Text="{Binding [MetaCurrent], Source={StaticResource Localization}}" />
-                </Grid>
-              </Button>
-
-              <Line Classes="mm-setting-divider"
-                    StartPoint="0,0.5"
-                    EndPoint="1,0.5" />
-
-              <Button Classes="mm-menu-item"
-                      Command="{Binding OpenAppSettingsCommand}">
-                <Grid ColumnDefinitions="*,Auto"
-                      ColumnSpacing="12">
-                  <StackPanel Grid.Column="0"
-                              Spacing="2"
-                              HorizontalAlignment="Left">
-                    <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [AppMenuSettingsLabel], Source={StaticResource Localization}}" />
-                    <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [AppMenuSettingsHint], Source={StaticResource Localization}}" />
-                  </StackPanel>
-                  <TextBlock Grid.Column="1"
-                             Classes="mm-setting-meta"
-                             Text="{Binding [MetaOpen], Source={StaticResource Localization}}" />
-                </Grid>
-              </Button>
-            </StackPanel>
-          </Border>
-        </StackPanel>
-      </Border>
-
-      <Border Name="AppSettingsPanel"
-              Classes="mm-settings-panel mm-popover-left mm-app-settings-panel"
-              HorizontalAlignment="Left"
-              VerticalAlignment="Top"
-              Margin="16,54,0,0"
-              Width="320">
-        <StackPanel>
-          <Border Classes="mm-settings-head-shell">
-            <Grid ColumnDefinitions="Auto,*,Auto"
-                  ColumnSpacing="12">
-              <Button Grid.Column="0"
-                      Classes="mm-settings-close"
-                      Command="{Binding ReturnToAppMenuCommand}"
-                      ToolTip.Tip="{Binding [OverlayBackToMenu], Source={StaticResource Localization}}">
-                <Path Data="M9.5,1.5 L2.5,5.5 L9.5,9.5"
-                      Stroke="{DynamicResource MmTextFaintBrush}"
-                      StrokeThickness="1.4"
-                      StrokeLineCap="Round"
-                      StrokeJoin="Round"
-                      Fill="Transparent" />
-              </Button>
-              <TextBlock Classes="mm-settings-title"
-                         Grid.Column="1"
-                         VerticalAlignment="Center"
-                         Text="{Binding [AppSettingsHeader], Source={StaticResource Localization}}" />
-              <Button Grid.Column="2"
-                      Classes="mm-settings-close"
-                      Command="{Binding CloseOverlayCommand}"
-                      ToolTip.Tip="{Binding [OverlayCloseSettings], Source={StaticResource Localization}}">
-                <Path Data="M0,0 L10,10 M10,0 L0,10"
-                      Stroke="{DynamicResource MmTextFaintBrush}"
-                      StrokeThickness="1.4"
-                      StrokeLineCap="Round" />
-              </Button>
-            </Grid>
-          </Border>
-
-          <Border Classes="mm-settings-body-shell">
-            <StackPanel Spacing="0">
-              <Border Classes="mm-setting-row">
-                <Grid ColumnDefinitions="Auto,*"
-                      ColumnSpacing="12">
-                  <StackPanel Grid.Column="0"
-                              Spacing="2"
-                              VerticalAlignment="Center">
-                    <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [LanguageLabel], Source={StaticResource Localization}}" />
-                    <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [LanguageHint], Source={StaticResource Localization}}" />
-                  </StackPanel>
-                  <Border Grid.Column="1"
-                          Classes="mm-segmented"
-                          HorizontalAlignment="Right">
-                    <StackPanel Orientation="Horizontal"
-                                Spacing="1">
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsSystemLanguageSelected}"
-                                    Command="{Binding SelectSystemLanguageCommand}">
-                        <TextBlock Text="{Binding [LanguageSystem], Source={StaticResource Localization}}" />
-                      </ToggleButton>
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsEnglishLanguageSelected}"
-                                    Command="{Binding SelectEnglishLanguageCommand}">
-                        <TextBlock Text="{Binding [LanguageEnglish], Source={StaticResource Localization}}" />
-                      </ToggleButton>
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsRussianLanguageSelected}"
-                                    Command="{Binding SelectRussianLanguageCommand}">
-                        <TextBlock Text="{Binding [LanguageRussian], Source={StaticResource Localization}}" />
-                      </ToggleButton>
-                    </StackPanel>
-                  </Border>
-                </Grid>
-              </Border>
-
-              <Line Classes="mm-setting-divider"
-                    StartPoint="0,0.5"
-                    EndPoint="1,0.5" />
-
-              <Border Classes="mm-setting-row">
-                <StackPanel Spacing="12">
-                  <Grid ColumnDefinitions="*,Auto"
-                        ColumnSpacing="12">
-                    <StackPanel Grid.Column="0"
-                                Spacing="2">
-                      <TextBlock Classes="mm-setting-label"
-                                 Text="{Binding [UpdatesLabel], Source={StaticResource Localization}}" />
-                      <TextBlock Classes="mm-setting-hint"
-                                 Text="{Binding [UpdatesHint], Source={StaticResource Localization}}" />
-                    </StackPanel>
-                    <TextBlock Grid.Column="1"
-                               Classes="mm-setting-meta"
-                               Text="{Binding UpdateStateBadge}" />
-                  </Grid>
-
-                  <StackPanel Spacing="4">
-                    <TextBlock Classes="mm-setting-label"
-                               FontSize="12"
-                               FontWeight="SemiBold"
-                               Text="{Binding UpdateStatusTitle}"
-                               TextWrapping="Wrap" />
-                    <TextBlock Classes="mm-setting-body"
-                               Text="{Binding UpdateStatusMessage}"
-                               TextWrapping="Wrap" />
-                  </StackPanel>
-
-                  <StackPanel Orientation="Horizontal"
-                              Spacing="8">
-                    <Button Classes="mm-dialog-secondary"
-                            Content="{Binding CheckForUpdatesLabel}"
-                            Command="{Binding CheckForUpdatesCommand}" />
-                    <Button Classes="mm-dialog-primary"
-                            Content="{Binding DownloadUpdateLabel}"
-                            Command="{Binding DownloadUpdateCommand}"
-                            IsVisible="{Binding CanDownloadAvailableUpdate}" />
-                  </StackPanel>
-
-                  <Button Classes="mm-dialog-secondary"
-                          HorizontalAlignment="Left"
-                          Content="{Binding DownloadedUpdateActionLabel}"
-                          Command="{Binding OpenDownloadedUpdateCommand}"
-                          IsVisible="{Binding CanOpenDownloadedUpdate}" />
-                </StackPanel>
-              </Border>
-
-              <Line Classes="mm-setting-divider"
-                    StartPoint="0,0.5"
-                    EndPoint="1,0.5" />
-
-              <Button Classes="mm-menu-item"
-                      Command="{Binding OpenAboutCommand}">
-                <Grid ColumnDefinitions="*,Auto"
-                      ColumnSpacing="12">
-                  <StackPanel Grid.Column="0"
-                              Spacing="2">
-                    <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [AboutLabel], Source={StaticResource Localization}}" />
-                    <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [AboutHint], Source={StaticResource Localization}}" />
-                  </StackPanel>
-                  <TextBlock Grid.Column="1"
-                             Classes="mm-setting-meta"
-                             Text="{Binding [MetaOpen], Source={StaticResource Localization}}" />
-                </Grid>
-              </Button>
-            </StackPanel>
-          </Border>
-        </StackPanel>
-      </Border>
-
-      <Border Name="AppAboutPanel"
-              Classes="mm-settings-panel mm-popover-left mm-app-about-panel"
-              HorizontalAlignment="Left"
-              VerticalAlignment="Top"
-              Margin="16,54,0,0"
-              Width="320">
-        <StackPanel>
-          <Border Classes="mm-settings-head-shell">
-            <Grid ColumnDefinitions="Auto,*,Auto"
-                  ColumnSpacing="12">
-              <Button Grid.Column="0"
-                      Classes="mm-settings-close"
-                      Command="{Binding ReturnToAppSettingsCommand}"
-                      ToolTip.Tip="{Binding [OverlayBackToSettings], Source={StaticResource Localization}}">
-                <Path Data="M9.5,1.5 L2.5,5.5 L9.5,9.5"
-                      Stroke="{DynamicResource MmTextFaintBrush}"
-                      StrokeThickness="1.4"
-                      StrokeLineCap="Round"
-                      StrokeJoin="Round"
-                      Fill="Transparent" />
-              </Button>
-              <TextBlock Classes="mm-settings-title"
-                         Grid.Column="1"
-                         VerticalAlignment="Center"
-                         Text="{Binding [AboutHeader], Source={StaticResource Localization}}" />
-              <Button Grid.Column="2"
-                      Classes="mm-settings-close"
-                      Command="{Binding CloseOverlayCommand}"
-                      ToolTip.Tip="{Binding [OverlayCloseAbout], Source={StaticResource Localization}}">
-                <Path Data="M0,0 L10,10 M10,0 L0,10"
-                      Stroke="{DynamicResource MmTextFaintBrush}"
-                      StrokeThickness="1.4"
-                      StrokeLineCap="Round" />
-              </Button>
-            </Grid>
-          </Border>
-
-          <Border Classes="mm-settings-body-shell">
-            <StackPanel Spacing="0">
-              <Border Classes="mm-setting-row">
-                <Grid ColumnDefinitions="*,Auto"
-                      ColumnSpacing="12">
-                  <StackPanel Grid.Column="0"
-                              Spacing="2">
-                    <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [AboutVersionLabel], Source={StaticResource Localization}}" />
-                    <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [AboutVersionHint], Source={StaticResource Localization}}" />
-                  </StackPanel>
-                  <TextBlock Grid.Column="1"
-                             Classes="mm-setting-meta"
-                             Text="{Binding AboutVersion}" />
-                </Grid>
-              </Border>
-
-              <Line Classes="mm-setting-divider"
-                    StartPoint="0,0.5"
-                    EndPoint="1,0.5" />
-
-              <Border Classes="mm-setting-row">
-                <Grid ColumnDefinitions="*,Auto"
-                      ColumnSpacing="12">
-                  <StackPanel Grid.Column="0"
-                              Spacing="2">
-                    <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [AboutLicenseLabel], Source={StaticResource Localization}}" />
-                    <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [AboutLicenseHint], Source={StaticResource Localization}}" />
-                  </StackPanel>
-                  <TextBlock Grid.Column="1"
-                             Classes="mm-setting-meta"
-                             Text="{Binding AboutLicense}" />
-                </Grid>
-              </Border>
-
-              <Line Classes="mm-setting-divider"
-                    StartPoint="0,0.5"
-                    EndPoint="1,0.5" />
-
-              <Border Classes="mm-setting-row">
-                <StackPanel Spacing="8">
-                  <TextBlock Classes="mm-setting-label"
-                             Text="{Binding [AboutCreditsLabel], Source={StaticResource Localization}}" />
-                  <WrapPanel Orientation="Horizontal"
-                             ItemHeight="22">
-                    <TextBlock Classes="mm-setting-body"
-                               Text="{Binding [AboutCreatedByPrefix], Source={StaticResource Localization}}" />
-                    <Button Classes="mm-inline-link"
-                            Tag="https://ermolaev.tech"
-                            Click="OnAboutLinkClick"
-                            Content="Andrey Ermolaev" />
-                    <TextBlock Classes="mm-setting-body"
-                               Text="{Binding [AboutWith], Source={StaticResource Localization}}" />
-                    <Button Classes="mm-inline-link"
-                            Tag="https://skaro.dev"
-                            Click="OnAboutLinkClick"
-                            Content="Skaro" />
-                    <TextBlock Classes="mm-setting-body"
-                               Text="{Binding [AboutCreditsPeriod], Source={StaticResource Localization}}" />
-                  </WrapPanel>
-                </StackPanel>
-              </Border>
-            </StackPanel>
-          </Border>
-        </StackPanel>
-      </Border>
-
-      <Border Name="SettingsPanel"
-              Classes="mm-settings-panel mm-popover-right mm-reading-panel"
-              IsVisible="{Binding IsViewer}"
-              HorizontalAlignment="Right"
-              VerticalAlignment="Top"
-              Margin="0,54,16,0"
-              Width="320">
-        <StackPanel>
-          <Border Classes="mm-settings-head-shell">
-            <Grid ColumnDefinitions="*,Auto"
-                  ColumnSpacing="12">
-              <TextBlock Classes="mm-settings-title"
-                         Grid.Column="0"
-                         Text="{Binding [ReadingHeader], Source={StaticResource Localization}}" />
-              <Button Grid.Column="1"
-                      Classes="mm-settings-close"
-                      Command="{Binding CloseSettingsCommand}"
-                      ToolTip.Tip="{Binding [OverlayCloseSettings], Source={StaticResource Localization}}">
-                <Path Data="M0,0 L10,10 M10,0 L0,10"
-                      Stroke="{DynamicResource MmTextFaintBrush}"
-                      StrokeThickness="1.4"
-                      StrokeLineCap="Round" />
-              </Button>
-            </Grid>
-          </Border>
-
-          <Border Classes="mm-settings-body-shell">
-            <StackPanel Spacing="0">
-              <Border Classes="mm-setting-row">
-                <Grid ColumnDefinitions="Auto,*"
-                      ColumnSpacing="12">
-                  <StackPanel Grid.Column="0"
-                              Spacing="2"
-                              VerticalAlignment="Center">
-                    <TextBlock Classes="mm-setting-label"
-                               Text="{Binding [ReadingFontLabel], Source={StaticResource Localization}}" />
-                    <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding [ReadingFontHint], Source={StaticResource Localization}}" />
-                  </StackPanel>
-                  <Border Grid.Column="1"
-                          Classes="mm-segmented"
-                          HorizontalAlignment="Right">
-                    <StackPanel Orientation="Horizontal"
-                                Spacing="1">
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsSerifFontSelected}">
-                        <TextBlock Text="{Binding [ReadingFontSerif], Source={StaticResource Localization}}" />
-                      </ToggleButton>
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsSansFontSelected}">
-                        <TextBlock Text="{Binding [ReadingFontSans], Source={StaticResource Localization}}" />
-                      </ToggleButton>
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsMonoFontSelected}">
-                        <TextBlock Text="{Binding [ReadingFontMono], Source={StaticResource Localization}}" />
-                      </ToggleButton>
-                    </StackPanel>
-                  </Border>
-                </Grid>
-              </Border>
-
-              <StackPanel Spacing="0">
-                <Line Classes="mm-setting-divider"
-                      StartPoint="0,0.5"
-                      EndPoint="1,0.5" />
-                <Border Classes="mm-setting-row">
-                  <Grid ColumnDefinitions="Auto,*"
-                        ColumnSpacing="12">
-                    <StackPanel Grid.Column="0"
-                                Spacing="2"
-                                VerticalAlignment="Center">
-                      <TextBlock Classes="mm-setting-label"
-                                 Text="{Binding [ReadingSizeLabel], Source={StaticResource Localization}}" />
-                      <TextBlock Classes="mm-setting-hint"
-                                 Text="{Binding [ReadingSizeHint], Source={StaticResource Localization}}" />
-                    </StackPanel>
-                    <StackPanel Grid.Column="1"
-                                Orientation="Horizontal"
-                                Spacing="10"
-                                HorizontalAlignment="Right"
-                                VerticalAlignment="Center">
-                      <Slider Classes="mm-settings-slider"
-                              Minimum="14"
-                              Maximum="24"
-                              TickFrequency="1"
-                              IsSnapToTickEnabled="True"
-                              Value="{Binding FontSizeSetting, Mode=TwoWay}" />
-                      <TextBlock Classes="mm-slider-value"
-                                 Text="{Binding FontSizeLabel}" />
-                    </StackPanel>
-                  </Grid>
-                </Border>
-              </StackPanel>
-
-              <StackPanel Spacing="0">
-                <Line Classes="mm-setting-divider"
-                      StartPoint="0,0.5"
-                      EndPoint="1,0.5" />
-                <Border Classes="mm-setting-row">
-                  <Grid ColumnDefinitions="Auto,*"
-                        ColumnSpacing="12">
-                    <StackPanel Grid.Column="0"
-                                Spacing="2"
-                                VerticalAlignment="Center">
-                      <TextBlock Classes="mm-setting-label"
-                                 Text="{Binding [ReadingLineHeightLabel], Source={StaticResource Localization}}" />
-                      <TextBlock Classes="mm-setting-hint"
-                                 Text="{Binding [ReadingLineHeightHint], Source={StaticResource Localization}}" />
-                    </StackPanel>
-                    <StackPanel Grid.Column="1"
-                                Orientation="Horizontal"
-                                Spacing="10"
-                                HorizontalAlignment="Right"
-                                VerticalAlignment="Center">
-                      <Slider Classes="mm-settings-slider"
-                              Minimum="1.4"
-                              Maximum="2.0"
-                              TickFrequency="0.05"
-                              IsSnapToTickEnabled="True"
-                              Value="{Binding LineHeightSetting, Mode=TwoWay}" />
-                      <TextBlock Classes="mm-slider-value"
-                                 Text="{Binding LineHeightLabel}" />
-                    </StackPanel>
-                  </Grid>
-                </Border>
-              </StackPanel>
-
-              <StackPanel Spacing="0">
-                <Line Classes="mm-setting-divider"
-                      StartPoint="0,0.5"
-                      EndPoint="1,0.5" />
-                <Border Classes="mm-setting-row">
-                  <Grid ColumnDefinitions="Auto,*"
-                        ColumnSpacing="12">
-                    <StackPanel Grid.Column="0"
-                                Spacing="2"
-                                VerticalAlignment="Center">
-                      <TextBlock Classes="mm-setting-label"
-                                 Text="{Binding [ReadingWidthLabel], Source={StaticResource Localization}}" />
-                      <TextBlock Classes="mm-setting-hint"
-                                 Text="{Binding [ReadingWidthHint], Source={StaticResource Localization}}" />
-                    </StackPanel>
-                    <Border Grid.Column="1"
-                            Classes="mm-segmented"
-                            HorizontalAlignment="Right">
-                      <StackPanel Orientation="Horizontal"
-                                  Spacing="1">
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsNarrowWidthSelected}">
-                          <TextBlock Text="{Binding [ReadingWidthNarrow], Source={StaticResource Localization}}" />
-                        </ToggleButton>
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsMediumWidthSelected}">
-                          <TextBlock Text="{Binding [ReadingWidthMedium], Source={StaticResource Localization}}" />
-                        </ToggleButton>
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsWideWidthSelected}">
-                          <TextBlock Text="{Binding [ReadingWidthWide], Source={StaticResource Localization}}" />
-                        </ToggleButton>
-                      </StackPanel>
-                    </Border>
-                  </Grid>
-                </Border>
-              </StackPanel>
-            </StackPanel>
-          </Border>
-        </StackPanel>
-      </Border>
+      <ContentControl Name="SettingsPanel"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Top"
+                      Margin="0,54,16,0"
+                      Content="{Binding ReadingSettingsOverlayContent}">
+        <ContentControl.ContentTemplate>
+          <DataTemplate>
+            <views:ReadingSettingsPanelView />
+          </DataTemplate>
+        </ContentControl.ContentTemplate>
+      </ContentControl>
 
       <Border Classes="mm-status"
               HorizontalAlignment="Stretch"

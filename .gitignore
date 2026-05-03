@@ -31,6 +31,7 @@ Thumbs.db
 *.log
 
 # Other
+.editorconfig
 .codex-tmp/
 *.zip
 .tmp*

@@ -93,6 +93,10 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsAppAboutOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppOverlayOpen))]
     [NotifyPropertyChangedFor(nameof(HasOpenOverlay))]
+    [NotifyPropertyChangedFor(nameof(AppMenuOverlayContent))]
+    [NotifyPropertyChangedFor(nameof(AppSettingsOverlayContent))]
+    [NotifyPropertyChangedFor(nameof(AppAboutOverlayContent))]
+    [NotifyPropertyChangedFor(nameof(ReadingSettingsOverlayContent))]
     private ShellOverlayKind _shellOverlay = ShellOverlayKind.None;
 
     [ObservableProperty]
@@ -191,6 +195,14 @@ public partial class MainWindowViewModel : ObservableObject
     public bool IsAppOverlayOpen => ShellOverlay is ShellOverlayKind.AppMenu or ShellOverlayKind.AppSettings or ShellOverlayKind.AppAbout;
 
     public bool HasOpenOverlay => ShellOverlay != ShellOverlayKind.None;
+
+    public object? AppMenuOverlayContent => IsAppMenuOpen ? this : null;
+
+    public object? AppSettingsOverlayContent => IsAppSettingsOpen ? this : null;
+
+    public object? AppAboutOverlayContent => IsAppAboutOpen ? this : null;
+
+    public object? ReadingSettingsOverlayContent => IsSettingsOpen && IsViewer ? this : null;
 
     public bool ShowsReadingStatus => IsViewer && !IsEditMode;
 
@@ -826,6 +838,7 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(HasDocumentTitle));
         OnPropertyChanged(nameof(ShowsReadingStatus));
         OnPropertyChanged(nameof(ShowsEditToggle));
+        OnPropertyChanged(nameof(ReadingSettingsOverlayContent));
         RefreshWindowTitle();
         UpdateCommandStates();
     }

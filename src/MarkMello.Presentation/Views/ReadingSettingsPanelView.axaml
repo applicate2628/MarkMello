@@ -1,0 +1,172 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:MarkMello.Presentation.ViewModels"
+             mc:Ignorable="d"
+             x:CompileBindings="False"
+             x:Class="MarkMello.Presentation.Views.ReadingSettingsPanelView"
+             x:DataType="vm:MainWindowViewModel">
+      <Border
+              Classes="mm-settings-panel mm-popover-right mm-reading-panel"
+              Width="320">
+        <StackPanel>
+          <Border Classes="mm-settings-head-shell">
+            <Grid ColumnDefinitions="*,Auto"
+                  ColumnSpacing="12">
+              <TextBlock Classes="mm-settings-title"
+                         Grid.Column="0"
+                         Text="{Binding [ReadingHeader], Source={StaticResource Localization}}" />
+              <Button Grid.Column="1"
+                      Classes="mm-settings-close"
+                      Command="{Binding CloseSettingsCommand}"
+                      ToolTip.Tip="{Binding [OverlayCloseSettings], Source={StaticResource Localization}}">
+                <Path Data="M0,0 L10,10 M10,0 L0,10"
+                      Stroke="{DynamicResource MmTextFaintBrush}"
+                      StrokeThickness="1.4"
+                      StrokeLineCap="Round" />
+              </Button>
+            </Grid>
+          </Border>
+
+          <Border Classes="mm-settings-body-shell">
+            <StackPanel Spacing="0">
+              <Border Classes="mm-setting-row">
+                <Grid ColumnDefinitions="Auto,*"
+                      ColumnSpacing="12">
+                  <StackPanel Grid.Column="0"
+                              Spacing="2"
+                              VerticalAlignment="Center">
+                    <TextBlock Classes="mm-setting-label"
+                               Text="{Binding [ReadingFontLabel], Source={StaticResource Localization}}" />
+                    <TextBlock Classes="mm-setting-hint"
+                               Text="{Binding [ReadingFontHint], Source={StaticResource Localization}}" />
+                  </StackPanel>
+                  <Border Grid.Column="1"
+                          Classes="mm-segmented"
+                          HorizontalAlignment="Right">
+                    <StackPanel Orientation="Horizontal"
+                                Spacing="1">
+                      <ToggleButton Classes="mm-segmented-item"
+                                    IsChecked="{Binding IsSerifFontSelected}">
+                        <TextBlock Text="{Binding [ReadingFontSerif], Source={StaticResource Localization}}" />
+                      </ToggleButton>
+                      <ToggleButton Classes="mm-segmented-item"
+                                    IsChecked="{Binding IsSansFontSelected}">
+                        <TextBlock Text="{Binding [ReadingFontSans], Source={StaticResource Localization}}" />
+                      </ToggleButton>
+                      <ToggleButton Classes="mm-segmented-item"
+                                    IsChecked="{Binding IsMonoFontSelected}">
+                        <TextBlock Text="{Binding [ReadingFontMono], Source={StaticResource Localization}}" />
+                      </ToggleButton>
+                    </StackPanel>
+                  </Border>
+                </Grid>
+              </Border>
+
+              <StackPanel Spacing="0">
+                <Line Classes="mm-setting-divider"
+                      StartPoint="0,0.5"
+                      EndPoint="1,0.5" />
+                <Border Classes="mm-setting-row">
+                  <Grid ColumnDefinitions="Auto,*"
+                        ColumnSpacing="12">
+                    <StackPanel Grid.Column="0"
+                                Spacing="2"
+                                VerticalAlignment="Center">
+                      <TextBlock Classes="mm-setting-label"
+                                 Text="{Binding [ReadingSizeLabel], Source={StaticResource Localization}}" />
+                      <TextBlock Classes="mm-setting-hint"
+                                 Text="{Binding [ReadingSizeHint], Source={StaticResource Localization}}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1"
+                                Orientation="Horizontal"
+                                Spacing="10"
+                                                  VerticalAlignment="Center">
+                      <Slider Classes="mm-settings-slider"
+                              Minimum="14"
+                              Maximum="24"
+                              TickFrequency="1"
+                              IsSnapToTickEnabled="True"
+                              Value="{Binding FontSizeSetting, Mode=TwoWay}" />
+                      <TextBlock Classes="mm-slider-value"
+                                 Text="{Binding FontSizeLabel}" />
+                    </StackPanel>
+                  </Grid>
+                </Border>
+              </StackPanel>
+
+              <StackPanel Spacing="0">
+                <Line Classes="mm-setting-divider"
+                      StartPoint="0,0.5"
+                      EndPoint="1,0.5" />
+                <Border Classes="mm-setting-row">
+                  <Grid ColumnDefinitions="Auto,*"
+                        ColumnSpacing="12">
+                    <StackPanel Grid.Column="0"
+                                Spacing="2"
+                                VerticalAlignment="Center">
+                      <TextBlock Classes="mm-setting-label"
+                                 Text="{Binding [ReadingLineHeightLabel], Source={StaticResource Localization}}" />
+                      <TextBlock Classes="mm-setting-hint"
+                                 Text="{Binding [ReadingLineHeightHint], Source={StaticResource Localization}}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1"
+                                Orientation="Horizontal"
+                                Spacing="10"
+                                                  VerticalAlignment="Center">
+                      <Slider Classes="mm-settings-slider"
+                              Minimum="1.4"
+                              Maximum="2.0"
+                              TickFrequency="0.05"
+                              IsSnapToTickEnabled="True"
+                              Value="{Binding LineHeightSetting, Mode=TwoWay}" />
+                      <TextBlock Classes="mm-slider-value"
+                                 Text="{Binding LineHeightLabel}" />
+                    </StackPanel>
+                  </Grid>
+                </Border>
+              </StackPanel>
+
+              <StackPanel Spacing="0">
+                <Line Classes="mm-setting-divider"
+                      StartPoint="0,0.5"
+                      EndPoint="1,0.5" />
+                <Border Classes="mm-setting-row">
+                  <Grid ColumnDefinitions="Auto,*"
+                        ColumnSpacing="12">
+                    <StackPanel Grid.Column="0"
+                                Spacing="2"
+                                VerticalAlignment="Center">
+                      <TextBlock Classes="mm-setting-label"
+                                 Text="{Binding [ReadingWidthLabel], Source={StaticResource Localization}}" />
+                      <TextBlock Classes="mm-setting-hint"
+                                 Text="{Binding [ReadingWidthHint], Source={StaticResource Localization}}" />
+                    </StackPanel>
+                    <Border Grid.Column="1"
+                            Classes="mm-segmented"
+                            HorizontalAlignment="Right">
+                      <StackPanel Orientation="Horizontal"
+                                  Spacing="1">
+                        <ToggleButton Classes="mm-segmented-item"
+                                      IsChecked="{Binding IsNarrowWidthSelected}">
+                          <TextBlock Text="{Binding [ReadingWidthNarrow], Source={StaticResource Localization}}" />
+                        </ToggleButton>
+                        <ToggleButton Classes="mm-segmented-item"
+                                      IsChecked="{Binding IsMediumWidthSelected}">
+                          <TextBlock Text="{Binding [ReadingWidthMedium], Source={StaticResource Localization}}" />
+                        </ToggleButton>
+                        <ToggleButton Classes="mm-segmented-item"
+                                      IsChecked="{Binding IsWideWidthSelected}">
+                          <TextBlock Text="{Binding [ReadingWidthWide], Source={StaticResource Localization}}" />
+                        </ToggleButton>
+                      </StackPanel>
+                    </Border>
+                  </Grid>
+                </Border>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </Border>
+</UserControl>

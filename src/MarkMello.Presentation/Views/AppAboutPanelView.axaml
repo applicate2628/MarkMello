@@ -1,0 +1,113 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:MarkMello.Presentation.ViewModels"
+             mc:Ignorable="d"
+             x:CompileBindings="False"
+             x:Class="MarkMello.Presentation.Views.AppAboutPanelView"
+             x:DataType="vm:MainWindowViewModel">
+      <Border
+              Classes="mm-settings-panel mm-popover-left mm-app-about-panel"
+              Width="320">
+        <StackPanel>
+          <Border Classes="mm-settings-head-shell">
+            <Grid ColumnDefinitions="Auto,*,Auto"
+                  ColumnSpacing="12">
+              <Button Grid.Column="0"
+                      Classes="mm-settings-close"
+                      Command="{Binding ReturnToAppSettingsCommand}"
+                      ToolTip.Tip="{Binding [OverlayBackToSettings], Source={StaticResource Localization}}">
+                <Path Data="M9.5,1.5 L2.5,5.5 L9.5,9.5"
+                      Stroke="{DynamicResource MmTextFaintBrush}"
+                      StrokeThickness="1.4"
+                      StrokeLineCap="Round"
+                      StrokeJoin="Round"
+                      Fill="Transparent" />
+              </Button>
+              <TextBlock Classes="mm-settings-title"
+                         Grid.Column="1"
+                         VerticalAlignment="Center"
+                         Text="{Binding [AboutHeader], Source={StaticResource Localization}}" />
+              <Button Grid.Column="2"
+                      Classes="mm-settings-close"
+                      Command="{Binding CloseOverlayCommand}"
+                      ToolTip.Tip="{Binding [OverlayCloseAbout], Source={StaticResource Localization}}">
+                <Path Data="M0,0 L10,10 M10,0 L0,10"
+                      Stroke="{DynamicResource MmTextFaintBrush}"
+                      StrokeThickness="1.4"
+                      StrokeLineCap="Round" />
+              </Button>
+            </Grid>
+          </Border>
+
+          <Border Classes="mm-settings-body-shell">
+            <StackPanel Spacing="0">
+              <Border Classes="mm-setting-row">
+                <Grid ColumnDefinitions="*,Auto"
+                      ColumnSpacing="12">
+                  <StackPanel Grid.Column="0"
+                              Spacing="2">
+                    <TextBlock Classes="mm-setting-label"
+                               Text="{Binding [AboutVersionLabel], Source={StaticResource Localization}}" />
+                    <TextBlock Classes="mm-setting-hint"
+                               Text="{Binding [AboutVersionHint], Source={StaticResource Localization}}" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1"
+                             Classes="mm-setting-meta"
+                             Text="{Binding AboutVersion}" />
+                </Grid>
+              </Border>
+
+              <Line Classes="mm-setting-divider"
+                    StartPoint="0,0.5"
+                    EndPoint="1,0.5" />
+
+              <Border Classes="mm-setting-row">
+                <Grid ColumnDefinitions="*,Auto"
+                      ColumnSpacing="12">
+                  <StackPanel Grid.Column="0"
+                              Spacing="2">
+                    <TextBlock Classes="mm-setting-label"
+                               Text="{Binding [AboutLicenseLabel], Source={StaticResource Localization}}" />
+                    <TextBlock Classes="mm-setting-hint"
+                               Text="{Binding [AboutLicenseHint], Source={StaticResource Localization}}" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1"
+                             Classes="mm-setting-meta"
+                             Text="{Binding AboutLicense}" />
+                </Grid>
+              </Border>
+
+              <Line Classes="mm-setting-divider"
+                    StartPoint="0,0.5"
+                    EndPoint="1,0.5" />
+
+              <Border Classes="mm-setting-row">
+                <StackPanel Spacing="8">
+                  <TextBlock Classes="mm-setting-label"
+                             Text="{Binding [AboutCreditsLabel], Source={StaticResource Localization}}" />
+                  <WrapPanel Orientation="Horizontal"
+                             ItemHeight="22">
+                    <TextBlock Classes="mm-setting-body"
+                               Text="{Binding [AboutCreatedByPrefix], Source={StaticResource Localization}}" />
+                    <Button Classes="mm-inline-link"
+                            Tag="https://ermolaev.tech"
+                            Click="OnAboutLinkClick"
+                            Content="Andrey Ermolaev" />
+                    <TextBlock Classes="mm-setting-body"
+                               Text="{Binding [AboutWith], Source={StaticResource Localization}}" />
+                    <Button Classes="mm-inline-link"
+                            Tag="https://skaro.dev"
+                            Click="OnAboutLinkClick"
+                            Content="Skaro" />
+                    <TextBlock Classes="mm-setting-body"
+                               Text="{Binding [AboutCreditsPeriod], Source={StaticResource Localization}}" />
+                  </WrapPanel>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </Border>
+</UserControl>

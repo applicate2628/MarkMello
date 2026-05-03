@@ -17,6 +17,7 @@ public partial class MainWindow : Window
 {
     private readonly MainWindowViewModel _viewModel = default!;
     private readonly StartupSmokeTestOptions _startupSmokeTestOptions = StartupSmokeTestOptions.Disabled;
+    private readonly Task _startupInitializationTask = Task.CompletedTask;
     private bool _allowConfirmedClose;
 
     public MainWindow()
@@ -51,6 +52,8 @@ public partial class MainWindow : Window
         SizeChanged += OnWindowSizeChanged;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
         _viewModel.CloseRequested += OnViewModelCloseRequested;
+
+        _startupInitializationTask = InitializeStartupAsync();
     }
 
     /// <summary>
@@ -80,10 +83,15 @@ public partial class MainWindow : Window
 
     private async void OnWindowOpened(object? sender, EventArgs e)
     {
+        await _startupInitializationTask.ConfigureAwait(true);
+        await CompleteStartupSmokeTestAsync().ConfigureAwait(true);
+    }
+
+    private async Task InitializeStartupAsync()
+    {
         try
         {
-            await _viewModel.InitializeAsync();
-            await CompleteStartupSmokeTestAsync().ConfigureAwait(true);
+            await _viewModel.InitializeAsync().ConfigureAwait(true);
         }
         catch (Exception exception) when (_startupSmokeTestOptions.IsEnabled)
         {
@@ -353,7 +361,7 @@ public partial class MainWindow : Window
     {
         if (_viewModel.IsSettingsOpen)
         {
-            var settingsPanel = this.FindControl<Border>("SettingsPanel");
+            var settingsPanel = this.FindControl<Control>("SettingsPanel");
             if (settingsPanel is not null && IsWithinVisual(source, settingsPanel))
             {
                 return true;
@@ -365,7 +373,7 @@ public partial class MainWindow : Window
 
         if (_viewModel.IsAppMenuOpen)
         {
-            var appMenuPanel = this.FindControl<Border>("AppMenuPanel");
+            var appMenuPanel = this.FindControl<Control>("AppMenuPanel");
             if (appMenuPanel is not null && IsWithinVisual(source, appMenuPanel))
             {
                 return true;
@@ -374,7 +382,7 @@ public partial class MainWindow : Window
 
         if (_viewModel.IsAppSettingsOpen)
         {
-            var appSettingsPanel = this.FindControl<Border>("AppSettingsPanel");
+            var appSettingsPanel = this.FindControl<Control>("AppSettingsPanel");
             if (appSettingsPanel is not null && IsWithinVisual(source, appSettingsPanel))
             {
                 return true;
@@ -383,7 +391,7 @@ public partial class MainWindow : Window
 
         if (_viewModel.IsAppAboutOpen)
         {
-            var appAboutPanel = this.FindControl<Border>("AppAboutPanel");
+            var appAboutPanel = this.FindControl<Control>("AppAboutPanel");
             if (appAboutPanel is not null && IsWithinVisual(source, appAboutPanel))
             {
                 return true;
@@ -401,27 +409,6 @@ public partial class MainWindow : Window
         Classes.Set("mm-app-menu-open", _viewModel.IsAppMenuOpen);
         Classes.Set("mm-app-settings-open", _viewModel.IsAppSettingsOpen);
         Classes.Set("mm-app-about-open", _viewModel.IsAppAboutOpen);
-    }
-
-    private async void OnAboutLinkClick(object? sender, RoutedEventArgs e)
-    {
-        if (sender is not Control { Tag: string rawUrl })
-        {
-            return;
-        }
-
-        if (!Uri.TryCreate(rawUrl, UriKind.Absolute, out var uri))
-        {
-            return;
-        }
-
-        var launcher = TopLevel.GetTopLevel(this)?.Launcher;
-        if (launcher is null)
-        {
-            return;
-        }
-
-        await launcher.LaunchUriAsync(uri);
     }
 
     private void OnViewModelCloseRequested(object? sender, EventArgs e)
