@@ -26,6 +26,23 @@ public partial class MainWindowViewModel
 
     public bool IsRussianLanguageSelected => Language == AppLanguage.Russian;
 
+    private IReadOnlyList<LanguageSelectionItem>? _languageOptions;
+
+    public IReadOnlyList<LanguageSelectionItem> LanguageOptions =>
+        _languageOptions ??= CreateLanguageOptions();
+
+    public LanguageSelectionItem? SelectedLanguageOption
+    {
+        get => LanguageOptions.FirstOrDefault(option => option.Language == Language);
+        set
+        {
+            if (value is not null)
+            {
+                ApplyLanguageSelection(value.Language);
+            }
+        }
+    }
+
     public string WordCountStatusLabel => _localization.Format("StatusWordCount", WordCount);
 
     public string ReadTimeStatusLabel => _localization.Format("StatusReadTime", ReadTimeMinutes);
@@ -50,6 +67,11 @@ public partial class MainWindowViewModel
         }
 
         RefreshLocalizedProperties();
+    }
+
+    partial void OnLanguageChanged(AppLanguage value)
+    {
+        OnPropertyChanged(nameof(SelectedLanguageOption));
     }
 
     private void ApplyLanguageSelection(AppLanguage language, bool persist = true)
@@ -85,6 +107,8 @@ public partial class MainWindowViewModel
 
     private void RefreshLocalizedProperties()
     {
+        _languageOptions = CreateLanguageOptions();
+
         OnPropertyChanged(nameof(EditToggleLabel));
         OnPropertyChanged(nameof(EditShortcutLabel));
         OnPropertyChanged(nameof(NextThemeHint));
@@ -95,6 +119,8 @@ public partial class MainWindowViewModel
         OnPropertyChanged(nameof(IsSystemLanguageSelected));
         OnPropertyChanged(nameof(IsEnglishLanguageSelected));
         OnPropertyChanged(nameof(IsRussianLanguageSelected));
+        OnPropertyChanged(nameof(LanguageOptions));
+        OnPropertyChanged(nameof(SelectedLanguageOption));
         OnPropertyChanged(nameof(WordCountStatusLabel));
         OnPropertyChanged(nameof(ReadTimeStatusLabel));
         OnPropertyChanged(nameof(FontSizeLabel));
@@ -104,6 +130,13 @@ public partial class MainWindowViewModel
         RefreshLoadErrorTexts();
         RefreshUpdateStatusTexts();
     }
+
+    private IReadOnlyList<LanguageSelectionItem> CreateLanguageOptions() =>
+    [
+        new(AppLanguage.System, _localization["LanguageSystem"]),
+        new(AppLanguage.English, _localization["LanguageEnglish"]),
+        new(AppLanguage.Russian, _localization["LanguageRussian"])
+    ];
 
     private void SetDirtyPrompt(PendingDirtyActionKind kind)
     {
@@ -339,3 +372,9 @@ public partial class MainWindowViewModel
         public sealed record OpenDownloadedFailedState(string Details) : UpdateStatusSnapshot;
     }
 }
+
+public sealed record LanguageSelectionItem(AppLanguage Language, string Label)
+{
+    public override string ToString() => Label;
+}
+

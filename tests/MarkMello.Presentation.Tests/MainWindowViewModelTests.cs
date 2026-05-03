@@ -455,6 +455,41 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("Слов: 0", harness.ViewModel.WordCountStatusLabel);
     }
 
+    [Fact]
+    public void SelectedLanguageOptionPersistsLanguageAndRefreshesDropdownLabels()
+    {
+        var harness = CreateHarness();
+        var initialOptions = harness.ViewModel.LanguageOptions;
+        var russianOption = initialOptions.Single(option => option.Language == AppLanguage.Russian);
+
+        harness.ViewModel.SelectedLanguageOption = russianOption;
+
+        var refreshedOptions = harness.ViewModel.LanguageOptions;
+
+        Assert.Equal(AppLanguage.Russian, harness.Settings.Language);
+        Assert.Equal(AppLanguage.Russian, harness.ViewModel.SelectedLanguageOption?.Language);
+        Assert.NotSame(initialOptions, refreshedOptions);
+        Assert.Same(
+            refreshedOptions.Single(option => option.Language == AppLanguage.Russian),
+            harness.ViewModel.SelectedLanguageOption);
+        Assert.Equal("Английский", refreshedOptions.Single(option => option.Language == AppLanguage.English).Label);
+        Assert.Equal("Слов: 0", harness.ViewModel.WordCountStatusLabel);
+    }
+
+    [Fact]
+    public void LanguageOptionsKeepsStableItemReferencesBetweenLocalizationChanges()
+    {
+        var harness = CreateHarness();
+
+        var firstRead = harness.ViewModel.LanguageOptions;
+        var secondRead = harness.ViewModel.LanguageOptions;
+
+        Assert.Same(firstRead, secondRead);
+        Assert.Same(
+            firstRead.Single(option => option.Language == AppLanguage.System),
+            harness.ViewModel.SelectedLanguageOption);
+    }
+
     private static MarkdownSource CreateSource(string path, string content)
         => new(path, Path.GetFileName(path), content);
 

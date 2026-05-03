@@ -116,6 +116,24 @@ public partial class MainWindow : Window
         ShutdownClassicDesktopLifetime(exitCode: 0);
     }
 
+    internal static bool IsOverlayPopupInteractionSource(Visual source)
+    {
+        for (var current = source; current is not null; current = current.GetVisualParent())
+        {
+            if (current is ComboBox or ComboBoxItem)
+            {
+                return true;
+            }
+
+            if (string.Equals(current.GetType().Name, "PopupRoot", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static void ShutdownClassicDesktopLifetime(int exitCode)
     {
         if (global::Avalonia.Application.Current?.ApplicationLifetime
@@ -184,7 +202,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (IsPointerWithinOpenOverlay(source))
+        if (IsPointerWithinOpenOverlay(source) || IsOverlayPopupInteractionSource(source))
         {
             return;
         }

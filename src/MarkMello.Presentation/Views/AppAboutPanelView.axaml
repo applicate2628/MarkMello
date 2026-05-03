@@ -96,12 +96,6 @@
                             Click="OnAboutLinkClick"
                             Content="Andrey Ermolaev" />
                     <TextBlock Classes="mm-setting-body"
-                               Text="{Binding [AboutWith], Source={StaticResource Localization}}" />
-                    <Button Classes="mm-inline-link"
-                            Tag="https://skaro.dev"
-                            Click="OnAboutLinkClick"
-                            Content="Skaro" />
-                    <TextBlock Classes="mm-setting-body"
                                Text="{Binding [AboutCreditsPeriod], Source={StaticResource Localization}}" />
                   </WrapPanel>
                 </StackPanel>

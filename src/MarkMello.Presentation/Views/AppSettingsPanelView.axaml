@@ -54,28 +54,17 @@
                     <TextBlock Classes="mm-setting-hint"
                                Text="{Binding [LanguageHint], Source={StaticResource Localization}}" />
                   </StackPanel>
-                  <Border Grid.Column="1"
-                          Classes="mm-segmented"
-                          HorizontalAlignment="Right">
-                    <StackPanel Orientation="Horizontal"
-                                Spacing="1">
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsSystemLanguageSelected}"
-                                    Command="{Binding SelectSystemLanguageCommand}">
-                        <TextBlock Text="{Binding [LanguageSystem], Source={StaticResource Localization}}" />
-                      </ToggleButton>
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsEnglishLanguageSelected}"
-                                    Command="{Binding SelectEnglishLanguageCommand}">
-                        <TextBlock Text="{Binding [LanguageEnglish], Source={StaticResource Localization}}" />
-                      </ToggleButton>
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsRussianLanguageSelected}"
-                                    Command="{Binding SelectRussianLanguageCommand}">
-                        <TextBlock Text="{Binding [LanguageRussian], Source={StaticResource Localization}}" />
-                      </ToggleButton>
-                    </StackPanel>
-                  </Border>
+                  <ComboBox Grid.Column="1"
+                            Classes="mm-language-select"
+                            HorizontalAlignment="Right"
+                            ItemsSource="{Binding LanguageOptions}"
+                            SelectedItem="{Binding SelectedLanguageOption, Mode=TwoWay}">
+                    <ComboBox.ItemTemplate>
+                      <DataTemplate>
+                        <TextBlock Text="{Binding Label}" />
+                      </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                  </ComboBox>
                 </Grid>
               </Border>
 
