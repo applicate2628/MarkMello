@@ -196,6 +196,17 @@ public sealed class EditorSessionViewModel : ObservableObject
         StatusMessage = string.Empty;
     }
 
+    public void UpdateDraftFileName(string fileName)
+    {
+        if (!string.IsNullOrWhiteSpace(CurrentPath))
+        {
+            return;
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+        FileName = fileName;
+    }
+
     public void SetStatusMessage(string? message)
     {
         StatusMessage = message ?? string.Empty;

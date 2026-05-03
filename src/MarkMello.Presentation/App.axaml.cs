@@ -3,6 +3,7 @@ using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using MarkMello.Application.Abstractions;
 using MarkMello.Domain.Diagnostics;
+using MarkMello.Presentation.Localization;
 using MarkMello.Presentation.Views;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -14,7 +15,7 @@ public partial class App : global::Avalonia.Application
     /// Сервис-провайдер, передаваемый из Program.Main до создания AppBuilder.
     /// Statiс — обусловлено тем, что Avalonia сама создаёт инстанс App.
     /// </summary>
-    public static IServiceProvider Services { get; private set; } = default!;
+    public static IServiceProvider? Services { get; private set; }
 
     public static void RegisterServices(IServiceProvider services)
     {
@@ -22,10 +23,22 @@ public partial class App : global::Avalonia.Application
         Services = services;
     }
 
-    public override void Initialize() => AvaloniaXamlLoader.Load(this);
+    public override void Initialize()
+    {
+        AvaloniaXamlLoader.Load(this);
+
+        var localization = Services?.GetService<ILocalizationService>() ?? new LocalizationService();
+        Resources["Localization"] = localization;
+    }
 
     public override void OnFrameworkInitializationCompleted()
     {
+        if (Services is null)
+        {
+            base.OnFrameworkInitializationCompleted();
+            return;
+        }
+
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var metrics = Services.GetRequiredService<IStartupMetrics>();

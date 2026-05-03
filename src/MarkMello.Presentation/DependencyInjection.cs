@@ -1,6 +1,7 @@
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using MarkMello.Application.Abstractions;
+using MarkMello.Presentation.Localization;
 using MarkMello.Presentation.Services;
 using MarkMello.Presentation.ViewModels;
 using MarkMello.Presentation.Views;
@@ -25,6 +26,7 @@ public static class DependencyInjection
 
         services.AddSingleton<IFilePicker, FilePicker>();
         services.AddSingleton<IThemeService, AvaloniaThemeService>();
+        services.AddSingleton<ILocalizationService, LocalizationService>();
 
         services.AddSingleton<MainWindowViewModel>();
         services.AddSingleton<MainWindow>();

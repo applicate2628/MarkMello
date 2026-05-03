@@ -1,24 +1,38 @@
+using System.ComponentModel;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using Avalonia.VisualTree;
-using Avalonia.Controls.Primitives;
+using MarkMello.Application.Abstractions;
 using MarkMello.Domain;
 using MarkMello.Presentation.ViewModels;
-using System.ComponentModel;
 
 namespace MarkMello.Presentation.Views;
 
 public partial class MainWindow : Window
 {
-    private readonly MainWindowViewModel _viewModel;
+    private readonly MainWindowViewModel _viewModel = default!;
+    private readonly StartupSmokeTestOptions _startupSmokeTestOptions = StartupSmokeTestOptions.Disabled;
     private bool _allowConfirmedClose;
 
-    public MainWindow(MainWindowViewModel viewModel)
+    public MainWindow()
     {
+        InitializeComponent();
+    }
+
+    public MainWindow(
+        MainWindowViewModel viewModel,
+        StartupSmokeTestOptions startupSmokeTestOptions)
+    {
+        ArgumentNullException.ThrowIfNull(viewModel);
+        ArgumentNullException.ThrowIfNull(startupSmokeTestOptions);
+
         _viewModel = viewModel;
+        _startupSmokeTestOptions = startupSmokeTestOptions;
         DataContext = viewModel;
 
         ConfigurePlatformChrome();
@@ -69,12 +83,41 @@ public partial class MainWindow : Window
         try
         {
             await _viewModel.InitializeAsync();
+            await CompleteStartupSmokeTestAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception) when (_startupSmokeTestOptions.IsEnabled)
+        {
+            Console.Error.WriteLine(exception);
+            ShutdownClassicDesktopLifetime(exitCode: 1);
         }
         catch
         {
             // Защита fast path: VM init не должна валить окно.
             // Реальный logging придёт вместе с infrastructure logging в M4+.
         }
+    }
+
+    private async Task CompleteStartupSmokeTestAsync()
+    {
+        if (!_startupSmokeTestOptions.IsEnabled)
+        {
+            return;
+        }
+
+        await Task.Delay(_startupSmokeTestOptions.ExitAfterOpenDelay).ConfigureAwait(true);
+        ShutdownClassicDesktopLifetime(exitCode: 0);
+    }
+
+    private static void ShutdownClassicDesktopLifetime(int exitCode)
+    {
+        if (global::Avalonia.Application.Current?.ApplicationLifetime
+            is IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            desktop.Shutdown(exitCode);
+            return;
+        }
+
+        Environment.ExitCode = exitCode;
     }
 
     protected override void OnClosed(EventArgs e)

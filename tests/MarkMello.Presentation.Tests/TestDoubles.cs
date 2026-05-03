@@ -78,6 +78,8 @@ internal sealed class InMemorySettingsStore : ISettingsStore
 
     public ThemeMode Theme { get; set; } = ThemeMode.System;
 
+    public AppLanguage Language { get; set; } = AppLanguage.English;
+
     public ValueTask<ReadingPreferences> LoadPreferencesAsync(CancellationToken cancellationToken = default)
         => ValueTask.FromResult(Preferences);
 
@@ -93,6 +95,15 @@ internal sealed class InMemorySettingsStore : ISettingsStore
     public ValueTask SaveThemeAsync(ThemeMode theme, CancellationToken cancellationToken = default)
     {
         Theme = theme;
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask<AppLanguage> LoadLanguageAsync(CancellationToken cancellationToken = default)
+        => ValueTask.FromResult(Language);
+
+    public ValueTask SaveLanguageAsync(AppLanguage language, CancellationToken cancellationToken = default)
+    {
+        Language = language;
         return ValueTask.CompletedTask;
     }
 }

@@ -16,13 +16,16 @@ public sealed class JsonSettingsStoreTests
 
             await store.SavePreferencesAsync(expectedPreferences);
             await store.SaveThemeAsync(ThemeMode.Dark);
+            await store.SaveLanguageAsync(AppLanguage.Russian);
 
             var reloadedStore = new JsonSettingsStore(rootDirectory);
             var actualPreferences = await reloadedStore.LoadPreferencesAsync();
             var actualTheme = await reloadedStore.LoadThemeAsync();
+            var actualLanguage = await reloadedStore.LoadLanguageAsync();
 
             Assert.Equal(expectedPreferences, actualPreferences);
             Assert.Equal(ThemeMode.Dark, actualTheme);
+            Assert.Equal(AppLanguage.Russian, actualLanguage);
         }
         finally
         {
@@ -42,9 +45,11 @@ public sealed class JsonSettingsStoreTests
 
             var preferences = await store.LoadPreferencesAsync();
             var theme = await store.LoadThemeAsync();
+            var language = await store.LoadLanguageAsync();
 
             Assert.Equal(ReadingPreferences.Default, preferences);
             Assert.Equal(ThemeMode.System, theme);
+            Assert.Equal(AppLanguage.System, language);
         }
         finally
         {
@@ -75,12 +80,14 @@ public sealed class JsonSettingsStoreTests
             var store = new JsonSettingsStore(rootDirectory);
             var preferences = await store.LoadPreferencesAsync();
             var theme = await store.LoadThemeAsync();
+            var language = await store.LoadLanguageAsync();
 
             Assert.Equal(ThemeMode.Light, theme);
             Assert.Equal(FontFamilyMode.Mono, preferences.FontFamily);
             Assert.Equal(ReadingPreferences.MinFontSize, preferences.FontSize);
             Assert.Equal(ReadingPreferences.MaxLineHeight, preferences.LineHeight);
             Assert.Equal(ReadingPreferences.MaxContentWidth, preferences.ContentWidth);
+            Assert.Equal(AppLanguage.System, language);
         }
         finally
         {

@@ -5,6 +5,7 @@ using MarkMello.Application.Updates;
 using MarkMello.Application.UseCases;
 using MarkMello.Domain;
 using MarkMello.Domain.Diagnostics;
+using MarkMello.Presentation.Localization;
 using System.Reflection;
 using System.ComponentModel;
 
@@ -16,12 +17,11 @@ namespace MarkMello.Presentation.ViewModels;
 /// </summary>
 public partial class MainWindowViewModel : ObservableObject
 {
-    private const string NewDocumentFileName = "Untitled.md";
-
     private readonly OpenDocumentUseCase _openDocument;
     private readonly SaveDocumentUseCase _saveDocument;
     private readonly IFilePicker _filePicker;
     private readonly ICommandLineActivation _commandLine;
+    private readonly ILocalizationService _localization;
     private readonly ISettingsStore _settings;
     private readonly IThemeService _themeService;
     private readonly IStartupMetrics _startupMetrics;
@@ -45,6 +45,7 @@ public partial class MainWindowViewModel : ObservableObject
         SaveDocumentUseCase saveDocument,
         IFilePicker filePicker,
         ICommandLineActivation commandLine,
+        ILocalizationService localization,
         ISettingsStore settings,
         IThemeService themeService,
         IStartupMetrics startupMetrics,
@@ -56,6 +57,7 @@ public partial class MainWindowViewModel : ObservableObject
         _saveDocument = saveDocument;
         _filePicker = filePicker;
         _commandLine = commandLine;
+        _localization = localization;
         _settings = settings;
         _themeService = themeService;
         _startupMetrics = startupMetrics;
@@ -63,6 +65,8 @@ public partial class MainWindowViewModel : ObservableObject
         _updateService = updateService;
         _imageSourceResolver = imageSourceResolver;
         _aboutVersion = GetProductVersion();
+        _localization.PropertyChanged += OnLocalizationChanged;
+        RefreshUpdateStatusTexts();
     }
 
     public IImageSourceResolver? ImageSourceResolver => _imageSourceResolver;
@@ -148,10 +152,10 @@ public partial class MainWindowViewModel : ObservableObject
     private bool _isDownloadingUpdate;
 
     [ObservableProperty]
-    private string _updateStatusTitle = "Updates";
+    private string _updateStatusTitle = string.Empty;
 
     [ObservableProperty]
-    private string _updateStatusMessage = "Manual GitHub release checks keep the startup path offline.";
+    private string _updateStatusMessage = string.Empty;
 
     [ObservableProperty]
     private string? _downloadedUpdatePath;
@@ -200,9 +204,9 @@ public partial class MainWindowViewModel : ObservableObject
 
     public bool ShowsEditToggle => State == ViewState.Viewing && Document is not null;
 
-    public string EditToggleLabel => IsEditMode ? "Reading" : "Edit";
+    public string EditToggleLabel => IsEditMode ? _localization["ModeReading"] : _localization["ModeEdit"];
 
-    public string EditShortcutLabel => IsEditMode ? "read" : "edit";
+    public string EditShortcutLabel => IsEditMode ? _localization["ModeReadShortcut"] : _localization["ModeEditShortcut"];
 
     public string AboutVersion => _aboutVersion;
 
@@ -224,29 +228,29 @@ public partial class MainWindowViewModel : ObservableObject
            && !IsCheckingForUpdates
            && !IsDownloadingUpdate;
 
-    public string CheckForUpdatesLabel => IsCheckingForUpdates ? "Checking..." : "Check now";
+    public string CheckForUpdatesLabel => IsCheckingForUpdates ? _localization["UpdateChecking"] : _localization["UpdateCheckNow"];
 
-    public string DownloadUpdateLabel => IsDownloadingUpdate ? "Downloading..." : "Download update";
+    public string DownloadUpdateLabel => IsDownloadingUpdate ? _localization["UpdateDownloading"] : _localization["UpdateDownload"];
 
     public string DownloadedUpdateActionLabel
         => _availableUpdatePackage?.InstallAction switch
         {
-            AppUpdateInstallAction.LaunchInstaller => "Launch installer",
-            AppUpdateInstallAction.OpenDiskImage => "Open DMG",
-            AppUpdateInstallAction.RevealFile => "Reveal AppImage",
-            _ => "Open update"
+            AppUpdateInstallAction.LaunchInstaller => _localization["UpdateLaunchInstaller"],
+            AppUpdateInstallAction.OpenDiskImage => _localization["UpdateOpenDmg"],
+            AppUpdateInstallAction.RevealFile => _localization["UpdateRevealAppImage"],
+            _ => _localization["UpdateOpenDownloaded"]
         };
 
     public string UpdateStateBadge
         => IsCheckingForUpdates
-            ? "Checking"
+            ? _localization["UpdateBadgeChecking"]
             : IsDownloadingUpdate
-                ? "Downloading"
+                ? _localization["UpdateBadgeDownloading"]
                 : CanOpenDownloadedUpdate
-                    ? "Ready"
+                    ? _localization["UpdateBadgeReady"]
                     : CanDownloadAvailableUpdate
-                        ? "Available"
-                        : "Manual";
+                        ? _localization["UpdateBadgeAvailable"]
+                        : _localization["UpdateBadgeManual"];
 
     public FontFamilyMode SelectedFontFamilyMode
     {
@@ -315,7 +319,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     public string FontSizeLabel => $"{ReadingPreferences.FontSize}px";
 
-    public string LineHeightLabel => $"{ReadingPreferences.LineHeight:0.00}";
+    public string LineHeightLabel => ReadingPreferences.LineHeight.ToString("0.00", _localization.Culture);
 
     public bool IsSerifFontSelected
     {
@@ -412,12 +416,15 @@ public partial class MainWindowViewModel : ObservableObject
     public int ReadTimeMinutes => Math.Max(1, (int)Math.Round(WordCount / 220.0));
 
     public string NextThemeHint => EffectiveTheme == ThemeMode.Light
-        ? "Switch to dark theme"
-        : "Switch to light theme";
+        ? _localization["ThemeSwitchToDark"]
+        : _localization["ThemeSwitchToLight"];
 
     public async Task InitializeAsync()
     {
         ReadingPreferences = await _settings.LoadPreferencesAsync().ConfigureAwait(true);
+
+        var savedLanguage = await _settings.LoadLanguageAsync().ConfigureAwait(true);
+        ApplyLanguageSelection(savedLanguage, persist: false);
 
         var savedTheme = await _settings.LoadThemeAsync().ConfigureAwait(true);
         ApplyTheme(savedTheme);
@@ -541,7 +548,7 @@ public partial class MainWindowViewModel : ObservableObject
             return;
         }
 
-        DirtyPromptErrorMessage = string.Empty;
+        SetDirtyPromptError(null);
 
         var outcome = await SaveEditorAsync(promptForPathWhenMissing: true, forceSaveAs: false).ConfigureAwait(true);
         if (outcome.Cancelled)
@@ -551,7 +558,7 @@ public partial class MainWindowViewModel : ObservableObject
 
         if (outcome.Result is not SaveDocumentResult.Success success)
         {
-            DirtyPromptErrorMessage = GetSaveFailureMessage(outcome.Result);
+            SetDirtyPromptError(outcome.Result);
             return;
         }
 
@@ -645,8 +652,7 @@ public partial class MainWindowViewModel : ObservableObject
         IsDownloadingUpdate = false;
         _availableUpdatePackage = null;
         DownloadedUpdatePath = null;
-        UpdateStatusTitle = "Checking GitHub Releases";
-        UpdateStatusMessage = "Looking for a newer packaged build for this device.";
+        SetUpdateStatus(new UpdateStatusSnapshot.CheckingState());
         UpdateCommandStates();
 
         try
@@ -654,33 +660,29 @@ public partial class MainWindowViewModel : ObservableObject
             var result = await _updateService.CheckForUpdatesAsync().ConfigureAwait(true);
             switch (result)
             {
-                case UpdateCheckResult.SourceNotConfigured sourceNotConfigured:
-                    UpdateStatusTitle = "Updates unavailable";
-                    UpdateStatusMessage = sourceNotConfigured.Message;
+                case UpdateCheckResult.SourceNotConfigured:
+                    SetUpdateStatus(new UpdateStatusSnapshot.SourceNotConfiguredState());
                     break;
 
                 case UpdateCheckResult.UnsupportedPlatform unsupportedPlatform:
-                    UpdateStatusTitle = "No packaged update for this runtime";
-                    UpdateStatusMessage =
-                        $"{unsupportedPlatform.PlatformName} {unsupportedPlatform.ArchitectureName} is not in the current release matrix.";
+                    SetUpdateStatus(new UpdateStatusSnapshot.UnsupportedPlatformState(
+                        unsupportedPlatform.PlatformName,
+                        unsupportedPlatform.ArchitectureName));
                     break;
 
                 case UpdateCheckResult.UpToDate upToDate:
-                    UpdateStatusTitle = "You're up to date";
-                    UpdateStatusMessage =
-                        $"Current build {upToDate.CurrentVersion} already matches the latest published release ({upToDate.LatestVersion}).";
+                    SetUpdateStatus(new UpdateStatusSnapshot.UpToDateState(
+                        upToDate.CurrentVersion,
+                        upToDate.LatestVersion));
                     break;
 
                 case UpdateCheckResult.UpdateAvailable updateAvailable:
                     _availableUpdatePackage = updateAvailable.Package;
-                    UpdateStatusTitle = $"Update {updateAvailable.Package.ReleaseVersion} available";
-                    UpdateStatusMessage =
-                        $"{updateAvailable.Package.AssetName} is ready for {updateAvailable.Package.PlatformName} {updateAvailable.Package.ArchitectureName}.";
+                    SetUpdateStatus(new UpdateStatusSnapshot.UpdateAvailableState(updateAvailable.Package));
                     break;
 
                 case UpdateCheckResult.Failed failed:
-                    UpdateStatusTitle = "Couldn't check for updates";
-                    UpdateStatusMessage = failed.Message;
+                    SetUpdateStatus(new UpdateStatusSnapshot.CheckFailedState(failed.Message));
                     break;
             }
         }
@@ -700,8 +702,7 @@ public partial class MainWindowViewModel : ObservableObject
         }
 
         IsDownloadingUpdate = true;
-        UpdateStatusTitle = $"Downloading {_availableUpdatePackage.ReleaseVersion}";
-        UpdateStatusMessage = $"Saving {_availableUpdatePackage.AssetName} from GitHub Releases.";
+        SetUpdateStatus(new UpdateStatusSnapshot.DownloadingState(_availableUpdatePackage));
         UpdateCommandStates();
 
         try
@@ -715,14 +716,12 @@ public partial class MainWindowViewModel : ObservableObject
                 case UpdateDownloadResult.Success success:
                     _availableUpdatePackage = success.Package;
                     DownloadedUpdatePath = success.DownloadedFilePath;
-                    UpdateStatusTitle = "Update ready";
-                    UpdateStatusMessage = GetUpdateReadyMessage(success.Package, success.DownloadedFilePath);
+                    SetUpdateStatus(new UpdateStatusSnapshot.DownloadReadyState(success.Package, success.DownloadedFilePath));
                     break;
 
                 case UpdateDownloadResult.Failed failed:
                     DownloadedUpdatePath = null;
-                    UpdateStatusTitle = "Download failed";
-                    UpdateStatusMessage = failed.Message;
+                    SetUpdateStatus(new UpdateStatusSnapshot.DownloadFailedState(failed.Message));
                     break;
             }
         }
@@ -747,14 +746,12 @@ public partial class MainWindowViewModel : ObservableObject
 
         switch (result)
         {
-            case UpdatePrepareResult.Success success:
-                UpdateStatusTitle = "Native update flow started";
-                UpdateStatusMessage = success.Message;
+            case UpdatePrepareResult.Success:
+                SetUpdateStatus(new UpdateStatusSnapshot.NativeFlowStartedState(_availableUpdatePackage));
                 break;
 
             case UpdatePrepareResult.Failed failed:
-                UpdateStatusTitle = "Couldn't open the downloaded update";
-                UpdateStatusMessage = failed.Message;
+                SetUpdateStatus(new UpdateStatusSnapshot.OpenDownloadedFailedState(failed.Message));
                 break;
         }
 
@@ -779,8 +776,7 @@ public partial class MainWindowViewModel : ObservableObject
         if (State == ViewState.LoadError)
         {
             State = Document is null ? ViewState.NoDocument : ViewState.Viewing;
-            ErrorTitle = string.Empty;
-            ErrorDetails = string.Empty;
+            ClearLoadError();
             RefreshWindowTitle();
         }
     }
@@ -909,11 +905,10 @@ public partial class MainWindowViewModel : ObservableObject
         _currentPath = null;
         State = ViewState.Viewing;
         ReadingProgress = 0;
-        ErrorTitle = string.Empty;
-        ErrorDetails = string.Empty;
+        ClearLoadError();
         CloseOverlayCore();
         EditorSession = new EditorSessionViewModel(
-            NewDocumentFileName,
+            GetUntitledFileName(),
             string.Empty,
             ReadingPreferences,
             _renderMarkdown,
@@ -948,8 +943,7 @@ public partial class MainWindowViewModel : ObservableObject
         _currentPath = null;
         State = ViewState.NoDocument;
         ReadingProgress = 0;
-        ErrorTitle = string.Empty;
-        ErrorDetails = string.Empty;
+        ClearLoadError();
         RefreshWindowTitle();
         UpdateCommandStates();
     }
@@ -1002,22 +996,11 @@ public partial class MainWindowViewModel : ObservableObject
                 ApplyLoadedDocument(success.Source, preserveEditModeAfterLoad);
                 break;
 
-            case OpenDocumentResult.NotFound notFound:
-                FailOpenResult("Couldn't find that file", notFound.Path);
-                break;
-
-            case OpenDocumentResult.AccessDenied denied:
-                FailOpenResult("Access denied", denied.Path);
-                break;
-
-            case OpenDocumentResult.ReadError read:
-                FailOpenResult("Couldn't read the file", $"{read.Path}\n\n{read.Message}");
-                break;
-
-            case OpenDocumentResult.UnsupportedType unsupported:
-                FailOpenResult(
-                    "Unsupported file type",
-                    $"{unsupported.Path}\n\nSupported extensions: {string.Join(", ", SupportedDocumentTypes.Extensions)}");
+            case OpenDocumentResult.NotFound:
+            case OpenDocumentResult.AccessDenied:
+            case OpenDocumentResult.ReadError:
+            case OpenDocumentResult.UnsupportedType:
+                FailOpenResult(result);
                 break;
         }
     }
@@ -1031,8 +1014,7 @@ public partial class MainWindowViewModel : ObservableObject
         _currentPath = source.Path;
         State = ViewState.Viewing;
         ReadingProgress = 0;
-        ErrorTitle = string.Empty;
-        ErrorDetails = string.Empty;
+        ClearLoadError();
 
         if (preserveEditModeAfterLoad)
         {
@@ -1092,14 +1074,12 @@ public partial class MainWindowViewModel : ObservableObject
         UpdateCommandStates();
     }
 
-    private void FailOpenResult(string title, string details)
+    private void FailOpenResult(OpenDocumentResult result)
     {
         CloseOverlayCore();
         IsEditMode = false;
         EditorSession = null;
-        ErrorTitle = title;
-        ErrorDetails = details;
-        State = ViewState.LoadError;
+        SetLoadError(result);
         RefreshWindowTitle();
         UpdateCommandStates();
     }
@@ -1130,19 +1110,7 @@ public partial class MainWindowViewModel : ObservableObject
         }
 
         _pendingDirtyAction = action;
-        DirtyPromptTitle = "Unsaved changes";
-        DirtyPromptMessage = kind switch
-        {
-            PendingDirtyActionKind.OpenFile => "Save your changes before opening another document?",
-            PendingDirtyActionKind.CreateNewDocument => "Save your changes before creating a new document?",
-            PendingDirtyActionKind.CloseFile => "Save your changes before closing the current document?",
-            PendingDirtyActionKind.Reload => "Save your changes before reloading the current document?",
-            PendingDirtyActionKind.LeaveEditMode => "Save your changes before returning to reading mode?",
-            PendingDirtyActionKind.CloseWindow => "Save your changes before closing MarkMello?",
-            _ => "Save your changes before continuing?"
-        };
-        DirtyPromptErrorMessage = string.Empty;
-        IsDirtyPromptOpen = true;
+        SetDirtyPrompt(kind);
     }
 
     private async Task ContinuePendingDirtyActionAsync()
@@ -1159,11 +1127,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     private void ClearDirtyPrompt()
     {
-        _pendingDirtyAction = null;
-        IsDirtyPromptOpen = false;
-        DirtyPromptTitle = string.Empty;
-        DirtyPromptMessage = string.Empty;
-        DirtyPromptErrorMessage = string.Empty;
+        ClearDirtyPromptState();
     }
 
     private async Task<SaveExecutionOutcome> SaveEditorAsync(bool promptForPathWhenMissing, bool forceSaveAs)
@@ -1193,10 +1157,9 @@ public partial class MainWindowViewModel : ObservableObject
     }
 
     private async Task<string?> PickSavePathAsync(string? currentFileName)
-    {
-        var suggestedFileName = NormalizeSuggestedFileName(currentFileName);
-        return await _filePicker.PickSaveMarkdownFileAsync(suggestedFileName).ConfigureAwait(true);
-    }
+        => await _filePicker
+            .PickSaveMarkdownFileAsync(NormalizeSuggestedFileName(currentFileName))
+            .ConfigureAwait(true);
 
     private void DiscardEditorChanges()
     {
@@ -1276,6 +1239,8 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(HasDocumentTitle));
         OnPropertyChanged(nameof(WordCount));
         OnPropertyChanged(nameof(ReadTimeMinutes));
+        OnPropertyChanged(nameof(WordCountStatusLabel));
+        OnPropertyChanged(nameof(ReadTimeStatusLabel));
         OnPropertyChanged(nameof(IsDirty));
     }
 
@@ -1310,18 +1275,6 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(DownloadUpdateLabel));
         OnPropertyChanged(nameof(DownloadedUpdateActionLabel));
         OnPropertyChanged(nameof(UpdateStateBadge));
-    }
-
-    private static string NormalizeSuggestedFileName(string? fileName)
-    {
-        if (string.IsNullOrWhiteSpace(fileName))
-        {
-            return "Untitled.md";
-        }
-
-        return SupportedDocumentTypes.IsSupportedPath(fileName)
-            ? fileName
-            : $"{fileName}.md";
     }
 
     private static string GetProductVersion()
@@ -1384,15 +1337,6 @@ public partial class MainWindowViewModel : ObservableObject
         return count;
     }
 
-    private static string GetSaveFailureMessage(SaveDocumentResult? result)
-        => result switch
-        {
-            SaveDocumentResult.InvalidPath invalidPath => $"Couldn't save to this path: {invalidPath.Path}",
-            SaveDocumentResult.AccessDenied accessDenied => $"Access denied: {accessDenied.Path}",
-            SaveDocumentResult.WriteError writeError => $"Couldn't save the document: {writeError.Message}",
-            _ => "Couldn't save the document."
-        };
-
     private static string? TryGetDirectory(string? path)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -1408,23 +1352,6 @@ public partial class MainWindowViewModel : ObservableObject
         {
             return null;
         }
-    }
-
-    private static string GetUpdateReadyMessage(AppUpdatePackage package, string downloadedFilePath)
-    {
-        var downloadedFileName = Path.GetFileName(downloadedFilePath);
-
-        return package.InstallAction switch
-        {
-            AppUpdateInstallAction.LaunchInstaller =>
-                $"{downloadedFileName} downloaded. Launch the installer to continue the native Windows upgrade flow.",
-            AppUpdateInstallAction.OpenDiskImage =>
-                $"{downloadedFileName} downloaded. Open the DMG to continue with the native macOS install flow.",
-            AppUpdateInstallAction.RevealFile =>
-                $"{downloadedFileName} downloaded. Reveal the AppImage, then replace your previous binary when you're ready.",
-            _ =>
-                $"{downloadedFileName} downloaded."
-        };
     }
 
     private enum PendingDirtyActionKind

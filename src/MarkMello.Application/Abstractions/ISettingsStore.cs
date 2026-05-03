@@ -13,4 +13,7 @@ public interface ISettingsStore
 
     ValueTask<ThemeMode> LoadThemeAsync(CancellationToken cancellationToken = default);
     ValueTask SaveThemeAsync(ThemeMode theme, CancellationToken cancellationToken = default);
+
+    ValueTask<AppLanguage> LoadLanguageAsync(CancellationToken cancellationToken = default);
+    ValueTask SaveLanguageAsync(AppLanguage language, CancellationToken cancellationToken = default);
 }

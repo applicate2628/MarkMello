@@ -1,3 +1,4 @@
+using System.Globalization;
 using MarkMello.Application.Abstractions;
 using MarkMello.Infrastructure.Documents;
 using MarkMello.Infrastructure.Images;
@@ -25,6 +26,7 @@ public static class DependencyInjection
         ArgumentNullException.ThrowIfNull(commandLineArgs);
 
         services.AddSingleton(metrics);
+        services.AddSingleton(CreateStartupSmokeTestOptions(commandLineArgs));
         services.AddSingleton<IDocumentLoader, FileDocumentLoader>();
         services.AddSingleton<IDocumentSaver, FileDocumentSaver>();
         services.AddSingleton<IMarkdownDocumentRenderer, MarkdigMarkdownDocumentRenderer>();
@@ -44,4 +46,70 @@ public static class DependencyInjection
 
         return services;
     }
+
+    private static StartupSmokeTestOptions CreateStartupSmokeTestOptions(string[] commandLineArgs)
+    {
+        var delayMilliseconds = TryGetSmokeExitDelayFromArguments(commandLineArgs)
+            ?? TryGetSmokeExitDelayFromEnvironment();
+
+        return delayMilliseconds is null
+            ? StartupSmokeTestOptions.Disabled
+            : new StartupSmokeTestOptions(
+                IsEnabled: true,
+                ExitAfterOpenDelay: TimeSpan.FromMilliseconds(delayMilliseconds.Value));
+    }
+
+    private static int? TryGetSmokeExitDelayFromArguments(string[] commandLineArgs)
+    {
+        for (var index = 0; index < commandLineArgs.Length; index++)
+        {
+            var argument = commandLineArgs[index];
+
+            if (string.Equals(argument, "--smoke-exit-after-open", StringComparison.Ordinal))
+            {
+                return 1500;
+            }
+
+            if (argument.StartsWith("--smoke-exit-after-open-ms=", StringComparison.Ordinal))
+            {
+                var value = argument["--smoke-exit-after-open-ms=".Length..];
+                return TryParsePositiveMilliseconds(value);
+            }
+
+            if (string.Equals(argument, "--smoke-exit-after-open-ms", StringComparison.Ordinal)
+                && index + 1 < commandLineArgs.Length)
+            {
+                return TryParsePositiveMilliseconds(commandLineArgs[index + 1]);
+            }
+        }
+
+        return null;
+    }
+
+    private static int? TryGetSmokeExitDelayFromEnvironment()
+    {
+        var milliseconds = Environment.GetEnvironmentVariable("MARKMELLO_SMOKE_EXIT_AFTER_OPEN_MS");
+        if (!string.IsNullOrWhiteSpace(milliseconds))
+        {
+            return TryParsePositiveMilliseconds(milliseconds);
+        }
+
+        var enabled = Environment.GetEnvironmentVariable("MARKMELLO_SMOKE_EXIT_AFTER_OPEN");
+        if (string.Equals(enabled, "1", StringComparison.Ordinal)
+            || string.Equals(enabled, "true", StringComparison.OrdinalIgnoreCase))
+        {
+            return 1500;
+        }
+
+        return null;
+    }
+
+    private static int? TryParsePositiveMilliseconds(string value)
+    {
+        return int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var milliseconds)
+            && milliseconds > 0
+            ? milliseconds
+            : null;
+    }
 }
+

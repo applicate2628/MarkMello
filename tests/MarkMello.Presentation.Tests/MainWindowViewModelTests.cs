@@ -2,6 +2,7 @@ using MarkMello.Application.UseCases;
 using MarkMello.Application.Updates;
 using MarkMello.Domain;
 using MarkMello.Domain.Diagnostics;
+using MarkMello.Presentation.Localization;
 using MarkMello.Presentation.ViewModels;
 using System.Globalization;
 
@@ -385,6 +386,33 @@ public sealed class MainWindowViewModelTests
             harness.ViewModel.UpdateStatusMessage);
     }
 
+    [Fact]
+    public async Task InitializeAsyncLoadsSavedLanguageAndLocalizesShellLabels()
+    {
+        var harness = CreateHarness();
+        harness.Settings.Language = AppLanguage.Russian;
+
+        await harness.ViewModel.InitializeAsync();
+
+        Assert.True(harness.ViewModel.IsRussianLanguageSelected);
+        Assert.Equal("Редактирование", harness.ViewModel.EditToggleLabel);
+        Assert.Equal("Проверить", harness.ViewModel.CheckForUpdatesLabel);
+        Assert.Equal("Обновления", harness.ViewModel.UpdateStatusTitle);
+    }
+
+    [Fact]
+    public void SelectRussianLanguageCommandPersistsLanguageAndRefreshesComputedLabels()
+    {
+        var harness = CreateHarness();
+
+        harness.ViewModel.SelectRussianLanguageCommand.Execute(null);
+
+        Assert.Equal(AppLanguage.Russian, harness.Settings.Language);
+        Assert.True(harness.ViewModel.IsRussianLanguageSelected);
+        Assert.Equal("Проверить", harness.ViewModel.CheckForUpdatesLabel);
+        Assert.Equal("Слов: 0", harness.ViewModel.WordCountStatusLabel);
+    }
+
     private static MarkdownSource CreateSource(string path, string content)
         => new(path, Path.GetFileName(path), content);
 
@@ -407,6 +435,7 @@ public sealed class MainWindowViewModelTests
         var saver = new RecordingDocumentSaver();
         var picker = new StubFilePicker();
         var settings = new InMemorySettingsStore();
+        var localization = new LocalizationService(AppLanguage.English);
         var themeService = new RecordingThemeService();
         var startupMetrics = new RecordingStartupMetrics();
         var updateService = new StubUpdateService();
@@ -415,19 +444,21 @@ public sealed class MainWindowViewModelTests
             new SaveDocumentUseCase(saver),
             picker,
             new StubCommandLineActivation(),
+            localization,
             settings,
             themeService,
             startupMetrics,
             new RenderMarkdownDocumentUseCase(new TestMarkdownRenderer()),
             updateService);
 
-        return new TestHarness(loader, saver, picker, startupMetrics, updateService, viewModel);
+        return new TestHarness(loader, saver, picker, settings, startupMetrics, updateService, viewModel);
     }
 
     private sealed record TestHarness(
         StubDocumentLoader Loader,
         RecordingDocumentSaver DocumentSaver,
         StubFilePicker FilePicker,
+        InMemorySettingsStore Settings,
         RecordingStartupMetrics StartupMetrics,
         StubUpdateService UpdateService,
         MainWindowViewModel ViewModel);

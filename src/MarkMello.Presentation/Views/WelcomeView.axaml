@@ -4,6 +4,7 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:MarkMello.Presentation.ViewModels"
              mc:Ignorable="d"
+             x:CompileBindings="False"
              x:Class="MarkMello.Presentation.Views.WelcomeView"
              x:DataType="vm:MainWindowViewModel">
 
@@ -28,7 +29,7 @@
              Foreground="{DynamicResource MmAccentBrush}" />
       </TextBlock>
 
-      <TextBlock Text="A quiet place to read Markdown."
+      <TextBlock Text="{Binding [WelcomeTagline], Source={StaticResource Localization}}"
                  FontFamily="{DynamicResource MmDocumentSansFontFamily}"
                  FontSize="13"
                  HorizontalAlignment="Center"
@@ -46,11 +47,11 @@
                   Stroke="{DynamicResource MmTextSoftBrush}"
                   StrokeThickness="1.5"
                   StrokeLineCap="Round" />
-            <TextBlock Text="Create MD" />
+            <TextBlock Text="{Binding [WelcomeCreateMd], Source={StaticResource Localization}}" />
           </StackPanel>
         </Button>
         <Button Classes="welcome-primary"
-                Content="Open file…"
+                Content="{Binding [WelcomeOpenFile], Source={StaticResource Localization}}"
                 Command="{Binding OpenFileCommand}" />
       </StackPanel>
 
@@ -63,7 +64,7 @@
         <Border Classes="kbd">
           <TextBlock Text="O" FontFamily="{DynamicResource MmDocumentMonoFontFamily}" FontSize="10" />
         </Border>
-        <TextBlock Text="or drop a .md file anywhere"
+        <TextBlock Text="{Binding [WelcomeDropHint], Source={StaticResource Localization}}"
                    FontSize="11"
                    Foreground="{DynamicResource MmTextFaintBrush}"
                    VerticalAlignment="Center" />

@@ -20,6 +20,7 @@ public sealed class JsonSettingsStore : ISettingsStore
     private bool _isLoaded;
     private ReadingPreferences _preferences = ReadingPreferences.Default;
     private ThemeMode _theme = ThemeMode.System;
+    private AppLanguage _language = AppLanguage.System;
 
     public JsonSettingsStore(string? settingsRootDirectory = null)
     {
@@ -77,6 +78,31 @@ public sealed class JsonSettingsStore : ISettingsStore
         return ValueTask.CompletedTask;
     }
 
+    public ValueTask<AppLanguage> LoadLanguageAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        lock (_gate)
+        {
+            EnsureLoadedCore();
+            return ValueTask.FromResult(_language);
+        }
+    }
+
+    public ValueTask SaveLanguageAsync(AppLanguage language, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        lock (_gate)
+        {
+            EnsureLoadedCore();
+            _language = NormalizeLanguage(language);
+            PersistCore();
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
     private void EnsureLoadedCore()
     {
         if (_isLoaded)
@@ -96,6 +122,7 @@ public sealed class JsonSettingsStore : ISettingsStore
                     {
                         _theme = NormalizeTheme(fileModel.Theme);
                         _preferences = ReadingPreferences.Normalize(fileModel.Preferences);
+                        _language = NormalizeLanguage(fileModel.Language);
                     }
                 }
             }
@@ -104,6 +131,7 @@ public sealed class JsonSettingsStore : ISettingsStore
         {
             _theme = ThemeMode.System;
             _preferences = ReadingPreferences.Default;
+            _language = AppLanguage.System;
         }
         finally
         {
@@ -124,7 +152,7 @@ public sealed class JsonSettingsStore : ISettingsStore
             Directory.CreateDirectory(directory);
 
             var tempFilePath = _settingsFilePath + ".tmp";
-            var fileModel = new SettingsFileModel(_theme, _preferences);
+            var fileModel = new SettingsFileModel(_theme, _preferences, _language);
             var json = JsonSerializer.Serialize(fileModel, JsonOptions);
 
             File.WriteAllText(tempFilePath, json);
@@ -143,6 +171,14 @@ public sealed class JsonSettingsStore : ISettingsStore
             ThemeMode.Light => ThemeMode.Light,
             ThemeMode.Dark => ThemeMode.Dark,
             _ => ThemeMode.System
+        };
+
+    private static AppLanguage NormalizeLanguage(AppLanguage language)
+        => language switch
+        {
+            AppLanguage.English => AppLanguage.English,
+            AppLanguage.Russian => AppLanguage.Russian,
+            _ => AppLanguage.System
         };
 
     private static string ResolveSettingsRootDirectory(string? settingsRootDirectory)
@@ -176,5 +212,6 @@ public sealed class JsonSettingsStore : ISettingsStore
 
     private sealed record SettingsFileModel(
         ThemeMode Theme,
-        ReadingPreferences Preferences);
+        ReadingPreferences Preferences,
+        AppLanguage Language);
 }

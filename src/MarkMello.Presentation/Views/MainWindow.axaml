@@ -5,6 +5,7 @@
         xmlns:vm="using:MarkMello.Presentation.ViewModels"
         xmlns:views="using:MarkMello.Presentation.Views"
         mc:Ignorable="d"
+        x:CompileBindings="False"
         x:Class="MarkMello.Presentation.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Width="1280" Height="840"
@@ -119,14 +120,14 @@
                     IsVisible="{Binding ShowCustomTitleBar}">
           <Button Classes="titlebar"
                   Click="OnMinimizeClick"
-                  ToolTip.Tip="Minimize">
+                  ToolTip.Tip="{Binding [TitleBarMinimize], Source={StaticResource Localization}}">
             <Path Data="M0,5 L10,5"
                   Stroke="{DynamicResource MmTitleBarTextBrush}"
                   StrokeThickness="1" />
           </Button>
           <Button Classes="titlebar"
                   Click="OnMaximizeClick"
-                  ToolTip.Tip="Maximize">
+                  ToolTip.Tip="{Binding [TitleBarMaximize], Source={StaticResource Localization}}">
             <Path Data="M0,0 L10,0 L10,10 L0,10 Z"
                   Stroke="{DynamicResource MmTitleBarTextBrush}"
                   StrokeThickness="1"
@@ -134,7 +135,7 @@
           </Button>
           <Button Classes="titlebar close"
                   Click="OnCloseClick"
-                  ToolTip.Tip="Close">
+                  ToolTip.Tip="{Binding [TitleBarClose], Source={StaticResource Localization}}">
             <Path Data="M0,0 L10,10 M10,0 L0,10"
                   Stroke="{DynamicResource MmTitleBarTextBrush}"
                   StrokeThickness="1" />
@@ -168,7 +169,7 @@
                       Classes="topbar-ghost"
                       IsChecked="{Binding IsAppOverlayOpen, Mode=OneWay}"
                       Command="{Binding ToggleAppMenuCommand}"
-                      ToolTip.Tip="App menu">
+                      ToolTip.Tip="{Binding [AppMenuTooltip], Source={StaticResource Localization}}">
           <Grid Width="14"
                 Height="14">
             <Path Data="M2.5 4H11.5 M2.5 7H11.5 M2.5 10H11.5"
@@ -248,7 +249,7 @@
                         IsVisible="{Binding ShowsEditToggle}"
                         IsChecked="{Binding IsEditMode, Mode=OneWay}"
                         Command="{Binding ToggleEditModeCommand}"
-                        ToolTip.Tip="Toggle edit mode (Ctrl+E)">
+                        ToolTip.Tip="{Binding [EditToggleTooltip], Source={StaticResource Localization}}">
             <StackPanel Orientation="Horizontal"
                         Spacing="6"
                         VerticalAlignment="Center">
@@ -299,7 +300,7 @@
                         IsVisible="{Binding IsViewer}"
                         Command="{Binding ToggleSettingsCommand}"
                         IsChecked="{Binding IsSettingsOpen, Mode=OneWay}"
-                        ToolTip.Tip="Reading preferences (Ctrl+,)">
+                        ToolTip.Tip="{Binding [ReadingSettingsTooltip], Source={StaticResource Localization}}">
             <Grid Width="14"
                   Height="14">
               <Viewbox Stretch="Uniform">
@@ -350,11 +351,11 @@
                   ColumnSpacing="12">
               <TextBlock Classes="mm-settings-title"
                          Grid.Column="0"
-                         Text="MENU" />
+                         Text="{Binding [AppMenuHeader], Source={StaticResource Localization}}" />
               <Button Grid.Column="1"
                       Classes="mm-settings-close"
                       Command="{Binding CloseOverlayCommand}"
-                      ToolTip.Tip="Close menu">
+                      ToolTip.Tip="{Binding [OverlayCloseMenu], Source={StaticResource Localization}}">
                 <Path Data="M0,0 L10,10 M10,0 L0,10"
                       Stroke="{DynamicResource MmTextFaintBrush}"
                       StrokeThickness="1.4"
@@ -373,9 +374,9 @@
                               Spacing="2"
                               HorizontalAlignment="Left">
                     <TextBlock Classes="mm-setting-label"
-                               Text="Open file" />
+                               Text="{Binding [AppMenuOpenFileLabel], Source={StaticResource Localization}}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="Pick a Markdown document" />
+                               Text="{Binding [AppMenuOpenFileHint], Source={StaticResource Localization}}" />
                   </StackPanel>
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
@@ -395,13 +396,13 @@
                               Spacing="2"
                               HorizontalAlignment="Left">
                     <TextBlock Classes="mm-setting-label"
-                               Text="Close file" />
+                               Text="{Binding [AppMenuCloseFileLabel], Source={StaticResource Localization}}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="Return to the welcome screen" />
+                               Text="{Binding [AppMenuCloseFileHint], Source={StaticResource Localization}}" />
                   </StackPanel>
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
-                             Text="Current" />
+                             Text="{Binding [MetaCurrent], Source={StaticResource Localization}}" />
                 </Grid>
               </Button>
 
@@ -417,13 +418,13 @@
                               Spacing="2"
                               HorizontalAlignment="Left">
                     <TextBlock Classes="mm-setting-label"
-                               Text="Settings" />
+                               Text="{Binding [AppMenuSettingsLabel], Source={StaticResource Localization}}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="Language, updates, about" />
+                               Text="{Binding [AppMenuSettingsHint], Source={StaticResource Localization}}" />
                   </StackPanel>
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
-                             Text="Open" />
+                             Text="{Binding [MetaOpen], Source={StaticResource Localization}}" />
                 </Grid>
               </Button>
             </StackPanel>
@@ -444,7 +445,7 @@
               <Button Grid.Column="0"
                       Classes="mm-settings-close"
                       Command="{Binding ReturnToAppMenuCommand}"
-                      ToolTip.Tip="Back to menu">
+                      ToolTip.Tip="{Binding [OverlayBackToMenu], Source={StaticResource Localization}}">
                 <Path Data="M9.5,1.5 L2.5,5.5 L9.5,9.5"
                       Stroke="{DynamicResource MmTextFaintBrush}"
                       StrokeThickness="1.4"
@@ -455,11 +456,11 @@
               <TextBlock Classes="mm-settings-title"
                          Grid.Column="1"
                          VerticalAlignment="Center"
-                         Text="SETTINGS" />
+                         Text="{Binding [AppSettingsHeader], Source={StaticResource Localization}}" />
               <Button Grid.Column="2"
                       Classes="mm-settings-close"
                       Command="{Binding CloseOverlayCommand}"
-                      ToolTip.Tip="Close settings">
+                      ToolTip.Tip="{Binding [OverlayCloseSettings], Source={StaticResource Localization}}">
                 <Path Data="M0,0 L10,10 M10,0 L0,10"
                       Stroke="{DynamicResource MmTextFaintBrush}"
                       StrokeThickness="1.4"
@@ -471,18 +472,38 @@
           <Border Classes="mm-settings-body-shell">
             <StackPanel Spacing="0">
               <Border Classes="mm-setting-row">
-                <Grid ColumnDefinitions="*,Auto"
+                <Grid ColumnDefinitions="Auto,*"
                       ColumnSpacing="12">
                   <StackPanel Grid.Column="0"
-                              Spacing="2">
+                              Spacing="2"
+                              VerticalAlignment="Center">
                     <TextBlock Classes="mm-setting-label"
-                               Text="Language" />
+                               Text="{Binding [LanguageLabel], Source={StaticResource Localization}}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="Shell localization comes next" />
+                               Text="{Binding [LanguageHint], Source={StaticResource Localization}}" />
                   </StackPanel>
-                  <TextBlock Grid.Column="1"
-                             Classes="mm-setting-meta"
-                             Text="Soon" />
+                  <Border Grid.Column="1"
+                          Classes="mm-segmented"
+                          HorizontalAlignment="Right">
+                    <StackPanel Orientation="Horizontal"
+                                Spacing="1">
+                      <ToggleButton Classes="mm-segmented-item"
+                                    IsChecked="{Binding IsSystemLanguageSelected}"
+                                    Command="{Binding SelectSystemLanguageCommand}">
+                        <TextBlock Text="{Binding [LanguageSystem], Source={StaticResource Localization}}" />
+                      </ToggleButton>
+                      <ToggleButton Classes="mm-segmented-item"
+                                    IsChecked="{Binding IsEnglishLanguageSelected}"
+                                    Command="{Binding SelectEnglishLanguageCommand}">
+                        <TextBlock Text="{Binding [LanguageEnglish], Source={StaticResource Localization}}" />
+                      </ToggleButton>
+                      <ToggleButton Classes="mm-segmented-item"
+                                    IsChecked="{Binding IsRussianLanguageSelected}"
+                                    Command="{Binding SelectRussianLanguageCommand}">
+                        <TextBlock Text="{Binding [LanguageRussian], Source={StaticResource Localization}}" />
+                      </ToggleButton>
+                    </StackPanel>
+                  </Border>
                 </Grid>
               </Border>
 
@@ -497,9 +518,9 @@
                     <StackPanel Grid.Column="0"
                                 Spacing="2">
                       <TextBlock Classes="mm-setting-label"
-                                 Text="Updates" />
+                                 Text="{Binding [UpdatesLabel], Source={StaticResource Localization}}" />
                       <TextBlock Classes="mm-setting-hint"
-                                 Text="Manual GitHub release checks" />
+                                 Text="{Binding [UpdatesHint], Source={StaticResource Localization}}" />
                     </StackPanel>
                     <TextBlock Grid.Column="1"
                                Classes="mm-setting-meta"
@@ -547,13 +568,13 @@
                   <StackPanel Grid.Column="0"
                               Spacing="2">
                     <TextBlock Classes="mm-setting-label"
-                               Text="About" />
+                               Text="{Binding [AboutLabel], Source={StaticResource Localization}}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="Version and product info" />
+                               Text="{Binding [AboutHint], Source={StaticResource Localization}}" />
                   </StackPanel>
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
-                             Text="Open" />
+                             Text="{Binding [MetaOpen], Source={StaticResource Localization}}" />
                 </Grid>
               </Button>
             </StackPanel>
@@ -574,7 +595,7 @@
               <Button Grid.Column="0"
                       Classes="mm-settings-close"
                       Command="{Binding ReturnToAppSettingsCommand}"
-                      ToolTip.Tip="Back to settings">
+                      ToolTip.Tip="{Binding [OverlayBackToSettings], Source={StaticResource Localization}}">
                 <Path Data="M9.5,1.5 L2.5,5.5 L9.5,9.5"
                       Stroke="{DynamicResource MmTextFaintBrush}"
                       StrokeThickness="1.4"
@@ -585,11 +606,11 @@
               <TextBlock Classes="mm-settings-title"
                          Grid.Column="1"
                          VerticalAlignment="Center"
-                         Text="ABOUT" />
+                         Text="{Binding [AboutHeader], Source={StaticResource Localization}}" />
               <Button Grid.Column="2"
                       Classes="mm-settings-close"
                       Command="{Binding CloseOverlayCommand}"
-                      ToolTip.Tip="Close about">
+                      ToolTip.Tip="{Binding [OverlayCloseAbout], Source={StaticResource Localization}}">
                 <Path Data="M0,0 L10,10 M10,0 L0,10"
                       Stroke="{DynamicResource MmTextFaintBrush}"
                       StrokeThickness="1.4"
@@ -606,9 +627,9 @@
                   <StackPanel Grid.Column="0"
                               Spacing="2">
                     <TextBlock Classes="mm-setting-label"
-                               Text="Version" />
+                               Text="{Binding [AboutVersionLabel], Source={StaticResource Localization}}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="Current product build" />
+                               Text="{Binding [AboutVersionHint], Source={StaticResource Localization}}" />
                   </StackPanel>
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
@@ -626,9 +647,9 @@
                   <StackPanel Grid.Column="0"
                               Spacing="2">
                     <TextBlock Classes="mm-setting-label"
-                               Text="License" />
+                               Text="{Binding [AboutLicenseLabel], Source={StaticResource Localization}}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="Project license" />
+                               Text="{Binding [AboutLicenseHint], Source={StaticResource Localization}}" />
                   </StackPanel>
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
@@ -643,23 +664,23 @@
               <Border Classes="mm-setting-row">
                 <StackPanel Spacing="8">
                   <TextBlock Classes="mm-setting-label"
-                             Text="Credits" />
+                             Text="{Binding [AboutCreditsLabel], Source={StaticResource Localization}}" />
                   <WrapPanel Orientation="Horizontal"
                              ItemHeight="22">
                     <TextBlock Classes="mm-setting-body"
-                               Text="Created by " />
+                               Text="{Binding [AboutCreatedByPrefix], Source={StaticResource Localization}}" />
                     <Button Classes="mm-inline-link"
                             Tag="https://ermolaev.tech"
                             Click="OnAboutLinkClick"
                             Content="Andrey Ermolaev" />
                     <TextBlock Classes="mm-setting-body"
-                               Text=" with " />
+                               Text="{Binding [AboutWith], Source={StaticResource Localization}}" />
                     <Button Classes="mm-inline-link"
                             Tag="https://skaro.dev"
                             Click="OnAboutLinkClick"
                             Content="Skaro" />
                     <TextBlock Classes="mm-setting-body"
-                               Text="." />
+                               Text="{Binding [AboutCreditsPeriod], Source={StaticResource Localization}}" />
                   </WrapPanel>
                 </StackPanel>
               </Border>
@@ -681,11 +702,11 @@
                   ColumnSpacing="12">
               <TextBlock Classes="mm-settings-title"
                          Grid.Column="0"
-                         Text="READING" />
+                         Text="{Binding [ReadingHeader], Source={StaticResource Localization}}" />
               <Button Grid.Column="1"
                       Classes="mm-settings-close"
                       Command="{Binding CloseSettingsCommand}"
-                      ToolTip.Tip="Close settings">
+                      ToolTip.Tip="{Binding [OverlayCloseSettings], Source={StaticResource Localization}}">
                 <Path Data="M0,0 L10,10 M10,0 L0,10"
                       Stroke="{DynamicResource MmTextFaintBrush}"
                       StrokeThickness="1.4"
@@ -703,9 +724,9 @@
                               Spacing="2"
                               VerticalAlignment="Center">
                     <TextBlock Classes="mm-setting-label"
-                               Text="Font" />
+                               Text="{Binding [ReadingFontLabel], Source={StaticResource Localization}}" />
                     <TextBlock Classes="mm-setting-hint"
-                               Text="Document typeface" />
+                               Text="{Binding [ReadingFontHint], Source={StaticResource Localization}}" />
                   </StackPanel>
                   <Border Grid.Column="1"
                           Classes="mm-segmented"
@@ -714,15 +735,15 @@
                                 Spacing="1">
                       <ToggleButton Classes="mm-segmented-item"
                                     IsChecked="{Binding IsSerifFontSelected}">
-                        <TextBlock Text="Serif" />
+                        <TextBlock Text="{Binding [ReadingFontSerif], Source={StaticResource Localization}}" />
                       </ToggleButton>
                       <ToggleButton Classes="mm-segmented-item"
                                     IsChecked="{Binding IsSansFontSelected}">
-                        <TextBlock Text="Sans" />
+                        <TextBlock Text="{Binding [ReadingFontSans], Source={StaticResource Localization}}" />
                       </ToggleButton>
                       <ToggleButton Classes="mm-segmented-item"
                                     IsChecked="{Binding IsMonoFontSelected}">
-                        <TextBlock Text="Mono" />
+                        <TextBlock Text="{Binding [ReadingFontMono], Source={StaticResource Localization}}" />
                       </ToggleButton>
                     </StackPanel>
                   </Border>
@@ -740,9 +761,9 @@
                                 Spacing="2"
                                 VerticalAlignment="Center">
                       <TextBlock Classes="mm-setting-label"
-                                 Text="Size" />
+                                 Text="{Binding [ReadingSizeLabel], Source={StaticResource Localization}}" />
                       <TextBlock Classes="mm-setting-hint"
-                                 Text="Base font size" />
+                                 Text="{Binding [ReadingSizeHint], Source={StaticResource Localization}}" />
                     </StackPanel>
                     <StackPanel Grid.Column="1"
                                 Orientation="Horizontal"
@@ -773,9 +794,9 @@
                                 Spacing="2"
                                 VerticalAlignment="Center">
                       <TextBlock Classes="mm-setting-label"
-                                 Text="Line height" />
+                                 Text="{Binding [ReadingLineHeightLabel], Source={StaticResource Localization}}" />
                       <TextBlock Classes="mm-setting-hint"
-                                 Text="Reading comfort" />
+                                 Text="{Binding [ReadingLineHeightHint], Source={StaticResource Localization}}" />
                     </StackPanel>
                     <StackPanel Grid.Column="1"
                                 Orientation="Horizontal"
@@ -806,9 +827,9 @@
                                 Spacing="2"
                                 VerticalAlignment="Center">
                       <TextBlock Classes="mm-setting-label"
-                                 Text="Width" />
+                                 Text="{Binding [ReadingWidthLabel], Source={StaticResource Localization}}" />
                       <TextBlock Classes="mm-setting-hint"
-                                 Text="Measure of a line" />
+                                 Text="{Binding [ReadingWidthHint], Source={StaticResource Localization}}" />
                     </StackPanel>
                     <Border Grid.Column="1"
                             Classes="mm-segmented"
@@ -817,15 +838,15 @@
                                   Spacing="1">
                         <ToggleButton Classes="mm-segmented-item"
                                       IsChecked="{Binding IsNarrowWidthSelected}">
-                          <TextBlock Text="Narrow" />
+                          <TextBlock Text="{Binding [ReadingWidthNarrow], Source={StaticResource Localization}}" />
                         </ToggleButton>
                         <ToggleButton Classes="mm-segmented-item"
                                       IsChecked="{Binding IsMediumWidthSelected}">
-                          <TextBlock Text="Medium" />
+                          <TextBlock Text="{Binding [ReadingWidthMedium], Source={StaticResource Localization}}" />
                         </ToggleButton>
                         <ToggleButton Classes="mm-segmented-item"
                                       IsChecked="{Binding IsWideWidthSelected}">
-                          <TextBlock Text="Wide" />
+                          <TextBlock Text="{Binding [ReadingWidthWide], Source={StaticResource Localization}}" />
                         </ToggleButton>
                       </StackPanel>
                     </Border>
@@ -848,11 +869,11 @@
                       Spacing="18"
                       VerticalAlignment="Bottom"
                       IsVisible="{Binding ShowsReadingStatus}">
-            <TextBlock Text="{Binding WordCount, StringFormat='{}{0:N0} words'}"
+            <TextBlock Text="{Binding WordCountStatusLabel}"
                         FontSize="11"
                         Foreground="{DynamicResource MmTextFaintBrush}"
                        IsVisible="{Binding ShowsReadingStatus}" />
-            <TextBlock Text="{Binding ReadTimeMinutes, StringFormat='{}{0} min read'}"
+            <TextBlock Text="{Binding ReadTimeStatusLabel}"
                         FontSize="11"
                         Foreground="{DynamicResource MmTextFaintBrush}"
                        IsVisible="{Binding ShowsReadingStatus}" />
@@ -874,7 +895,7 @@
                            FontFamily="{DynamicResource MmDocumentMonoFontFamily}"
                            FontSize="10" />
               </Border>
-              <TextBlock Text="open"
+              <TextBlock Text="{Binding [StatusOpen], Source={StaticResource Localization}}"
                          FontSize="11"
                          Foreground="{DynamicResource MmTextFaintBrush}"
                          VerticalAlignment="Center"
@@ -912,7 +933,7 @@
                            FontFamily="{DynamicResource MmDocumentMonoFontFamily}"
                            FontSize="10" />
               </Border>
-              <TextBlock Text="prefs"
+              <TextBlock Text="{Binding [StatusPrefs], Source={StaticResource Localization}}"
                          FontSize="11"
                          Foreground="{DynamicResource MmTextFaintBrush}"
                          VerticalAlignment="Center"
@@ -929,7 +950,7 @@
               BorderThickness="2"
               CornerRadius="10"
               Margin="12">
-        <TextBlock Text="Drop your Markdown file to open"
+        <TextBlock Text="{Binding [DragDropHint], Source={StaticResource Localization}}"
                    FontFamily="{DynamicResource MmDocumentSansFontFamily}"
                    FontSize="14"
                    Foreground="{DynamicResource MmAccentBrush}"
@@ -958,13 +979,13 @@
                         Spacing="8"
                         Margin="0,18,0,0">
               <Button Classes="mm-dialog-secondary"
-                      Content="Cancel"
+                      Content="{Binding [DirtyPromptCancel], Source={StaticResource Localization}}"
                       Command="{Binding CancelDirtyPromptCommand}" />
               <Button Classes="mm-dialog-secondary"
-                      Content="Discard"
+                      Content="{Binding [DirtyPromptDiscard], Source={StaticResource Localization}}"
                       Command="{Binding ConfirmDirtyDiscardCommand}" />
               <Button Classes="mm-dialog-primary"
-                      Content="Save"
+                      Content="{Binding [DirtyPromptSave], Source={StaticResource Localization}}"
                       Command="{Binding ConfirmDirtySaveCommand}" />
             </StackPanel>
           </StackPanel>

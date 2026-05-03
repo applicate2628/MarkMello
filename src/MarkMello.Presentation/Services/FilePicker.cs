@@ -2,6 +2,7 @@ using Avalonia.Controls;
 using Avalonia.Platform.Storage;
 using MarkMello.Application.Abstractions;
 using MarkMello.Domain;
+using MarkMello.Presentation.Localization;
 
 namespace MarkMello.Presentation.Services;
 
@@ -12,11 +13,14 @@ namespace MarkMello.Presentation.Services;
 /// </summary>
 public sealed class FilePicker : IFilePicker
 {
+    private readonly ILocalizationService _localization;
     private readonly Func<TopLevel?> _topLevelAccessor;
 
-    public FilePicker(Func<TopLevel?> topLevelAccessor)
+    public FilePicker(ILocalizationService localization, Func<TopLevel?> topLevelAccessor)
     {
+        ArgumentNullException.ThrowIfNull(localization);
         ArgumentNullException.ThrowIfNull(topLevelAccessor);
+        _localization = localization;
         _topLevelAccessor = topLevelAccessor;
     }
 
@@ -30,11 +34,11 @@ public sealed class FilePicker : IFilePicker
 
         var options = new FilePickerOpenOptions
         {
-            Title = "Open Markdown file",
+            Title = _localization["OpenDialogTitle"],
             AllowMultiple = false,
             FileTypeFilter = new[]
             {
-                new FilePickerFileType("Markdown documents")
+                new FilePickerFileType(_localization["MarkdownDocuments"])
                 {
                     Patterns = SupportedDocumentTypes.Extensions
                         .Select(static extension => $"*{extension}")
@@ -65,12 +69,12 @@ public sealed class FilePicker : IFilePicker
         var normalizedSuggestedName = NormalizeSuggestedFileName(suggestedFileName);
         var options = new FilePickerSaveOptions
         {
-            Title = "Save Markdown file",
+            Title = _localization["SaveDialogTitle"],
             SuggestedFileName = normalizedSuggestedName,
             DefaultExtension = Path.GetExtension(normalizedSuggestedName),
             FileTypeChoices = new[]
             {
-                new FilePickerFileType("Markdown documents")
+                new FilePickerFileType(_localization["MarkdownDocuments"])
                 {
                     Patterns = SupportedDocumentTypes.Extensions
                         .Select(static extension => $"*{extension}")
@@ -83,11 +87,11 @@ public sealed class FilePicker : IFilePicker
         return file?.TryGetLocalPath();
     }
 
-    private static string NormalizeSuggestedFileName(string suggestedFileName)
+    private string NormalizeSuggestedFileName(string suggestedFileName)
     {
         if (string.IsNullOrWhiteSpace(suggestedFileName))
         {
-            return "Untitled.md";
+            return _localization["UntitledFileName"];
         }
 
         var trimmed = suggestedFileName.Trim();
