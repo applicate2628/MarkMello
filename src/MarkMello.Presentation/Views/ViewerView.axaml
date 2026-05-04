@@ -8,28 +8,38 @@
              x:Class="MarkMello.Presentation.Views.ViewerView"
              x:DataType="vm:MainWindowViewModel">
 
-  <ScrollViewer Name="DocScroll"
-                HorizontalScrollBarVisibility="Disabled"
-                VerticalScrollBarVisibility="Auto"
+  <Grid UseLayoutRounding="True">
+    <ScrollViewer Name="DocScroll"
+                  HorizontalScrollBarVisibility="Disabled"
+                  VerticalScrollBarVisibility="Auto"
+                  UseLayoutRounding="True">
+      <Grid UseLayoutRounding="True">
+        <Border MaxWidth="{Binding DocumentColumnMaxWidth}"
+                HorizontalAlignment="Center"
                 UseLayoutRounding="True">
-    <Grid UseLayoutRounding="True">
-      <Border MaxWidth="{Binding DocumentColumnMaxWidth}"
-              HorizontalAlignment="Center"
-              UseLayoutRounding="True">
-        <Border.Transitions>
-          <Transitions>
-            <DoubleTransition Property="MaxWidth"
-                              Duration="0:0:0.18" />
-          </Transitions>
-        </Border.Transitions>
-        <views:MarkdownDocumentView Name="DocumentView"
-                                    Document="{Binding RenderedDocument}"
-                                    DocumentPadding="72,96,72,160"
-                                    ReadingPreferences="{Binding ReadingPreferences}"
-                                    ImageSourceResolver="{Binding ImageSourceResolver}"
-                                    UseLayoutRounding="True" />
-      </Border>
-    </Grid>
-  </ScrollViewer>
+          <Border.Transitions>
+            <Transitions>
+              <DoubleTransition Property="MaxWidth"
+                                Duration="0:0:0.18" />
+            </Transitions>
+          </Border.Transitions>
+          <views:MarkdownDocumentView Name="DocumentView"
+                                      Document="{Binding RenderedDocument}"
+                                      DocumentPadding="72,96,72,160"
+                                      ReadingPreferences="{Binding ReadingPreferences}"
+                                      ImageSourceResolver="{Binding ImageSourceResolver}"
+                                      UseLayoutRounding="True" />
+        </Border>
+      </Grid>
+    </ScrollViewer>
+
+    <ContentControl Name="MinimapHost"
+                    Width="128"
+                    Margin="0,72,12,72"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Stretch"
+                    IsHitTestVisible="False"
+                    UseLayoutRounding="True" />
+  </Grid>
 
 </UserControl>

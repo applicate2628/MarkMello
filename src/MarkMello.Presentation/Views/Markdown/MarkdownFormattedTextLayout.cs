@@ -68,6 +68,27 @@ internal sealed class MarkdownFormattedTextLayout : IDisposable
 
     public IReadOnlyList<MarkdownDisplayCodeBox> CodeBoxes => _displayModel.CodeBoxes;
 
+    public IReadOnlyList<MarkdownFormattedTextLineMetrics> GetLineMetrics()
+    {
+        if (_lines.Count == 0)
+        {
+            return Array.Empty<MarkdownFormattedTextLineMetrics>();
+        }
+
+        var result = new List<MarkdownFormattedTextLineMetrics>(_lines.Count);
+        foreach (var line in _lines)
+        {
+            result.Add(new MarkdownFormattedTextLineMetrics(
+                new Rect(
+                    0,
+                    line.Y,
+                    Math.Max(1, line.TextLine.WidthIncludingTrailingWhitespace),
+                    Math.Max(1, line.TextLine.Height))));
+        }
+
+        return result;
+    }
+
     public void Draw(DrawingContext context)
     {
         foreach (var line in _lines)
@@ -255,6 +276,8 @@ internal sealed class MarkdownFormattedTextLayout : IDisposable
 
     private readonly record struct FormattedLine(TextLine TextLine, double Y);
 }
+
+internal readonly record struct MarkdownFormattedTextLineMetrics(Rect Bounds);
 
 internal sealed class MarkdownTextSource : ITextSource
 {

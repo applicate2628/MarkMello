@@ -13,6 +13,7 @@ using Avalonia.VisualTree;
 using MarkMello.Application.Abstractions;
 using MarkMello.Domain;
 using MarkMello.Presentation.Views.Markdown;
+using MarkMello.Presentation.Views.Markdown.Minimap;
 using System.Globalization;
 using System.Threading;
 
@@ -200,6 +201,147 @@ public sealed class MarkdownDocumentView : UserControl
         : string.Empty;
 
     public event EventHandler? DocumentRendered;
+
+    internal DocumentMiniatureSnapshot CreateMiniatureSnapshot()
+    {
+        if (Document is null || Bounds.Height <= 0 || Bounds.Width <= 0)
+        {
+            return DocumentMiniatureSnapshot.Empty;
+        }
+
+        return new DocumentMiniatureSnapshot(
+            totalWidth: Math.Max(1, Bounds.Width),
+            totalHeight: Math.Max(1, Bounds.Height));
+    }
+
+    internal void RenderMiniature(DrawingContext context, Rect targetBounds)
+    {
+        var snapshot = CreateMiniatureSnapshot();
+        if (snapshot.IsEmpty || targetBounds.Width <= 0 || targetBounds.Height <= 0)
+        {
+            return;
+        }
+
+        var scaleX = targetBounds.Width / snapshot.TotalWidth;
+        var scaleY = targetBounds.Height / snapshot.TotalHeight;
+
+        using (context.PushClip(targetBounds))
+        {
+            foreach (var fragment in _selectionFragments)
+            {
+                DrawControlMiniature(context, fragment, targetBounds, scaleX, scaleY);
+            }
+
+            foreach (var imageView in _root.GetVisualDescendants().OfType<MarkdownImageView>())
+            {
+                DrawImagePlaceholderMiniature(context, imageView, targetBounds, scaleX, scaleY);
+            }
+
+            foreach (var rule in _root.GetVisualDescendants().OfType<Border>().Where(static border => border.Classes.Contains("mm-md-hr")))
+            {
+                DrawHorizontalRuleMiniature(context, rule, targetBounds, scaleX, scaleY);
+            }
+        }
+    }
+
+    private void DrawControlMiniature(
+        DrawingContext context,
+        Control control,
+        Rect targetBounds,
+        double scaleX,
+        double scaleY)
+    {
+        if (control.Bounds.Width <= 0 || control.Bounds.Height <= 0)
+        {
+            return;
+        }
+
+        var origin = control.TranslatePoint(new Point(0, 0), this);
+        if (origin is null)
+        {
+            return;
+        }
+
+        var matrix = new Matrix(
+            scaleX,
+            0,
+            0,
+            scaleY,
+            targetBounds.X + origin.Value.X * scaleX,
+            targetBounds.Y + origin.Value.Y * scaleY);
+
+        using (context.PushTransform(matrix))
+        {
+            control.Render(context);
+        }
+    }
+
+    private void DrawImagePlaceholderMiniature(
+        DrawingContext context,
+        Control imageView,
+        Rect targetBounds,
+        double scaleX,
+        double scaleY)
+    {
+        var bounds = TranslateControlBounds(imageView);
+        if (bounds is null)
+        {
+            return;
+        }
+
+        var target = MapMiniatureRect(bounds.Value, targetBounds, scaleX, scaleY);
+        if (target.Width <= 0 || target.Height <= 0)
+        {
+            return;
+        }
+
+        var fill = LookupBrush("MmSurfaceRaisedBrush") ?? LookupBrush("MmCodeBackgroundBrush") ?? Brushes.Transparent;
+        var stroke = LookupBrush("MmBorderSubtleBrush") ?? LookupBrush("MmTextFaintBrush");
+        context.DrawRectangle(fill, stroke is null ? null : new Pen(stroke, 1), target, 1.5, 1.5);
+    }
+
+    private void DrawHorizontalRuleMiniature(
+        DrawingContext context,
+        Control rule,
+        Rect targetBounds,
+        double scaleX,
+        double scaleY)
+    {
+        var bounds = TranslateControlBounds(rule);
+        if (bounds is null)
+        {
+            return;
+        }
+
+        var target = MapMiniatureRect(bounds.Value, targetBounds, scaleX, scaleY);
+        if (target.Width <= 0 || target.Height <= 0)
+        {
+            return;
+        }
+
+        var brush = LookupBrush("MmBorderBrush") ?? LookupBrush("MmTextFaintBrush") ?? Brushes.Gray;
+        context.DrawRectangle(brush, null, target);
+    }
+
+    private Rect? TranslateControlBounds(Control control)
+    {
+        if (control.Bounds.Width <= 0 || control.Bounds.Height <= 0)
+        {
+            return null;
+        }
+
+        var origin = control.TranslatePoint(new Point(0, 0), this);
+        return origin is null
+            ? null
+            : new Rect(origin.Value, control.Bounds.Size);
+    }
+
+    private static Rect MapMiniatureRect(Rect sourceBounds, Rect targetBounds, double scaleX, double scaleY)
+        => new(
+            targetBounds.X + sourceBounds.X * scaleX,
+            targetBounds.Y + sourceBounds.Y * scaleY,
+            sourceBounds.Width * scaleX,
+            Math.Max(1, sourceBounds.Height * scaleY));
 
     public void SelectAll()
     {

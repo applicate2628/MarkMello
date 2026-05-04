@@ -189,6 +189,7 @@ internal sealed class MarkdownSelectionTextFragment : MarkdownDocumentSelectionF
         layout.Draw(context);
     }
 
+
     public override int GetDocumentOffset(Point localPoint)
     {
         var localOffset = GetLocalTextOffset(localPoint, preferPreviousCharacterAtBoundary: false);
