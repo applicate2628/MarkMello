@@ -11,8 +11,6 @@ namespace MarkMello.Presentation.Views;
 public partial class ViewerView : UserControl
 {
     private const double WheelStepMultiplier = 6.0;
-    private const double MinimapMinWidth = 1100.0;
-    private const double MinimapMinScrollableViewportRatio = 1.5;
     private ScrollViewer? _scroll;
     private MarkdownDocumentView? _documentView;
     private ContentControl? _minimapHost;
@@ -218,6 +216,9 @@ public partial class ViewerView : UserControl
             return;
         }
 
+        _lastMinimapExtent = _scroll.Extent;
+        _lastMinimapViewport = _scroll.Viewport;
+
         if (!ShouldShowMinimap())
         {
             RemoveMinimap();
@@ -225,14 +226,11 @@ public partial class ViewerView : UserControl
         }
 
         var snapshot = _documentView.CreateMiniatureSnapshot();
-        if (snapshot.IsEmpty)
+        if (!DocumentMinimapBuildPolicy.AllowsDetailedMiniature(snapshot))
         {
             RemoveMinimap();
             return;
         }
-
-        _lastMinimapExtent = _scroll.Extent;
-        _lastMinimapViewport = _scroll.Viewport;
 
         var minimap = EnsureMinimap();
         minimap.SetSource(_documentView, snapshot);
@@ -318,13 +316,12 @@ public partial class ViewerView : UserControl
             return false;
         }
 
-        return HasSizeChanged(_lastMinimapExtent, _scroll.Extent)
-            || HasSizeChanged(_lastMinimapViewport, _scroll.Viewport);
+        return DocumentMinimapBuildPolicy.HasLayoutMetricsChanged(
+            _lastMinimapExtent,
+            _lastMinimapViewport,
+            _scroll.Extent,
+            _scroll.Viewport);
     }
-
-    private static bool HasSizeChanged(Size previous, Size current)
-        => Math.Abs(previous.Width - current.Width) > 0.5
-            || Math.Abs(previous.Height - current.Height) > 0.5;
 
     private bool ShouldShowMinimap()
     {
@@ -333,11 +330,10 @@ public partial class ViewerView : UserControl
             return false;
         }
 
-        var viewportHeight = _scroll.Viewport.Height;
-        var documentHeight = _scroll.Extent.Height;
-        return Bounds.Width >= MinimapMinWidth
-            && viewportHeight > 0
-            && _scroll.ScrollBarMaximum.Y > 0
-            && documentHeight >= viewportHeight * MinimapMinScrollableViewportRatio;
+        return DocumentMinimapBuildPolicy.ShouldShow(
+            Bounds.Width,
+            _scroll.Extent,
+            _scroll.Viewport,
+            _scroll.ScrollBarMaximum.Y);
     }
 }
