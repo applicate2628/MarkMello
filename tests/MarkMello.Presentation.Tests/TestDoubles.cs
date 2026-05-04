@@ -80,6 +80,8 @@ internal sealed class InMemorySettingsStore : ISettingsStore
 
     public AppLanguage Language { get; set; } = AppLanguage.English;
 
+    public WindowPlacement? WindowPlacement { get; set; }
+
     public ValueTask<ReadingPreferences> LoadPreferencesAsync(CancellationToken cancellationToken = default)
         => ValueTask.FromResult(Preferences);
 
@@ -104,6 +106,17 @@ internal sealed class InMemorySettingsStore : ISettingsStore
     public ValueTask SaveLanguageAsync(AppLanguage language, CancellationToken cancellationToken = default)
     {
         Language = language;
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask<WindowPlacement?> LoadWindowPlacementAsync(CancellationToken cancellationToken = default)
+        => ValueTask.FromResult(WindowPlacement);
+
+    public ValueTask SaveWindowPlacementAsync(
+        WindowPlacement? placement,
+        CancellationToken cancellationToken = default)
+    {
+        WindowPlacement = MarkMello.Domain.WindowPlacement.Normalize(placement);
         return ValueTask.CompletedTask;
     }
 }

@@ -6,7 +6,7 @@ namespace MarkMello.Presentation.Tests;
 public sealed class JsonSettingsStoreTests
 {
     [Fact]
-    public async Task SaveAndLoadRoundTripsThemeAndReadingPreferences()
+    public async Task SaveAndLoadRoundTripsSettings()
     {
         var rootDirectory = CreateTempDirectory();
         try
@@ -17,15 +17,18 @@ public sealed class JsonSettingsStoreTests
             await store.SavePreferencesAsync(expectedPreferences);
             await store.SaveThemeAsync(ThemeMode.Dark);
             await store.SaveLanguageAsync(AppLanguage.Russian);
+            await store.SaveWindowPlacementAsync(new WindowPlacement(120, 80, 900, 700, IsMaximized: true));
 
             var reloadedStore = new JsonSettingsStore(rootDirectory);
             var actualPreferences = await reloadedStore.LoadPreferencesAsync();
             var actualTheme = await reloadedStore.LoadThemeAsync();
             var actualLanguage = await reloadedStore.LoadLanguageAsync();
+            var actualWindowPlacement = await reloadedStore.LoadWindowPlacementAsync();
 
             Assert.Equal(expectedPreferences, actualPreferences);
             Assert.Equal(ThemeMode.Dark, actualTheme);
             Assert.Equal(AppLanguage.Russian, actualLanguage);
+            Assert.Equal(new WindowPlacement(120, 80, 900, 700, IsMaximized: true), actualWindowPlacement);
         }
         finally
         {
@@ -46,10 +49,12 @@ public sealed class JsonSettingsStoreTests
             var preferences = await store.LoadPreferencesAsync();
             var theme = await store.LoadThemeAsync();
             var language = await store.LoadLanguageAsync();
+            var windowPlacement = await store.LoadWindowPlacementAsync();
 
             Assert.Equal(ReadingPreferences.Default, preferences);
             Assert.Equal(ThemeMode.System, theme);
             Assert.Equal(AppLanguage.System, language);
+            Assert.Null(windowPlacement);
         }
         finally
         {
@@ -81,6 +86,7 @@ public sealed class JsonSettingsStoreTests
             var preferences = await store.LoadPreferencesAsync();
             var theme = await store.LoadThemeAsync();
             var language = await store.LoadLanguageAsync();
+            var windowPlacement = await store.LoadWindowPlacementAsync();
 
             Assert.Equal(ThemeMode.Light, theme);
             Assert.Equal(FontFamilyMode.Mono, preferences.FontFamily);
@@ -88,6 +94,46 @@ public sealed class JsonSettingsStoreTests
             Assert.Equal(ReadingPreferences.MaxLineHeight, preferences.LineHeight);
             Assert.Equal(ReadingPreferences.MaxContentWidth, preferences.ContentWidth);
             Assert.Equal(AppLanguage.System, language);
+            Assert.Null(windowPlacement);
+        }
+        finally
+        {
+            DeleteDirectory(rootDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task LoadFallsBackToNullWindowPlacementWhenPlacementIsInvalid()
+    {
+        var rootDirectory = CreateTempDirectory();
+        const string json = """
+        {
+          "theme": "Light",
+          "preferences": {
+            "fontFamily": "Serif",
+            "fontSize": 18,
+            "lineHeight": 1.7,
+            "contentWidth": 720
+          },
+          "language": "English",
+          "windowPlacement": {
+            "x": 100,
+            "y": 100,
+            "width": 0,
+            "height": 640,
+            "isMaximized": false
+          }
+        }
+        """;
+
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(rootDirectory, "settings.json"), json);
+
+            var store = new JsonSettingsStore(rootDirectory);
+            var windowPlacement = await store.LoadWindowPlacementAsync();
+
+            Assert.Null(windowPlacement);
         }
         finally
         {

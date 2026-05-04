@@ -16,4 +16,7 @@ public interface ISettingsStore
 
     ValueTask<AppLanguage> LoadLanguageAsync(CancellationToken cancellationToken = default);
     ValueTask SaveLanguageAsync(AppLanguage language, CancellationToken cancellationToken = default);
+
+    ValueTask<WindowPlacement?> LoadWindowPlacementAsync(CancellationToken cancellationToken = default);
+    ValueTask SaveWindowPlacementAsync(WindowPlacement? placement, CancellationToken cancellationToken = default);
 }

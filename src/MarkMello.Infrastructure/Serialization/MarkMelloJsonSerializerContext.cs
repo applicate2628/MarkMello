@@ -16,6 +16,7 @@ namespace MarkMello.Infrastructure.Serialization;
     WriteIndented = true)]
 [JsonSerializable(typeof(SettingsFileModel))]
 [JsonSerializable(typeof(ReadingPreferences))]
+[JsonSerializable(typeof(WindowPlacement))]
 [JsonSerializable(typeof(ThemeMode))]
 [JsonSerializable(typeof(AppLanguage))]
 [JsonSerializable(typeof(FontFamilyMode))]
