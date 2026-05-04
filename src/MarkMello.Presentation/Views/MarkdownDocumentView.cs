@@ -9,9 +9,11 @@ using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using MarkMello.Application.Abstractions;
 using MarkMello.Domain;
 using MarkMello.Presentation.Views.Markdown;
+using System.Globalization;
 using System.Threading;
 
 namespace MarkMello.Presentation.Views;
@@ -55,6 +57,8 @@ public sealed class MarkdownDocumentView : UserControl
     };
 
     private readonly List<MarkdownDocumentSelectionFragmentBase> _selectionFragments = [];
+    private readonly Dictionary<string, Control> _headingAnchorTargets = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _headingAnchorCounts = new(StringComparer.Ordinal);
     private MarkdownDocumentTextMap _textMap = MarkdownDocumentTextMap.Empty;
     private bool _isPointerPressed;
     private bool _isDraggingSelection;
@@ -245,6 +249,8 @@ public sealed class MarkdownDocumentView : UserControl
     {
         DisposeSelectionFragments();
         _root.Children.Clear();
+        _headingAnchorTargets.Clear();
+        _headingAnchorCounts.Clear();
         ResetPointerState();
 
         var document = Document;
@@ -392,7 +398,7 @@ public sealed class MarkdownDocumentView : UserControl
         // h5 / h6 render with the soft text colour in the design.
         var baseForeground = block.Level >= 5 ? LookupBrush("MmTextSoftBrush") : null;
 
-        return BuildSelectionFragment(
+        var headingControl = BuildSelectionFragment(
             path,
             block.Inlines,
             margin,
@@ -403,6 +409,9 @@ public sealed class MarkdownDocumentView : UserControl
             fallbackClassName: "mm-md-heading",
             baseForeground: baseForeground,
             letterSpacing: letterSpacing);
+
+        RegisterHeadingAnchor(block, headingControl);
+        return headingControl;
     }
 
     private Control BuildParagraph(MarkdownParagraphBlock block, string path, bool nested, bool insideQuote)
@@ -1058,6 +1067,11 @@ public sealed class MarkdownDocumentView : UserControl
 
         var pressedLink = _pressedLink!.Value;
 
+        if (TryScrollToHeadingAnchor(pressedLink.Url))
+        {
+            return;
+        }
+
         if (!Uri.TryCreate(pressedLink.Url, UriKind.Absolute, out var uri))
         {
             return;
@@ -1072,6 +1086,64 @@ public sealed class MarkdownDocumentView : UserControl
         await launcher.LaunchUriAsync(uri);
     }
 
+    private void RegisterHeadingAnchor(MarkdownHeadingBlock block, Control headingControl)
+    {
+        var baseAnchor = MarkdownHeadingAnchorSlugger.CreateAnchor(block.Inlines);
+        if (string.IsNullOrEmpty(baseAnchor))
+        {
+            return;
+        }
+
+        var count = _headingAnchorCounts.TryGetValue(baseAnchor, out var currentCount)
+            ? currentCount
+            : 0;
+        _headingAnchorCounts[baseAnchor] = count + 1;
+
+        var anchor = count == 0
+            ? baseAnchor
+            : string.Create(CultureInfo.InvariantCulture, $"{baseAnchor}-{count}");
+
+        _headingAnchorTargets.TryAdd(anchor, headingControl);
+    }
+
+    internal bool HasHeadingAnchor(string linkTarget)
+        => MarkdownHeadingAnchorSlugger.TryNormalizeFragment(linkTarget, out var anchor)
+            && _headingAnchorTargets.ContainsKey(anchor);
+
+    private bool TryScrollToHeadingAnchor(string linkTarget)
+    {
+        if (!MarkdownHeadingAnchorSlugger.TryNormalizeFragment(linkTarget, out var anchor)
+            || !_headingAnchorTargets.TryGetValue(anchor, out var target))
+        {
+            return false;
+        }
+
+        return TryScrollTargetIntoView(target);
+    }
+
+    private bool TryScrollTargetIntoView(Control target)
+    {
+        var scrollViewer = this.FindAncestorOfType<ScrollViewer>();
+        if (scrollViewer is null)
+        {
+            return false;
+        }
+
+        var targetPoint = target.TranslatePoint(new Point(0, 0), scrollViewer);
+        if (targetPoint is null)
+        {
+            return false;
+        }
+
+        const double topInset = 24;
+        var nextOffsetY = Math.Clamp(
+            scrollViewer.Offset.Y + targetPoint.Value.Y - topInset,
+            0,
+            scrollViewer.ScrollBarMaximum.Y);
+
+        scrollViewer.Offset = new Vector(scrollViewer.Offset.X, nextOffsetY);
+        return true;
+    }
 
     private void CommitSelection(DocumentTextRange range, bool preserveOnRelease)
     {
