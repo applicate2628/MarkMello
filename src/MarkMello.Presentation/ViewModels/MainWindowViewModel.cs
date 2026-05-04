@@ -327,6 +327,8 @@ public partial class MainWindowViewModel : ObservableObject
         }
     }
 
+    public double DocumentColumnMaxWidth => ReadingLayoutMetrics.GetDocumentColumnMaxWidth(ReadingPreferences);
+
     public double ContentWidthSetting
     {
         get => ReadingPreferences.ContentWidth;
@@ -396,7 +398,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     public bool IsNarrowWidthSelected
     {
-        get => ReadingPreferences.ContentWidth == 580;
+        get => ReadingPreferences.ContentWidth == ReadingPreferences.NarrowContentWidth;
         set
         {
             if (!value)
@@ -405,13 +407,13 @@ public partial class MainWindowViewModel : ObservableObject
                 return;
             }
 
-            ContentWidthSetting = 580;
+            ContentWidthSetting = ReadingPreferences.NarrowContentWidth;
         }
     }
 
     public bool IsMediumWidthSelected
     {
-        get => ReadingPreferences.ContentWidth == 720;
+        get => ReadingPreferences.ContentWidth == ReadingPreferences.MediumContentWidth;
         set
         {
             if (!value)
@@ -420,13 +422,13 @@ public partial class MainWindowViewModel : ObservableObject
                 return;
             }
 
-            ContentWidthSetting = 720;
+            ContentWidthSetting = ReadingPreferences.MediumContentWidth;
         }
     }
 
     public bool IsWideWidthSelected
     {
-        get => ReadingPreferences.ContentWidth == 860;
+        get => ReadingPreferences.ContentWidth == ReadingPreferences.WideContentWidth;
         set
         {
             if (!value)
@@ -435,7 +437,7 @@ public partial class MainWindowViewModel : ObservableObject
                 return;
             }
 
-            ContentWidthSetting = 860;
+            ContentWidthSetting = ReadingPreferences.WideContentWidth;
         }
     }
 
@@ -956,6 +958,7 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(FontSizeSetting));
         OnPropertyChanged(nameof(LineHeightSetting));
         OnPropertyChanged(nameof(ContentWidthSetting));
+        OnPropertyChanged(nameof(DocumentColumnMaxWidth));
         OnPropertyChanged(nameof(FontSizeLabel));
         OnPropertyChanged(nameof(LineHeightLabel));
         OnPropertyChanged(nameof(IsSerifFontSelected));

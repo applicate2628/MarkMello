@@ -6,7 +6,7 @@ namespace MarkMello.Domain;
 /// <param name="FontFamily">Семейство шрифта (Serif/Sans/Mono).</param>
 /// <param name="FontSize">Базовый размер шрифта в пикселях.</param>
 /// <param name="LineHeight">Межстрочный интервал (множитель к размеру шрифта).</param>
-/// <param name="ContentWidth">Максимальная ширина центральной колонки чтения в пикселях.</param>
+/// <param name="ContentWidth">Максимальная полезная ширина текста документа в пикселях.</param>
 public sealed record ReadingPreferences(
     FontFamilyMode FontFamily,
     int FontSize,
@@ -18,9 +18,16 @@ public sealed record ReadingPreferences(
     public const double MinLineHeight = 1.4;
     public const double MaxLineHeight = 2.0;
     public const double LineHeightStep = 0.05;
-    public const int MinContentWidth = 580;
-    public const int MaxContentWidth = 860;
+    public const int NarrowContentWidth = 640;
+    public const int MediumContentWidth = 820;
+    public const int WideContentWidth = 1080;
+    public const int MinContentWidth = NarrowContentWidth;
+    public const int MaxContentWidth = 1280;
     public const int ContentWidthStep = 20;
+
+    private const int LegacyNarrowContentWidth = 580;
+    private const int LegacyMediumContentWidth = 720;
+    private const int LegacyWideContentWidth = 860;
 
     /// <summary>
     /// Безопасные значения по умолчанию. Используются при отсутствии или повреждении сохранённых настроек.
@@ -29,7 +36,7 @@ public sealed record ReadingPreferences(
         FontFamily: FontFamilyMode.Serif,
         FontSize: 18,
         LineHeight: 1.7,
-        ContentWidth: 720);
+        ContentWidth: MediumContentWidth);
 
     /// <summary>
     /// Нормализует пользовательские настройки до безопасного и предсказуемого диапазона.
@@ -69,7 +76,15 @@ public sealed record ReadingPreferences(
 
     private static int NormalizeContentWidth(int value)
     {
-        var clamped = Math.Clamp(value, MinContentWidth, MaxContentWidth);
+        var migrated = value switch
+        {
+            LegacyNarrowContentWidth => NarrowContentWidth,
+            LegacyMediumContentWidth => MediumContentWidth,
+            LegacyWideContentWidth => WideContentWidth,
+            _ => value
+        };
+
+        var clamped = Math.Clamp(migrated, MinContentWidth, MaxContentWidth);
         var rounded = (int)Math.Round(clamped / (double)ContentWidthStep, MidpointRounding.AwayFromZero) * ContentWidthStep;
         return Math.Clamp(rounded, MinContentWidth, MaxContentWidth);
     }

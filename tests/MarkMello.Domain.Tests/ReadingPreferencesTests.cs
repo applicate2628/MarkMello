@@ -28,4 +28,17 @@ public sealed class ReadingPreferencesTests
         Assert.Equal(ReadingPreferences.MinLineHeight, normalized.LineHeight);
         Assert.Equal(ReadingPreferences.MinContentWidth, normalized.ContentWidth);
     }
+
+    [Theory]
+    [InlineData(580, ReadingPreferences.NarrowContentWidth)]
+    [InlineData(720, ReadingPreferences.MediumContentWidth)]
+    [InlineData(860, ReadingPreferences.WideContentWidth)]
+    public void NormalizeMigratesLegacyPresetContentWidths(int legacyWidth, int expectedWidth)
+    {
+        var candidate = ReadingPreferences.Default with { ContentWidth = legacyWidth };
+
+        var normalized = ReadingPreferences.Normalize(candidate);
+
+        Assert.Equal(expectedWidth, normalized.ContentWidth);
+    }
 }

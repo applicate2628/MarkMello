@@ -12,7 +12,7 @@ public sealed class JsonSettingsStoreTests
         try
         {
             var store = new JsonSettingsStore(rootDirectory);
-            var expectedPreferences = new ReadingPreferences(FontFamilyMode.Mono, 19, 1.8, 860);
+            var expectedPreferences = new ReadingPreferences(FontFamilyMode.Mono, 19, 1.8, ReadingPreferences.WideContentWidth);
 
             await store.SavePreferencesAsync(expectedPreferences);
             await store.SaveThemeAsync(ThemeMode.Dark);

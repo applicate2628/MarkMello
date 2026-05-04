@@ -185,7 +185,7 @@
                   VerticalScrollBarVisibility="Auto"
                   UseLayoutRounding="True">
       <Grid UseLayoutRounding="True">
-        <Border MaxWidth="{Binding ReadingPreferences.ContentWidth}"
+        <Border MaxWidth="{Binding DocumentColumnMaxWidth}"
                 HorizontalAlignment="Center"
                 UseLayoutRounding="True">
           <Border.Transitions>

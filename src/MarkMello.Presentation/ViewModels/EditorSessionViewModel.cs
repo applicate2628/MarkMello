@@ -167,8 +167,16 @@ public sealed class EditorSessionViewModel : ObservableObject
     public ReadingPreferences ReadingPreferences
     {
         get => _readingPreferences;
-        private set => SetProperty(ref _readingPreferences, value);
+        private set
+        {
+            if (SetProperty(ref _readingPreferences, value))
+            {
+                OnPropertyChanged(nameof(DocumentColumnMaxWidth));
+            }
+        }
     }
+
+    public double DocumentColumnMaxWidth => ReadingLayoutMetrics.GetDocumentColumnMaxWidth(ReadingPreferences);
 
     public RenderedMarkdownDocument RenderedPreview
     {
