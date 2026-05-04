@@ -46,10 +46,28 @@ public sealed class DocumentMinimapScrollMapperTests
             documentHeight: 2_000,
             viewportHeight: 400,
             scrollOffset: 800,
+            maxScrollOffset: 1_600,
             minThumbHeight: 24);
 
         Assert.Equal(80, thumb.Width);
         Assert.Equal(200, thumb.Y);
         Assert.Equal(100, thumb.Height);
+    }
+
+    [Fact]
+    public void CalculateViewportThumbReachesBottomWhenMinimumHeightIsApplied()
+    {
+        var thumb = DocumentMinimapScrollMapper.CalculateViewportThumb(
+            minimapWidth: 80,
+            minimapHeight: 500,
+            documentHeight: 20_000,
+            viewportHeight: 400,
+            scrollOffset: 19_600,
+            maxScrollOffset: 19_600,
+            minThumbHeight: 28);
+
+        Assert.Equal(80, thumb.Width);
+        Assert.Equal(472, thumb.Y);
+        Assert.Equal(28, thumb.Height);
     }
 }

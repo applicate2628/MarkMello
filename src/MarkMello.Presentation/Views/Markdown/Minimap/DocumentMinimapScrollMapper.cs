@@ -27,6 +27,7 @@ internal static class DocumentMinimapScrollMapper
         double documentHeight,
         double viewportHeight,
         double scrollOffset,
+        double maxScrollOffset,
         double minThumbHeight)
     {
         if (minimapWidth <= 0 || minimapHeight <= 0 || documentHeight <= 0 || viewportHeight <= 0)
@@ -34,11 +35,14 @@ internal static class DocumentMinimapScrollMapper
             return default;
         }
 
-        var normalizedTop = Math.Clamp(scrollOffset / documentHeight, 0, 1);
         var normalizedHeight = Math.Clamp(viewportHeight / documentHeight, 0, 1);
-        var thumbHeight = Math.Clamp(minimapHeight * normalizedHeight, Math.Min(minThumbHeight, minimapHeight), minimapHeight);
-        var thumbTop = Math.Clamp(minimapHeight * normalizedTop, 0, Math.Max(0, minimapHeight - thumbHeight));
+        var minimumHeight = Math.Min(Math.Max(0, minThumbHeight), minimapHeight);
+        var thumbHeight = Math.Clamp(minimapHeight * normalizedHeight, minimumHeight, minimapHeight);
+        var maxThumbTop = Math.Max(0, minimapHeight - thumbHeight);
+        var normalizedScroll = maxScrollOffset <= 0
+            ? 0
+            : Math.Clamp(scrollOffset / maxScrollOffset, 0, 1);
 
-        return new Rect(0, thumbTop, minimapWidth, thumbHeight);
+        return new Rect(0, maxThumbTop * normalizedScroll, minimapWidth, thumbHeight);
     }
 }

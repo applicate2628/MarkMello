@@ -202,6 +202,8 @@ public sealed class MarkdownDocumentView : UserControl
 
     public event EventHandler? DocumentRendered;
 
+    public event EventHandler? DocumentRenderInvalidated;
+
     internal DocumentMiniatureSnapshot CreateMiniatureSnapshot()
     {
         if (Document is null || Bounds.Height <= 0 || Bounds.Width <= 0)
@@ -227,6 +229,11 @@ public sealed class MarkdownDocumentView : UserControl
 
         using (context.PushClip(targetBounds))
         {
+            foreach (var border in _root.GetVisualDescendants().OfType<Border>().Where(IsMiniatureStructuralBorder))
+            {
+                DrawBorderDecorationMiniature(context, border, targetBounds, scaleX, scaleY);
+            }
+
             foreach (var fragment in _selectionFragments)
             {
                 DrawControlMiniature(context, fragment, targetBounds, scaleX, scaleY);
@@ -272,8 +279,47 @@ public sealed class MarkdownDocumentView : UserControl
 
         using (context.PushTransform(matrix))
         {
+            if (control is MarkdownSelectionTextFragment textFragment)
+            {
+                textFragment.RenderMiniature(context);
+                return;
+            }
+
             control.Render(context);
         }
+    }
+
+    private void DrawBorderDecorationMiniature(
+        DrawingContext context,
+        Border border,
+        Rect targetBounds,
+        double scaleX,
+        double scaleY)
+    {
+        var bounds = TranslateControlBounds(border);
+        if (bounds is null)
+        {
+            return;
+        }
+
+        var target = MapMiniatureRect(bounds.Value, targetBounds, scaleX, scaleY);
+        if (target.Width <= 0 || target.Height <= 0)
+        {
+            return;
+        }
+
+        var background = border.Background;
+        var borderBrush = border.BorderBrush;
+        var pen = borderBrush is null || IsEmptyThickness(border.BorderThickness)
+            ? null
+            : new Pen(borderBrush, 1);
+
+        if (background is null && pen is null)
+        {
+            return;
+        }
+
+        context.DrawRectangle(background, pen, target, 1.5, 1.5);
     }
 
     private void DrawImagePlaceholderMiniature(
@@ -336,6 +382,16 @@ public sealed class MarkdownDocumentView : UserControl
             : new Rect(origin.Value, control.Bounds.Size);
     }
 
+    private static bool IsMiniatureStructuralBorder(Border border)
+        => border.Classes.Contains("mm-md-quote")
+            || border.Classes.Contains("mm-md-codeblock")
+            || border.Classes.Contains("mm-md-table")
+            || border.Classes.Contains("mm-md-table-header-cell")
+            || border.Classes.Contains("mm-md-table-cell");
+
+    private static bool IsEmptyThickness(Thickness thickness)
+        => thickness.Left <= 0 && thickness.Top <= 0 && thickness.Right <= 0 && thickness.Bottom <= 0;
+
     private static Rect MapMiniatureRect(Rect sourceBounds, Rect targetBounds, double scaleX, double scaleY)
         => new(
             targetBounds.X + sourceBounds.X * scaleX,
@@ -389,6 +445,7 @@ public sealed class MarkdownDocumentView : UserControl
 
     private void Rebuild()
     {
+        DocumentRenderInvalidated?.Invoke(this, EventArgs.Empty);
         DisposeSelectionFragments();
         _root.Children.Clear();
         _headingAnchorTargets.Clear();
@@ -443,6 +500,7 @@ public sealed class MarkdownDocumentView : UserControl
 
     private void RefreshForReadingPreferencesChange()
     {
+        DocumentRenderInvalidated?.Invoke(this, EventArgs.Empty);
         _readingPreferencesRefreshCts?.Cancel();
         var cts = new CancellationTokenSource();
         _readingPreferencesRefreshCts = cts;

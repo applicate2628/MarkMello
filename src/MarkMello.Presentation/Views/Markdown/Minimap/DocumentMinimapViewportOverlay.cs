@@ -7,8 +7,9 @@ namespace MarkMello.Presentation.Views.Markdown.Minimap;
 
 internal sealed class DocumentMinimapViewportOverlay : Control
 {
-    private const double DefaultWidth = 128;
-    private const double ViewportThumbMinHeight = 26;
+    private const double DefaultWidth = 136;
+    private const double ViewportThumbMinHeight = 28;
+    private const double TrackHorizontalPadding = 4;
     private bool _isDragging;
 
     public DocumentMinimapViewportOverlay()
@@ -138,13 +139,15 @@ internal sealed class DocumentMinimapViewportOverlay : Control
     private void DrawViewportThumb(DrawingContext context)
     {
         var documentHeight = Math.Max(DocumentHeight, ScrollMaximum + ViewportHeight);
+        var trackWidth = Math.Max(0, Bounds.Width - TrackHorizontalPadding * 2);
         var thumb = DocumentMinimapScrollMapper.CalculateViewportThumb(
-            Bounds.Width,
+            trackWidth,
             Bounds.Height,
             documentHeight,
             ViewportHeight,
             ScrollOffset,
-            ViewportThumbMinHeight);
+            ScrollMaximum,
+            ViewportThumbMinHeight).Translate(new Vector(TrackHorizontalPadding, 0));
 
         if (thumb.Width <= 0 || thumb.Height <= 0)
         {
@@ -154,14 +157,14 @@ internal sealed class DocumentMinimapViewportOverlay : Control
         var fill = ResolveBrush("MmSelectionBrush") ?? ResolveBrush("MmAccentSoftBrush") ?? Brushes.LightBlue;
         var stroke = ResolveBrush("MmAccentBrush") ?? ResolveBrush("MmTextFaintBrush") ?? Brushes.Gray;
 
-        using (context.PushOpacity(IsPointerOver || _isDragging ? 0.34 : 0.22))
+        using (context.PushOpacity(IsPointerOver || _isDragging ? 0.42 : 0.26))
         {
-            context.DrawRectangle(fill, null, thumb, 4, 4);
+            context.DrawRectangle(fill, null, thumb, 5, 5);
         }
 
-        using (context.PushOpacity(IsPointerOver || _isDragging ? 0.72 : 0.48))
+        using (context.PushOpacity(IsPointerOver || _isDragging ? 0.78 : 0.52))
         {
-            context.DrawRectangle(null, new Pen(stroke, 1), thumb, 4, 4);
+            context.DrawRectangle(null, new Pen(stroke, 1), thumb, 5, 5);
         }
     }
 

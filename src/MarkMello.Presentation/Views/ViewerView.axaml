@@ -34,8 +34,8 @@
     </ScrollViewer>
 
     <ContentControl Name="MinimapHost"
-                    Width="128"
-                    Margin="0,72,12,72"
+                    Width="136"
+                    Margin="0,64,16,64"
                     HorizontalAlignment="Right"
                     VerticalAlignment="Stretch"
                     IsHitTestVisible="False"

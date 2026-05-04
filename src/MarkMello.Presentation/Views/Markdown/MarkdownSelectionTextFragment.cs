@@ -189,6 +189,13 @@ internal sealed class MarkdownSelectionTextFragment : MarkdownDocumentSelectionF
         layout.Draw(context);
     }
 
+    internal void RenderMiniature(DrawingContext context)
+    {
+        var layout = GetOrCreateTextLayout(Bounds.Width);
+        DrawInlineCodeBackgrounds(context, layout);
+        layout.Draw(context);
+    }
+
 
     public override int GetDocumentOffset(Point localPoint)
     {

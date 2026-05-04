@@ -18,7 +18,10 @@ public partial class ViewerView : UserControl
     private ContentControl? _minimapHost;
     private DocumentMinimapView? _minimap;
     private int _minimapBuildGeneration;
+    private bool _isMinimapBuildQueued;
     private bool _hasRenderedDocument;
+    private Size _lastMinimapExtent;
+    private Size _lastMinimapViewport;
 
     public ViewerView()
     {
@@ -45,17 +48,25 @@ public partial class ViewerView : UserControl
         if (_documentView is not null)
         {
             _documentView.DocumentRendered += OnDocumentRendered;
+            _documentView.DocumentRenderInvalidated += OnDocumentRenderInvalidated;
         }
 
         SizeChanged += OnViewerSizeChanged;
+        ActualThemeVariantChanged += OnViewerAppearanceChanged;
+        ResourcesChanged += OnViewerResourcesChanged;
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         SizeChanged -= OnViewerSizeChanged;
+        ActualThemeVariantChanged -= OnViewerAppearanceChanged;
+        ResourcesChanged -= OnViewerResourcesChanged;
         _minimapBuildGeneration++;
+        _isMinimapBuildQueued = false;
         RemoveMinimap();
         _hasRenderedDocument = false;
+        _lastMinimapExtent = default;
+        _lastMinimapViewport = default;
         _minimapHost = null;
 
         if (_scroll is not null)
@@ -68,6 +79,7 @@ public partial class ViewerView : UserControl
         if (_documentView is not null)
         {
             _documentView.DocumentRendered -= OnDocumentRendered;
+            _documentView.DocumentRenderInvalidated -= OnDocumentRenderInvalidated;
             _documentView = null;
         }
 
@@ -119,6 +131,15 @@ public partial class ViewerView : UserControl
         QueueMinimapBuild();
     }
 
+    private void OnDocumentRenderInvalidated(object? sender, EventArgs e)
+    {
+        _hasRenderedDocument = false;
+        _lastMinimapExtent = default;
+        _lastMinimapViewport = default;
+        _minimapBuildGeneration++;
+        RemoveMinimap();
+    }
+
     private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
         if (_scroll is null)
@@ -131,6 +152,11 @@ public partial class ViewerView : UserControl
         if (DataContext is MainWindowViewModel vm)
         {
             vm.ReadingProgress = max > 0 ? Math.Clamp(current / max * 100.0, 0, 100) : 0;
+        }
+
+        if (_hasRenderedDocument && HasMinimapLayoutMetricsChanged())
+        {
+            QueueMinimapBuild();
         }
 
         UpdateMinimapScrollState();
@@ -147,19 +173,47 @@ public partial class ViewerView : UserControl
         QueueMinimapBuild();
     }
 
+    private void OnViewerAppearanceChanged(object? sender, EventArgs e)
+    {
+        if (!_hasRenderedDocument)
+        {
+            return;
+        }
+
+        QueueMinimapBuild();
+    }
+
+    private void OnViewerResourcesChanged(object? sender, ResourcesChangedEventArgs e)
+    {
+        if (!_hasRenderedDocument)
+        {
+            return;
+        }
+
+        QueueMinimapBuild();
+    }
+
     private void QueueMinimapBuild()
     {
         _minimapBuildGeneration++;
-        var generation = _minimapBuildGeneration;
+        if (_isMinimapBuildQueued)
+        {
+            return;
+        }
 
+        _isMinimapBuildQueued = true;
         Dispatcher.UIThread.Post(
-            () => BuildMinimapIfCurrent(generation),
+            () =>
+            {
+                _isMinimapBuildQueued = false;
+                BuildMinimapIfCurrent(_minimapBuildGeneration);
+            },
             DispatcherPriority.Background);
     }
 
     private void BuildMinimapIfCurrent(int generation)
     {
-        if (generation != _minimapBuildGeneration || _documentView is null || _scroll is null || _minimapHost is null)
+        if (generation != _minimapBuildGeneration || !_hasRenderedDocument || _documentView is null || _scroll is null || _minimapHost is null)
         {
             return;
         }
@@ -176,6 +230,9 @@ public partial class ViewerView : UserControl
             RemoveMinimap();
             return;
         }
+
+        _lastMinimapExtent = _scroll.Extent;
+        _lastMinimapViewport = _scroll.Viewport;
 
         var minimap = EnsureMinimap();
         minimap.SetSource(_documentView, snapshot);
@@ -253,6 +310,21 @@ public partial class ViewerView : UserControl
         _minimapHost.IsVisible = visible;
         _minimapHost.IsHitTestVisible = visible;
     }
+
+    private bool HasMinimapLayoutMetricsChanged()
+    {
+        if (_scroll is null)
+        {
+            return false;
+        }
+
+        return HasSizeChanged(_lastMinimapExtent, _scroll.Extent)
+            || HasSizeChanged(_lastMinimapViewport, _scroll.Viewport);
+    }
+
+    private static bool HasSizeChanged(Size previous, Size current)
+        => Math.Abs(previous.Width - current.Width) > 0.5
+            || Math.Abs(previous.Height - current.Height) > 0.5;
 
     private bool ShouldShowMinimap()
     {

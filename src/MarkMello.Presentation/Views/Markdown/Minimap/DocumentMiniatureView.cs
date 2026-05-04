@@ -6,7 +6,7 @@ namespace MarkMello.Presentation.Views.Markdown.Minimap;
 
 internal sealed class DocumentMiniatureView : Control
 {
-    private const double DefaultWidth = 128;
+    private const double DefaultWidth = 136;
     private MarkdownDocumentView? _sourceDocumentView;
     private DocumentMiniatureSnapshot _snapshot = DocumentMiniatureSnapshot.Empty;
 
@@ -15,6 +15,7 @@ internal sealed class DocumentMiniatureView : Control
         Focusable = false;
         IsTabStop = false;
         UseLayoutRounding = true;
+        ClipToBounds = true;
         IsHitTestVisible = false;
     }
 
@@ -53,11 +54,11 @@ internal sealed class DocumentMiniatureView : Control
         {
             using (context.PushOpacity(0.12))
             {
-                context.DrawRectangle(background, null, new Rect(0, 0, Bounds.Width, Bounds.Height), 5, 5);
+                context.DrawRectangle(background, null, new Rect(0, 0, Bounds.Width, Bounds.Height), 6, 6);
             }
         }
 
-        using (context.PushOpacity(0.52))
+        using (context.PushOpacity(0.68))
         {
             _sourceDocumentView.RenderMiniature(context, new Rect(0, 0, Bounds.Width, Bounds.Height));
         }

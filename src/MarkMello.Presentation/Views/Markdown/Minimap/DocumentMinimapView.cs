@@ -11,6 +11,7 @@ internal sealed class DocumentMinimapView : Grid
         Focusable = false;
         IsTabStop = false;
         UseLayoutRounding = true;
+        ClipToBounds = true;
 
         Children.Add(_miniatureView);
         Children.Add(_overlay);
