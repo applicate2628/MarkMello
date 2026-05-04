@@ -26,7 +26,7 @@
           <views:MarkdownDocumentView Name="DocumentView"
                                       Document="{Binding RenderedDocument}"
                                       DocumentPadding="72,96,72,160"
-                                      ReadingPreferences="{Binding ReadingPreferences}"
+                                      ReadingPreferences="{Binding DocumentReadingPreferences}"
                                       ImageSourceResolver="{Binding ImageSourceResolver}"
                                       UseLayoutRounding="True" />
         </Border>

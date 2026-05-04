@@ -39,6 +39,7 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly string _aboutVersion;
     private readonly string _aboutLicense = "GPLv3";
     private AppUpdatePackage? _availableUpdatePackage;
+    private ReadingPreferences _documentReadingPreferences = GetDocumentRenderingPreferences(ReadingPreferences.Default);
 
     public event EventHandler? CloseRequested;
 
@@ -225,6 +226,8 @@ public partial class MainWindowViewModel : ObservableObject
     public bool ShowsMoonThemeIcon => EffectiveTheme == ThemeMode.Light;
 
     public bool ShowsSunThemeIcon => EffectiveTheme == ThemeMode.Dark;
+
+    public ReadingPreferences DocumentReadingPreferences => _documentReadingPreferences;
 
     public bool ShowsEditPencilIcon => !IsEditMode;
 
@@ -438,6 +441,66 @@ public partial class MainWindowViewModel : ObservableObject
             }
 
             ContentWidthSetting = ReadingPreferences.WideContentWidth;
+        }
+    }
+
+
+    public DocumentMinimapMode SelectedDocumentMinimapMode
+    {
+        get => ReadingPreferences.DocumentMinimapMode;
+        set
+        {
+            if (ReadingPreferences.DocumentMinimapMode == value)
+            {
+                return;
+            }
+
+            ApplyReadingPreferences(ReadingPreferences with { DocumentMinimapMode = value });
+        }
+    }
+
+    public bool IsDocumentMinimapAutoSelected
+    {
+        get => ReadingPreferences.DocumentMinimapMode == DocumentMinimapMode.Auto;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsDocumentMinimapAutoSelected));
+                return;
+            }
+
+            SelectedDocumentMinimapMode = DocumentMinimapMode.Auto;
+        }
+    }
+
+    public bool IsDocumentMinimapOnSelected
+    {
+        get => ReadingPreferences.DocumentMinimapMode == DocumentMinimapMode.On;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsDocumentMinimapOnSelected));
+                return;
+            }
+
+            SelectedDocumentMinimapMode = DocumentMinimapMode.On;
+        }
+    }
+
+    public bool IsDocumentMinimapOffSelected
+    {
+        get => ReadingPreferences.DocumentMinimapMode == DocumentMinimapMode.Off;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsDocumentMinimapOffSelected));
+                return;
+            }
+
+            SelectedDocumentMinimapMode = DocumentMinimapMode.Off;
         }
     }
 
@@ -952,7 +1015,15 @@ public partial class MainWindowViewModel : ObservableObject
 
     partial void OnReadingPreferencesChanged(ReadingPreferences value)
     {
-        EditorSession?.UpdateReadingPreferences(value);
+        var documentRenderingPreferences = GetDocumentRenderingPreferences(value);
+        var documentRenderingPreferencesChanged = documentRenderingPreferences != _documentReadingPreferences;
+        _documentReadingPreferences = documentRenderingPreferences;
+
+        if (documentRenderingPreferencesChanged)
+        {
+            EditorSession?.UpdateReadingPreferences(value);
+            OnPropertyChanged(nameof(DocumentReadingPreferences));
+        }
 
         OnPropertyChanged(nameof(SelectedFontFamilyMode));
         OnPropertyChanged(nameof(FontSizeSetting));
@@ -967,6 +1038,10 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(IsNarrowWidthSelected));
         OnPropertyChanged(nameof(IsMediumWidthSelected));
         OnPropertyChanged(nameof(IsWideWidthSelected));
+        OnPropertyChanged(nameof(SelectedDocumentMinimapMode));
+        OnPropertyChanged(nameof(IsDocumentMinimapAutoSelected));
+        OnPropertyChanged(nameof(IsDocumentMinimapOnSelected));
+        OnPropertyChanged(nameof(IsDocumentMinimapOffSelected));
     }
 
     private async Task OpenFileCoreAsync()
@@ -1293,6 +1368,12 @@ public partial class MainWindowViewModel : ObservableObject
         Theme = mode;
         _themeService.Apply(mode);
         EffectiveTheme = _themeService.GetEffectiveTheme();
+    }
+
+    private static ReadingPreferences GetDocumentRenderingPreferences(ReadingPreferences preferences)
+    {
+        var normalized = ReadingPreferences.Normalize(preferences);
+        return normalized with { DocumentMinimapMode = ReadingPreferences.Default.DocumentMinimapMode };
     }
 
     private void ApplyReadingPreferences(ReadingPreferences preferences)

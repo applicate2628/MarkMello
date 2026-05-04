@@ -12,7 +12,12 @@ public sealed class JsonSettingsStoreTests
         try
         {
             var store = new JsonSettingsStore(rootDirectory);
-            var expectedPreferences = new ReadingPreferences(FontFamilyMode.Mono, 19, 1.8, ReadingPreferences.WideContentWidth);
+            var expectedPreferences = new ReadingPreferences(
+                FontFamilyMode.Mono,
+                19,
+                1.8,
+                ReadingPreferences.WideContentWidth,
+                DocumentMinimapMode.On);
 
             await store.SavePreferencesAsync(expectedPreferences);
             await store.SaveThemeAsync(ThemeMode.Dark);
@@ -53,6 +58,7 @@ public sealed class JsonSettingsStoreTests
 
             Assert.Equal(ReadingPreferences.Default, preferences);
             Assert.Equal(ThemeMode.System, theme);
+            Assert.Equal(DocumentMinimapMode.Auto, preferences.DocumentMinimapMode);
             Assert.Equal(AppLanguage.System, language);
             Assert.Null(windowPlacement);
         }
@@ -73,7 +79,8 @@ public sealed class JsonSettingsStoreTests
             "fontFamily": "Mono",
             "fontSize": 4,
             "lineHeight": 9.0,
-            "contentWidth": 1700
+            "contentWidth": 1700,
+            "documentMinimapMode": "Off"
           }
         }
         """;
@@ -93,8 +100,41 @@ public sealed class JsonSettingsStoreTests
             Assert.Equal(ReadingPreferences.MinFontSize, preferences.FontSize);
             Assert.Equal(ReadingPreferences.MaxLineHeight, preferences.LineHeight);
             Assert.Equal(ReadingPreferences.MaxContentWidth, preferences.ContentWidth);
+            Assert.Equal(DocumentMinimapMode.Off, preferences.DocumentMinimapMode);
             Assert.Equal(AppLanguage.System, language);
             Assert.Null(windowPlacement);
+        }
+        finally
+        {
+            DeleteDirectory(rootDirectory);
+        }
+    }
+
+
+    [Fact]
+    public async Task LoadUsesAutoMinimapModeWhenLegacySettingsHaveNoMinimapMode()
+    {
+        var rootDirectory = CreateTempDirectory();
+        const string json = """
+        {
+          "theme": "Light",
+          "preferences": {
+            "fontFamily": "Serif",
+            "fontSize": 18,
+            "lineHeight": 1.7,
+            "contentWidth": 820
+          }
+        }
+        """;
+
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(rootDirectory, "settings.json"), json);
+
+            var store = new JsonSettingsStore(rootDirectory);
+            var preferences = await store.LoadPreferencesAsync();
+
+            Assert.Equal(DocumentMinimapMode.Auto, preferences.DocumentMinimapMode);
         }
         finally
         {

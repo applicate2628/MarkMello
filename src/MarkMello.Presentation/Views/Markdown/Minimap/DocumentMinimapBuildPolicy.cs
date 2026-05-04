@@ -1,4 +1,5 @@
 using Avalonia;
+using MarkMello.Domain;
 
 namespace MarkMello.Presentation.Views.Markdown.Minimap;
 
@@ -10,16 +11,25 @@ internal static class DocumentMinimapBuildPolicy
     public const double MaxDetailedDocumentHeight = 240_000.0;
 
     public static bool ShouldShow(
+        DocumentMinimapMode mode,
         double hostWidth,
         Size scrollExtent,
         Size scrollViewport,
         double scrollMaximumY)
     {
         var viewportHeight = scrollViewport.Height;
+        if (mode == DocumentMinimapMode.Off || viewportHeight <= 0 || scrollMaximumY <= 0)
+        {
+            return false;
+        }
+
+        if (mode == DocumentMinimapMode.On)
+        {
+            return true;
+        }
+
         var documentHeight = scrollExtent.Height;
         return hostWidth >= MinHostWidth
-            && viewportHeight > 0
-            && scrollMaximumY > 0
             && documentHeight >= viewportHeight * MinScrollableViewportRatio;
     }
 

@@ -3,8 +3,10 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
+using MarkMello.Domain;
 using MarkMello.Presentation.ViewModels;
 using MarkMello.Presentation.Views.Markdown.Minimap;
+using System.ComponentModel;
 
 namespace MarkMello.Presentation.Views;
 
@@ -20,10 +22,17 @@ public partial class ViewerView : UserControl
     private bool _hasRenderedDocument;
     private Size _lastMinimapExtent;
     private Size _lastMinimapViewport;
+    private MainWindowViewModel? _viewModel;
 
     public ViewerView()
     {
         InitializeComponent();
+    }
+
+    protected override void OnDataContextChanged(EventArgs e)
+    {
+        base.OnDataContextChanged(e);
+        AttachViewModel(DataContext as MainWindowViewModel);
     }
 
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
@@ -52,6 +61,7 @@ public partial class ViewerView : UserControl
         SizeChanged += OnViewerSizeChanged;
         ActualThemeVariantChanged += OnViewerAppearanceChanged;
         ResourcesChanged += OnViewerResourcesChanged;
+        AttachViewModel(DataContext as MainWindowViewModel);
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
@@ -59,6 +69,7 @@ public partial class ViewerView : UserControl
         SizeChanged -= OnViewerSizeChanged;
         ActualThemeVariantChanged -= OnViewerAppearanceChanged;
         ResourcesChanged -= OnViewerResourcesChanged;
+        AttachViewModel(null);
         _minimapBuildGeneration++;
         _isMinimapBuildQueued = false;
         RemoveMinimap();
@@ -185,6 +196,47 @@ public partial class ViewerView : UserControl
     {
         if (!_hasRenderedDocument)
         {
+            return;
+        }
+
+        QueueMinimapBuild();
+    }
+
+    private void AttachViewModel(MainWindowViewModel? viewModel)
+    {
+        if (ReferenceEquals(_viewModel, viewModel))
+        {
+            return;
+        }
+
+        if (_viewModel is not null)
+        {
+            _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        }
+
+        _viewModel = viewModel;
+
+        if (_viewModel is not null)
+        {
+            _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        }
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(MainWindowViewModel.ReadingPreferences))
+        {
+            return;
+        }
+
+        if (!_hasRenderedDocument)
+        {
+            return;
+        }
+
+        if (!ShouldShowMinimap())
+        {
+            RemoveMinimap();
             return;
         }
 
@@ -330,7 +382,12 @@ public partial class ViewerView : UserControl
             return false;
         }
 
+        var mode = DataContext is MainWindowViewModel vm
+            ? vm.ReadingPreferences.DocumentMinimapMode
+            : DocumentMinimapMode.Auto;
+
         return DocumentMinimapBuildPolicy.ShouldShow(
+            mode,
             Bounds.Width,
             _scroll.Extent,
             _scroll.Viewport,

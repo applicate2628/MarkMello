@@ -1,4 +1,5 @@
 using Avalonia;
+using MarkMello.Domain;
 using MarkMello.Presentation.Views.Markdown.Minimap;
 
 namespace MarkMello.Presentation.Tests;
@@ -9,6 +10,7 @@ public sealed class DocumentMinimapBuildPolicyTests
     public void ShouldShowReturnsTrueOnlyForWideScrollableLongDocument()
     {
         var shouldShow = DocumentMinimapBuildPolicy.ShouldShow(
+            DocumentMinimapMode.Auto,
             hostWidth: 1280,
             scrollExtent: new Size(900, 2_400),
             scrollViewport: new Size(900, 800),
@@ -21,6 +23,7 @@ public sealed class DocumentMinimapBuildPolicyTests
     public void ShouldShowReturnsFalseForNarrowHost()
     {
         var shouldShow = DocumentMinimapBuildPolicy.ShouldShow(
+            DocumentMinimapMode.Auto,
             hostWidth: DocumentMinimapBuildPolicy.MinHostWidth - 1,
             scrollExtent: new Size(900, 2_400),
             scrollViewport: new Size(900, 800),
@@ -33,6 +36,7 @@ public sealed class DocumentMinimapBuildPolicyTests
     public void ShouldShowReturnsFalseForShortDocument()
     {
         var shouldShow = DocumentMinimapBuildPolicy.ShouldShow(
+            DocumentMinimapMode.Auto,
             hostWidth: 1280,
             scrollExtent: new Size(900, 1_000),
             scrollViewport: new Size(900, 800),
@@ -45,6 +49,47 @@ public sealed class DocumentMinimapBuildPolicyTests
     public void ShouldShowReturnsFalseWhenDocumentDoesNotScroll()
     {
         var shouldShow = DocumentMinimapBuildPolicy.ShouldShow(
+            DocumentMinimapMode.Auto,
+            hostWidth: 1280,
+            scrollExtent: new Size(900, 800),
+            scrollViewport: new Size(900, 800),
+            scrollMaximumY: 0);
+
+        Assert.False(shouldShow);
+    }
+
+
+    [Fact]
+    public void ShouldShowReturnsFalseWhenModeIsOff()
+    {
+        var shouldShow = DocumentMinimapBuildPolicy.ShouldShow(
+            DocumentMinimapMode.Off,
+            hostWidth: 1280,
+            scrollExtent: new Size(900, 2_400),
+            scrollViewport: new Size(900, 800),
+            scrollMaximumY: 1_600);
+
+        Assert.False(shouldShow);
+    }
+
+    [Fact]
+    public void ShouldShowReturnsTrueForModeOnWhenDocumentScrolls()
+    {
+        var shouldShow = DocumentMinimapBuildPolicy.ShouldShow(
+            DocumentMinimapMode.On,
+            hostWidth: 800,
+            scrollExtent: new Size(900, 1_000),
+            scrollViewport: new Size(900, 800),
+            scrollMaximumY: 200);
+
+        Assert.True(shouldShow);
+    }
+
+    [Fact]
+    public void ShouldShowReturnsFalseForModeOnWhenDocumentDoesNotScroll()
+    {
+        var shouldShow = DocumentMinimapBuildPolicy.ShouldShow(
+            DocumentMinimapMode.On,
             hostWidth: 1280,
             scrollExtent: new Size(900, 800),
             scrollViewport: new Size(900, 800),

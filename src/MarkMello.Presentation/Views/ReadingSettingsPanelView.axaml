@@ -164,6 +164,45 @@
                   </Grid>
                 </Border>
               </StackPanel>
+
+
+              <StackPanel Spacing="0">
+                <Line Classes="mm-setting-divider"
+                      StartPoint="0,0.5"
+                      EndPoint="1,0.5" />
+                <Border Classes="mm-setting-row">
+                  <Grid ColumnDefinitions="Auto,*"
+                        ColumnSpacing="12">
+                    <StackPanel Grid.Column="0"
+                                Spacing="2"
+                                VerticalAlignment="Center">
+                      <TextBlock Classes="mm-setting-label"
+                                 Text="{Binding ReadingMinimapLabel}" />
+                      <TextBlock Classes="mm-setting-hint"
+                                 Text="{Binding ReadingMinimapHint}" />
+                    </StackPanel>
+                    <Border Grid.Column="1"
+                            Classes="mm-segmented"
+                            HorizontalAlignment="Right">
+                      <StackPanel Orientation="Horizontal"
+                                  Spacing="1">
+                        <ToggleButton Classes="mm-segmented-item"
+                                      IsChecked="{Binding IsDocumentMinimapAutoSelected}">
+                          <TextBlock Text="{Binding ReadingMinimapAuto}" />
+                        </ToggleButton>
+                        <ToggleButton Classes="mm-segmented-item"
+                                      IsChecked="{Binding IsDocumentMinimapOnSelected}">
+                          <TextBlock Text="{Binding ReadingMinimapOn}" />
+                        </ToggleButton>
+                        <ToggleButton Classes="mm-segmented-item"
+                                      IsChecked="{Binding IsDocumentMinimapOffSelected}">
+                          <TextBlock Text="{Binding ReadingMinimapOff}" />
+                        </ToggleButton>
+                      </StackPanel>
+                    </Border>
+                  </Grid>
+                </Border>
+              </StackPanel>
             </StackPanel>
           </Border>
         </StackPanel>
