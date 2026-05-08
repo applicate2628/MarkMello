@@ -52,9 +52,11 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
         switch (block)
         {
             case HeadingBlock heading:
-                target.Add(new MarkdownHeadingBlock(
-                    Math.Clamp(heading.Level, 1, 6),
-                    ConvertInlines(heading.Inline)));
+                target.Add(WithSourceSpan(
+                    new MarkdownHeadingBlock(
+                        Math.Clamp(heading.Level, 1, 6),
+                        ConvertInlines(heading.Inline)),
+                    heading));
                 return;
 
             case ParagraphBlock paragraph:
@@ -63,36 +65,44 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
                 // "figure" style images as a standalone paragraph.
                 if (TryExtractStandaloneImage(paragraph.Inline, out var standaloneImage))
                 {
-                    target.Add(standaloneImage);
+                    target.Add(WithSourceSpan(standaloneImage, paragraph));
                     return;
                 }
-                target.Add(new MarkdownParagraphBlock(ConvertInlines(paragraph.Inline)));
+                target.Add(WithSourceSpan(
+                    new MarkdownParagraphBlock(ConvertInlines(paragraph.Inline)),
+                    paragraph));
                 return;
 
             case QuoteBlock quote:
-                target.Add(new MarkdownQuoteBlock(ConvertBlocks(quote)));
+                target.Add(WithSourceSpan(
+                    new MarkdownQuoteBlock(ConvertBlocks(quote)),
+                    quote));
                 return;
 
             case ListBlock list:
-                target.Add(ConvertList(list));
+                target.Add(WithSourceSpan(ConvertList(list), list));
                 return;
 
-            case ThematicBreakBlock:
-                target.Add(new MarkdownHorizontalRuleBlock());
+            case ThematicBreakBlock thematicBreak:
+                target.Add(WithSourceSpan(new MarkdownHorizontalRuleBlock(), thematicBreak));
                 return;
 
             case FencedCodeBlock fencedCode:
-                target.Add(new MarkdownCodeBlock(
-                    NormalizeNullable(fencedCode.Info?.ToString()),
-                    ExtractCode(fencedCode)));
+                target.Add(WithSourceSpan(
+                    new MarkdownCodeBlock(
+                        NormalizeNullable(fencedCode.Info?.ToString()),
+                        ExtractCode(fencedCode)),
+                    fencedCode));
                 return;
 
             case CodeBlock codeBlock:
-                target.Add(new MarkdownCodeBlock(null, ExtractCode(codeBlock)));
+                target.Add(WithSourceSpan(
+                    new MarkdownCodeBlock(null, ExtractCode(codeBlock)),
+                    codeBlock));
                 return;
 
             case Table table:
-                target.Add(ConvertTable(table));
+                target.Add(WithSourceSpan(ConvertTable(table), table));
                 return;
 
             case HtmlBlock htmlBlock:
@@ -101,7 +111,7 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
                 // versions (ScriptBlock, ScriptTag, ScriptPreOrStyle...).
                 // Instead we strip scripts/styles/comments/CDATA by content,
                 // which is stable regardless of Markdig's internal classification.
-                AppendHtmlBlock(htmlBlock.Lines.ToString(), target);
+                AppendHtmlBlock(htmlBlock.Lines.ToString(), target, CreateSourceSpan(htmlBlock));
                 return;
 
             case ContainerBlock nested:
@@ -115,9 +125,11 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
                 var leafText = ExtractLeafText(leaf);
                 if (!string.IsNullOrWhiteSpace(leafText))
                 {
-                    target.Add(new MarkdownParagraphBlock([
-                        new MarkdownTextInline(leafText)
-                    ]));
+                    target.Add(WithSourceSpan(
+                        new MarkdownParagraphBlock([
+                            new MarkdownTextInline(leafText)
+                        ]),
+                        leaf));
                 }
                 return;
         }
@@ -427,6 +439,69 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
     private static string? NormalizeNullable(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    private static MarkdownBlock WithSourceSpan(MarkdownBlock block, Block sourceBlock)
+        => WithSourceSpan(block, CreateSourceSpan(sourceBlock));
+
+    private static MarkdownBlock WithSourceSpan(MarkdownBlock block, MarkdownSourceSpan? sourceSpan)
+        => sourceSpan is null ? block : block with { SourceSpan = sourceSpan };
+
+    private static MarkdownSourceSpan? CreateSourceSpan(Block block)
+    {
+        int? startLine = block.Line >= 0 ? block.Line : null;
+        int? endLine = startLine is null
+            ? null
+            : startLine.Value + Math.Max(0, CountSourceLines(block) - 1);
+
+        if (block is ContainerBlock container)
+        {
+            foreach (var child in container)
+            {
+                var childSpan = CreateSourceSpan(child);
+                if (childSpan is null)
+                {
+                    continue;
+                }
+
+                startLine = startLine is null
+                    ? childSpan.Value.StartLine
+                    : Math.Min(startLine.Value, childSpan.Value.StartLine);
+                endLine = endLine is null
+                    ? childSpan.Value.EndLine
+                    : Math.Max(endLine.Value, childSpan.Value.EndLine);
+            }
+        }
+
+        return startLine is null
+            ? null
+            : new MarkdownSourceSpan(startLine.Value, endLine ?? startLine.Value);
+    }
+
+    private static int CountSourceLines(Block block)
+        => block is LeafBlock leaf
+            ? CountSourceLines(leaf.Lines.ToString())
+            : 1;
+
+    private static int CountSourceLines(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 1;
+        }
+
+        var lineBreaks = 0;
+        foreach (var c in text)
+        {
+            if (c == '\n')
+            {
+                lineBreaks++;
+            }
+        }
+
+        return text.EndsWith('\n')
+            ? Math.Max(1, lineBreaks)
+            : lineBreaks + 1;
+    }
+
     // --- HTML handling ----------------------------------------------------
 
     private static readonly Regex ImgTagPattern = new(
@@ -501,7 +576,7 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
     /// patterns -- "figure with caption", "centered picture", etc. -- render
     /// as image + caption rather than a literal "[image: alt] caption" line.
     /// </summary>
-    private static void AppendHtmlBlock(string html, List<MarkdownBlock> target)
+    private static void AppendHtmlBlock(string html, List<MarkdownBlock> target, MarkdownSourceSpan? sourceSpan)
     {
         if (string.IsNullOrEmpty(html))
         {
@@ -524,35 +599,37 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
         var imgMatches = ImgTagPattern.Matches(scrubbed);
         if (imgMatches.Count == 0)
         {
-            AppendHtmlTextParagraph(scrubbed, target);
+            AppendHtmlTextParagraph(scrubbed, target, sourceSpan);
             return;
         }
 
         var cursor = 0;
         foreach (Match match in imgMatches)
         {
-            AppendHtmlTextParagraph(scrubbed[cursor..match.Index], target);
+            AppendHtmlTextParagraph(scrubbed[cursor..match.Index], target, sourceSpan);
 
             if (TryBuildImageBlockFromImgTag(match.Value, out var imageBlock))
             {
-                target.Add(imageBlock);
+                target.Add(WithSourceSpan(imageBlock, sourceSpan));
             }
             else
             {
                 // Malformed <img> (no src) -- keep the alt-text placeholder
                 // so the author still sees that something was intended here.
-                target.Add(new MarkdownParagraphBlock([
-                    new MarkdownTextInline(FormatImagePlaceholder(match.Value))
-                ]));
+                target.Add(WithSourceSpan(
+                    new MarkdownParagraphBlock([
+                        new MarkdownTextInline(FormatImagePlaceholder(match.Value))
+                    ]),
+                    sourceSpan));
             }
 
             cursor = match.Index + match.Length;
         }
 
-        AppendHtmlTextParagraph(scrubbed[cursor..], target);
+        AppendHtmlTextParagraph(scrubbed[cursor..], target, sourceSpan);
     }
 
-    private static void AppendHtmlTextParagraph(string htmlFragment, List<MarkdownBlock> target)
+    private static void AppendHtmlTextParagraph(string htmlFragment, List<MarkdownBlock> target, MarkdownSourceSpan? sourceSpan)
     {
         if (string.IsNullOrEmpty(htmlFragment))
         {
@@ -570,7 +647,9 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
             return;
         }
 
-        target.Add(new MarkdownParagraphBlock([new MarkdownTextInline(text)]));
+        target.Add(WithSourceSpan(
+            new MarkdownParagraphBlock([new MarkdownTextInline(text)]),
+            sourceSpan));
     }
 
     private static bool TryBuildImageBlockFromImgTag(string imgTag, out MarkdownImageBlock imageBlock)
