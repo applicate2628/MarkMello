@@ -146,9 +146,12 @@ public sealed class MarkdownDocumentViewTests
         var codeBlock = Assert.IsType<Border>(Assert.Single(root.Children));
         var body = Assert.IsType<StackPanel>(codeBlock.Child);
         var scrollViewer = Assert.IsType<ScrollViewer>(Assert.Single(body.Children));
+        var scrollContent = Assert.IsType<Border>(scrollViewer.Content);
 
         Assert.Equal(ScrollBarVisibility.Auto, scrollViewer.HorizontalScrollBarVisibility);
         Assert.Equal(ScrollBarVisibility.Disabled, scrollViewer.VerticalScrollBarVisibility);
+        Assert.Equal(16, scrollContent.Padding.Bottom);
+        Assert.NotNull(scrollContent.Child);
     }
 
     [Fact]

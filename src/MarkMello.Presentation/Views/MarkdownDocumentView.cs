@@ -44,6 +44,7 @@ public sealed class MarkdownDocumentView : UserControl
         AvaloniaProperty.Register<MarkdownDocumentView, IImageSourceResolver?>(nameof(ImageSourceResolver));
 
     private const double DragSelectionThreshold = 4;
+    private const double CodeBlockHorizontalScrollBarReserve = 16;
 
     private readonly StackPanel _root = new()
     {
@@ -763,7 +764,11 @@ public sealed class MarkdownDocumentView : UserControl
         {
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            Content = codeFragment
+            Content = new Border
+            {
+                Padding = new Thickness(0, 0, 0, CodeBlockHorizontalScrollBarReserve),
+                Child = codeFragment
+            }
         });
 
         return new Border
