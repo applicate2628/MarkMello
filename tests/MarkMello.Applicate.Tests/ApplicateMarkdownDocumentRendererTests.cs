@@ -79,6 +79,22 @@ public sealed class ApplicateMarkdownDocumentRendererTests
     }
 
     [Fact]
+    public void RenderPreservesMathLikeTextInsideInlineCode()
+    {
+        var renderer = new ApplicateMarkdownDocumentRenderer();
+
+        var document = renderer.Render("Keep `$x$` as code, but render $y$ as math.");
+
+        var paragraph = Assert.IsType<MarkdownParagraphBlock>(Assert.Single(document.Blocks));
+        Assert.Contains(paragraph.Inlines, inline => inline is MarkdownCodeInline code
+            && code.Code == "$x$");
+        Assert.Contains(paragraph.Inlines, inline => inline is ApplicateMathInline math
+            && math.Tex == "y");
+        Assert.DoesNotContain(paragraph.Inlines.OfType<MarkdownCodeInline>(), code =>
+            code.Code.Contains("APPLICATE_MATH", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void NormalizeTexForRendererHandlesCommonAliases()
     {
         var normalized = ApplicateMarkdownDocumentRenderer.NormalizeTexForRenderer(@"\tfrac{1}{2} + \dfrac{a}{b} + x^{\prime} + y^\prime");
@@ -93,5 +109,24 @@ public sealed class ApplicateMarkdownDocumentRendererTests
             @"\underbrace{\frac{1}{\mu_{r}} x}_{\text{curl-curl}} - \overbrace{k_{0}^{2} y}^{mass}");
 
         Assert.Equal(@"\frac{1}{\mu_{r}} x - k_{0}^{2} y", normalized);
+    }
+
+    [Fact]
+    public void MathLineBreakerWrapsAtTopLevelOperators()
+    {
+        const string tex = @"\sqrt{1.184375 - p^{2}} / 2.45 \cdot \tan(x) - \sqrt{p^{2} + 0.265625} \cdot \tanh(y) = 0";
+
+        var chunks = ApplicateMathLineBreaker.SplitIntoChunks(tex);
+        var rows = ApplicateMathLineBreaker.WrapIntoRows(
+            tex,
+            maxWidth: 42,
+            measureWidth: text => text.Length);
+
+        Assert.True(rows.Count > 1);
+        Assert.Contains(chunks, chunk => chunk == @"\cdot");
+        Assert.Contains(chunks, chunk => chunk.StartsWith(@"\tan", StringComparison.Ordinal));
+        Assert.Contains(chunks, chunk => chunk.StartsWith(@"\tanh", StringComparison.Ordinal));
+        Assert.DoesNotContain(rows, row => row.Contains(@"\sqrt{1.184375", StringComparison.Ordinal)
+            && !row.Contains('}'));
     }
 }

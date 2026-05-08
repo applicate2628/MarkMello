@@ -1,18 +1,32 @@
 ![MarkMello](assets/cover.png)
 
-# MarkMello
+# MarkMello Applicate
 
 [English](README.en.md)
 
-**MarkMello — приложение для быстрого открытия и чтения Markdown-файлов с дополнительным режимом редактирования.**
+**MarkMello Applicate — форк MarkMello для быстрого чтения Markdown-файлов с улучшенным отображением технических документов и TeX-формул.**
+
+Этот репозиторий является форком [upstream MarkMello](https://github.com/dartdavros/MarkMello).
+Оригинальный проект принадлежит MarkMello contributors. Applicate-добавления
+поддерживаются отдельно: Copyright (C) 2026 Dmitry Denisenko (@applicate2628).
+Подробности см. в [NOTICE.md](NOTICE.md) и [FORK_CHANGES.md](FORK_CHANGES.md).
 
 ## Что умеет MarkMello
 
-MarkMello позволяет:
+MarkMello Applicate сохраняет базовые возможности MarkMello:
 
 - быстро открывать Markdown-файлы в режиме просмотра;
 - настраивать удобный режим чтения: тему, размер шрифта, высоту строки и ширину области документа;
 - при необходимости переходить в режим редактирования и вносить правки в файл.
+
+Applicate-добавления:
+
+- отображают inline- и display-формулы TeX в Markdown;
+- нормализуют распространенные TeX-алиасы, которые текущий renderer path не принимает напрямую;
+- переносят длинные display-формулы по верхнеуровневым математическим разделителям вместо сжатия до нечитаемого размера;
+- добавляют гибкое изменение ширины чтения перетаскиванием края, сохраняя исходные пресеты Narrow, Medium и Wide;
+- сохраняют minimap-поведение для Applicate viewer path;
+- делегируют Markdown-блоки без Applicate-формул обратно в оригинальный `MarkdownDocumentView`, чтобы обычное чтение оставалось ближе к upstream.
 
 ## Чем отличается от обычных Markdown-редакторов
 
@@ -26,9 +40,9 @@ MarkMello сначала открывает файл для чтения.
 
 ### Windows
 
-1. Скачайте `MarkMello-setup-win-x64.exe` или `MarkMello-setup-win-arm64.exe`, в зависимости от архитектуры компьютера.
+1. Скачайте `MarkMello.Applicate-setup-win-x64.exe` или `MarkMello.Applicate-setup-win-arm64.exe`, в зависимости от архитектуры компьютера.
 2. Запустите установщик.
-3. Откройте MarkMello из меню Start или откройте `.md` файл через MarkMello.
+3. Откройте MarkMello Applicate из меню Start или откройте `.md` файл через MarkMello Applicate.
 
 ### macOS
 
@@ -93,17 +107,25 @@ dotnet restore ./MarkMello.sln
 dotnet build ./MarkMello.sln
 ```
 
-Запуск проекта:
+Запуск upstream-проекта:
 
 ```bash
 dotnet run --project ./src/MarkMello.Desktop/MarkMello.Desktop.csproj
 ```
 
+Запуск Applicate-форка:
+
+```bash
+dotnet run --project ./src/MarkMello.Applicate.Desktop/MarkMello.Applicate.Desktop.csproj
+```
+
 Открытие файла из командной строки:
 
 ```bash
-dotnet run --project ./src/MarkMello.Desktop/MarkMello.Desktop.csproj -- ./sample.md
+dotnet run --project ./src/MarkMello.Applicate.Desktop/MarkMello.Applicate.Desktop.csproj -- ./sample.md
 ```
+
+Сборка Windows-инсталлятора Applicate-форка описана в [packaging/README.md](packaging/README.md).
 
 ## Горячие клавиши
 
@@ -119,3 +141,13 @@ dotnet run --project ./src/MarkMello.Desktop/MarkMello.Desktop.csproj -- ./sampl
 Проект распространяется по лицензии GPL-3.0.
 
 См. файл [LICENSE](LICENSE).
+
+## Термины и сокращения
+
+- `Applicate`: fork-specific overlay с дополнительной поддержкой формул и reader-улучшениями.
+- `GPL-3.0`: GNU General Public License version 3.
+- `Markdown`: lightweight markup format для текстовой документации.
+- `minimap`: боковая миниатюра документа для быстрой навигации.
+- `renderer path`: путь обработки Markdown от parser model до UI-рендера.
+- `TeX`: синтаксис математических формул, используемый Markdown math renderers.
+- `upstream`: оригинальный репозиторий MarkMello, от которого сделан форк.

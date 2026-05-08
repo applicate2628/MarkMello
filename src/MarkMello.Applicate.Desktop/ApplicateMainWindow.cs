@@ -1,3 +1,5 @@
+using Avalonia.Controls;
+using Avalonia.Controls.Templates;
 using MarkMello.Application.Abstractions;
 using MarkMello.Presentation.ViewModels;
 using MarkMello.Presentation.Views;
@@ -12,7 +14,23 @@ public sealed class ApplicateMainWindow : MainWindow
         ISettingsStore settings)
         : base(viewModel, startupSmokeTestOptions, settings)
     {
-        DataTemplates.Insert(0, new ApplicateViewerTemplate());
+        var viewerTemplate = new ApplicateViewerTemplate();
+        DataTemplates.Insert(0, viewerTemplate);
+        InstallViewerHostTemplate(viewerTemplate);
         Opened += (_, _) => Title = $"{Title} [Applicate overlay]";
+    }
+
+    private void InstallViewerHostTemplate(IDataTemplate viewerTemplate)
+    {
+        var bodyPanel = this.FindControl<Panel>("BodyPanel");
+        var viewerHost = bodyPanel?.Children
+            .OfType<ContentControl>()
+            .FirstOrDefault(static control => control.GetType() == typeof(ContentControl) && control.Name is null);
+        if (viewerHost is null)
+        {
+            return;
+        }
+
+        viewerHost.ContentTemplate = viewerTemplate;
     }
 }

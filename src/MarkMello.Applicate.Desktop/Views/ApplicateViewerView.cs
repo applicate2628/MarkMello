@@ -6,6 +6,8 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
+using MarkMello.Applicate.Desktop.Views.Minimap;
 using MarkMello.Domain;
 using MarkMello.Presentation.ViewModels;
 using SysMath = System.Math;
@@ -17,24 +19,33 @@ public sealed class ApplicateViewerView : UserControl
     private const double WheelStepMultiplier = 6.0;
     private const double MinManualContentWidth = 320.0;
     private const double ViewportHorizontalGutter = 32.0;
+    private const double MinimapColumnGap = 24.0;
     private const double WidthHandleHitArea = 24.0;
     private const double WidthHandleIdleTrackWidth = 2.0;
     private const double WidthHandleHoverTrackWidth = 5.0;
     private const double WidthHandleDraggingTrackWidth = 7.0;
 
     private readonly ScrollViewer _scroll;
+    private readonly Border _scrollContentFrame;
     private readonly Border _column;
     private readonly ApplicateMarkdownDocumentView _documentView;
     private readonly Border _widthHandle;
     private readonly Border _widthHandleTrack;
+    private readonly ContentControl _minimapHost;
     private MainWindowViewModel? _viewModel;
     private bool _isDraggingWidth;
     private bool _isWidthHandleHovering;
+    private ApplicateDocumentMinimapView? _minimap;
+    private int _minimapBuildGeneration;
+    private bool _isMinimapBuildQueued;
+    private bool _hasRenderedDocument;
     private Point _dragStart;
     private double _dragStartWidth;
     private double? _manualContentWidth;
     private double _lastViewModelContentWidth;
     private double _documentHorizontalPadding = 144.0;
+    private Size _lastMinimapExtent;
+    private Size _lastMinimapViewport;
 
     public ApplicateViewerView()
     {
@@ -44,6 +55,7 @@ public sealed class ApplicateViewerView : UserControl
             UseLayoutRounding = true
         };
         _documentView.DocumentRendered += OnDocumentRendered;
+        _documentView.DocumentRenderInvalidated += OnDocumentRenderInvalidated;
 
         _widthHandleTrack = new Border
         {
@@ -97,6 +109,13 @@ public sealed class ApplicateViewerView : UserControl
             Child = documentLayer
         };
 
+        _scrollContentFrame = new Border
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            UseLayoutRounding = true,
+            Child = _column
+        };
+
         _scroll = new ScrollViewer
         {
             HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled,
@@ -107,14 +126,35 @@ public sealed class ApplicateViewerView : UserControl
                 UseLayoutRounding = true,
                 Children =
                 {
-                    _column
+                    _scrollContentFrame
                 }
             }
         };
         _scroll.ScrollChanged += OnScrollChanged;
         _scroll.AddHandler(InputElement.PointerWheelChangedEvent, OnPointerWheelChanged, RoutingStrategies.Tunnel);
 
-        Content = _scroll;
+        _minimapHost = new ContentControl
+        {
+            Width = 136,
+            Margin = new Thickness(0, 64, 16, 64),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            IsHitTestVisible = false,
+            UseLayoutRounding = true
+        };
+
+        Content = new Grid
+        {
+            UseLayoutRounding = true,
+            Children =
+            {
+                _scroll,
+                _minimapHost
+            }
+        };
+
+        ActualThemeVariantChanged += OnViewerAppearanceChanged;
+        ResourcesChanged += OnViewerResourcesChanged;
     }
 
     protected override void OnDataContextChanged(EventArgs e)
@@ -125,7 +165,15 @@ public sealed class ApplicateViewerView : UserControl
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
+        ActualThemeVariantChanged -= OnViewerAppearanceChanged;
+        ResourcesChanged -= OnViewerResourcesChanged;
         AttachViewModel(null);
+        _minimapBuildGeneration++;
+        _isMinimapBuildQueued = false;
+        RemoveMinimap();
+        _hasRenderedDocument = false;
+        _lastMinimapExtent = default;
+        _lastMinimapViewport = default;
         base.OnDetachedFromVisualTree(e);
     }
 
@@ -133,6 +181,10 @@ public sealed class ApplicateViewerView : UserControl
     {
         base.OnSizeChanged(e);
         ApplyColumnWidth();
+        if (_hasRenderedDocument)
+        {
+            QueueMinimapBuild();
+        }
     }
 
     private void AttachViewModel(MainWindowViewModel? viewModel)
@@ -165,6 +217,16 @@ public sealed class ApplicateViewerView : UserControl
             or nameof(MainWindowViewModel.ReadingPreferences))
         {
             SyncFromViewModel();
+            if (_hasRenderedDocument)
+            {
+                if (!ShouldShowMinimap())
+                {
+                    RemoveMinimap();
+                    return;
+                }
+
+                QueueMinimapBuild();
+            }
         }
     }
 
@@ -175,6 +237,7 @@ public sealed class ApplicateViewerView : UserControl
             _documentView.Document = RenderedMarkdownDocument.Empty;
             _documentView.ReadingPreferences = ReadingPreferences.Default;
             _documentView.ImageSourceResolver = null;
+            _documentView.AvailableContentWidth = double.NaN;
             _manualContentWidth = null;
             _lastViewModelContentWidth = 0;
             _column.MaxWidth = double.PositiveInfinity;
@@ -200,6 +263,18 @@ public sealed class ApplicateViewerView : UserControl
     private void OnDocumentRendered(object? sender, EventArgs e)
     {
         _viewModel?.MarkReadableDocumentRendered();
+        _hasRenderedDocument = true;
+        QueueMinimapBuild();
+        Dispatcher.UIThread.Post(QueueMinimapBuild, DispatcherPriority.Loaded);
+    }
+
+    private void OnDocumentRenderInvalidated(object? sender, EventArgs e)
+    {
+        _hasRenderedDocument = false;
+        _lastMinimapExtent = default;
+        _lastMinimapViewport = default;
+        _minimapBuildGeneration++;
+        RemoveMinimap();
     }
 
     private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)
@@ -212,6 +287,14 @@ public sealed class ApplicateViewerView : UserControl
         var max = _scroll.ScrollBarMaximum.Y;
         var current = _scroll.Offset.Y;
         _viewModel.ReadingProgress = max > 0 ? SysMath.Clamp(current / max * 100.0, 0, 100) : 0;
+
+        if (_hasRenderedDocument && HasMinimapLayoutMetricsChanged())
+        {
+            QueueMinimapBuild();
+        }
+
+        UpdateMinimapScrollState();
+        UpdateMinimapVisibility();
     }
 
     private void OnPointerWheelChanged(object? sender, PointerWheelEventArgs e)
@@ -297,6 +380,22 @@ public sealed class ApplicateViewerView : UserControl
         UpdateWidthHandleVisual();
     }
 
+    private void OnViewerAppearanceChanged(object? sender, EventArgs e)
+    {
+        if (_hasRenderedDocument)
+        {
+            QueueMinimapBuild();
+        }
+    }
+
+    private void OnViewerResourcesChanged(object? sender, ResourcesChangedEventArgs e)
+    {
+        if (_hasRenderedDocument)
+        {
+            QueueMinimapBuild();
+        }
+    }
+
     private void ApplyColumnWidth()
     {
         if (_viewModel is null)
@@ -306,13 +405,38 @@ public sealed class ApplicateViewerView : UserControl
 
         var desiredContentWidth = _manualContentWidth ?? _viewModel.ContentWidthSetting;
         var visibleContentWidth = ClampManualContentWidth(desiredContentWidth);
+        _documentView.AvailableContentWidth = visibleContentWidth;
         _column.MaxWidth = visibleContentWidth + _documentHorizontalPadding;
     }
 
     private double ClampManualContentWidth(double contentWidth)
     {
-        var availableWidth = SysMath.Max(MinManualContentWidth, Bounds.Width - _documentHorizontalPadding - ViewportHorizontalGutter);
+        var availableWidth = SysMath.Max(
+            MinManualContentWidth,
+            Bounds.Width - GetMinimapReservedWidth() - _documentHorizontalPadding - ViewportHorizontalGutter);
         return SysMath.Clamp(contentWidth, MinManualContentWidth, availableWidth);
+    }
+
+    private void ApplyMinimapReservation()
+    {
+        var reservedWidth = GetMinimapReservedWidth();
+        _scrollContentFrame.Padding = new Thickness(0, 0, reservedWidth, 0);
+    }
+
+    private double GetMinimapReservedWidth()
+    {
+        if (_minimap is null || !_minimapHost.IsVisible)
+        {
+            return 0;
+        }
+
+        var minimapWidth = _minimapHost.Bounds.Width > 0 ? _minimapHost.Bounds.Width : _minimapHost.Width;
+        if (double.IsNaN(minimapWidth) || double.IsInfinity(minimapWidth) || minimapWidth <= 0)
+        {
+            minimapWidth = 136;
+        }
+
+        return minimapWidth + _minimapHost.Margin.Left + _minimapHost.Margin.Right + MinimapColumnGap;
     }
 
     private void UpdateWidthHandleVisual()
@@ -346,5 +470,132 @@ public sealed class ApplicateViewerView : UserControl
         }
 
         return fallback;
+    }
+
+    private void QueueMinimapBuild()
+    {
+        _minimapBuildGeneration++;
+        if (_isMinimapBuildQueued)
+        {
+            return;
+        }
+
+        _isMinimapBuildQueued = true;
+        Dispatcher.UIThread.Post(
+            () =>
+            {
+                _isMinimapBuildQueued = false;
+                BuildMinimapIfCurrent(_minimapBuildGeneration);
+            },
+            DispatcherPriority.Background);
+    }
+
+    private void BuildMinimapIfCurrent(int generation)
+    {
+        if (generation != _minimapBuildGeneration || !_hasRenderedDocument)
+        {
+            return;
+        }
+
+        _lastMinimapExtent = _scroll.Extent;
+        _lastMinimapViewport = _scroll.Viewport;
+
+        if (!ShouldShowMinimap())
+        {
+            RemoveMinimap();
+            return;
+        }
+
+        var snapshot = _documentView.CreateMiniatureSnapshot();
+        if (!ApplicateDocumentMinimapBuildPolicy.AllowsDetailedMiniature(snapshot))
+        {
+            RemoveMinimap();
+            return;
+        }
+
+        var minimap = EnsureMinimap();
+        minimap.SetSource(_documentView, snapshot);
+        UpdateMinimapScrollState();
+        UpdateMinimapVisibility();
+    }
+
+    private ApplicateDocumentMinimapView EnsureMinimap()
+    {
+        if (_minimap is not null)
+        {
+            return _minimap;
+        }
+
+        var minimap = new ApplicateDocumentMinimapView();
+        minimap.ScrollRequested += OnMinimapScrollRequested;
+        _minimap = minimap;
+        _minimapHost.Content = minimap;
+        _minimapHost.IsHitTestVisible = true;
+        return minimap;
+    }
+
+    private void RemoveMinimap()
+    {
+        if (_minimap is not null)
+        {
+            _minimap.ScrollRequested -= OnMinimapScrollRequested;
+            _minimap.ClearSource();
+            _minimap = null;
+        }
+
+        _minimapHost.Content = null;
+        _minimapHost.IsHitTestVisible = false;
+        ApplyMinimapReservation();
+        ApplyColumnWidth();
+    }
+
+    private void OnMinimapScrollRequested(object? sender, ApplicateDocumentMinimapScrollRequestedEventArgs e)
+    {
+        var targetOffset = SysMath.Clamp(e.OffsetY, 0, _scroll.ScrollBarMaximum.Y);
+        _scroll.Offset = new Vector(_scroll.Offset.X, targetOffset);
+    }
+
+    private void UpdateMinimapScrollState()
+    {
+        if (_minimap is null)
+        {
+            return;
+        }
+
+        _minimap.ScrollOffset = _scroll.Offset.Y;
+        _minimap.ScrollMaximum = _scroll.ScrollBarMaximum.Y;
+        _minimap.ViewportHeight = _scroll.Viewport.Height;
+    }
+
+    private void UpdateMinimapVisibility()
+    {
+        if (_minimap is null)
+        {
+            return;
+        }
+
+        var visible = ShouldShowMinimap();
+        _minimapHost.IsVisible = visible;
+        _minimapHost.IsHitTestVisible = visible;
+        ApplyMinimapReservation();
+        ApplyColumnWidth();
+    }
+
+    private bool HasMinimapLayoutMetricsChanged()
+        => ApplicateDocumentMinimapBuildPolicy.HasLayoutMetricsChanged(
+            _lastMinimapExtent,
+            _lastMinimapViewport,
+            _scroll.Extent,
+            _scroll.Viewport);
+
+    private bool ShouldShowMinimap()
+    {
+        var mode = _viewModel?.ReadingPreferences.DocumentMinimapMode ?? DocumentMinimapMode.Auto;
+        return ApplicateDocumentMinimapBuildPolicy.ShouldShow(
+            mode,
+            Bounds.Width,
+            _scroll.Extent,
+            _scroll.Viewport,
+            _scroll.ScrollBarMaximum.Y);
     }
 }

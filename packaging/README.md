@@ -14,6 +14,9 @@ This folder captures the first release baseline from `ADR-0004`.
 
 - `windows/MarkMello.iss` is the per-user Inno Setup installer.
 - `windows/build-installer.ps1` compiles the installer from a published app folder.
+- `windows/MarkMello.Applicate.iss` is the Applicate fork installer metadata.
+- `windows/build-applicate-installer.ps1` compiles the Applicate fork installer
+  from a published `MarkMello.Applicate` app folder.
 - `windows/sign-files.ps1` signs published binaries and installers when a PFX certificate is provided.
 - `windows/markmello-installer.ico` is the installer icon generated from the shared master icon.
 - The installer registers MarkMello as an available `.md` handler and adds `Open with MarkMello`-style shell integration without forcing a system-wide default.
@@ -39,6 +42,33 @@ dotnet publish .\src\MarkMello.Desktop\MarkMello.Desktop.csproj `
   -PublishDir .\publish\win-x64 `
   -RuntimeId win-x64 `
   -Version 0.6.0
+```
+
+Applicate fork example:
+
+```powershell
+dotnet publish .\src\MarkMello.Applicate.Desktop\MarkMello.Applicate.Desktop.csproj `
+  -c Release -r win-x64 --self-contained true `
+  -p:PublishSingleFile=false `
+  -p:MarkMelloReleaseOwner=applicate2628 `
+  -p:MarkMelloReleaseRepo=MarkMello `
+  -o .\publish\applicate-win-x64
+
+.\packaging\windows\build-applicate-installer.ps1 `
+  -PublishDir .\publish\applicate-win-x64 `
+  -RuntimeId win-x64 `
+  -Version 0.6.0 `
+  -OutputDir .\artifacts\applicate-win-x64
+```
+
+The Applicate installer installs as `MarkMello Applicate`, uses
+`MarkMello.Applicate.exe`, and has a fork-specific AppId and ProgId so it does
+not reuse the upstream MarkMello installer identity.
+
+Local installer builds require Inno Setup 6. On Windows it can be installed with:
+
+```powershell
+winget install --id JRSoftware.InnoSetup --source winget
 ```
 
 ## macOS
@@ -93,3 +123,14 @@ If you want the Windows workflow to sign artifacts, configure:
 
 - `WINDOWS_SIGNING_CERT_BASE64` — base64-encoded `.pfx`
 - `WINDOWS_SIGNING_CERT_PASSWORD` — password for that certificate
+
+## Terms and Abbreviations
+
+- `AppId`: Inno Setup application identifier used to distinguish installed apps.
+- `Applicate`: the fork-specific MarkMello overlay.
+- `AppImage`: portable Linux application packaging format.
+- `DMG`: macOS disk image distribution format.
+- `Inno Setup`: Windows installer generator used by this repository.
+- `PFX`: certificate container format used for Windows code signing.
+- `ProgId`: Windows file-association program identifier.
+- `runtime ID`: .NET target runtime such as `win-x64` or `win-arm64`.

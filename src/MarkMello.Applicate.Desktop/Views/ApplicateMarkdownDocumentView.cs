@@ -5,9 +5,11 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using CSharpMath.Avalonia;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Math;
+using MarkMello.Applicate.Desktop.Views.Minimap;
 using MarkMello.Domain;
 using MarkMello.Presentation.Views;
 using SysMath = System.Math;
@@ -34,6 +36,9 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
     public static readonly StyledProperty<IImageSourceResolver?> ImageSourceResolverProperty =
         AvaloniaProperty.Register<ApplicateMarkdownDocumentView, IImageSourceResolver?>(nameof(ImageSourceResolver));
 
+    public static readonly StyledProperty<double> AvailableContentWidthProperty =
+        AvaloniaProperty.Register<ApplicateMarkdownDocumentView, double>(nameof(AvailableContentWidth), double.NaN);
+
     private static readonly Regex InlineMathPattern = new(
         @"(?<!\\)(\$(?!\$)(.+?)(?<!\\)\$|\\\((.+?)\\\))",
         RegexOptions.Compiled | RegexOptions.Singleline);
@@ -58,11 +63,14 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         DocumentPaddingProperty.Changed.AddClassHandler<ApplicateMarkdownDocumentView>((view, _) => view.ApplyDocumentPadding());
         ReadingPreferencesProperty.Changed.AddClassHandler<ApplicateMarkdownDocumentView>((view, _) => view.Rebuild());
         ImageSourceResolverProperty.Changed.AddClassHandler<ApplicateMarkdownDocumentView>((view, _) => view.Rebuild());
+        AvailableContentWidthProperty.Changed.AddClassHandler<ApplicateMarkdownDocumentView>((view, _) => view.ApplyAvailableContentWidth());
     }
 
     public ApplicateMarkdownDocumentView()
     {
         UseLayoutRounding = true;
+        ActualThemeVariantChanged += OnAppearanceChanged;
+        ResourcesChanged += OnResourcesChanged;
         _viewport.Child = _root;
         ApplyDocumentPadding();
         Content = _viewport;
@@ -92,20 +100,91 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         set => SetValue(ImageSourceResolverProperty, value);
     }
 
+    public double AvailableContentWidth
+    {
+        get => GetValue(AvailableContentWidthProperty);
+        set => SetValue(AvailableContentWidthProperty, value);
+    }
+
     public event EventHandler? DocumentRendered;
+
+    public event EventHandler? DocumentRenderInvalidated;
+
+    internal ApplicateDocumentMiniatureSnapshot CreateMiniatureSnapshot()
+    {
+        if (Document is null || Bounds.Height <= 0 || Bounds.Width <= 0)
+        {
+            return ApplicateDocumentMiniatureSnapshot.Empty;
+        }
+
+        return new ApplicateDocumentMiniatureSnapshot(
+            totalWidth: SysMath.Max(1, Bounds.Width),
+            totalHeight: SysMath.Max(1, Bounds.Height));
+    }
+
+    internal void RenderMiniature(DrawingContext context, Rect targetBounds)
+    {
+        var snapshot = CreateMiniatureSnapshot();
+        if (snapshot.IsEmpty || targetBounds.Width <= 0 || targetBounds.Height <= 0)
+        {
+            return;
+        }
+
+        var scaleX = targetBounds.Width / snapshot.TotalWidth;
+        var scaleY = targetBounds.Height / snapshot.TotalHeight;
+
+        using (context.PushClip(targetBounds))
+        {
+            foreach (var border in _root.GetVisualDescendants().OfType<Border>().Where(IsMiniatureVisibleBorder))
+            {
+                DrawBorderMiniature(context, border, targetBounds, scaleX, scaleY);
+            }
+
+            foreach (var text in _root.GetVisualDescendants().OfType<TextBlock>())
+            {
+                DrawTextMiniature(context, text, targetBounds, scaleX, scaleY);
+            }
+
+            foreach (var text in _root.GetVisualDescendants().OfType<SelectableTextBlock>())
+            {
+                DrawTextMiniature(context, text, targetBounds, scaleX, scaleY);
+            }
+
+            foreach (var math in _root.GetVisualDescendants().OfType<MathView>())
+            {
+                DrawTextMiniature(context, math, targetBounds, scaleX, scaleY);
+            }
+        }
+    }
 
     private void ApplyDocumentPadding()
     {
         _viewport.Padding = DocumentPadding;
     }
 
+    private void ApplyAvailableContentWidth()
+    {
+        foreach (var mathView in _root.GetVisualDescendants().OfType<ApplicateWrappingMathView>())
+        {
+            mathView.AvailableContentWidth = AvailableContentWidth;
+        }
+    }
+
     private void Rebuild()
     {
+        DocumentRenderInvalidated?.Invoke(this, EventArgs.Empty);
         _root.Children.Clear();
 
         var document = Document;
         if (document is null || document.Blocks.Count == 0)
         {
+            QueueRenderedNotification();
+            return;
+        }
+
+        if (!ContainsApplicateMath(document))
+        {
+            _root.Children.Add(BuildNativeDocument(document.Blocks));
             QueueRenderedNotification();
             return;
         }
@@ -118,6 +197,100 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         QueueRenderedNotification();
     }
 
+    private void OnAppearanceChanged(object? sender, EventArgs e)
+        => Rebuild();
+
+    private void OnResourcesChanged(object? sender, ResourcesChangedEventArgs e)
+        => Rebuild();
+
+    private void DrawBorderMiniature(
+        DrawingContext context,
+        Border border,
+        Rect targetBounds,
+        double scaleX,
+        double scaleY)
+    {
+        var bounds = TranslateControlBounds(border);
+        if (bounds is null)
+        {
+            return;
+        }
+
+        var target = MapMiniatureRect(bounds.Value, targetBounds, scaleX, scaleY);
+        if (target.Width <= 0 || target.Height <= 0)
+        {
+            return;
+        }
+
+        var background = border.Background;
+        var borderBrush = border.BorderBrush;
+        var pen = borderBrush is null || IsEmptyThickness(border.BorderThickness)
+            ? null
+            : new Pen(borderBrush, 1);
+        if (background is null && pen is null)
+        {
+            return;
+        }
+
+        using (context.PushOpacity(0.7))
+        {
+            context.DrawRectangle(background, pen, target, 1.5, 1.5);
+        }
+    }
+
+    private void DrawTextMiniature(
+        DrawingContext context,
+        Control control,
+        Rect targetBounds,
+        double scaleX,
+        double scaleY)
+    {
+        var bounds = TranslateControlBounds(control);
+        if (bounds is null)
+        {
+            return;
+        }
+
+        var target = MapMiniatureRect(bounds.Value, targetBounds, scaleX, scaleY);
+        if (target.Width <= 0 || target.Height <= 0)
+        {
+            return;
+        }
+
+        var brush = Brush("MmTextFaintBrush", Brushes.Gray);
+        using (context.PushOpacity(0.5))
+        {
+            context.DrawRectangle(brush, null, target);
+        }
+    }
+
+    private Rect? TranslateControlBounds(Control control)
+    {
+        if (control.Bounds.Width <= 0 || control.Bounds.Height <= 0)
+        {
+            return null;
+        }
+
+        var origin = control.TranslatePoint(new Point(0, 0), this);
+        return origin is null
+            ? null
+            : new Rect(origin.Value, control.Bounds.Size);
+    }
+
+    private static Rect MapMiniatureRect(Rect sourceBounds, Rect targetBounds, double scaleX, double scaleY)
+        => new(
+            targetBounds.X + sourceBounds.X * scaleX,
+            targetBounds.Y + sourceBounds.Y * scaleY,
+            sourceBounds.Width * scaleX,
+            SysMath.Max(1, sourceBounds.Height * scaleY));
+
+    private static bool IsMiniatureVisibleBorder(Border border)
+        => border.Background is not null
+            || border.BorderBrush is not null && !IsEmptyThickness(border.BorderThickness);
+
+    private static bool IsEmptyThickness(Thickness thickness)
+        => thickness.Left <= 0 && thickness.Top <= 0 && thickness.Right <= 0 && thickness.Bottom <= 0;
+
     private void QueueRenderedNotification()
     {
         Dispatcher.UIThread.Post(() => DocumentRendered?.Invoke(this, EventArgs.Empty), DispatcherPriority.Background);
@@ -127,6 +300,7 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         => block switch
         {
             ApplicateMathBlock math => BuildMathBlock(math, nested),
+            _ when !ContainsApplicateMath(block) => BuildNativeBlock(block),
             MarkdownHeadingBlock heading => BuildHeading(heading),
             MarkdownParagraphBlock paragraph => BuildParagraph(paragraph.Inlines, nested),
             MarkdownQuoteBlock quote => BuildQuote(quote),
@@ -201,7 +375,7 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         return new Border
         {
             BorderThickness = new Thickness(3, 0, 0, 0),
-            BorderBrush = Brush("MmRuleBrush", Brushes.LightGray),
+            BorderBrush = Brush("MmQuoteBarBrush", Brushes.LightGray),
             Padding = new Thickness(18, 4, 0, 4),
             Margin = new Thickness(0, 10, 0, 16),
             Child = stack
@@ -255,7 +429,7 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         => new Border
         {
             Height = 1,
-            Background = Brush("MmRuleBrush", Brushes.LightGray),
+            Background = Brush("MmBorderBrush", Brushes.LightGray),
             Margin = new Thickness(0, 20, 0, 20)
         };
 
@@ -282,17 +456,15 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         => new Border
         {
             Background = Brushes.Transparent,
+            ClipToBounds = true,
             Padding = new Thickness(0, 4),
             Margin = new Thickness(0, nested ? 4 : 8, 0, nested ? 8 : 16),
-            Child = new MathView
+            Child = new ApplicateWrappingMathView(
+                block.Tex,
+                MathFontSize(),
+                TextColor())
             {
-                LaTeX = block.Tex,
-                FontSize = MathFontSize(),
-                TextColor = TextColor(),
-                ErrorColor = Colors.OrangeRed,
-                DisplayErrorInline = true,
-                HorizontalAlignment = HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Center
+                AvailableContentWidth = AvailableContentWidth
             }
         };
 
@@ -312,9 +484,12 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         => (float)SysMath.Round(ReadingPreferences.FontSize * MathFontScale, 1, MidpointRounding.AwayFromZero);
 
     private Control BuildNativeBlock(MarkdownBlock block)
+        => BuildNativeDocument([block]);
+
+    private Control BuildNativeDocument(IReadOnlyList<MarkdownBlock> blocks)
         => new MarkdownDocumentView
         {
-            Document = new RenderedMarkdownDocument([block], Document?.BaseDirectory),
+            Document = new RenderedMarkdownDocument(blocks, Document?.BaseDirectory),
             DocumentPadding = new Thickness(0),
             ReadingPreferences = ReadingPreferences,
             ImageSourceResolver = ImageSourceResolver,
@@ -362,8 +537,8 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
     private Control BuildInlineCode(string text)
         => new Border
         {
-            Background = Brush("MmInlineCodeBackgroundBrush", new SolidColorBrush(Color.FromRgb(246, 243, 239))),
-            BorderBrush = Brush("MmInlineCodeBorderBrush", Brushes.LightGray),
+            Background = Brush("MmCodeBackgroundBrush", new SolidColorBrush(Color.FromRgb(246, 243, 239))),
+            BorderBrush = Brush("MmCodeBorderBrush", Brushes.LightGray),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(4),
             Padding = new Thickness(4, 1),
@@ -490,6 +665,35 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
             : !string.IsNullOrWhiteSpace(image.Title)
                 ? image.Title
                 : string.IsNullOrWhiteSpace(image.Url) ? "image" : image.Url;
+
+    private static bool ContainsApplicateMath(RenderedMarkdownDocument document)
+        => document.Blocks.Any(ContainsApplicateMath);
+
+    private static bool ContainsApplicateMath(MarkdownBlock block)
+        => block switch
+        {
+            ApplicateMathBlock => true,
+            MarkdownHeadingBlock heading => ContainsApplicateMath(heading.Inlines),
+            MarkdownParagraphBlock paragraph => ContainsApplicateMath(paragraph.Inlines),
+            MarkdownQuoteBlock quote => quote.Blocks.Any(ContainsApplicateMath),
+            MarkdownListBlock list => list.Items.Any(item => item.Blocks.Any(ContainsApplicateMath)),
+            MarkdownTableBlock table => table.Header.Any(ContainsApplicateMath)
+                || table.Rows.Any(row => row.Any(ContainsApplicateMath)),
+            _ => false
+        };
+
+    private static bool ContainsApplicateMath(MarkdownTableCell cell)
+        => ContainsApplicateMath(cell.Inlines);
+
+    private static bool ContainsApplicateMath(IReadOnlyList<MarkdownInline> inlines)
+        => inlines.Any(inline => inline switch
+        {
+            ApplicateMathInline => true,
+            MarkdownStrongInline strong => ContainsApplicateMath(strong.Inlines),
+            MarkdownEmphasisInline emphasis => ContainsApplicateMath(emphasis.Inlines),
+            MarkdownLinkInline link => ContainsApplicateMath(link.Inlines),
+            _ => false
+        });
 
     private FontFamily ResolveBodyFontFamily()
         => ReadingPreferences.FontFamily switch

@@ -62,22 +62,72 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
                 continue;
             }
 
-            result.Append(InlineMathPattern.Replace(line, match =>
-            {
-                var tex = match.Groups[2].Success ? match.Groups[2].Value : match.Groups[3].Value;
-                if (string.IsNullOrWhiteSpace(tex))
-                {
-                    return match.Value;
-                }
-
-                var index = replacements.Count;
-                replacements.Add(index, NormalizeTexForRenderer(tex.Trim()));
-                return $"@@APPLICATE_MATH_{index}@@";
-            }));
+            AppendLineWithProtectedInlineMath(result, line, replacements);
         }
 
         inlineMath = replacements;
         return result.ToString();
+    }
+
+    private static void AppendLineWithProtectedInlineMath(
+        StringBuilder result,
+        string line,
+        Dictionary<int, string> replacements)
+    {
+        var cursor = 0;
+        while (cursor < line.Length)
+        {
+            if (line[cursor] == '`')
+            {
+                var codeSpanEnd = FindCodeSpanEnd(line, cursor);
+                if (codeSpanEnd is null)
+                {
+                    result.Append(line.AsSpan(cursor));
+                    return;
+                }
+
+                result.Append(line.AsSpan(cursor, codeSpanEnd.Value - cursor));
+                cursor = codeSpanEnd.Value;
+                continue;
+            }
+
+            var nextCodeSpan = line.IndexOf('`', cursor);
+            var segmentEnd = nextCodeSpan < 0 ? line.Length : nextCodeSpan;
+            AppendProtectedInlineMathSegment(result, line[cursor..segmentEnd], replacements);
+            cursor = segmentEnd;
+        }
+    }
+
+    private static int? FindCodeSpanEnd(string line, int startIndex)
+    {
+        var runLength = 0;
+        while (startIndex + runLength < line.Length && line[startIndex + runLength] == '`')
+        {
+            runLength++;
+        }
+
+        var marker = new string('`', runLength);
+        var closingIndex = line.IndexOf(marker, startIndex + runLength, StringComparison.Ordinal);
+        return closingIndex < 0 ? null : closingIndex + runLength;
+    }
+
+    private static void AppendProtectedInlineMathSegment(
+        StringBuilder result,
+        string text,
+        Dictionary<int, string> replacements)
+    {
+        result.Append(InlineMathPattern.Replace(text, match =>
+        {
+            var tex = match.Groups[2].Success ? match.Groups[2].Value : match.Groups[3].Value;
+            if (string.IsNullOrWhiteSpace(tex))
+            {
+                return match.Value;
+            }
+
+            var index = replacements.Count;
+            replacements.Add(index, NormalizeTexForRenderer(tex.Trim()));
+            return $"@@APPLICATE_MATH_{index}@@";
+        }));
     }
 
     private static IReadOnlyList<MarkdownBlock> RestoreInlineMath(
