@@ -1,0 +1,510 @@
+using System.Text;
+using System.Text.RegularExpressions;
+using MarkMello.Application.Abstractions;
+using MarkMello.Domain;
+using MarkMello.Infrastructure.Markdown;
+
+namespace MarkMello.Applicate.Desktop.Math;
+
+public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRenderer
+{
+    private static readonly Regex InlineMathPattern = new(
+        @"(?<!\\)(\$(?!\$)(.+?)(?<!\\)\$|\\\((.+?)\\\))",
+        RegexOptions.Compiled | RegexOptions.Singleline);
+
+    private static readonly Regex InlineMathTokenPattern = new(
+        @"@@APPLICATE_MATH_(\d+)@@",
+        RegexOptions.Compiled);
+
+    private readonly IMarkdownDocumentRenderer _inner = new MarkdigMarkdownDocumentRenderer();
+
+    public RenderedMarkdownDocument Render(string markdown) => Render(markdown, baseDirectory: null);
+
+    public RenderedMarkdownDocument Render(string markdown, string? baseDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(markdown))
+        {
+            return RenderedMarkdownDocument.Empty;
+        }
+
+        var blocks = new List<MarkdownBlock>();
+        foreach (var segment in SplitDisplayMath(markdown))
+        {
+            if (segment.IsMath)
+            {
+                blocks.Add(new ApplicateMathBlock(NormalizeTexForRenderer(segment.Text)));
+                continue;
+            }
+
+            var protectedText = ProtectInlineMath(segment.Text, out var inlineMath);
+            var rendered = _inner.Render(protectedText, baseDirectory);
+            blocks.AddRange(inlineMath.Count == 0
+                ? rendered.Blocks
+                : RestoreInlineMath(rendered.Blocks, inlineMath));
+        }
+
+        return new RenderedMarkdownDocument(blocks, baseDirectory);
+    }
+
+    private static string ProtectInlineMath(string markdown, out IReadOnlyDictionary<int, string> inlineMath)
+    {
+        var replacements = new Dictionary<int, string>();
+        var result = new StringBuilder(markdown.Length);
+        var inFence = false;
+        var fenceMarker = string.Empty;
+
+        foreach (var line in ReadLinesWithEndings(markdown))
+        {
+            var trimmed = line.Trim();
+            if (TryToggleFence(trimmed, ref inFence, ref fenceMarker) || inFence)
+            {
+                result.Append(line);
+                continue;
+            }
+
+            result.Append(InlineMathPattern.Replace(line, match =>
+            {
+                var tex = match.Groups[2].Success ? match.Groups[2].Value : match.Groups[3].Value;
+                if (string.IsNullOrWhiteSpace(tex))
+                {
+                    return match.Value;
+                }
+
+                var index = replacements.Count;
+                replacements.Add(index, NormalizeTexForRenderer(tex.Trim()));
+                return $"@@APPLICATE_MATH_{index}@@";
+            }));
+        }
+
+        inlineMath = replacements;
+        return result.ToString();
+    }
+
+    private static IReadOnlyList<MarkdownBlock> RestoreInlineMath(
+        IReadOnlyList<MarkdownBlock> blocks,
+        IReadOnlyDictionary<int, string> inlineMath)
+        => blocks.Select(block => RestoreInlineMath(block, inlineMath)).ToList();
+
+    private static MarkdownBlock RestoreInlineMath(
+        MarkdownBlock block,
+        IReadOnlyDictionary<int, string> inlineMath)
+        => block switch
+        {
+            MarkdownHeadingBlock heading => heading with { Inlines = RestoreInlineMath(heading.Inlines, inlineMath) },
+            MarkdownParagraphBlock paragraph => paragraph with { Inlines = RestoreInlineMath(paragraph.Inlines, inlineMath) },
+            MarkdownQuoteBlock quote => quote with { Blocks = RestoreInlineMath(quote.Blocks, inlineMath) },
+            MarkdownListBlock list => list with
+            {
+                Items = list.Items.Select(item => item with
+                {
+                    Blocks = RestoreInlineMath(item.Blocks, inlineMath)
+                }).ToList()
+            },
+            MarkdownTableBlock table => table with
+            {
+                Header = table.Header.Select(cell => cell with
+                {
+                    Inlines = RestoreInlineMath(cell.Inlines, inlineMath)
+                }).ToList(),
+                Rows = table.Rows.Select(row => row.Select(cell => cell with
+                {
+                    Inlines = RestoreInlineMath(cell.Inlines, inlineMath)
+                }).ToList()).ToList()
+            },
+            _ => block
+        };
+
+    private static IReadOnlyList<MarkdownInline> RestoreInlineMath(
+        IReadOnlyList<MarkdownInline> inlines,
+        IReadOnlyDictionary<int, string> inlineMath)
+    {
+        var result = new List<MarkdownInline>();
+        foreach (var inline in inlines)
+        {
+            AddRestoredInline(result, inline, inlineMath);
+        }
+
+        return result;
+    }
+
+    private static void AddRestoredInline(
+        List<MarkdownInline> result,
+        MarkdownInline inline,
+        IReadOnlyDictionary<int, string> inlineMath)
+    {
+        switch (inline)
+        {
+            case MarkdownTextInline text:
+                AddRestoredTextInline(result, text.Text, inlineMath);
+                return;
+
+            case MarkdownStrongInline strong:
+                result.Add(strong with { Inlines = RestoreInlineMath(strong.Inlines, inlineMath) });
+                return;
+
+            case MarkdownEmphasisInline emphasis:
+                result.Add(emphasis with { Inlines = RestoreInlineMath(emphasis.Inlines, inlineMath) });
+                return;
+
+            case MarkdownLinkInline link:
+                result.Add(link with { Inlines = RestoreInlineMath(link.Inlines, inlineMath) });
+                return;
+
+            default:
+                result.Add(inline);
+                return;
+        }
+    }
+
+    private static void AddRestoredTextInline(
+        List<MarkdownInline> result,
+        string text,
+        IReadOnlyDictionary<int, string> inlineMath)
+    {
+        var cursor = 0;
+        foreach (Match match in InlineMathTokenPattern.Matches(text))
+        {
+            if (match.Index > cursor)
+            {
+                result.Add(new MarkdownTextInline(text[cursor..match.Index]));
+            }
+
+            var index = int.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+            if (inlineMath.TryGetValue(index, out var tex))
+            {
+                result.Add(new ApplicateMathInline(tex));
+            }
+            else
+            {
+                result.Add(new MarkdownTextInline(match.Value));
+            }
+
+            cursor = match.Index + match.Length;
+        }
+
+        if (cursor < text.Length)
+        {
+            result.Add(new MarkdownTextInline(text[cursor..]));
+        }
+    }
+
+    public static string NormalizeTexForRenderer(string tex)
+    {
+        ArgumentNullException.ThrowIfNull(tex);
+
+        var normalized = tex
+            .Replace(@"\tfrac", @"\frac", StringComparison.Ordinal)
+            .Replace(@"\dfrac", @"\frac", StringComparison.Ordinal)
+            .Replace(@"^{\prime}", "'", StringComparison.Ordinal)
+            .Replace(@"^\prime", "'", StringComparison.Ordinal);
+
+        return StripUnsupportedBraceAnnotations(normalized);
+    }
+
+    private static string StripUnsupportedBraceAnnotations(string tex)
+    {
+        var result = new StringBuilder(tex.Length);
+        var index = 0;
+
+        while (index < tex.Length)
+        {
+            if (TryReadBraceAnnotation(tex, index, @"\underbrace", out var body, out var nextIndex) ||
+                TryReadBraceAnnotation(tex, index, @"\overbrace", out body, out nextIndex))
+            {
+                result.Append(StripUnsupportedBraceAnnotations(body));
+                index = nextIndex;
+                continue;
+            }
+
+            result.Append(tex[index]);
+            index++;
+        }
+
+        return result.ToString();
+    }
+
+    private static bool TryReadBraceAnnotation(
+        string tex,
+        int startIndex,
+        string command,
+        out string body,
+        out int nextIndex)
+    {
+        body = string.Empty;
+        nextIndex = startIndex;
+
+        if (!tex.AsSpan(startIndex).StartsWith(command, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var cursor = startIndex + command.Length;
+        if (cursor < tex.Length && char.IsLetter(tex[cursor]))
+        {
+            return false;
+        }
+
+        cursor = SkipWhitespace(tex, cursor);
+        if (cursor >= tex.Length || tex[cursor] != '{')
+        {
+            return false;
+        }
+
+        if (!TryReadBalancedGroup(tex, cursor, out body, out cursor))
+        {
+            return false;
+        }
+
+        nextIndex = ConsumeOptionalBraceAnnotationLabel(tex, cursor);
+        return true;
+    }
+
+    private static int ConsumeOptionalBraceAnnotationLabel(string tex, int index)
+    {
+        var cursor = SkipWhitespace(tex, index);
+        if (cursor >= tex.Length || (tex[cursor] != '_' && tex[cursor] != '^'))
+        {
+            return index;
+        }
+
+        cursor = SkipWhitespace(tex, cursor + 1);
+        if (cursor >= tex.Length)
+        {
+            return cursor;
+        }
+
+        if (tex[cursor] == '{' && TryReadBalancedGroup(tex, cursor, out _, out var afterGroup))
+        {
+            return afterGroup;
+        }
+
+        return cursor + 1;
+    }
+
+    private static bool TryReadBalancedGroup(string tex, int openBraceIndex, out string body, out int nextIndex)
+    {
+        body = string.Empty;
+        nextIndex = openBraceIndex;
+
+        if (openBraceIndex >= tex.Length || tex[openBraceIndex] != '{')
+        {
+            return false;
+        }
+
+        var depth = 0;
+        for (var index = openBraceIndex; index < tex.Length; index++)
+        {
+            var ch = tex[index];
+            if (ch == '\\')
+            {
+                index++;
+                continue;
+            }
+
+            if (ch == '{')
+            {
+                depth++;
+                continue;
+            }
+
+            if (ch != '}')
+            {
+                continue;
+            }
+
+            depth--;
+            if (depth == 0)
+            {
+                body = tex[(openBraceIndex + 1)..index];
+                nextIndex = index + 1;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static int SkipWhitespace(string tex, int index)
+    {
+        while (index < tex.Length && char.IsWhiteSpace(tex[index]))
+        {
+            index++;
+        }
+
+        return index;
+    }
+
+    private static IEnumerable<MarkdownSegment> SplitDisplayMath(string markdown)
+    {
+        var text = new StringBuilder();
+        var math = new StringBuilder();
+        var inMath = false;
+        var inFence = false;
+        var fenceMarker = string.Empty;
+
+        foreach (var line in ReadLinesWithEndings(markdown))
+        {
+            var trimmed = line.Trim();
+
+            if (!inMath && TryToggleFence(trimmed, ref inFence, ref fenceMarker))
+            {
+                text.Append(line);
+                continue;
+            }
+
+            if (!inFence && trimmed == "$$")
+            {
+                if (inMath)
+                {
+                    yield return new MarkdownSegment(math.ToString().Trim(), IsMath: true);
+                    math.Clear();
+                    inMath = false;
+                }
+                else
+                {
+                    if (text.Length > 0)
+                    {
+                        yield return new MarkdownSegment(text.ToString(), IsMath: false);
+                        text.Clear();
+                    }
+                    inMath = true;
+                }
+                continue;
+            }
+
+            if (!inFence && TryReadSingleLineDisplayMath(trimmed, out var singleLineMath))
+            {
+                if (text.Length > 0)
+                {
+                    yield return new MarkdownSegment(text.ToString(), IsMath: false);
+                    text.Clear();
+                }
+                yield return new MarkdownSegment(singleLineMath, IsMath: true);
+                continue;
+            }
+
+            if (!inFence && TryReadStandaloneInlineMath(trimmed, out var standaloneInlineMath))
+            {
+                if (text.Length > 0)
+                {
+                    yield return new MarkdownSegment(text.ToString(), IsMath: false);
+                    text.Clear();
+                }
+                yield return new MarkdownSegment(standaloneInlineMath, IsMath: true);
+                continue;
+            }
+
+            if (inMath)
+            {
+                math.Append(line);
+            }
+            else
+            {
+                text.Append(line);
+            }
+        }
+
+        if (inMath)
+        {
+            text.AppendLine("$$");
+            text.Append(math);
+        }
+
+        if (text.Length > 0)
+        {
+            yield return new MarkdownSegment(text.ToString(), IsMath: false);
+        }
+    }
+
+    private static bool TryToggleFence(string trimmed, ref bool inFence, ref string fenceMarker)
+    {
+        if (trimmed.Length < 3)
+        {
+            return false;
+        }
+
+        var markerChar = trimmed[0];
+        if (markerChar is not ('`' or '~'))
+        {
+            return false;
+        }
+
+        var markerLength = 0;
+        while (markerLength < trimmed.Length && trimmed[markerLength] == markerChar)
+        {
+            markerLength++;
+        }
+
+        if (markerLength < 3)
+        {
+            return false;
+        }
+
+        var marker = new string(markerChar, markerLength);
+        if (!inFence)
+        {
+            inFence = true;
+            fenceMarker = marker;
+            return true;
+        }
+
+        if (!trimmed.StartsWith(fenceMarker, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        inFence = false;
+        fenceMarker = string.Empty;
+        return true;
+    }
+
+    private static bool TryReadSingleLineDisplayMath(string trimmed, out string tex)
+    {
+        tex = string.Empty;
+        if (trimmed.Length <= 4 || !trimmed.StartsWith("$$", StringComparison.Ordinal) || !trimmed.EndsWith("$$", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        tex = trimmed[2..^2].Trim();
+        return tex.Length > 0;
+    }
+
+    private static bool TryReadStandaloneInlineMath(string trimmed, out string tex)
+    {
+        tex = string.Empty;
+        if (trimmed.Length <= 2
+            || !trimmed.StartsWith('$')
+            || !trimmed.EndsWith('$')
+            || trimmed.StartsWith("$$", StringComparison.Ordinal)
+            || trimmed.EndsWith("$$", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        tex = trimmed[1..^1].Trim();
+        return tex.Length > 0;
+    }
+
+    private static IEnumerable<string> ReadLinesWithEndings(string text)
+    {
+        var start = 0;
+        for (var index = 0; index < text.Length; index++)
+        {
+            if (text[index] != '\n')
+            {
+                continue;
+            }
+
+            yield return text[start..(index + 1)];
+            start = index + 1;
+        }
+
+        if (start < text.Length)
+        {
+            yield return text[start..];
+        }
+    }
+
+    private readonly record struct MarkdownSegment(string Text, bool IsMath);
+}
