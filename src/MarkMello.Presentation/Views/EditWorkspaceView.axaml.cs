@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -12,10 +13,13 @@ namespace MarkMello.Presentation.Views;
 
 public partial class EditWorkspaceView : UserControl
 {
-    private const double ScrollSyncTopInset = 24;
+    private const double ScrollSyncViewportAnchorRatio = 0.38;
+    private const double ScrollSyncMinViewportAnchorY = 24;
+    private const double ScrollSyncHitTestX = 2;
     private const int MaxScrollSyncAttachAttempts = 4;
 
     private TextBox? _editorTextBox;
+    private TextPresenter? _editorTextPresenter;
     private ScrollViewer? _editorScrollViewer;
     private ScrollViewer? _previewScrollViewer;
     private MarkdownDocumentView? _previewDocumentView;
@@ -65,12 +69,23 @@ public partial class EditWorkspaceView : UserControl
         _editorTextBox = this.FindControl<TextBox>("EditorTextBox");
         _previewScrollViewer = this.FindControl<ScrollViewer>("PreviewScrollViewer");
         _previewDocumentView = this.FindControl<MarkdownDocumentView>("PreviewDocumentView");
-        _editorScrollViewer = _editorTextBox?
+        var editorVisuals = _editorTextBox?
             .GetVisualDescendants()
+            .ToArray();
+        _editorScrollViewer = editorVisuals?
             .OfType<ScrollViewer>()
             .FirstOrDefault();
+        _editorTextPresenter = editorVisuals?
+            .OfType<TextPresenter>()
+            .FirstOrDefault(static presenter => presenter.Name == "PART_TextPresenter")
+            ?? editorVisuals?
+                .OfType<TextPresenter>()
+                .FirstOrDefault();
 
-        if (_editorScrollViewer is null || _previewScrollViewer is null || _previewDocumentView is null)
+        if (_editorScrollViewer is null
+            || _editorTextPresenter is null
+            || _previewScrollViewer is null
+            || _previewDocumentView is null)
         {
             if (attempt < MaxScrollSyncAttachAttempts)
             {
@@ -107,6 +122,7 @@ public partial class EditWorkspaceView : UserControl
         }
 
         _editorTextBox = null;
+        _editorTextPresenter = null;
         _editorScrollViewer = null;
         _previewScrollViewer = null;
         _previewDocumentView = null;
@@ -143,61 +159,167 @@ public partial class EditWorkspaceView : UserControl
 
     private void SynchronizePreviewToEditor()
     {
-        if (_editorTextBox is null
-            || _editorScrollViewer is null
-            || _previewScrollViewer is null
+        if (_previewScrollViewer is null
             || _previewDocumentView is null
-            || !_previewDocumentView.TryGetVerticalOffsetForSourceLine(GetEditorTopSourceLine(), out var previewDocumentOffsetY))
+            || !TryGetEditorSourceLineAtViewportAnchor(out var sourceLine)
+            || !_previewDocumentView.TryGetVerticalOffsetForSourceLine(sourceLine, out var previewDocumentOffsetY)
+            || !TryGetViewportRelativeOriginY(_previewDocumentView, _previewScrollViewer, out var previewDocumentOriginY))
         {
             return;
         }
 
-        var previewDocumentOriginY = GetPreviewDocumentContentOriginY();
-        SetSynchronizedVerticalOffset(
-            _previewScrollViewer,
-            previewDocumentOriginY + previewDocumentOffsetY - ScrollSyncTopInset);
+        var targetOffsetY = _previewScrollViewer.Offset.Y
+            + previewDocumentOriginY
+            + previewDocumentOffsetY
+            - GetViewportAnchorY(_previewScrollViewer);
+        SetSynchronizedVerticalOffset(_previewScrollViewer, targetOffsetY);
     }
 
     private void SynchronizeEditorToPreview()
     {
-        if (_editorTextBox is null
-            || _editorScrollViewer is null
-            || _previewScrollViewer is null
-            || _previewDocumentView is null)
+        if (_previewScrollViewer is null
+            || _previewDocumentView is null
+            || !TryGetViewportRelativeOriginY(_previewDocumentView, _previewScrollViewer, out var previewDocumentOriginY))
         {
             return;
         }
 
         var previewDocumentOffsetY = Math.Max(
             0,
-            _previewScrollViewer.Offset.Y - GetPreviewDocumentContentOriginY() + ScrollSyncTopInset);
+            GetViewportAnchorY(_previewScrollViewer) - previewDocumentOriginY);
 
-        if (!_previewDocumentView.TryGetSourceLineForVerticalOffset(previewDocumentOffsetY, out var sourceLine))
+        if (!_previewDocumentView.TryGetSourceLineForVerticalOffset(previewDocumentOffsetY, out var sourceLine)
+            || !TryGetEditorVerticalOffsetForSourceLine(sourceLine, out var editorOffsetY))
         {
             return;
         }
 
-        sourceLine = Math.Clamp(sourceLine, 0, Math.Max(0, CountEditorSourceLines() - 1));
-        SetSynchronizedVerticalOffset(
-            _editorScrollViewer,
-            sourceLine * ResolveEditorLineHeight(_editorTextBox));
+        SetSynchronizedVerticalOffset(_editorScrollViewer!, editorOffsetY);
     }
 
-    private int GetEditorTopSourceLine()
+    private bool TryGetEditorSourceLineAtViewportAnchor(out int sourceLine)
     {
-        if (_editorTextBox is null || _editorScrollViewer is null)
+        sourceLine = 0;
+        if (_editorTextBox is null
+            || _editorTextPresenter is null
+            || _editorScrollViewer is null
+            || !TryGetViewportRelativeOriginY(_editorTextPresenter, _editorScrollViewer, out var presenterOriginY))
+        {
+            return false;
+        }
+
+        var text = _editorTextBox.Text ?? string.Empty;
+        var localY = Math.Clamp(
+            GetViewportAnchorY(_editorScrollViewer) - presenterOriginY,
+            0,
+            Math.Max(0, _editorTextPresenter.Bounds.Height - 1));
+        var localX = Math.Clamp(
+            ScrollSyncHitTestX,
+            0,
+            Math.Max(0, _editorTextPresenter.Bounds.Width - 1));
+
+        var hit = _editorTextPresenter.TextLayout.HitTestPoint(new Point(localX, localY));
+        var characterIndex = Math.Clamp(hit.TextPosition, 0, text.Length);
+        sourceLine = GetSourceLineFromCharacterIndex(text, characterIndex);
+        sourceLine = Math.Clamp(sourceLine, 0, Math.Max(0, CountSourceLines(text) - 1));
+        return true;
+    }
+
+    private bool TryGetEditorVerticalOffsetForSourceLine(int sourceLine, out double offsetY)
+    {
+        offsetY = 0;
+        if (_editorTextBox is null
+            || _editorTextPresenter is null
+            || _editorScrollViewer is null
+            || !TryGetViewportRelativeOriginY(_editorTextPresenter, _editorScrollViewer, out var presenterOriginY))
+        {
+            return false;
+        }
+
+        var text = _editorTextBox.Text ?? string.Empty;
+        var lineStartCharacterIndex = GetLineStartCharacterIndex(text, sourceLine);
+        var lineBounds = _editorTextPresenter.TextLayout.HitTestTextPosition(lineStartCharacterIndex);
+        offsetY = _editorScrollViewer.Offset.Y
+            + presenterOriginY
+            + lineBounds.Y
+            - GetViewportAnchorY(_editorScrollViewer);
+        return true;
+    }
+
+    private static bool TryGetViewportRelativeOriginY(Control control, Visual relativeTo, out double originY)
+    {
+        originY = 0;
+        var origin = control.TranslatePoint(new Point(0, 0), relativeTo);
+        if (origin is null)
+        {
+            return false;
+        }
+
+        originY = origin.Value.Y;
+        return true;
+    }
+
+    private static double GetViewportAnchorY(ScrollViewer scrollViewer)
+    {
+        var viewportHeight = Math.Max(0, scrollViewer.Bounds.Height);
+        if (viewportHeight <= 0)
+        {
+            return ScrollSyncMinViewportAnchorY;
+        }
+
+        if (viewportHeight <= ScrollSyncMinViewportAnchorY * 2)
+        {
+            return viewportHeight * 0.5;
+        }
+
+        return Math.Clamp(
+            viewportHeight * ScrollSyncViewportAnchorRatio,
+            ScrollSyncMinViewportAnchorY,
+            viewportHeight - ScrollSyncMinViewportAnchorY);
+    }
+
+    private static int GetSourceLineFromCharacterIndex(string text, int characterIndex)
+    {
+        var normalizedIndex = Math.Clamp(characterIndex, 0, text.Length);
+        var line = 0;
+        for (var index = 0; index < normalizedIndex; index++)
+        {
+            if (text[index] == '\n')
+            {
+                line++;
+            }
+        }
+
+        return line;
+    }
+
+    private static int GetLineStartCharacterIndex(string text, int sourceLine)
+    {
+        if (string.IsNullOrEmpty(text) || sourceLine <= 0)
         {
             return 0;
         }
 
-        var lineHeight = ResolveEditorLineHeight(_editorTextBox);
-        var sourceLine = (int)Math.Floor(Math.Max(0, _editorScrollViewer.Offset.Y + ScrollSyncTopInset) / lineHeight);
-        return Math.Clamp(sourceLine, 0, Math.Max(0, CountEditorSourceLines() - 1));
+        var currentLine = 0;
+        for (var index = 0; index < text.Length; index++)
+        {
+            if (text[index] != '\n')
+            {
+                continue;
+            }
+
+            currentLine++;
+            if (currentLine >= sourceLine)
+            {
+                return Math.Min(text.Length, index + 1);
+            }
+        }
+
+        return text.Length;
     }
 
-    private int CountEditorSourceLines()
+    private static int CountSourceLines(string text)
     {
-        var text = _editorTextBox?.Text;
         if (string.IsNullOrEmpty(text))
         {
             return 1;
@@ -213,19 +335,6 @@ public partial class EditWorkspaceView : UserControl
         }
 
         return count;
-    }
-
-    private double GetPreviewDocumentContentOriginY()
-    {
-        if (_previewDocumentView is null || _previewScrollViewer is null)
-        {
-            return 0;
-        }
-
-        var origin = _previewDocumentView.TranslatePoint(new Point(0, 0), _previewScrollViewer);
-        return origin is null
-            ? 0
-            : _previewScrollViewer.Offset.Y + origin.Value.Y;
     }
 
     private void SetSynchronizedVerticalOffset(ScrollViewer scrollViewer, double offsetY)
@@ -247,9 +356,6 @@ public partial class EditWorkspaceView : UserControl
             _isSynchronizingScroll = false;
         }
     }
-
-    private static double ResolveEditorLineHeight(TextBox editor)
-        => Math.Max(1, editor.FontSize * 1.45);
 
     private void OnFormatButtonClick(object? sender, RoutedEventArgs e)
     {
