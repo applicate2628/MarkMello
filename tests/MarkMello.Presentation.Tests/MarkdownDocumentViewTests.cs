@@ -2,6 +2,7 @@ using MarkMello.Domain;
 using MarkMello.Presentation.Views;
 using MarkMello.Presentation.Views.Markdown;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 
 namespace MarkMello.Presentation.Tests;
 
@@ -128,6 +129,34 @@ public sealed class MarkdownDocumentViewTests
 
         Assert.True(view.Focusable);
         Assert.True(view.IsTabStop);
+    }
+
+    [Fact]
+    public void CodeBlockUsesDedicatedHorizontalScrollViewer()
+    {
+        var document = new RenderedMarkdownDocument(
+        [
+            new MarkdownCodeBlock(string.Empty, "var veryLongIdentifierName = \"this line should scroll horizontally instead of wrapping\";")
+        ]);
+
+        var view = CreateView(document);
+
+        var viewport = Assert.IsType<Border>(view.Content);
+        var root = Assert.IsType<StackPanel>(viewport.Child);
+        var codeBlock = Assert.IsType<Border>(Assert.Single(root.Children));
+        var body = Assert.IsType<StackPanel>(codeBlock.Child);
+        var scrollViewer = Assert.IsType<ScrollViewer>(Assert.Single(body.Children));
+
+        Assert.Equal(ScrollBarVisibility.Auto, scrollViewer.HorizontalScrollBarVisibility);
+        Assert.Equal(ScrollBarVisibility.Disabled, scrollViewer.VerticalScrollBarVisibility);
+    }
+
+    [Fact]
+    public void SelectionPointerPolicyIgnoresScrollBarChrome()
+    {
+        Assert.True(MarkdownDocumentView.IsPointerInputFromScrollBarChrome(new ScrollBar()));
+        Assert.False(MarkdownDocumentView.IsPointerInputFromScrollBarChrome(new Border()));
+        Assert.False(MarkdownDocumentView.IsPointerInputFromScrollBarChrome(null));
     }
 
     [Fact]

@@ -1024,6 +1024,11 @@ public sealed class MarkdownDocumentView : UserControl
 
     private void OnPointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        if (IsPointerInputFromScrollBarChrome(e.Source))
+        {
+            return;
+        }
+
         if (!TryResolveFragment(e.GetPosition(this), out var fragment, out var localPosition))
         {
             return;
@@ -1434,6 +1439,16 @@ public sealed class MarkdownDocumentView : UserControl
         return new Point(
             Math.Clamp(point.X, 0, width),
             Math.Clamp(point.Y, 0, height - 1));
+    }
+
+    internal static bool IsPointerInputFromScrollBarChrome(object? source)
+    {
+        if (source is not Control control)
+        {
+            return false;
+        }
+
+        return control is ScrollBar || control.FindAncestorOfType<ScrollBar>() is not null;
     }
 
     private static bool HasCommandModifier(KeyModifiers modifiers)
