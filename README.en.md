@@ -21,12 +21,12 @@ MarkMello Applicate keeps the baseline MarkMello features:
 
 Applicate additions:
 
-- render inline and display TeX formulas in Markdown;
-- normalize common TeX aliases that the current renderer path does not accept directly;
-- wrap long display formulas at top-level math separators instead of shrinking them to an unreadable scale;
+- add an optional WebView/KaTeX renderer for inline and display TeX formulas in Markdown;
+- render Markdown locally: documents, generated HTML, KaTeX assets, and temporary WebView files stay on the user's machine, while remote image links in WebView render as placeholders;
+- keep the native renderer as a fallback and compatibility mode;
 - add flexible reader-width resizing by dragging the content edge while preserving the original Narrow, Medium, and Wide presets;
-- preserve minimap behavior for the Applicate viewer path;
-- delegate Markdown blocks without Applicate formulas back to the original `MarkdownDocumentView`, keeping ordinary reading closer to upstream behavior.
+- add a WebView minimap while preserving the native minimap for the native renderer;
+- keep reading, resize, theme, edit preview, and Native/WebView switching synchronized without a blank frame.
 
 ## How it differs from regular Markdown editors
 
@@ -100,11 +100,19 @@ open /Applications/MarkMello.app
 
 ## Build from source
 
-.NET SDK 9 is required.
+.NET SDK 10 is required. Node.js/npm is also required when rebuilding the WebView renderer assets.
 
 ```bash
 dotnet restore ./MarkMello.sln
 dotnet build ./MarkMello.sln
+```
+
+If the TypeScript renderer changed:
+
+```bash
+npm --prefix ./src/MarkMello.Applicate.Desktop install
+npm --prefix ./src/MarkMello.Applicate.Desktop run check:renderer
+npm --prefix ./src/MarkMello.Applicate.Desktop run build:renderer
 ```
 
 Run the upstream project:

@@ -4,6 +4,17 @@ This folder captures the first release baseline from `ADR-0004`.
 
 ## Release matrix
 
+Applicate fork Windows assets:
+
+- `MarkMello.Applicate-setup-win-x64.exe`
+- `MarkMello.Applicate-setup-win-arm64.exe`
+
+The GitHub Actions release workflow currently publishes the Applicate Windows
+installer assets only. Applicate-branded macOS packaging is intentionally
+disabled until the fork has macOS-specific app bundle metadata and asset names.
+
+Upstream baseline assets:
+
 - `MarkMello-setup-win-x64.exe`
 - `MarkMello-setup-win-arm64.exe`
 - `MarkMello-macos-arm64.dmg`
@@ -47,6 +58,9 @@ dotnet publish .\src\MarkMello.Desktop\MarkMello.Desktop.csproj `
 Applicate fork example:
 
 ```powershell
+npm --prefix .\src\MarkMello.Applicate.Desktop install
+npm --prefix .\src\MarkMello.Applicate.Desktop run build:renderer
+
 dotnet publish .\src\MarkMello.Applicate.Desktop\MarkMello.Applicate.Desktop.csproj `
   -c Release -r win-x64 --self-contained true `
   -p:PublishSingleFile=false `
@@ -64,6 +78,9 @@ dotnet publish .\src\MarkMello.Applicate.Desktop\MarkMello.Applicate.Desktop.csp
 The Applicate installer installs as `MarkMello Applicate`, uses
 `MarkMello.Applicate.exe`, and has a fork-specific AppId and ProgId so it does
 not reuse the upstream MarkMello installer identity.
+
+The Applicate fork currently targets .NET SDK 10. Release workflows and local
+packaging hosts must install .NET 10, not the older upstream .NET 9 baseline.
 
 Local installer builds require Inno Setup 6. On Windows it can be installed with:
 
@@ -97,8 +114,7 @@ winget install --id JRSoftware.InnoSetup --source winget
 Example:
 
 ```powershell
-$py = "C:\Users\drmar\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
-& $py .\packaging\generate-icons.py
+py .\packaging\generate-icons.py
 ```
 
 ## Update source
@@ -107,8 +123,9 @@ The in-app `Settings -> Updates` flow reads GitHub Releases coordinates from the
 
 - `MarkMelloReleaseOwner`
 - `MarkMelloReleaseRepo`
+- `MarkMelloReleaseAssetPrefix`
 
-Those values default in `src/MarkMello.Desktop/MarkMello.Desktop.csproj`, and can be overridden in CI or local release builds with MSBuild properties.
+Those values default in the selected desktop project (`src/MarkMello.Desktop/MarkMello.Desktop.csproj` for upstream builds, `src/MarkMello.Applicate.Desktop/MarkMello.Applicate.Desktop.csproj` for Applicate builds), and can be overridden in CI or local release builds with MSBuild properties. Applicate uses `MarkMello.Applicate` as its update asset prefix.
 
 ## Signing and notarization
 

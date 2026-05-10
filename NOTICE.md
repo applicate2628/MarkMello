@@ -24,13 +24,15 @@ Applicate additions are distributed under GPL-3.0 as part of this fork.
 
 ## Current Applicate Functionality
 
-- TeX formula rendering for inline math and display math in Markdown files.
-- Compatibility normalization for common TeX aliases unsupported by the current
-  renderer path.
-- Long display formula wrapping across top-level math separators.
+- Optional WebView/KaTeX renderer for inline math and display math in Markdown
+  files.
+- Native renderer fallback and compatibility mode.
+- Local-only WebView renderer pipeline: generated HTML and bundled KaTeX assets
+  stay on the user's machine, and remote image links render as placeholders.
 - Flexible reader-width resizing while preserving the upstream Narrow, Medium,
   and Wide presets.
-- Overlay minimap support for the Applicate viewer path.
+- Native and WebView minimap support for the Applicate viewer path.
+- Smooth Native/WebView renderer switching without a blank preview frame.
 - Separate Windows installer metadata so the fork installs as `MarkMello Applicate`
   and does not reuse the upstream MarkMello AppId or ProgId.
 
@@ -39,6 +41,8 @@ Applicate additions are distributed under GPL-3.0 as part of this fork.
 - `AppId`: Inno Setup application identifier used by Windows installers.
 - `Applicate`: the fork-specific overlay maintained by Dmitry Denisenko.
 - `GPL-3.0`: GNU General Public License version 3.
+- `KaTeX`: local JavaScript/CSS math renderer used by the WebView backend.
 - `ProgId`: Windows file-association program identifier.
 - `TeX`: math notation syntax used by Markdown formula renderers.
 - `upstream`: the original MarkMello repository used as the update source.
+- `WebView`: embedded browser surface used only for Markdown document rendering.

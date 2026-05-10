@@ -21,12 +21,12 @@ MarkMello Applicate сохраняет базовые возможности Mar
 
 Applicate-добавления:
 
-- отображают inline- и display-формулы TeX в Markdown;
-- нормализуют распространенные TeX-алиасы, которые текущий renderer path не принимает напрямую;
-- переносят длинные display-формулы по верхнеуровневым математическим разделителям вместо сжатия до нечитаемого размера;
+- добавляют опциональный WebView/KaTeX renderer для inline- и display-формул TeX в Markdown;
+- рендерят Markdown локально: документы, HTML, KaTeX assets и временные WebView-файлы остаются на машине пользователя, а remote image links в WebView заменяются placeholder-ами;
+- сохраняют native renderer как fallback и как режим совместимости;
 - добавляют гибкое изменение ширины чтения перетаскиванием края, сохраняя исходные пресеты Narrow, Medium и Wide;
-- сохраняют minimap-поведение для Applicate viewer path;
-- делегируют Markdown-блоки без Applicate-формул обратно в оригинальный `MarkdownDocumentView`, чтобы обычное чтение оставалось ближе к upstream.
+- добавляют minimap для WebView renderer и сохраняют native minimap для native renderer;
+- синхронизируют чтение, resize, theme, edit preview и переключение Native/WebView без пустого кадра.
 
 ## Чем отличается от обычных Markdown-редакторов
 
@@ -100,11 +100,19 @@ open /Applications/MarkMello.app
 
 ## Сборка из исходников
 
-Требуется .NET SDK 9.
+Требуется .NET SDK 10. Для пересборки WebView renderer assets также нужен Node.js/npm.
 
 ```bash
 dotnet restore ./MarkMello.sln
 dotnet build ./MarkMello.sln
+```
+
+Если менялся TypeScript renderer:
+
+```bash
+npm --prefix ./src/MarkMello.Applicate.Desktop install
+npm --prefix ./src/MarkMello.Applicate.Desktop run check:renderer
+npm --prefix ./src/MarkMello.Applicate.Desktop run build:renderer
 ```
 
 Запуск upstream-проекта:

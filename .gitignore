@@ -24,11 +24,20 @@ Thumbs.db
 *.snupkg
 **/packages/
 
+# Node toolchain
+node_modules/
+
 # Avalonia
 *.axaml.bak
 
 # Logs
 *.log
+.scratch/
+.reports/**/*.png
+.reports/**/*.jpg
+.reports/**/*.jpeg
+.reports/**/*.webp
+.reports/**/*.gif
 
 # Other
 .editorconfig
