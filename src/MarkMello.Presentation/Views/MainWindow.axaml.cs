@@ -192,6 +192,11 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (e.Source is Visual source && IsInteractiveTitleBarSource(source))
+        {
+            return;
+        }
+
         try
         {
             BeginMoveDrag(e);
@@ -341,6 +346,19 @@ public partial class MainWindow : Window
         for (Visual? current = source; current is not null; current = current.GetVisualParent())
         {
             if (ReferenceEquals(current, target))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsInteractiveTitleBarSource(Visual source)
+    {
+        for (Visual? current = source; current is not null; current = current.GetVisualParent())
+        {
+            if (current is Button or ToggleButton or TextBox)
             {
                 return true;
             }

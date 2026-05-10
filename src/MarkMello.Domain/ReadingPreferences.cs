@@ -8,12 +8,16 @@ namespace MarkMello.Domain;
 /// <param name="LineHeight">Межстрочный интервал (множитель к размеру шрифта).</param>
 /// <param name="ContentWidth">Максимальная полезная ширина текста документа в пикселях.</param>
 /// <param name="DocumentMinimapMode">Режим отображения миникарты документа.</param>
+/// <param name="RendererBackend">Механизм рендеринга Markdown-документа.</param>
+/// <param name="WidthResizerVisibility">Когда показывать визуальную линию изменения ширины.</param>
 public sealed record ReadingPreferences(
     FontFamilyMode FontFamily,
     int FontSize,
     double LineHeight,
     int ContentWidth,
-    DocumentMinimapMode DocumentMinimapMode = DocumentMinimapMode.Auto)
+    DocumentMinimapMode DocumentMinimapMode = DocumentMinimapMode.Auto,
+    MarkdownRendererBackend RendererBackend = MarkdownRendererBackend.Native,
+    WidthResizerVisibility WidthResizerVisibility = WidthResizerVisibility.OnHover)
 {
     public const int MinFontSize = 14;
     public const int MaxFontSize = 24;
@@ -39,7 +43,9 @@ public sealed record ReadingPreferences(
         FontSize: 18,
         LineHeight: 1.7,
         ContentWidth: MediumContentWidth,
-        DocumentMinimapMode: DocumentMinimapMode.Auto);
+        DocumentMinimapMode: DocumentMinimapMode.Auto,
+        RendererBackend: MarkdownRendererBackend.Native,
+        WidthResizerVisibility: WidthResizerVisibility.OnHover);
 
     /// <summary>
     /// Нормализует пользовательские настройки до безопасного и предсказуемого диапазона.
@@ -62,8 +68,21 @@ public sealed record ReadingPreferences(
         var documentMinimapMode = Enum.IsDefined(preferences.DocumentMinimapMode)
             ? preferences.DocumentMinimapMode
             : Default.DocumentMinimapMode;
+        var rendererBackend = Enum.IsDefined(preferences.RendererBackend)
+            ? preferences.RendererBackend
+            : Default.RendererBackend;
+        var widthResizerVisibility = Enum.IsDefined(preferences.WidthResizerVisibility)
+            ? preferences.WidthResizerVisibility
+            : Default.WidthResizerVisibility;
 
-        return new ReadingPreferences(fontFamily, fontSize, lineHeight, contentWidth, documentMinimapMode);
+        return new ReadingPreferences(
+            fontFamily,
+            fontSize,
+            lineHeight,
+            contentWidth,
+            documentMinimapMode,
+            rendererBackend,
+            widthResizerVisibility);
     }
 
     public ReadingPreferences Normalize() => Normalize(this);

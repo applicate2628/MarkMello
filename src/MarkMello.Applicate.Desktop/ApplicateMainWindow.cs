@@ -15,6 +15,8 @@ public sealed class ApplicateMainWindow : MainWindow
         : base(viewModel, startupSmokeTestOptions, settings)
     {
         var viewerTemplate = new ApplicateViewerTemplate();
+        var editWorkspaceTemplate = new ApplicateEditWorkspaceTemplate();
+        DataTemplates.Insert(0, editWorkspaceTemplate);
         DataTemplates.Insert(0, viewerTemplate);
         InstallViewerHostTemplate(viewerTemplate);
         Opened += (_, _) => Title = $"{Title} [Applicate overlay]";

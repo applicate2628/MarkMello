@@ -444,6 +444,50 @@ public partial class MainWindowViewModel : ObservableObject
         }
     }
 
+    public WidthResizerVisibility SelectedWidthResizerVisibility
+    {
+        get => ReadingPreferences.WidthResizerVisibility;
+        set
+        {
+            if (ReadingPreferences.WidthResizerVisibility == value)
+            {
+                return;
+            }
+
+            ApplyReadingPreferences(ReadingPreferences with { WidthResizerVisibility = value });
+        }
+    }
+
+    public bool IsWidthResizerAlwaysSelected
+    {
+        get => ReadingPreferences.WidthResizerVisibility == WidthResizerVisibility.Always;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsWidthResizerAlwaysSelected));
+                return;
+            }
+
+            SelectedWidthResizerVisibility = WidthResizerVisibility.Always;
+        }
+    }
+
+    public bool IsWidthResizerOnHoverSelected
+    {
+        get => ReadingPreferences.WidthResizerVisibility == WidthResizerVisibility.OnHover;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsWidthResizerOnHoverSelected));
+                return;
+            }
+
+            SelectedWidthResizerVisibility = WidthResizerVisibility.OnHover;
+        }
+    }
+
 
     public DocumentMinimapMode SelectedDocumentMinimapMode
     {
@@ -501,6 +545,50 @@ public partial class MainWindowViewModel : ObservableObject
             }
 
             SelectedDocumentMinimapMode = DocumentMinimapMode.Off;
+        }
+    }
+
+    public MarkdownRendererBackend SelectedRendererBackend
+    {
+        get => ReadingPreferences.RendererBackend;
+        set
+        {
+            if (ReadingPreferences.RendererBackend == value)
+            {
+                return;
+            }
+
+            ApplyReadingPreferences(ReadingPreferences with { RendererBackend = value });
+        }
+    }
+
+    public bool IsNativeRendererSelected
+    {
+        get => ReadingPreferences.RendererBackend == MarkdownRendererBackend.Native;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsNativeRendererSelected));
+                return;
+            }
+
+            SelectedRendererBackend = MarkdownRendererBackend.Native;
+        }
+    }
+
+    public bool IsWebViewRendererSelected
+    {
+        get => ReadingPreferences.RendererBackend == MarkdownRendererBackend.WebView;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsWebViewRendererSelected));
+                return;
+            }
+
+            SelectedRendererBackend = MarkdownRendererBackend.WebView;
         }
     }
 
@@ -1038,10 +1126,16 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(IsNarrowWidthSelected));
         OnPropertyChanged(nameof(IsMediumWidthSelected));
         OnPropertyChanged(nameof(IsWideWidthSelected));
+        OnPropertyChanged(nameof(SelectedWidthResizerVisibility));
+        OnPropertyChanged(nameof(IsWidthResizerAlwaysSelected));
+        OnPropertyChanged(nameof(IsWidthResizerOnHoverSelected));
         OnPropertyChanged(nameof(SelectedDocumentMinimapMode));
         OnPropertyChanged(nameof(IsDocumentMinimapAutoSelected));
         OnPropertyChanged(nameof(IsDocumentMinimapOnSelected));
         OnPropertyChanged(nameof(IsDocumentMinimapOffSelected));
+        OnPropertyChanged(nameof(SelectedRendererBackend));
+        OnPropertyChanged(nameof(IsNativeRendererSelected));
+        OnPropertyChanged(nameof(IsWebViewRendererSelected));
     }
 
     private async Task OpenFileCoreAsync()

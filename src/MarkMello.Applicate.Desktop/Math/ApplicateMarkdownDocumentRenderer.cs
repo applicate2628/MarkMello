@@ -17,6 +17,17 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         RegexOptions.Compiled);
 
     private readonly IMarkdownDocumentRenderer _inner = new MarkdigMarkdownDocumentRenderer();
+    private readonly Func<string, string> _normalizeTex;
+
+    public ApplicateMarkdownDocumentRenderer()
+        : this(NormalizeTexForRenderer)
+    {
+    }
+
+    internal ApplicateMarkdownDocumentRenderer(Func<string, string> normalizeTex)
+    {
+        _normalizeTex = normalizeTex ?? throw new ArgumentNullException(nameof(normalizeTex));
+    }
 
     public RenderedMarkdownDocument Render(string markdown) => Render(markdown, baseDirectory: null);
 
@@ -32,11 +43,11 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         {
             if (segment.IsMath)
             {
-                blocks.Add(new ApplicateMathBlock(NormalizeTexForRenderer(segment.Text)));
+                blocks.Add(new ApplicateMathBlock(_normalizeTex(segment.Text)));
                 continue;
             }
 
-            var protectedText = ProtectInlineMath(segment.Text, out var inlineMath);
+            var protectedText = ProtectInlineMath(segment.Text, _normalizeTex, out var inlineMath);
             var rendered = _inner.Render(protectedText, baseDirectory);
             blocks.AddRange(inlineMath.Count == 0
                 ? rendered.Blocks
@@ -46,7 +57,10 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         return new RenderedMarkdownDocument(blocks, baseDirectory);
     }
 
-    private static string ProtectInlineMath(string markdown, out IReadOnlyDictionary<int, string> inlineMath)
+    private static string ProtectInlineMath(
+        string markdown,
+        Func<string, string> normalizeTex,
+        out IReadOnlyDictionary<int, string> inlineMath)
     {
         var replacements = new Dictionary<int, string>();
         var result = new StringBuilder(markdown.Length);
@@ -62,7 +76,7 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
                 continue;
             }
 
-            AppendLineWithProtectedInlineMath(result, line, replacements);
+            AppendLineWithProtectedInlineMath(result, line, replacements, normalizeTex);
         }
 
         inlineMath = replacements;
@@ -72,7 +86,8 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
     private static void AppendLineWithProtectedInlineMath(
         StringBuilder result,
         string line,
-        Dictionary<int, string> replacements)
+        Dictionary<int, string> replacements,
+        Func<string, string> normalizeTex)
     {
         var cursor = 0;
         while (cursor < line.Length)
@@ -93,7 +108,7 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
 
             var nextCodeSpan = line.IndexOf('`', cursor);
             var segmentEnd = nextCodeSpan < 0 ? line.Length : nextCodeSpan;
-            AppendProtectedInlineMathSegment(result, line[cursor..segmentEnd], replacements);
+            AppendProtectedInlineMathSegment(result, line[cursor..segmentEnd], replacements, normalizeTex);
             cursor = segmentEnd;
         }
     }
@@ -114,7 +129,8 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
     private static void AppendProtectedInlineMathSegment(
         StringBuilder result,
         string text,
-        Dictionary<int, string> replacements)
+        Dictionary<int, string> replacements,
+        Func<string, string> normalizeTex)
     {
         result.Append(InlineMathPattern.Replace(text, match =>
         {
@@ -125,7 +141,7 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
             }
 
             var index = replacements.Count;
-            replacements.Add(index, NormalizeTexForRenderer(tex.Trim()));
+            replacements.Add(index, normalizeTex(tex.Trim()));
             return $"@@APPLICATE_MATH_{index}@@";
         }));
     }

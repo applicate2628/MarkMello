@@ -11,6 +11,8 @@ public sealed class ReadingPreferencesTests
 
         Assert.Equal(ReadingPreferences.Default, normalized);
         Assert.Equal(DocumentMinimapMode.Auto, normalized.DocumentMinimapMode);
+        Assert.Equal(MarkdownRendererBackend.Native, normalized.RendererBackend);
+        Assert.Equal(WidthResizerVisibility.OnHover, normalized.WidthResizerVisibility);
     }
 
     [Fact]
@@ -30,6 +32,7 @@ public sealed class ReadingPreferencesTests
         Assert.Equal(ReadingPreferences.MinLineHeight, normalized.LineHeight);
         Assert.Equal(ReadingPreferences.MinContentWidth, normalized.ContentWidth);
         Assert.Equal(DocumentMinimapMode.Auto, normalized.DocumentMinimapMode);
+        Assert.Equal(WidthResizerVisibility.OnHover, normalized.WidthResizerVisibility);
     }
 
     [Theory]
@@ -44,6 +47,7 @@ public sealed class ReadingPreferencesTests
 
         Assert.Equal(expectedWidth, normalized.ContentWidth);
     }
+
     [Theory]
     [InlineData(DocumentMinimapMode.Auto)]
     [InlineData(DocumentMinimapMode.On)]
@@ -57,4 +61,37 @@ public sealed class ReadingPreferencesTests
         Assert.Equal(mode, normalized.DocumentMinimapMode);
     }
 
+    [Theory]
+    [InlineData(MarkdownRendererBackend.Native)]
+    [InlineData(MarkdownRendererBackend.WebView)]
+    public void NormalizePreservesKnownRendererBackend(MarkdownRendererBackend backend)
+    {
+        var candidate = ReadingPreferences.Default with { RendererBackend = backend };
+
+        var normalized = ReadingPreferences.Normalize(candidate);
+
+        Assert.Equal(backend, normalized.RendererBackend);
+    }
+
+    [Theory]
+    [InlineData(WidthResizerVisibility.Always)]
+    [InlineData(WidthResizerVisibility.OnHover)]
+    public void NormalizePreservesSupportedWidthResizerVisibility(WidthResizerVisibility visibility)
+    {
+        var candidate = ReadingPreferences.Default with { WidthResizerVisibility = visibility };
+
+        var normalized = ReadingPreferences.Normalize(candidate);
+
+        Assert.Equal(visibility, normalized.WidthResizerVisibility);
+    }
+
+    [Fact]
+    public void NormalizeUsesOnHoverForUnknownWidthResizerVisibility()
+    {
+        var candidate = ReadingPreferences.Default with { WidthResizerVisibility = (WidthResizerVisibility)42 };
+
+        var normalized = ReadingPreferences.Normalize(candidate);
+
+        Assert.Equal(WidthResizerVisibility.OnHover, normalized.WidthResizerVisibility);
+    }
 }

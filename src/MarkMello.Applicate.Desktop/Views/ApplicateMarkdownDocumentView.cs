@@ -56,6 +56,8 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         Background = Brushes.Transparent,
         HorizontalAlignment = HorizontalAlignment.Stretch
     };
+    private long _renderGeneration;
+    private bool _hasPendingRenderedNotification;
 
     static ApplicateMarkdownDocumentView()
     {
@@ -140,19 +142,9 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
                 DrawBorderMiniature(context, border, targetBounds, scaleX, scaleY);
             }
 
-            foreach (var text in _root.GetVisualDescendants().OfType<TextBlock>())
+            foreach (var control in _root.GetVisualDescendants().OfType<Control>().Where(IsMiniatureRenderableControl))
             {
-                DrawTextMiniature(context, text, targetBounds, scaleX, scaleY);
-            }
-
-            foreach (var text in _root.GetVisualDescendants().OfType<SelectableTextBlock>())
-            {
-                DrawTextMiniature(context, text, targetBounds, scaleX, scaleY);
-            }
-
-            foreach (var math in _root.GetVisualDescendants().OfType<MathView>())
-            {
-                DrawTextMiniature(context, math, targetBounds, scaleX, scaleY);
+                DrawControlMiniature(context, control, targetBounds, scaleX, scaleY);
             }
         }
     }
@@ -174,18 +166,21 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
     {
         DocumentRenderInvalidated?.Invoke(this, EventArgs.Empty);
         _root.Children.Clear();
+        LayoutUpdated -= OnLayoutUpdatedAfterDocumentRebuild;
+        _hasPendingRenderedNotification = false;
 
         var document = Document;
+        var generation = ++_renderGeneration;
         if (document is null || document.Blocks.Count == 0)
         {
-            QueueRenderedNotification();
+            QueueRenderedNotification(generation);
             return;
         }
 
         if (!ContainsApplicateMath(document))
         {
             _root.Children.Add(BuildNativeDocument(document.Blocks));
-            QueueRenderedNotification();
+            QueueRenderedNotification(generation);
             return;
         }
 
@@ -194,7 +189,7 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
             _root.Children.Add(BuildBlock(document.Blocks[index], nested: false));
         }
 
-        QueueRenderedNotification();
+        QueueRenderedNotification(generation);
     }
 
     private void OnAppearanceChanged(object? sender, EventArgs e)
@@ -238,7 +233,7 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         }
     }
 
-    private void DrawTextMiniature(
+    private void DrawControlMiniature(
         DrawingContext context,
         Control control,
         Rect targetBounds,
@@ -251,16 +246,17 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
             return;
         }
 
-        var target = MapMiniatureRect(bounds.Value, targetBounds, scaleX, scaleY);
-        if (target.Width <= 0 || target.Height <= 0)
-        {
-            return;
-        }
+        var matrix = new Matrix(
+            scaleX,
+            0,
+            0,
+            scaleY,
+            targetBounds.X + bounds.Value.X * scaleX,
+            targetBounds.Y + bounds.Value.Y * scaleY);
 
-        var brush = Brush("MmTextFaintBrush", Brushes.Gray);
-        using (context.PushOpacity(0.5))
+        using (context.PushTransform(matrix))
         {
-            context.DrawRectangle(brush, null, target);
+            control.Render(context);
         }
     }
 
@@ -288,12 +284,60 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         => border.Background is not null
             || border.BorderBrush is not null && !IsEmptyThickness(border.BorderThickness);
 
+    private static bool IsMiniatureRenderableControl(Control control)
+    {
+        if (!control.IsVisible || control.Bounds.Width <= 0 || control.Bounds.Height <= 0)
+        {
+            return false;
+        }
+
+        if (control is Border or Panel or ContentControl)
+        {
+            return false;
+        }
+
+        if (control is TextBlock or SelectableTextBlock or MathView)
+        {
+            return true;
+        }
+
+        var typeName = control.GetType().Name;
+        if (typeName.Contains("TextFragment", StringComparison.Ordinal)
+            || typeName.Contains("ImageView", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return !control.GetVisualChildren().OfType<Control>().Any();
+    }
+
     private static bool IsEmptyThickness(Thickness thickness)
         => thickness.Left <= 0 && thickness.Top <= 0 && thickness.Right <= 0 && thickness.Bottom <= 0;
 
-    private void QueueRenderedNotification()
+    private void QueueRenderedNotification(long generation)
     {
-        Dispatcher.UIThread.Post(() => DocumentRendered?.Invoke(this, EventArgs.Empty), DispatcherPriority.Background);
+        _hasPendingRenderedNotification = true;
+        LayoutUpdated -= OnLayoutUpdatedAfterDocumentRebuild;
+        LayoutUpdated += OnLayoutUpdatedAfterDocumentRebuild;
+
+        Dispatcher.UIThread.Post(
+            () => CompleteDocumentRenderedNotification(generation),
+            DispatcherPriority.Render);
+    }
+
+    private void OnLayoutUpdatedAfterDocumentRebuild(object? sender, EventArgs e)
+        => CompleteDocumentRenderedNotification(_renderGeneration);
+
+    private void CompleteDocumentRenderedNotification(long generation)
+    {
+        if (!_hasPendingRenderedNotification || generation != _renderGeneration)
+        {
+            return;
+        }
+
+        _hasPendingRenderedNotification = false;
+        LayoutUpdated -= OnLayoutUpdatedAfterDocumentRebuild;
+        DocumentRendered?.Invoke(this, EventArgs.Empty);
     }
 
     private Control BuildBlock(MarkdownBlock block, bool nested)

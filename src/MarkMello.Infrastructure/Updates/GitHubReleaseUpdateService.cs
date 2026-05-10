@@ -12,6 +12,8 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
 {
     private const string ReleaseOwnerMetadataKey = "MarkMelloReleaseOwner";
     private const string ReleaseRepoMetadataKey = "MarkMelloReleaseRepo";
+    private const string ReleaseAssetPrefixMetadataKey = "MarkMelloReleaseAssetPrefix";
+    private const string DefaultReleaseAssetPrefix = "MarkMello";
 
     private readonly HttpClient _httpClient;
     private readonly string _releaseOwner;
@@ -28,7 +30,7 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
         assembly ??= Assembly.GetEntryAssembly() ?? typeof(GitHubReleaseUpdateService).Assembly;
         (_releaseOwner, _releaseRepo) = ResolveReleaseSource(assembly);
         _currentVersion = ResolveCurrentVersion(assembly);
-        _target = ResolveReleaseTarget();
+        _target = ResolveReleaseTarget(ResolveReleaseAssetPrefix(assembly));
     }
 
     public async Task<UpdateCheckResult> CheckForUpdatesAsync(CancellationToken cancellationToken = default)
@@ -258,7 +260,19 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
             : $"{version.Major}.{Math.Max(version.Minor, 0)}.{Math.Max(version.Build, 0)}";
     }
 
-    private static ReleaseTargetDescriptor? ResolveReleaseTarget()
+    private static string ResolveReleaseAssetPrefix(Assembly assembly)
+    {
+        var prefix = assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(static attribute =>
+                string.Equals(attribute.Key, ReleaseAssetPrefixMetadataKey, StringComparison.Ordinal))
+            ?.Value;
+
+        return string.IsNullOrWhiteSpace(prefix)
+            ? DefaultReleaseAssetPrefix
+            : prefix.Trim();
+    }
+
+    private static ReleaseTargetDescriptor? ResolveReleaseTarget(string assetPrefix)
     {
         var architecture = RuntimeInformation.OSArchitecture;
 
@@ -269,12 +283,12 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
                 Architecture.X64 => new ReleaseTargetDescriptor(
                     "Windows",
                     "x64",
-                    "MarkMello-setup-win-x64.exe",
+                    $"{assetPrefix}-setup-win-x64.exe",
                     AppUpdateInstallAction.LaunchInstaller),
                 Architecture.Arm64 => new ReleaseTargetDescriptor(
                     "Windows",
                     "arm64",
-                    "MarkMello-setup-win-arm64.exe",
+                    $"{assetPrefix}-setup-win-arm64.exe",
                     AppUpdateInstallAction.LaunchInstaller),
                 _ => null
             };
@@ -287,12 +301,12 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
                 Architecture.Arm64 => new ReleaseTargetDescriptor(
                     "macOS",
                     "arm64",
-                    "MarkMello-macos-arm64.dmg",
+                    $"{assetPrefix}-macos-arm64.dmg",
                     AppUpdateInstallAction.OpenDiskImage),
                 Architecture.X64 => new ReleaseTargetDescriptor(
                     "macOS",
                     "x64",
-                    "MarkMello-macos-x64.dmg",
+                    $"{assetPrefix}-macos-x64.dmg",
                     AppUpdateInstallAction.OpenDiskImage),
                 _ => null
             };
@@ -305,12 +319,12 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
                 Architecture.X64 => new ReleaseTargetDescriptor(
                     "Linux",
                     "x86_64",
-                    "MarkMello-linux-x86_64.AppImage",
+                    $"{assetPrefix}-linux-x86_64.AppImage",
                     AppUpdateInstallAction.RevealFile),
                 Architecture.Arm64 => new ReleaseTargetDescriptor(
                     "Linux",
                     "aarch64",
-                    "MarkMello-linux-aarch64.AppImage",
+                    $"{assetPrefix}-linux-aarch64.AppImage",
                     AppUpdateInstallAction.RevealFile),
                 _ => null
             };

@@ -63,6 +63,25 @@
       <Setter Property="RenderTransform" Value="translate(0px,0px)" />
     </Style>
 
+    <Style Selector="StackPanel.mm-titlebar-actions">
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="RenderTransform" Value="translate(0px,-2px)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity" Duration="0:0:0.18" />
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Window:pointerover StackPanel.mm-titlebar-actions">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="translate(0px,0px)" />
+    </Style>
+    <Style Selector="Window.mm-overlay-open StackPanel.mm-titlebar-actions">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="translate(0px,0px)" />
+    </Style>
+
     <Style Selector="Border.mm-status">
       <Setter Property="Opacity" Value="0" />
       <Setter Property="Transitions">
@@ -95,29 +114,9 @@
     <Border Grid.Row="0"
             Height="36"
             Background="{DynamicResource MmTitleBarBrush}">
-      <Grid ColumnDefinitions="*,Auto">
-        <Border Grid.Column="0"
-                Background="Transparent"
-                PointerPressed="OnTitleBarPointerPressed">
-          <DockPanel LastChildFill="True"
-                     Margin="14,0,0,0"
-                     VerticalAlignment="Center">
-            <Ellipse DockPanel.Dock="Left"
-                     Width="5" Height="5"
-                     VerticalAlignment="Center"
-                     Margin="0,0,8,0"
-                     Fill="{DynamicResource MmAccentBrush}"
-                     IsVisible="{Binding HasDocumentTitle}" />
-            <TextBlock Text="{Binding WindowTitle}"
-                       FontSize="12"
-                       FontWeight="Medium"
-                       VerticalAlignment="Center"
-                       TextTrimming="CharacterEllipsis"
-                       Foreground="{DynamicResource MmTitleBarTextBrush}" />
-          </DockPanel>
-        </Border>
-
-        <StackPanel Grid.Column="1"
+      <DockPanel LastChildFill="True"
+                 ClipToBounds="True">
+        <StackPanel DockPanel.Dock="Right"
                     Orientation="Horizontal"
                     IsVisible="{Binding ShowCustomTitleBar}">
           <Button Classes="titlebar"
@@ -143,53 +142,14 @@
                   StrokeThickness="1" />
           </Button>
         </StackPanel>
-      </Grid>
-    </Border>
 
-    <Panel Grid.Row="1"
-           Name="BodyPanel">
-
-      <views:WelcomeView IsVisible="{Binding IsWelcome}" />
-      <ContentControl IsVisible="{Binding IsViewer}"
-                      Content="{Binding ActiveDocumentContent}" />
-      <views:LoadErrorView IsVisible="{Binding IsError}" />
-
-      <Border Name="ReadingProgressBar"
-              Classes="mm-progress"
-              IsVisible="{Binding IsViewer}"
-              Height="1"
-              VerticalAlignment="Top"
-              HorizontalAlignment="Left"
-              Background="{DynamicResource MmAccentBrush}"
-              IsHitTestVisible="False" />
-
-      <Border Classes="mm-top-chrome"
-              HorizontalAlignment="Left"
-              VerticalAlignment="Top"
-              Margin="16,12,0,0"
-              IsVisible="{Binding ShowsAppMenuControl}">
-        <ToggleButton Name="AppMenuTriggerButton"
-                      Classes="topbar-ghost"
-                      IsChecked="{Binding IsAppOverlayOpen, Mode=OneWay}"
-                      Command="{Binding ToggleAppMenuCommand}"
-                      ToolTip.Tip="{Binding AppMenuTooltip}">
-          <Grid Width="14"
-                Height="14">
-            <Path Data="M2.5 4H11.5 M2.5 7H11.5 M2.5 10H11.5"
-                  Stroke="{DynamicResource MmTextSoftBrush}"
-                  StrokeThickness="1.5"
-                  StrokeLineCap="Round"
-                  StrokeJoin="Round"
-                  Fill="Transparent" />
-          </Grid>
-        </ToggleButton>
-      </Border>
-
-      <Border Classes="mm-top-chrome"
-              HorizontalAlignment="Right"
-              VerticalAlignment="Top"
-              Margin="0,12,16,0">
-        <StackPanel Orientation="Horizontal" Spacing="6">
+        <StackPanel DockPanel.Dock="Right"
+                    Classes="mm-titlebar-actions"
+                    Orientation="Horizontal"
+                    Spacing="6"
+                    MinWidth="142"
+                    VerticalAlignment="Center"
+                    Margin="0,0,8,0">
           <Button Classes="topbar-ghost"
                   Command="{Binding CycleThemeCommand}"
                   ToolTip.Tip="{Binding NextThemeHint}">
@@ -340,57 +300,111 @@
             </Grid>
           </ToggleButton>
         </StackPanel>
-      </Border>
 
-      <ContentControl Name="AppMenuPanel"
-                      HorizontalAlignment="Left"
-                      VerticalAlignment="Top"
-                      Margin="16,54,0,0"
-                      Content="{Binding AppMenuOverlayContent}">
-        <ContentControl.ContentTemplate>
-          <DataTemplate x:DataType="vm:MainWindowViewModel">
-            <views:AppMenuPanelView />
-          </DataTemplate>
-        </ContentControl.ContentTemplate>
-      </ContentControl>
+        <Border MinWidth="0"
+                ClipToBounds="True"
+                Background="Transparent"
+                PointerPressed="OnTitleBarPointerPressed">
+          <DockPanel LastChildFill="True"
+                     MinWidth="0"
+                     ClipToBounds="True"
+                     Margin="14,0,0,0"
+                     VerticalAlignment="Center">
+            <ToggleButton Name="AppMenuTriggerButton"
+                          DockPanel.Dock="Left"
+                          Classes="topbar-ghost"
+                          Margin="0,0,8,0"
+                          IsVisible="{Binding ShowsAppMenuControl}"
+                          IsChecked="{Binding IsAppOverlayOpen, Mode=OneWay}"
+                          Command="{Binding ToggleAppMenuCommand}"
+                          ToolTip.Tip="{Binding AppMenuTooltip}">
+              <Grid Width="14"
+                    Height="14">
+                <Path Data="M2.5 4H11.5 M2.5 7H11.5 M2.5 10H11.5"
+                      Stroke="{DynamicResource MmTextSoftBrush}"
+                      StrokeThickness="1.5"
+                      StrokeLineCap="Round"
+                      StrokeJoin="Round"
+                      Fill="Transparent" />
+              </Grid>
+            </ToggleButton>
+            <Ellipse DockPanel.Dock="Left"
+                     Width="5" Height="5"
+                     VerticalAlignment="Center"
+                     Margin="0,0,8,0"
+                     Fill="{DynamicResource MmAccentBrush}"
+                     IsVisible="{Binding HasDocumentTitle}" />
+            <TextBlock Text="{Binding WindowTitle}"
+                       MinWidth="0"
+                       FontSize="12"
+                       FontWeight="Medium"
+                       VerticalAlignment="Center"
+                       TextTrimming="CharacterEllipsis"
+                       Foreground="{DynamicResource MmTitleBarTextBrush}" />
+          </DockPanel>
+        </Border>
+      </DockPanel>
+    </Border>
 
-      <ContentControl Name="AppSettingsPanel"
-                      HorizontalAlignment="Left"
-                      VerticalAlignment="Top"
-                      Margin="16,54,0,0"
-                      Content="{Binding AppSettingsOverlayContent}">
-        <ContentControl.ContentTemplate>
-          <DataTemplate x:DataType="vm:MainWindowViewModel">
-            <views:AppSettingsPanelView />
-          </DataTemplate>
-        </ContentControl.ContentTemplate>
-      </ContentControl>
+    <Panel Grid.Row="1"
+           Name="BodyPanel">
 
-      <ContentControl Name="AppAboutPanel"
-                      HorizontalAlignment="Left"
-                      VerticalAlignment="Top"
-                      Margin="16,54,0,0"
-                      Content="{Binding AppAboutOverlayContent}">
-        <ContentControl.ContentTemplate>
-          <DataTemplate x:DataType="vm:MainWindowViewModel">
-            <views:AppAboutPanelView />
-          </DataTemplate>
-        </ContentControl.ContentTemplate>
-      </ContentControl>
+      <views:WelcomeView ZIndex="0"
+                         IsVisible="{Binding IsWelcome}" />
+      <ContentControl IsVisible="{Binding IsViewer}"
+                      ZIndex="0"
+                      Content="{Binding ActiveDocumentContent}" />
+      <views:LoadErrorView ZIndex="0"
+                           IsVisible="{Binding IsError}" />
 
-      <ContentControl Name="SettingsPanel"
-                      HorizontalAlignment="Right"
-                      VerticalAlignment="Top"
-                      Margin="0,54,16,0"
-                      Content="{Binding ReadingSettingsOverlayContent}">
-        <ContentControl.ContentTemplate>
-          <DataTemplate x:DataType="vm:MainWindowViewModel">
-            <views:ReadingSettingsPanelView />
-          </DataTemplate>
-        </ContentControl.ContentTemplate>
-      </ContentControl>
+      <Border Name="ReadingProgressBar"
+              Classes="mm-progress"
+              ZIndex="200"
+              IsVisible="{Binding IsViewer}"
+              Height="1"
+              VerticalAlignment="Top"
+              HorizontalAlignment="Left"
+              Background="{DynamicResource MmAccentBrush}"
+              IsHitTestVisible="False" />
+
+      <Popup Name="AppMenuPanel"
+             ZIndex="1000"
+             IsOpen="{Binding IsAppMenuOpen}"
+             PlacementTarget="{Binding #AppMenuTriggerButton}"
+             Placement="BottomEdgeAlignedLeft"
+             VerticalOffset="8">
+        <views:AppMenuPanelView />
+      </Popup>
+
+      <Popup Name="AppSettingsPanel"
+             ZIndex="1000"
+             IsOpen="{Binding IsAppSettingsOpen}"
+             PlacementTarget="{Binding #AppMenuTriggerButton}"
+             Placement="BottomEdgeAlignedLeft"
+             VerticalOffset="8">
+        <views:AppSettingsPanelView />
+      </Popup>
+
+      <Popup Name="AppAboutPanel"
+             ZIndex="1000"
+             IsOpen="{Binding IsAppAboutOpen}"
+             PlacementTarget="{Binding #AppMenuTriggerButton}"
+             Placement="BottomEdgeAlignedLeft"
+             VerticalOffset="8">
+        <views:AppAboutPanelView />
+      </Popup>
+
+      <Popup Name="SettingsPanel"
+             ZIndex="1000"
+             IsOpen="{Binding IsSettingsOpen}"
+             PlacementTarget="{Binding #SettingsTriggerButton}"
+             Placement="BottomEdgeAlignedRight"
+             VerticalOffset="8">
+        <views:ReadingSettingsPanelView />
+      </Popup>
 
       <Border Classes="mm-status"
+              ZIndex="300"
               HorizontalAlignment="Stretch"
               VerticalAlignment="Bottom"
               Padding="20,0,20,14"

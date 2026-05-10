@@ -7,6 +7,7 @@ using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views.Minimap;
 using MarkMello.Domain;
 using MarkMello.Presentation.ViewModels;
@@ -14,7 +15,7 @@ using SysMath = System.Math;
 
 namespace MarkMello.Applicate.Desktop.Views;
 
-public sealed class ApplicateViewerView : UserControl
+public sealed class ApplicateViewerView : UserControl, IDisposable
 {
     private const double WheelStepMultiplier = 6.0;
     private const double MinManualContentWidth = 320.0;
@@ -28,10 +29,14 @@ public sealed class ApplicateViewerView : UserControl
     private readonly ScrollViewer _scroll;
     private readonly Border _scrollContentFrame;
     private readonly Border _column;
+    private readonly Grid _documentShell;
+    private readonly Grid _documentLayer;
     private readonly ApplicateMarkdownDocumentView _documentView;
+    private readonly IApplicateHtmlMarkdownRenderer? _htmlRenderer;
     private readonly Border _widthHandle;
     private readonly Border _widthHandleTrack;
     private readonly ContentControl _minimapHost;
+    private ApplicateWebMarkdownDocumentView? _webDocumentView;
     private MainWindowViewModel? _viewModel;
     private bool _isDraggingWidth;
     private bool _isWidthHandleHovering;
@@ -43,12 +48,22 @@ public sealed class ApplicateViewerView : UserControl
     private double _dragStartWidth;
     private double? _manualContentWidth;
     private double _lastViewModelContentWidth;
+    private double _lastReadingProgress;
     private double _documentHorizontalPadding = 144.0;
+    private double _webMinimapReservedWidth;
     private Size _lastMinimapExtent;
     private Size _lastMinimapViewport;
+    private MarkdownSource? _lastDocumentSource;
+    private MarkdownRendererBackend _lastRequestedRendererBackend = MarkdownRendererBackend.Native;
+    private ApplicateRendererSurfaceKind _activeRendererSurface = ApplicateRendererSurfaceKind.Native;
+    private ApplicateRendererSurfaceKind? _pendingRendererSurface;
+    private bool _pendingRendererReady;
+    private long _rendererSwitchGeneration;
+    private bool _webRendererFailedForCurrentDocument;
 
-    public ApplicateViewerView()
+    public ApplicateViewerView(IApplicateHtmlMarkdownRenderer? htmlRenderer = null)
     {
+        _htmlRenderer = htmlRenderer;
         _documentView = new ApplicateMarkdownDocumentView
         {
             DocumentPadding = new Thickness(72, 96, 72, 160),
@@ -56,6 +71,7 @@ public sealed class ApplicateViewerView : UserControl
         };
         _documentView.DocumentRendered += OnDocumentRendered;
         _documentView.DocumentRenderInvalidated += OnDocumentRenderInvalidated;
+        ApplicateRendererSurfaceTransition.EnsureOpacityTransition(_documentView);
 
         _widthHandleTrack = new Border
         {
@@ -65,7 +81,7 @@ public sealed class ApplicateViewerView : UserControl
             Margin = new Thickness(0, 42, 6, 42),
             CornerRadius = new CornerRadius(99),
             Background = Brush("MmTextFaintBrush", new SolidColorBrush(Color.FromArgb(70, 120, 120, 120))),
-            Opacity = 0.18,
+            Opacity = 0,
             IsHitTestVisible = false,
             Transitions =
             [
@@ -98,15 +114,22 @@ public sealed class ApplicateViewerView : UserControl
         _widthHandle.PointerReleased += OnWidthHandlePointerReleased;
         _widthHandle.PointerCaptureLost += OnWidthHandlePointerCaptureLost;
 
-        var documentLayer = new Grid { UseLayoutRounding = true };
-        documentLayer.Children.Add(_documentView);
-        documentLayer.Children.Add(_widthHandle);
+        _documentLayer = new Grid { UseLayoutRounding = true };
+        _documentLayer.Children.Add(_documentView);
+
+        _documentShell = new Grid { UseLayoutRounding = true };
+        _documentShell.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));
+        _documentShell.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(WidthHandleHitArea)));
+        Grid.SetColumn(_documentLayer, 0);
+        Grid.SetColumn(_widthHandle, 1);
+        _documentShell.Children.Add(_documentLayer);
+        _documentShell.Children.Add(_widthHandle);
 
         _column = new Border
         {
             HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
             UseLayoutRounding = true,
-            Child = documentLayer
+            Child = _documentShell
         };
 
         _scrollContentFrame = new Border
@@ -167,6 +190,8 @@ public sealed class ApplicateViewerView : UserControl
     {
         ActualThemeVariantChanged -= OnViewerAppearanceChanged;
         ResourcesChanged -= OnViewerResourcesChanged;
+        DisposeWebDocumentView();
+
         AttachViewModel(null);
         _minimapBuildGeneration++;
         _isMinimapBuildQueued = false;
@@ -238,15 +263,78 @@ public sealed class ApplicateViewerView : UserControl
             _documentView.ReadingPreferences = ReadingPreferences.Default;
             _documentView.ImageSourceResolver = null;
             _documentView.AvailableContentWidth = double.NaN;
+            if (_webDocumentView is not null)
+            {
+                _webDocumentView.Source = null;
+                _webDocumentView.ReadingPreferences = ReadingPreferences.Default;
+                _webDocumentView.ImageSourceResolver = null;
+                _webDocumentView.AvailableContentWidth = double.NaN;
+            }
+
+            _activeRendererSurface = ApplicateRendererSurfaceKind.Native;
+            _pendingRendererSurface = null;
+            _pendingRendererReady = false;
+            _rendererSwitchGeneration++;
+            ApplyRendererSurfaceVisuals();
             _manualContentWidth = null;
             _lastViewModelContentWidth = 0;
+            _lastReadingProgress = 0;
+            _webMinimapReservedWidth = 0;
+            _lastDocumentSource = null;
+            _webRendererFailedForCurrentDocument = false;
             _column.MaxWidth = double.PositiveInfinity;
             return;
         }
 
+        if (!ReferenceEquals(_lastDocumentSource, _viewModel.Document))
+        {
+            _lastDocumentSource = _viewModel.Document;
+            _webRendererFailedForCurrentDocument = false;
+            _webMinimapReservedWidth = 0;
+            _lastReadingProgress = 0;
+        }
+
+        var requestedRendererBackend = _viewModel.DocumentReadingPreferences.RendererBackend;
+        if (_lastRequestedRendererBackend != requestedRendererBackend)
+        {
+            _lastRequestedRendererBackend = requestedRendererBackend;
+            if (requestedRendererBackend == MarkdownRendererBackend.WebView)
+            {
+                _webRendererFailedForCurrentDocument = false;
+            }
+        }
+
+        var requestedRendererSurface = ResolveRequestedRendererSurface();
         _documentView.Document = _viewModel.RenderedDocument;
         _documentView.ReadingPreferences = _viewModel.DocumentReadingPreferences;
         _documentView.ImageSourceResolver = _viewModel.ImageSourceResolver;
+
+        if (requestedRendererSurface == ApplicateRendererSurfaceKind.WebView)
+        {
+            if (EnsureWebDocumentView() is null)
+            {
+                requestedRendererSurface = ApplicateRendererSurfaceKind.Native;
+            }
+        }
+
+        StageRendererSurface(requestedRendererSurface);
+
+        if (_webDocumentView is not null
+            && (requestedRendererSurface == ApplicateRendererSurfaceKind.WebView || IsWebRendererVisibleOrTargeted()))
+        {
+            var webAlreadyRenderedCurrentDocument =
+                requestedRendererSurface == ApplicateRendererSurfaceKind.WebView
+                && _webDocumentView.HasLoadedDocumentForSource(_viewModel.Document);
+            _webDocumentView.Source = _viewModel.Document;
+            _webDocumentView.ReadingPreferences = CreateWebDocumentReadingPreferences(
+                _viewModel.DocumentReadingPreferences,
+                _viewModel.ReadingPreferences);
+            _webDocumentView.ImageSourceResolver = _viewModel.ImageSourceResolver;
+            if (webAlreadyRenderedCurrentDocument)
+            {
+                CommitPendingRendererSurface(ApplicateRendererSurfaceKind.WebView);
+            }
+        }
 
         var viewModelContentWidth = _viewModel.ContentWidthSetting;
         _documentHorizontalPadding = SysMath.Max(0, _viewModel.DocumentColumnMaxWidth - viewModelContentWidth);
@@ -262,19 +350,51 @@ public sealed class ApplicateViewerView : UserControl
 
     private void OnDocumentRendered(object? sender, EventArgs e)
     {
-        _viewModel?.MarkReadableDocumentRendered();
-        _hasRenderedDocument = true;
-        QueueMinimapBuild();
-        Dispatcher.UIThread.Post(QueueMinimapBuild, DispatcherPriority.Loaded);
+        if (ReferenceEquals(sender, _webDocumentView)
+            && _pendingRendererSurface == ApplicateRendererSurfaceKind.WebView)
+        {
+            CommitPendingRendererSurface(ApplicateRendererSurfaceKind.WebView);
+            MarkCurrentDocumentRendered();
+            return;
+        }
+
+        if (ReferenceEquals(sender, _documentView)
+            && _pendingRendererSurface == ApplicateRendererSurfaceKind.Native)
+        {
+            CommitPendingRendererSurface(ApplicateRendererSurfaceKind.Native);
+            MarkCurrentDocumentRendered();
+            return;
+        }
+
+        if (!IsRenderedSurfaceActive(sender))
+        {
+            return;
+        }
+
+        MarkCurrentDocumentRendered();
     }
 
     private void OnDocumentRenderInvalidated(object? sender, EventArgs e)
     {
+        if (!IsRenderedSurfaceActive(sender))
+        {
+            return;
+        }
+
         _hasRenderedDocument = false;
         _lastMinimapExtent = default;
         _lastMinimapViewport = default;
+        _webMinimapReservedWidth = 0;
         _minimapBuildGeneration++;
         RemoveMinimap();
+    }
+
+    private void MarkCurrentDocumentRendered()
+    {
+        _viewModel?.MarkReadableDocumentRendered();
+        _hasRenderedDocument = true;
+        QueueMinimapBuild();
+        Dispatcher.UIThread.Post(QueueMinimapBuild, DispatcherPriority.Loaded);
     }
 
     private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)
@@ -286,7 +406,11 @@ public sealed class ApplicateViewerView : UserControl
 
         var max = _scroll.ScrollBarMaximum.Y;
         var current = _scroll.Offset.Y;
-        _viewModel.ReadingProgress = max > 0 ? SysMath.Clamp(current / max * 100.0, 0, 100) : 0;
+        if (!IsWebRendererActive())
+        {
+            _lastReadingProgress = max > 0 ? SysMath.Clamp(current / max * 100.0, 0, 100) : 0;
+            _viewModel.ReadingProgress = _lastReadingProgress;
+        }
 
         if (_hasRenderedDocument && HasMinimapLayoutMetricsChanged())
         {
@@ -345,6 +469,7 @@ public sealed class ApplicateViewerView : UserControl
         _dragStartWidth = _manualContentWidth ?? _viewModel.ContentWidthSetting;
         UpdateWidthHandleVisual();
         e.Pointer.Capture(_widthHandle);
+        SetWebDocumentHitTestingForWidthDrag(false);
         e.Handled = true;
     }
 
@@ -356,8 +481,7 @@ public sealed class ApplicateViewerView : UserControl
         }
 
         var delta = e.GetPosition(this).X - _dragStart.X;
-        _manualContentWidth = ClampManualContentWidth(_dragStartWidth + delta * 2.0);
-        ApplyColumnWidth();
+        ApplyWidthDragDelta(delta);
         e.Handled = true;
     }
 
@@ -368,16 +492,37 @@ public sealed class ApplicateViewerView : UserControl
             return;
         }
 
-        _isDraggingWidth = false;
-        UpdateWidthHandleVisual();
+        FinishWidthHandleDrag();
         e.Pointer.Capture(null);
         e.Handled = true;
     }
 
     private void OnWidthHandlePointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
     {
+        FinishWidthHandleDrag();
+    }
+
+    private void FinishWidthHandleDrag()
+    {
         _isDraggingWidth = false;
         UpdateWidthHandleVisual();
+        SetWebDocumentHitTestingForWidthDrag(true);
+    }
+
+    private void ApplyWidthDragDelta(double deltaX)
+    {
+        // The column is center-aligned, so dragging the right handle by N pixels
+        // grows the readable document by 2N pixels and keeps the centerline stable.
+        _manualContentWidth = ClampManualContentWidth(CalculateWidthDragContentWidth(_dragStartWidth, deltaX));
+        ApplyColumnWidth();
+    }
+
+    private void SetWebDocumentHitTestingForWidthDrag(bool enabled)
+    {
+        if (_webDocumentView is not null)
+        {
+            _webDocumentView.IsHitTestVisible = enabled;
+        }
     }
 
     private void OnViewerAppearanceChanged(object? sender, EventArgs e)
@@ -405,25 +550,85 @@ public sealed class ApplicateViewerView : UserControl
 
         var desiredContentWidth = _manualContentWidth ?? _viewModel.ContentWidthSetting;
         var visibleContentWidth = ClampManualContentWidth(desiredContentWidth);
+        var documentColumnWidth = visibleContentWidth + _documentHorizontalPadding;
         _documentView.AvailableContentWidth = visibleContentWidth;
-        _column.MaxWidth = visibleContentWidth + _documentHorizontalPadding;
+        var layoutSurface = GetLayoutRendererSurface();
+        var layoutUsesWebRenderer = layoutSurface == ApplicateRendererSurfaceKind.WebView;
+        _scroll.VerticalScrollBarVisibility = layoutUsesWebRenderer
+            ? Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled
+            : Avalonia.Controls.Primitives.ScrollBarVisibility.Auto;
+        var nativeWidthHandleSlotWidth = layoutUsesWebRenderer ? 0 : WidthHandleHitArea;
+        _documentShell.ColumnDefinitions[1].Width = new GridLength(nativeWidthHandleSlotWidth);
+        _widthHandle.IsVisible = !layoutUsesWebRenderer;
+        _widthHandle.IsHitTestVisible = !layoutUsesWebRenderer;
+        if (_webDocumentView is not null)
+        {
+            // The WebView document uses CSS border-box padding, so it needs the
+            // full document column width to keep the readable text width aligned
+            // with the native renderer. The WebView surface itself may be wider:
+            // its DOM minimap is viewport-fixed and should anchor to the window
+            // edge, not to the readable text column.
+            _webDocumentView.AvailableContentWidth = documentColumnWidth;
+            _webDocumentView.MinHeight = SysMath.Max(480, Bounds.Height);
+        }
+
+        var documentLayerWidth = CalculateDocumentLayerWidth(documentColumnWidth, Bounds.Width, layoutUsesWebRenderer);
+        var shellWidth = documentLayerWidth + nativeWidthHandleSlotWidth;
+
+        _documentLayer.Width = documentLayerWidth;
+        _column.Width = shellWidth;
+        _column.MaxWidth = shellWidth;
+        UpdateWidthHandleVisual();
     }
+
+    internal static ReadingPreferences CreateWebDocumentReadingPreferences(
+        ReadingPreferences documentPreferences,
+        ReadingPreferences shellPreferences)
+        => documentPreferences with { DocumentMinimapMode = shellPreferences.DocumentMinimapMode };
+
+    internal static double CalculateDocumentLayerWidth(double documentColumnWidth, double hostWidth, bool useWebRenderer)
+        => useWebRenderer
+            ? SysMath.Max(documentColumnWidth, hostWidth)
+            : documentColumnWidth;
+
+    internal static double CalculateWidthDragContentWidth(double dragStartWidth, double deltaX)
+        => dragStartWidth + deltaX * 2.0;
 
     private double ClampManualContentWidth(double contentWidth)
     {
-        var availableWidth = SysMath.Max(
-            MinManualContentWidth,
-            Bounds.Width - GetMinimapReservedWidth() - _documentHorizontalPadding - ViewportHorizontalGutter);
+        var availableWidth = CalculateAvailableContentWidth(
+            Bounds.Width,
+            GetResizeReservedWidth(),
+            _documentHorizontalPadding,
+            GetLayoutRendererSurface() == ApplicateRendererSurfaceKind.WebView);
         return SysMath.Clamp(contentWidth, MinManualContentWidth, availableWidth);
     }
 
     private void ApplyMinimapReservation()
     {
-        var reservedWidth = GetMinimapReservedWidth();
+        var reservedWidth = GetNativeMinimapReservedWidth();
         _scrollContentFrame.Padding = new Thickness(0, 0, reservedWidth, 0);
     }
 
-    private double GetMinimapReservedWidth()
+    private double GetResizeReservedWidth()
+        => GetLayoutRendererSurface() == ApplicateRendererSurfaceKind.WebView
+            ? _webMinimapReservedWidth
+            : GetNativeMinimapReservedWidth();
+
+    internal static double CalculateAvailableContentWidth(
+        double boundsWidth,
+        double resizeReservedWidth,
+        double documentHorizontalPadding,
+        bool useWebRenderer)
+        => SysMath.Max(
+            MinManualContentWidth,
+            boundsWidth
+                - resizeReservedWidth
+                - documentHorizontalPadding
+                - (useWebRenderer ? 0 : WidthHandleHitArea)
+                - ViewportHorizontalGutter);
+
+    private double GetNativeMinimapReservedWidth()
     {
         if (_minimap is null || !_minimapHost.IsVisible)
         {
@@ -441,25 +646,34 @@ public sealed class ApplicateViewerView : UserControl
 
     private void UpdateWidthHandleVisual()
     {
-        if (_isDraggingWidth)
+        var visibility = _viewModel?.ReadingPreferences.WidthResizerVisibility
+            ?? ReadingPreferences.Default.WidthResizerVisibility;
+        var state = CalculateWidthHandleVisualState(visibility, _isWidthHandleHovering, _isDraggingWidth);
+
+        _widthHandleTrack.Width = state.Width;
+        _widthHandleTrack.Opacity = state.Opacity;
+        _widthHandleTrack.Background = state.UseAccentBrush
+            ? Brush("MmAccentBrush", Brushes.OrangeRed)
+            : Brush("MmTextFaintBrush", new SolidColorBrush(Color.FromArgb(70, 120, 120, 120)));
+    }
+
+    internal static ApplicateWidthHandleVisualState CalculateWidthHandleVisualState(
+        WidthResizerVisibility visibility,
+        bool isHovering,
+        bool isDragging)
+    {
+        if (isDragging)
         {
-            _widthHandleTrack.Width = WidthHandleDraggingTrackWidth;
-            _widthHandleTrack.Opacity = 0.9;
-            _widthHandleTrack.Background = Brush("MmAccentBrush", Brushes.OrangeRed);
-            return;
+            return new ApplicateWidthHandleVisualState(WidthHandleDraggingTrackWidth, 0.9, UseAccentBrush: true);
         }
 
-        if (_isWidthHandleHovering)
+        if (isHovering)
         {
-            _widthHandleTrack.Width = WidthHandleHoverTrackWidth;
-            _widthHandleTrack.Opacity = 0.72;
-            _widthHandleTrack.Background = Brush("MmAccentBrush", Brushes.OrangeRed);
-            return;
+            return new ApplicateWidthHandleVisualState(WidthHandleHoverTrackWidth, 0.72, UseAccentBrush: true);
         }
 
-        _widthHandleTrack.Width = WidthHandleIdleTrackWidth;
-        _widthHandleTrack.Opacity = 0.18;
-        _widthHandleTrack.Background = Brush("MmTextFaintBrush", new SolidColorBrush(Color.FromArgb(70, 120, 120, 120)));
+        var idleOpacity = visibility == WidthResizerVisibility.Always ? 0.18 : 0;
+        return new ApplicateWidthHandleVisualState(WidthHandleIdleTrackWidth, idleOpacity, UseAccentBrush: false);
     }
 
     private IBrush Brush(string key, IBrush fallback)
@@ -555,6 +769,144 @@ public sealed class ApplicateViewerView : UserControl
         _scroll.Offset = new Vector(_scroll.Offset.X, targetOffset);
     }
 
+    private void OnWebScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)
+    {
+        if (_viewModel is not null && IsWebRendererActive())
+        {
+            _lastReadingProgress = e.ProgressPercent;
+            _viewModel.ReadingProgress = _lastReadingProgress;
+        }
+    }
+
+    private void OnWebMinimapStateChanged(object? sender, ApplicateWebMinimapStateEventArgs e)
+    {
+        if (!IsWebRendererVisibleOrTargeted())
+        {
+            return;
+        }
+
+        var nextReservedWidth = e.Visible ? e.ReservedWidth : 0;
+        if (SysMath.Abs(_webMinimapReservedWidth - nextReservedWidth) < 0.5)
+        {
+            return;
+        }
+
+        _webMinimapReservedWidth = nextReservedWidth;
+        ApplyColumnWidth();
+    }
+
+    private void OnWebWidthDragRequested(object? sender, ApplicateWebWidthDragEventArgs e)
+    {
+        if (_viewModel is null || !IsWebRendererActive())
+        {
+            return;
+        }
+
+        if (e.Phase == ApplicateWebWidthDragPhase.Start)
+        {
+            _isDraggingWidth = true;
+            _dragStartWidth = _manualContentWidth ?? _viewModel.ContentWidthSetting;
+            UpdateWidthHandleVisual();
+            return;
+        }
+
+        if (!_isDraggingWidth)
+        {
+            return;
+        }
+
+        ApplyWidthDragDelta(e.DeltaX);
+        if (e.Phase == ApplicateWebWidthDragPhase.End)
+        {
+            FinishWidthHandleDrag();
+        }
+    }
+
+    private void OnWebFallbackRequested(object? sender, EventArgs e)
+    {
+        _webRendererFailedForCurrentDocument = true;
+        if (_pendingRendererSurface == ApplicateRendererSurfaceKind.WebView)
+        {
+            CancelPendingRendererSurface();
+        }
+
+        if (_activeRendererSurface == ApplicateRendererSurfaceKind.WebView)
+        {
+            StageRendererSurface(ApplicateRendererSurfaceKind.Native);
+        }
+
+        SyncFromViewModel();
+    }
+
+    private void OnWebViewerInteractionRequested(object? sender, EventArgs e)
+    {
+        if (_viewModel?.HasOpenOverlay == true)
+        {
+            _viewModel.CloseOverlayCommand.Execute(null);
+        }
+    }
+
+    private ApplicateWebMarkdownDocumentView? EnsureWebDocumentView()
+    {
+        if (_webDocumentView is not null)
+        {
+            return _webDocumentView;
+        }
+
+        if (_htmlRenderer is null)
+        {
+            return null;
+        }
+
+        ApplicateWebMarkdownDocumentView view;
+        try
+        {
+            view = new ApplicateWebMarkdownDocumentView(_htmlRenderer)
+            {
+                IsVisible = false,
+                MinHeight = 1,
+                UseLayoutRounding = true
+            };
+            ApplicateRendererSurfaceTransition.EnsureOpacityTransition(view);
+        }
+        catch
+        {
+            _webRendererFailedForCurrentDocument = true;
+            return null;
+        }
+
+        view.DocumentRendered += OnDocumentRendered;
+        view.DocumentRenderInvalidated += OnDocumentRenderInvalidated;
+        view.ScrollStateChanged += OnWebScrollStateChanged;
+        view.MinimapStateChanged += OnWebMinimapStateChanged;
+        view.WidthDragRequested += OnWebWidthDragRequested;
+        view.ViewerInteractionRequested += OnWebViewerInteractionRequested;
+        view.FallbackRequested += OnWebFallbackRequested;
+        _webDocumentView = view;
+
+        _documentLayer.Children.Add(view);
+        return view;
+    }
+
+    private void DisposeWebDocumentView()
+    {
+        if (_webDocumentView is null)
+        {
+            return;
+        }
+
+        _webDocumentView.DocumentRendered -= OnDocumentRendered;
+        _webDocumentView.DocumentRenderInvalidated -= OnDocumentRenderInvalidated;
+        _webDocumentView.ScrollStateChanged -= OnWebScrollStateChanged;
+        _webDocumentView.MinimapStateChanged -= OnWebMinimapStateChanged;
+        _webDocumentView.WidthDragRequested -= OnWebWidthDragRequested;
+        _webDocumentView.ViewerInteractionRequested -= OnWebViewerInteractionRequested;
+        _webDocumentView.FallbackRequested -= OnWebFallbackRequested;
+        _documentLayer.Children.Remove(_webDocumentView);
+        _webDocumentView.Dispose();
+        _webDocumentView = null;
+    }
+
     private void UpdateMinimapScrollState()
     {
         if (_minimap is null)
@@ -591,6 +943,11 @@ public sealed class ApplicateViewerView : UserControl
     private bool ShouldShowMinimap()
     {
         var mode = _viewModel?.ReadingPreferences.DocumentMinimapMode ?? DocumentMinimapMode.Auto;
+        if (GetLayoutRendererSurface() == ApplicateRendererSurfaceKind.WebView)
+        {
+            return false;
+        }
+
         return ApplicateDocumentMinimapBuildPolicy.ShouldShow(
             mode,
             Bounds.Width,
@@ -598,4 +955,172 @@ public sealed class ApplicateViewerView : UserControl
             _scroll.Viewport,
             _scroll.ScrollBarMaximum.Y);
     }
+
+    private bool IsWebRendererActive()
+        => _activeRendererSurface == ApplicateRendererSurfaceKind.WebView
+           && _webDocumentView is not null;
+
+    private bool IsWebRendererVisibleOrTargeted()
+        => IsWebRendererActive()
+           || _pendingRendererSurface == ApplicateRendererSurfaceKind.WebView;
+
+    private bool IsRenderedSurfaceActive(object? sender)
+        => ReferenceEquals(sender, _webDocumentView)
+            ? IsWebRendererActive()
+            : ReferenceEquals(sender, _documentView)
+              && _activeRendererSurface == ApplicateRendererSurfaceKind.Native;
+
+    private ApplicateRendererSurfaceKind ResolveRequestedRendererSurface()
+        => ShouldRequestWebRenderer()
+            ? ApplicateRendererSurfaceKind.WebView
+            : ApplicateRendererSurfaceKind.Native;
+
+    private ApplicateRendererSurfaceKind GetLayoutRendererSurface()
+        => _pendingRendererSurface is { } pending && _pendingRendererReady
+            ? pending
+            : _activeRendererSurface;
+
+    private void StageRendererSurface(ApplicateRendererSurfaceKind requestedSurface)
+    {
+        if (_pendingRendererSurface == requestedSurface)
+        {
+            ApplyRendererSurfaceVisuals();
+            return;
+        }
+
+        if (_pendingRendererSurface is not null && requestedSurface == _activeRendererSurface)
+        {
+            CancelPendingRendererSurface();
+            return;
+        }
+
+        if (_activeRendererSurface == requestedSurface)
+        {
+            _pendingRendererSurface = null;
+            _pendingRendererReady = false;
+            ApplyRendererSurfaceVisuals();
+            return;
+        }
+
+        _pendingRendererSurface = requestedSurface;
+        _pendingRendererReady = requestedSurface == ApplicateRendererSurfaceKind.Native;
+        _rendererSwitchGeneration++;
+        ApplyRendererSurfaceVisuals();
+
+        if (_pendingRendererReady)
+        {
+            CommitPendingRendererSurface(requestedSurface);
+        }
+    }
+
+    private void CommitPendingRendererSurface(ApplicateRendererSurfaceKind surface)
+    {
+        if (_pendingRendererSurface != surface)
+        {
+            return;
+        }
+
+        _pendingRendererReady = true;
+        var generation = ++_rendererSwitchGeneration;
+        ApplyColumnWidth();
+        ApplyRendererSurfaceVisuals();
+        RestoreReadingProgressForSurface(surface);
+        _ = CompleteRendererSwitchAfterDelayAsync(surface, generation);
+    }
+
+    private async Task CompleteRendererSwitchAfterDelayAsync(
+        ApplicateRendererSurfaceKind surface,
+        long generation)
+    {
+        await Task.Delay(ApplicateRendererSurfaceTransition.FadeDuration).ConfigureAwait(false);
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            if (generation != _rendererSwitchGeneration || _pendingRendererSurface != surface || !_pendingRendererReady)
+            {
+                return;
+            }
+
+            _activeRendererSurface = surface;
+            _pendingRendererSurface = null;
+            _pendingRendererReady = false;
+            ApplyColumnWidth();
+            ApplyRendererSurfaceVisuals();
+            RestoreReadingProgressForSurface(surface);
+        });
+    }
+
+    private void RestoreReadingProgressForSurface(ApplicateRendererSurfaceKind surface)
+    {
+        if (surface == ApplicateRendererSurfaceKind.WebView)
+        {
+            _webDocumentView?.ScrollToProgress(_lastReadingProgress);
+            return;
+        }
+
+        RestoreNativeReadingProgress();
+        Dispatcher.UIThread.Post(RestoreNativeReadingProgress, DispatcherPriority.Loaded);
+    }
+
+    private void RestoreNativeReadingProgress()
+    {
+        var maxOffset = _scroll.ScrollBarMaximum.Y;
+        if (maxOffset <= 0)
+        {
+            return;
+        }
+
+        var targetOffset = SysMath.Clamp(_lastReadingProgress / 100.0 * maxOffset, 0, maxOffset);
+        _scroll.Offset = new Vector(_scroll.Offset.X, targetOffset);
+    }
+
+    private void CancelPendingRendererSurface()
+    {
+        _pendingRendererSurface = null;
+        _pendingRendererReady = false;
+        _rendererSwitchGeneration++;
+        ApplyColumnWidth();
+        ApplyRendererSurfaceVisuals();
+    }
+
+    private void ApplyRendererSurfaceVisuals()
+    {
+        ApplicateRendererSurfaceTransition.ApplyVisualState(
+            _documentView,
+            ApplicateRendererSurfaceTransition.CalculateVisualState(
+                ApplicateRendererSurfaceKind.Native,
+                _activeRendererSurface,
+                _pendingRendererSurface,
+                _pendingRendererReady));
+
+        if (_webDocumentView is not null)
+        {
+            ApplicateRendererSurfaceTransition.ApplyVisualState(
+                _webDocumentView,
+                ApplicateRendererSurfaceTransition.CalculateVisualState(
+                    ApplicateRendererSurfaceKind.WebView,
+                    _activeRendererSurface,
+                    _pendingRendererSurface,
+                    _pendingRendererReady));
+        }
+    }
+
+    private bool ShouldRequestWebRenderer()
+        => _viewModel?.DocumentReadingPreferences.RendererBackend == MarkdownRendererBackend.WebView
+           && _htmlRenderer is not null
+           && !_webRendererFailedForCurrentDocument;
+
+    internal bool IsWidthHandleOutsideDocumentLayerForTesting
+        => _widthHandle.Parent is not null
+           && !ReferenceEquals(_widthHandle.Parent, _documentLayer);
+
+    public void Dispose()
+    {
+        DisposeWebDocumentView();
+        GC.SuppressFinalize(this);
+    }
 }
+
+internal readonly record struct ApplicateWidthHandleVisualState(
+    double Width,
+    double Opacity,
+    bool UseAccentBrush);

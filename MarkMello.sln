@@ -16,9 +16,13 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "MarkMello.Presentation", "s
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "MarkMello.Desktop", "src\MarkMello.Desktop\MarkMello.Desktop.csproj", "{55555555-5555-5555-5555-555555555555}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "MarkMello.Applicate.Desktop", "src\MarkMello.Applicate.Desktop\MarkMello.Applicate.Desktop.csproj", "{BE6C26B3-69AF-4BD4-B161-BB83DB86C1B2}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "MarkMello.Domain.Tests", "tests\MarkMello.Domain.Tests\MarkMello.Domain.Tests.csproj", "{66666666-6666-6666-6666-666666666666}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "MarkMello.Presentation.Tests", "tests\MarkMello.Presentation.Tests\MarkMello.Presentation.Tests.csproj", "{77777777-7777-7777-7777-777777777777}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "MarkMello.Applicate.Tests", "tests\MarkMello.Applicate.Tests\MarkMello.Applicate.Tests.csproj", "{28A25B5E-D6D0-4EC3-8EAF-F8738F88085B}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -46,6 +50,10 @@ Global
 		{55555555-5555-5555-5555-555555555555}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{55555555-5555-5555-5555-555555555555}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{55555555-5555-5555-5555-555555555555}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BE6C26B3-69AF-4BD4-B161-BB83DB86C1B2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BE6C26B3-69AF-4BD4-B161-BB83DB86C1B2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BE6C26B3-69AF-4BD4-B161-BB83DB86C1B2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BE6C26B3-69AF-4BD4-B161-BB83DB86C1B2}.Release|Any CPU.Build.0 = Release|Any CPU
 		{66666666-6666-6666-6666-666666666666}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{66666666-6666-6666-6666-666666666666}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{66666666-6666-6666-6666-666666666666}.Release|Any CPU.ActiveCfg = Release|Any CPU
@@ -54,6 +62,10 @@ Global
 		{77777777-7777-7777-7777-777777777777}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{77777777-7777-7777-7777-777777777777}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{77777777-7777-7777-7777-777777777777}.Release|Any CPU.Build.0 = Release|Any CPU
+		{28A25B5E-D6D0-4EC3-8EAF-F8738F88085B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{28A25B5E-D6D0-4EC3-8EAF-F8738F88085B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{28A25B5E-D6D0-4EC3-8EAF-F8738F88085B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{28A25B5E-D6D0-4EC3-8EAF-F8738F88085B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -64,7 +76,9 @@ Global
 		{33333333-3333-3333-3333-333333333333} = {C1A3B5D7-E9F1-4321-9876-ABCDEF012345}
 		{44444444-4444-4444-4444-444444444444} = {C1A3B5D7-E9F1-4321-9876-ABCDEF012345}
 		{55555555-5555-5555-5555-555555555555} = {C1A3B5D7-E9F1-4321-9876-ABCDEF012345}
+		{BE6C26B3-69AF-4BD4-B161-BB83DB86C1B2} = {C1A3B5D7-E9F1-4321-9876-ABCDEF012345}
 		{66666666-6666-6666-6666-666666666666} = {D9C6141E-5E6A-4A1A-9E2D-0A8EF0BB2A90}
 		{77777777-7777-7777-7777-777777777777} = {D9C6141E-5E6A-4A1A-9E2D-0A8EF0BB2A90}
+		{28A25B5E-D6D0-4EC3-8EAF-F8738F88085B} = {D9C6141E-5E6A-4A1A-9E2D-0A8EF0BB2A90}
 	EndGlobalSection
 EndGlobal

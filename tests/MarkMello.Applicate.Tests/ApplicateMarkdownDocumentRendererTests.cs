@@ -129,4 +129,17 @@ public sealed class ApplicateMarkdownDocumentRendererTests
         Assert.DoesNotContain(rows, row => row.Contains(@"\sqrt{1.184375", StringComparison.Ordinal)
             && !row.Contains('}'));
     }
+
+    [Fact]
+    public void MathLineBreakerDoesNotSplitInsideLeftRightDelimiters()
+    {
+        const string tex = @"\frac{1}{\mu_{r}} \iint \mathbf{T}\cdot \mathbf{E}_{t} = -\frac{\beta^{2}}{\mu_{r}}\left[\iint \mathbf{T}\cdot \nabla E_{z} + \iint \mathbf{T}\cdot \mathbf{E}_{t}\right]";
+
+        var chunks = ApplicateMathLineBreaker.SplitIntoChunks(tex);
+
+        Assert.DoesNotContain(chunks, chunk => chunk.Contains(@"\left[", StringComparison.Ordinal)
+            && !chunk.Contains(@"\right]", StringComparison.Ordinal));
+        Assert.DoesNotContain(chunks, chunk => chunk.Contains(@"\right]", StringComparison.Ordinal)
+            && !chunk.Contains(@"\left[", StringComparison.Ordinal));
+    }
 }

@@ -34,6 +34,7 @@ public static class ApplicateMathLineBreaker
 
         var chunks = new List<string>();
         var depth = 0;
+        var delimiterDepth = 0;
         var segmentStart = 0;
 
         for (var index = 0; index < tex.Length; index++)
@@ -41,10 +42,28 @@ public static class ApplicateMathLineBreaker
             var current = tex[index];
             if (current == '\\')
             {
-                if (depth == 0 && TryGetBreakCommand(tex, index, out var commandLength))
+                if (TryReadCommand(tex, index, out var command, out var commandLength))
                 {
-                    AddChunk(tex, segmentStart, index, chunks);
-                    segmentStart = index;
+                    if (command == @"\left")
+                    {
+                        delimiterDepth++;
+                        index += commandLength - 1;
+                        continue;
+                    }
+
+                    if (command == @"\right")
+                    {
+                        delimiterDepth = SysMath.Max(0, delimiterDepth - 1);
+                        index += commandLength - 1;
+                        continue;
+                    }
+
+                    if (depth == 0 && delimiterDepth == 0 && IsBreakCommand(command))
+                    {
+                        AddChunk(tex, segmentStart, index, chunks);
+                        segmentStart = index;
+                    }
+
                     index += commandLength - 1;
                 }
                 else if (index + 1 < tex.Length)
@@ -67,7 +86,7 @@ public static class ApplicateMathLineBreaker
                 continue;
             }
 
-            if (depth == 0 && IsBreakCharacter(current) && index > segmentStart)
+            if (depth == 0 && delimiterDepth == 0 && IsBreakCharacter(current) && index > segmentStart)
             {
                 AddChunk(tex, segmentStart, index, chunks);
                 segmentStart = index;
@@ -131,19 +150,33 @@ public static class ApplicateMathLineBreaker
     private static bool IsBreakCharacter(char value)
         => value is '=' or '+' or '-' or '/' or ',' or ';';
 
-    private static bool TryGetBreakCommand(string tex, int index, out int commandLength)
+    private static bool IsBreakCommand(string command)
+        => BreakCommands.Contains(command, StringComparer.Ordinal);
+
+    private static bool TryReadCommand(string tex, int index, out string command, out int commandLength)
     {
-        foreach (var command in BreakCommands)
+        command = string.Empty;
+        commandLength = 0;
+
+        if (index >= tex.Length || tex[index] != '\\')
         {
-            if (tex.AsSpan(index).StartsWith(command.AsSpan(), StringComparison.Ordinal))
-            {
-                commandLength = command.Length;
-                return true;
-            }
+            return false;
         }
 
-        commandLength = 0;
-        return false;
+        var cursor = index + 1;
+        while (cursor < tex.Length && char.IsLetter(tex[cursor]))
+        {
+            cursor++;
+        }
+
+        if (cursor == index + 1)
+        {
+            return false;
+        }
+
+        command = tex[index..cursor];
+        commandLength = command.Length;
+        return true;
     }
 
     private static void AddChunk(string tex, int start, int end, List<string> chunks)

@@ -1,9 +1,8 @@
 using System.Text;
-using MarkMello.Domain;
 
-namespace MarkMello.Presentation.Views.Markdown;
+namespace MarkMello.Domain;
 
-internal static class MarkdownHeadingAnchorSlugger
+public static class MarkdownHeadingAnchorSlugger
 {
     public static string CreateAnchor(IReadOnlyList<MarkdownInline> inlines)
         => CreateAnchor(ExtractPlainText(inlines));

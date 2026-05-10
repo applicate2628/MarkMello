@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:renderer": "tsc -p RendererWeb/tsconfig.json --noEmit",
+    "build:renderer": "esbuild RendererWeb/src/renderer.ts --bundle --format=iife --target=es2020 --outfile=RendererWeb/assets/renderer.js --legal-comments=none"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.0",
+    "typescript": "6.0.3"
+  }
+}

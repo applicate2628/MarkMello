@@ -2,6 +2,7 @@ using Avalonia;
 using MarkMello.Application;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Math;
+using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Domain.Diagnostics;
 using MarkMello.Infrastructure;
 using MarkMello.Infrastructure.Diagnostics;
@@ -36,6 +37,8 @@ internal static class Program
         var collection = new ServiceCollection();
         collection.AddInfrastructure(metrics, args);
         collection.Replace(ServiceDescriptor.Singleton<IMarkdownDocumentRenderer, ApplicateMarkdownDocumentRenderer>());
+        collection.AddSingleton<ApplicateWebAssetEmbedder>();
+        collection.AddSingleton<IApplicateHtmlMarkdownRenderer, ApplicateHtmlMarkdownRenderer>();
         collection.AddApplication();
         collection.AddPresentation();
         collection.Replace(ServiceDescriptor.Singleton<MainWindow>(provider => new ApplicateMainWindow(

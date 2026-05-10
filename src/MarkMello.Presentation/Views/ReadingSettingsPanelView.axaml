@@ -177,6 +177,41 @@
                                 Spacing="2"
                                 VerticalAlignment="Center">
                       <TextBlock Classes="mm-setting-label"
+                                 Text="{Binding ReadingResizerLabel}" />
+                      <TextBlock Classes="mm-setting-hint"
+                                 Text="{Binding ReadingResizerHint}" />
+                    </StackPanel>
+                    <Border Grid.Column="1"
+                            Classes="mm-segmented"
+                            HorizontalAlignment="Right">
+                      <StackPanel Orientation="Horizontal"
+                                  Spacing="1">
+                        <ToggleButton Classes="mm-segmented-item"
+                                      IsChecked="{Binding IsWidthResizerOnHoverSelected}">
+                          <TextBlock Text="{Binding ReadingResizerOnHover}" />
+                        </ToggleButton>
+                        <ToggleButton Classes="mm-segmented-item"
+                                      IsChecked="{Binding IsWidthResizerAlwaysSelected}">
+                          <TextBlock Text="{Binding ReadingResizerAlways}" />
+                        </ToggleButton>
+                      </StackPanel>
+                    </Border>
+                  </Grid>
+                </Border>
+              </StackPanel>
+
+
+              <StackPanel Spacing="0">
+                <Line Classes="mm-setting-divider"
+                      StartPoint="0,0.5"
+                      EndPoint="1,0.5" />
+                <Border Classes="mm-setting-row">
+                  <Grid ColumnDefinitions="Auto,*"
+                        ColumnSpacing="12">
+                    <StackPanel Grid.Column="0"
+                                Spacing="2"
+                                VerticalAlignment="Center">
+                      <TextBlock Classes="mm-setting-label"
                                  Text="{Binding ReadingMinimapLabel}" />
                       <TextBlock Classes="mm-setting-hint"
                                  Text="{Binding ReadingMinimapHint}" />
@@ -197,6 +232,40 @@
                         <ToggleButton Classes="mm-segmented-item"
                                       IsChecked="{Binding IsDocumentMinimapOffSelected}">
                           <TextBlock Text="{Binding ReadingMinimapOff}" />
+                        </ToggleButton>
+                      </StackPanel>
+                    </Border>
+                  </Grid>
+                </Border>
+              </StackPanel>
+
+              <StackPanel Spacing="0">
+                <Line Classes="mm-setting-divider"
+                      StartPoint="0,0.5"
+                      EndPoint="1,0.5" />
+                <Border Classes="mm-setting-row">
+                  <Grid ColumnDefinitions="Auto,*"
+                        ColumnSpacing="12">
+                    <StackPanel Grid.Column="0"
+                                Spacing="2"
+                                VerticalAlignment="Center">
+                      <TextBlock Classes="mm-setting-label"
+                                 Text="{Binding ReadingRendererLabel}" />
+                      <TextBlock Classes="mm-setting-hint"
+                                 Text="{Binding ReadingRendererHint}" />
+                    </StackPanel>
+                    <Border Grid.Column="1"
+                            Classes="mm-segmented"
+                            HorizontalAlignment="Right">
+                      <StackPanel Orientation="Horizontal"
+                                  Spacing="1">
+                        <ToggleButton Classes="mm-segmented-item"
+                                      IsChecked="{Binding IsNativeRendererSelected}">
+                          <TextBlock Text="{Binding ReadingRendererNative}" />
+                        </ToggleButton>
+                        <ToggleButton Classes="mm-segmented-item"
+                                      IsChecked="{Binding IsWebViewRendererSelected}">
+                          <TextBlock Text="{Binding ReadingRendererWebView}" />
                         </ToggleButton>
                       </StackPanel>
                     </Border>

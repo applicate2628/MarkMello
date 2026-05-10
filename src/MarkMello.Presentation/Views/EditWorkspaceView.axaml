@@ -180,12 +180,14 @@
                   DragCompleted="OnSplitterDragCompleted" />
 
     <ScrollViewer Grid.Column="2"
+                  Name="PreviewPane"
                   MinWidth="280"
                   HorizontalScrollBarVisibility="Disabled"
                   VerticalScrollBarVisibility="Auto"
                   UseLayoutRounding="True">
       <Grid UseLayoutRounding="True">
-        <Border MaxWidth="{Binding DocumentColumnMaxWidth}"
+        <Border Name="PreviewDocumentFrame"
+                MaxWidth="{Binding DocumentColumnMaxWidth}"
                 HorizontalAlignment="Center"
                 UseLayoutRounding="True">
           <Border.Transitions>
