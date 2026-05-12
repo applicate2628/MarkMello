@@ -71,12 +71,14 @@
   var minimapSourceReady = false;
   var katexHasRun = false;
   var widthResizerVisibility = "on-hover";
-  var viewerChromeEnabled = true;
+  var viewerChromeEnabled = false;
   var widthHandleRoot = null;
   var widthHandleDragging = false;
   var widthHandleStartClientX = 0;
   var pendingWidthDragDeltaX = 0;
   var widthDragFrameRequested = false;
+  var layoutReadyGeneration = 0;
+  var layoutReadyTimer;
   var lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
   var minimapPolicy = {
     // Mirrors ApplicateDocumentMinimapBuildPolicy until the host sends minimap-policy.
@@ -86,6 +88,12 @@
     minScrollableViewportRatio: 1.5,
     maxDetailedDocumentHeight: 24e4
   };
+  function applyViewerChromeState() {
+    document.documentElement.dataset.mmChrome = viewerChromeEnabled ? "on" : "off";
+    if (!viewerChromeEnabled) {
+      window.scrollTo({ left: 0, top: 0, behavior: "instant" });
+    }
+  }
   function postHostMessage(message) {
     const serialized = JSON.stringify(message);
     if (hostWindow.chrome?.webview) {
@@ -115,14 +123,52 @@
     });
     katexHasRun = true;
   }
-  function postScroll() {
+  function getScrollState() {
     const root = document.scrollingElement ?? document.documentElement;
-    postHostMessage({
-      type: "scroll",
+    return {
       scrollTop: root.scrollTop,
       scrollHeight: root.scrollHeight,
       clientHeight: root.clientHeight
+    };
+  }
+  function postScroll() {
+    postHostMessage({
+      type: "scroll",
+      ...getScrollState()
     });
+  }
+  function postLayoutReady() {
+    postScroll();
+    postHostMessage({
+      type: "layout-ready",
+      ...getScrollState()
+    });
+  }
+  function scheduleLayoutReady() {
+    const generation = ++layoutReadyGeneration;
+    let completed = false;
+    if (layoutReadyTimer !== void 0) {
+      window.clearTimeout(layoutReadyTimer);
+    }
+    const complete = () => {
+      if (completed || generation !== layoutReadyGeneration) {
+        return;
+      }
+      completed = true;
+      if (layoutReadyTimer !== void 0) {
+        window.clearTimeout(layoutReadyTimer);
+        layoutReadyTimer = void 0;
+      }
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          if (generation === layoutReadyGeneration) {
+            postLayoutReady();
+          }
+        });
+      });
+    };
+    layoutReadyTimer = window.setTimeout(complete, 250);
+    document.fonts?.ready.then(complete).catch(complete);
   }
   function readRootPixelVariable(name, fallback) {
     const raw = getComputedStyle(document.documentElement).getPropertyValue(name);
@@ -449,6 +495,7 @@
     document.documentElement.style.setProperty("--mm-document-max-width", `${message.maxWidth}px`);
     minimapMode = message.minimapMode;
     viewerChromeEnabled = message.viewerChromeEnabled ?? true;
+    applyViewerChromeState();
     widthResizerVisibility = normalizeWidthResizerVisibility(message.widthResizerVisibility);
     const widthResizerClasses = getWidthResizerVisibilityClasses(widthResizerVisibility);
     document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
@@ -460,6 +507,7 @@
       queueMinimapRefresh();
     }
     updateWidthHandlePosition();
+    scheduleLayoutReady();
   }
   function handleHostMessage(raw) {
     const message = raw;
@@ -509,10 +557,28 @@
       }
     }, true);
   }
+  function wireWheelProxy() {
+    document.addEventListener("wheel", (event) => {
+      if (viewerChromeEnabled) {
+        return;
+      }
+      if (Math.abs(event.deltaY) <= Number.EPSILON || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+        return;
+      }
+      postHostMessage({
+        type: "wheel",
+        deltaY: event.deltaY,
+        deltaMode: event.deltaMode
+      });
+      event.preventDefault();
+    }, { capture: true, passive: false });
+  }
   document.addEventListener("DOMContentLoaded", () => {
+    applyViewerChromeState();
     renderMath();
     wireLinks();
     wireViewerInteraction();
+    wireWheelProxy();
     postHostMessage({
       type: "document-ready",
       mathCount: document.querySelectorAll("[data-tex]").length

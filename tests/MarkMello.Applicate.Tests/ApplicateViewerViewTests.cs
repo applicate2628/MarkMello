@@ -136,9 +136,33 @@ public sealed class ApplicateViewerViewTests
         Assert.True(active.IsVisible);
         Assert.True(active.IsHitTestVisible);
         Assert.Equal(1, active.Opacity);
+        Assert.True(active.ZIndex > pending.ZIndex);
         Assert.True(pending.IsVisible);
         Assert.False(pending.IsHitTestVisible);
         Assert.Equal(0, pending.Opacity);
+        Assert.True(pending.TranslateX < 0);
+    }
+
+    [Theory]
+    [InlineData((int)ApplicateRendererSurfaceKind.WebView, (int)ApplicateRendererSurfaceKind.Native, true, false, false)]
+    [InlineData((int)ApplicateRendererSurfaceKind.WebView, (int)ApplicateRendererSurfaceKind.Native, false, false, true)]
+    [InlineData((int)ApplicateRendererSurfaceKind.WebView, (int)ApplicateRendererSurfaceKind.Native, true, true, true)]
+    [InlineData((int)ApplicateRendererSurfaceKind.Native, (int)ApplicateRendererSurfaceKind.Native, true, false, true)]
+    [InlineData((int)ApplicateRendererSurfaceKind.WebView, (int)ApplicateRendererSurfaceKind.WebView, true, false, true)]
+    public void NativeSurfaceUpdateIsSuppressedOnlyForPendingWebSwitchOfSameRenderedDocument(
+        int requestedSurface,
+        int activeSurface,
+        bool hasRenderedDocument,
+        bool documentChanged,
+        bool expected)
+    {
+        var actual = ApplicateViewerView.ShouldUpdateNativeSurfaceForTesting(
+            (ApplicateRendererSurfaceKind)requestedSurface,
+            (ApplicateRendererSurfaceKind)activeSurface,
+            hasRenderedDocument,
+            documentChanged);
+
+        Assert.Equal(expected, actual);
     }
 
     [Fact]
@@ -158,9 +182,11 @@ public sealed class ApplicateViewerViewTests
         Assert.True(active.IsVisible);
         Assert.False(active.IsHitTestVisible);
         Assert.Equal(0, active.Opacity);
+        Assert.True(pending.ZIndex > active.ZIndex);
         Assert.True(pending.IsVisible);
         Assert.True(pending.IsHitTestVisible);
         Assert.Equal(1, pending.Opacity);
+        Assert.Equal(0, pending.TranslateX);
     }
 
     [Fact]
@@ -184,4 +210,24 @@ public sealed class ApplicateViewerViewTests
         Assert.True(web.IsHitTestVisible);
         Assert.Equal(1, web.Opacity);
     }
+
+    [Theory]
+    [InlineData(120, 0, 16, 800, 120)]
+    [InlineData(3, 1, 20, 800, 180)]
+    [InlineData(1, 2, 16, 1000, 850)]
+    [InlineData(1, 2, 24, 0, 24)]
+    public void WebWheelDeltaUsesRendererDeltaMode(
+        double deltaY,
+        int deltaMode,
+        double smallChangeHeight,
+        double viewportHeight,
+        double expected)
+    {
+        Assert.Equal(expected, ApplicateViewerView.NormalizeWebWheelDeltaForTesting(
+            deltaY,
+            deltaMode,
+            smallChangeHeight,
+            viewportHeight));
+    }
+
 }

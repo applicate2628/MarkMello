@@ -40,18 +40,22 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private string? _currentGeneratedDocumentPath;
     private bool _isLoadingGeneratedDocument;
     private bool _hasLoadedDocument;
+    private bool _awaitingLayoutReady;
+    private bool _hasLayoutReady;
+    private bool _hasMinimapState;
     private bool _disposed;
     private double _scrollTop;
     private double _scrollHeight;
     private double _clientHeight;
+    private bool _isUpdatingInputs;
 
     static ApplicateWebMarkdownDocumentView()
     {
-        SourceProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.QueueRender());
-        ImageSourceResolverProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.QueueRender());
-        ReadingPreferencesProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.ApplyReadingPreferences());
-        AvailableContentWidthProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.ApplyReadingPreferences());
-        ViewerChromeEnabledProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.ApplyReadingPreferences());
+        SourceProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.OnRenderInputChanged());
+        ImageSourceResolverProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.OnRenderInputChanged());
+        ReadingPreferencesProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.OnLiveInputChanged());
+        AvailableContentWidthProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.OnLiveInputChanged());
+        ViewerChromeEnabledProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.OnLiveInputChanged());
     }
 
     public ApplicateWebMarkdownDocumentView(IApplicateHtmlMarkdownRenderer renderer)
@@ -121,18 +125,102 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     public event EventHandler<ApplicateWebWidthDragEventArgs>? WidthDragRequested;
 
+    public event EventHandler<ApplicateWebWheelEventArgs>? WheelRequested;
+
     public event EventHandler? ViewerInteractionRequested;
 
     public event EventHandler? FallbackRequested;
 
     internal bool HasLoadedDocumentForSource(MarkdownSource? source)
-        => _hasLoadedDocument && Equals(Source, source);
+        => _hasLoadedDocument && !_awaitingLayoutReady && Equals(Source, source);
+
+    internal void UpdateInputs(
+        MarkdownSource? source,
+        ReadingPreferences readingPreferences,
+        IImageSourceResolver? imageSourceResolver,
+        double availableContentWidth,
+        bool viewerChromeEnabled)
+    {
+        var action = DetermineInputUpdateAction(
+            sourceChanged: !Equals(Source, source),
+            imageSourceResolverChanged: !ReferenceEquals(ImageSourceResolver, imageSourceResolver),
+            hasLoadedDocument: _hasLoadedDocument,
+            readingPreferencesChanged: ReadingPreferences != readingPreferences,
+            availableContentWidthChanged: !AreEqual(AvailableContentWidth, availableContentWidth),
+            viewerChromeEnabledChanged: ViewerChromeEnabled != viewerChromeEnabled);
+
+        _isUpdatingInputs = true;
+        try
+        {
+            ReadingPreferences = readingPreferences;
+            ImageSourceResolver = imageSourceResolver;
+            AvailableContentWidth = availableContentWidth;
+            ViewerChromeEnabled = viewerChromeEnabled;
+            Source = source;
+        }
+        finally
+        {
+            _isUpdatingInputs = false;
+        }
+
+        if (action == ApplicateWebInputUpdateAction.Render)
+        {
+            QueueRender();
+            return;
+        }
+
+        if (action == ApplicateWebInputUpdateAction.ApplyLivePreferences)
+        {
+            ApplyReadingPreferences();
+        }
+    }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         CancelRender();
         base.OnDetachedFromVisualTree(e);
     }
+
+    private void OnRenderInputChanged()
+    {
+        if (_isUpdatingInputs)
+        {
+            return;
+        }
+
+        QueueRender();
+    }
+
+    private void OnLiveInputChanged()
+    {
+        if (_isUpdatingInputs)
+        {
+            return;
+        }
+
+        ApplyReadingPreferences();
+    }
+
+    internal static ApplicateWebInputUpdateAction DetermineInputUpdateAction(
+        bool sourceChanged,
+        bool imageSourceResolverChanged,
+        bool hasLoadedDocument,
+        bool readingPreferencesChanged,
+        bool availableContentWidthChanged,
+        bool viewerChromeEnabledChanged)
+    {
+        if (sourceChanged || imageSourceResolverChanged || !hasLoadedDocument)
+        {
+            return ApplicateWebInputUpdateAction.Render;
+        }
+
+        return readingPreferencesChanged || availableContentWidthChanged || viewerChromeEnabledChanged
+            ? ApplicateWebInputUpdateAction.ApplyLivePreferences
+            : ApplicateWebInputUpdateAction.None;
+    }
+
+    private static bool AreEqual(double left, double right)
+        => double.IsNaN(left) && double.IsNaN(right) || SysMath.Abs(left - right) <= double.Epsilon;
 
     private void QueueRender()
     {
@@ -143,6 +231,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         DocumentRenderInvalidated?.Invoke(this, EventArgs.Empty);
         _hasLoadedDocument = false;
+        _awaitingLayoutReady = false;
+        _hasLayoutReady = false;
+        _hasMinimapState = false;
         _scrollTop = 0;
         _scrollHeight = 0;
         _clientHeight = 0;
@@ -171,7 +262,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             string? generatedDocumentPath = null;
             try
             {
-                generatedDocumentPath = await WriteGeneratedDocumentAsync(document.Html, cancellationToken)
+                var html = ApplyInitialTheme(document.Html, GetThemeName());
+                generatedDocumentPath = await WriteGeneratedDocumentAsync(html, cancellationToken)
                     .ConfigureAwait(true);
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -262,10 +354,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (type == "document-ready")
             {
                 _hasLoadedDocument = true;
+                BeginAwaitingLayoutReady();
                 SendTheme();
                 SendMinimapPolicy();
                 SendReadingPreferences();
-                DocumentRendered?.Invoke(this, EventArgs.Empty);
+                return;
+            }
+
+            if (IsLayoutReadyMessage(document.RootElement))
+            {
+                HandleScrollMessage(document.RootElement);
+                _hasLayoutReady = true;
+                CompleteLayoutReady();
                 return;
             }
 
@@ -284,6 +384,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (type == "width-drag")
             {
                 HandleWidthDragMessage(document.RootElement);
+                return;
+            }
+
+            if (type == "wheel")
+            {
+                HandleWheelMessage(document.RootElement);
                 return;
             }
 
@@ -335,6 +441,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         MinimapStateChanged?.Invoke(this, state);
+        _hasMinimapState = true;
+        CompleteLayoutReady();
     }
 
     internal static bool TryReadMinimapState(JsonElement root, out ApplicateWebMinimapStateEventArgs? state)
@@ -372,6 +480,34 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
            && typeProperty.ValueKind == JsonValueKind.String
            && string.Equals(typeProperty.GetString(), "viewer-interaction", StringComparison.Ordinal);
 
+    internal static bool IsLayoutReadyMessage(JsonElement root)
+        => root.TryGetProperty("type", out var typeProperty)
+           && typeProperty.ValueKind == JsonValueKind.String
+           && string.Equals(typeProperty.GetString(), "layout-ready", StringComparison.Ordinal);
+
+    private void CompleteLayoutReady()
+    {
+        if (!ShouldCompleteRender(_hasLoadedDocument, _hasLayoutReady, _hasMinimapState) || !_awaitingLayoutReady)
+        {
+            return;
+        }
+
+        _awaitingLayoutReady = false;
+        DocumentRendered?.Invoke(this, EventArgs.Empty);
+    }
+
+    internal static bool ShouldCompleteRenderForTesting(
+        bool hasLoadedDocument,
+        bool hasLayoutReady,
+        bool hasMinimapState)
+        => ShouldCompleteRender(hasLoadedDocument, hasLayoutReady, hasMinimapState);
+
+    private static bool ShouldCompleteRender(
+        bool hasLoadedDocument,
+        bool hasLayoutReady,
+        bool hasMinimapState)
+        => hasLoadedDocument && hasLayoutReady && hasMinimapState;
+
     private void HandleWidthDragMessage(JsonElement root)
     {
         if (!root.TryGetProperty("phase", out var phaseProperty)
@@ -387,6 +523,39 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         WidthDragRequested?.Invoke(this, new ApplicateWebWidthDragEventArgs(phase, deltaX));
+    }
+
+    private void HandleWheelMessage(JsonElement root)
+    {
+        if (TryReadWheelMessage(root, out var wheel) && wheel is not null)
+        {
+            WheelRequested?.Invoke(this, wheel);
+        }
+    }
+
+    internal static bool TryReadWheelMessage(JsonElement root, out ApplicateWebWheelEventArgs? wheel)
+    {
+        wheel = null;
+        if (!root.TryGetProperty("deltaY", out var deltaYProperty)
+            || deltaYProperty.ValueKind != JsonValueKind.Number
+            || !deltaYProperty.TryGetDouble(out var deltaY)
+            || !double.IsFinite(deltaY)
+            || SysMath.Abs(deltaY) > 10000)
+        {
+            return false;
+        }
+
+        var deltaMode = 0;
+        if (root.TryGetProperty("deltaMode", out var deltaModeProperty)
+            && (deltaModeProperty.ValueKind != JsonValueKind.Number
+                || !deltaModeProperty.TryGetInt32(out deltaMode)
+                || deltaMode is < 0 or > 2))
+        {
+            return false;
+        }
+
+        wheel = new ApplicateWebWheelEventArgs(deltaY, deltaMode);
+        return true;
     }
 
     private async Task HandleLinkClickedAsync(JsonElement root)
@@ -446,12 +615,42 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void SendTheme()
     {
-        var theme = ActualThemeVariant == ThemeVariant.Dark ? "dark" : "light";
-        PostRendererMessage(new { type = "theme", theme });
+        PostRendererMessage(new { type = "theme", theme = GetThemeName() });
+    }
+
+    private string GetThemeName()
+        => ActualThemeVariant == ThemeVariant.Dark ? "dark" : "light";
+
+    internal static string ApplyInitialThemeForTesting(string html, string theme)
+        => ApplyInitialTheme(html, theme);
+
+    private static string ApplyInitialTheme(string html, string theme)
+    {
+        var normalizedTheme = string.Equals(theme, "dark", StringComparison.OrdinalIgnoreCase)
+            ? "dark"
+            : "light";
+        if (html.Contains("data-theme=", StringComparison.Ordinal))
+        {
+            return html;
+        }
+
+        const string htmlTag = "<html";
+        var htmlTagIndex = html.IndexOf(htmlTag, StringComparison.Ordinal);
+        if (htmlTagIndex < 0)
+        {
+            return html;
+        }
+
+        return html.Insert(htmlTagIndex + htmlTag.Length, $" data-theme=\"{normalizedTheme}\"");
     }
 
     private void SendReadingPreferences()
     {
+        if (_hasLoadedDocument)
+        {
+            BeginAwaitingLayoutReady();
+        }
+
         var maxWidth = double.IsFinite(AvailableContentWidth) && AvailableContentWidth > 0
             ? AvailableContentWidth
             : ReadingPreferences.ContentWidth;
@@ -466,6 +665,13 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 viewerChromeEnabled = ViewerChromeEnabled,
                 widthResizerVisibility = ToRendererWidthResizerVisibility(ReadingPreferences.WidthResizerVisibility)
             });
+    }
+
+    private void BeginAwaitingLayoutReady()
+    {
+        _awaitingLayoutReady = true;
+        _hasLayoutReady = false;
+        _hasMinimapState = false;
     }
 
     internal static string ToRendererWidthResizerVisibility(WidthResizerVisibility visibility)
@@ -695,4 +901,20 @@ public sealed class ApplicateWebWidthDragEventArgs(
     public ApplicateWebWidthDragPhase Phase { get; } = phase;
 
     public double DeltaX { get; } = deltaX;
+}
+
+public sealed class ApplicateWebWheelEventArgs(
+    double deltaY,
+    int deltaMode) : EventArgs
+{
+    public double DeltaY { get; } = deltaY;
+
+    public int DeltaMode { get; } = deltaMode;
+}
+
+internal enum ApplicateWebInputUpdateAction
+{
+    None,
+    ApplyLivePreferences,
+    Render
 }

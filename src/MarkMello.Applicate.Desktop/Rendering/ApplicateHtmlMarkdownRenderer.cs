@@ -311,11 +311,6 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             return null;
         }
 
-        if (IsRemoteUri(url))
-        {
-            return null;
-        }
-
         await using var stream = await context.ImageSourceResolver
             .TryOpenAsync(url, context.BaseDirectory, context.CancellationToken)
             .ConfigureAwait(false);
@@ -380,13 +375,10 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             && uri.Scheme is "http" or "https" or "mailto";
     }
 
-    private static bool IsRemoteUri(string url)
-        => Uri.TryCreate(url, UriKind.Absolute, out var uri)
-            && uri.Scheme is "http" or "https";
-
     private static string GetImageMimeType(string url)
     {
-        var extension = Path.GetExtension(url).ToLowerInvariant();
+        var path = Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.AbsolutePath : url;
+        var extension = Path.GetExtension(path).ToLowerInvariant();
         return extension switch
         {
             ".jpg" or ".jpeg" => "image/jpeg",

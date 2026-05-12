@@ -54,7 +54,7 @@
         </Transitions>
       </Setter>
     </Style>
-    <Style Selector="Window:pointerover Border.mm-top-chrome">
+    <Style Selector="Window.mm-top-chrome-hover Border.mm-top-chrome">
       <Setter Property="Opacity" Value="1" />
       <Setter Property="RenderTransform" Value="translate(0px,0px)" />
     </Style>
@@ -73,7 +73,7 @@
         </Transitions>
       </Setter>
     </Style>
-    <Style Selector="Window:pointerover StackPanel.mm-titlebar-actions">
+    <Style Selector="Window.mm-top-chrome-hover StackPanel.mm-titlebar-actions">
       <Setter Property="Opacity" Value="1" />
       <Setter Property="RenderTransform" Value="translate(0px,0px)" />
     </Style>
@@ -113,7 +113,9 @@
 
     <Border Grid.Row="0"
             Height="36"
-            Background="{DynamicResource MmTitleBarBrush}">
+            Background="{DynamicResource MmTitleBarBrush}"
+            PointerEntered="OnTopChromePointerEntered"
+            PointerExited="OnTopChromePointerExited">
       <DockPanel LastChildFill="True"
                  ClipToBounds="True">
         <StackPanel DockPanel.Dock="Right"
@@ -372,7 +374,9 @@
              IsOpen="{Binding IsAppMenuOpen}"
              PlacementTarget="{Binding #AppMenuTriggerButton}"
              Placement="BottomEdgeAlignedLeft"
-             VerticalOffset="8">
+             VerticalOffset="8"
+             Topmost="False"
+             ShouldUseOverlayLayer="False">
         <views:AppMenuPanelView />
       </Popup>
 
@@ -381,7 +385,9 @@
              IsOpen="{Binding IsAppSettingsOpen}"
              PlacementTarget="{Binding #AppMenuTriggerButton}"
              Placement="BottomEdgeAlignedLeft"
-             VerticalOffset="8">
+             VerticalOffset="8"
+             Topmost="False"
+             ShouldUseOverlayLayer="False">
         <views:AppSettingsPanelView />
       </Popup>
 
@@ -390,7 +396,9 @@
              IsOpen="{Binding IsAppAboutOpen}"
              PlacementTarget="{Binding #AppMenuTriggerButton}"
              Placement="BottomEdgeAlignedLeft"
-             VerticalOffset="8">
+             VerticalOffset="8"
+             Topmost="False"
+             ShouldUseOverlayLayer="False">
         <views:AppAboutPanelView />
       </Popup>
 
@@ -399,7 +407,9 @@
              IsOpen="{Binding IsSettingsOpen}"
              PlacementTarget="{Binding #SettingsTriggerButton}"
              Placement="BottomEdgeAlignedRight"
-             VerticalOffset="8">
+             VerticalOffset="8"
+             Topmost="False"
+             ShouldUseOverlayLayer="False">
         <views:ReadingSettingsPanelView />
       </Popup>
 

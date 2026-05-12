@@ -112,6 +112,26 @@ public sealed class ApplicateMarkdownDocumentRendererTests
     }
 
     [Fact]
+    public void NormalizeTexForRendererStripsUnsupportedBoldsymbolFormatting()
+    {
+        var normalized = ApplicateMarkdownDocumentRenderer.NormalizeTexForRenderer(
+            @"E_{h} = \sum_{j=1}^{N} x_{j}\boldsymbol\phi_{j} + \boldsymbol{\nabla \times \phi_{j}}");
+
+        Assert.Equal(
+            @"E_{h} = \sum_{j=1}^{N} x_{j}\phi_{j} + \nabla \times \phi_{j}",
+            normalized);
+    }
+
+    [Fact]
+    public void NormalizeTexForRendererStripsUnsupportedBoxedFormatting()
+    {
+        var normalized = ApplicateMarkdownDocumentRenderer.NormalizeTexForRenderer(
+            @"\boxed{\text{в LHS мода задаёт admittance}} + \boxed{T_{zt}e_{t}}");
+
+        Assert.Equal(@"\text{в LHS мода задаёт admittance} + T_{zt}e_{t}", normalized);
+    }
+
+    [Fact]
     public void MathLineBreakerWrapsAtTopLevelOperators()
     {
         const string tex = @"\sqrt{1.184375 - p^{2}} / 2.45 \cdot \tan(x) - \sqrt{p^{2} + 0.265625} \cdot \tanh(y) = 0";

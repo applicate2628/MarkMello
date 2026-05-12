@@ -11,7 +11,7 @@ public sealed class ReadingPreferencesTests
 
         Assert.Equal(ReadingPreferences.Default, normalized);
         Assert.Equal(DocumentMinimapMode.Auto, normalized.DocumentMinimapMode);
-        Assert.Equal(MarkdownRendererBackend.Native, normalized.RendererBackend);
+        Assert.Equal(MarkdownRendererBackend.WebView, normalized.RendererBackend);
         Assert.Equal(WidthResizerVisibility.OnHover, normalized.WidthResizerVisibility);
     }
 

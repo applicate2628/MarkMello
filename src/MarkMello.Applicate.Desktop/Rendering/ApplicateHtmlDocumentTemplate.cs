@@ -22,7 +22,7 @@ public static class ApplicateHtmlDocumentTemplate
         // scripts nonce-bound and permits inline styles only for rendered markup.
         return $$"""
             <!doctype html>
-            <html>
+            <html data-mm-chrome="off">
             <head>
               <meta charset="utf-8">
               <meta name="viewport" content="width=device-width, initial-scale=1">

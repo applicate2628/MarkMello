@@ -31,10 +31,12 @@ type RendererWindow = Window & {
 
 type RendererMessage =
   | { type: "document-ready"; mathCount: number }
+  | { type: "layout-ready"; scrollTop: number; scrollHeight: number; clientHeight: number }
   | { type: "link-clicked"; href: string; button: number; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }
   | { type: "minimap-state"; visible: boolean; reservedWidth: number }
   | { type: "scroll"; scrollTop: number; scrollHeight: number; clientHeight: number }
   | { type: "viewer-interaction" }
+  | { type: "wheel"; deltaY: number; deltaMode: number }
   | { type: "width-drag"; phase: "start" | "move" | "end"; deltaX: number };
 
 type MinimapMode = "auto" | "on" | "off";
@@ -83,12 +85,14 @@ let lastMinimapDocumentHeight = 0;
 let minimapSourceReady = false;
 let katexHasRun = false;
 let widthResizerVisibility: WidthResizerVisibility = "on-hover";
-let viewerChromeEnabled = true;
+let viewerChromeEnabled = false;
 let widthHandleRoot: HTMLElement | null = null;
 let widthHandleDragging = false;
 let widthHandleStartClientX = 0;
 let pendingWidthDragDeltaX = 0;
 let widthDragFrameRequested = false;
+let layoutReadyGeneration = 0;
+let layoutReadyTimer: number | undefined;
 let lastPostedMinimapState: PostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
 let minimapPolicy: MinimapPolicy = {
   // Mirrors ApplicateDocumentMinimapBuildPolicy until the host sends minimap-policy.
@@ -98,6 +102,13 @@ let minimapPolicy: MinimapPolicy = {
   minScrollableViewportRatio: 1.5,
   maxDetailedDocumentHeight: 240000
 };
+
+function applyViewerChromeState(): void {
+  document.documentElement.dataset.mmChrome = viewerChromeEnabled ? "on" : "off";
+  if (!viewerChromeEnabled) {
+    window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior });
+  }
+}
 
 function postHostMessage(message: RendererMessage): void {
   const serialized = JSON.stringify(message);
@@ -133,14 +144,59 @@ function renderMath(): void {
   katexHasRun = true;
 }
 
-function postScroll(): void {
+function getScrollState(): { scrollTop: number; scrollHeight: number; clientHeight: number } {
   const root = document.scrollingElement ?? document.documentElement;
-  postHostMessage({
-    type: "scroll",
+  return {
     scrollTop: root.scrollTop,
     scrollHeight: root.scrollHeight,
     clientHeight: root.clientHeight
+  };
+}
+
+function postScroll(): void {
+  postHostMessage({
+    type: "scroll",
+    ...getScrollState()
   });
+}
+
+function postLayoutReady(): void {
+  postScroll();
+  postHostMessage({
+    type: "layout-ready",
+    ...getScrollState()
+  });
+}
+
+function scheduleLayoutReady(): void {
+  const generation = ++layoutReadyGeneration;
+  let completed = false;
+  if (layoutReadyTimer !== undefined) {
+    window.clearTimeout(layoutReadyTimer);
+  }
+
+  const complete = () => {
+    if (completed || generation !== layoutReadyGeneration) {
+      return;
+    }
+
+    completed = true;
+    if (layoutReadyTimer !== undefined) {
+      window.clearTimeout(layoutReadyTimer);
+      layoutReadyTimer = undefined;
+    }
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (generation === layoutReadyGeneration) {
+          postLayoutReady();
+        }
+      });
+    });
+  };
+
+  layoutReadyTimer = window.setTimeout(complete, 250);
+  document.fonts?.ready.then(complete).catch(complete);
 }
 
 function readRootPixelVariable(name: string, fallback: number): number {
@@ -539,6 +595,7 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
   document.documentElement.style.setProperty("--mm-document-max-width", `${message.maxWidth}px`);
   minimapMode = message.minimapMode;
   viewerChromeEnabled = message.viewerChromeEnabled ?? true;
+  applyViewerChromeState();
   widthResizerVisibility = normalizeWidthResizerVisibility(message.widthResizerVisibility);
   const widthResizerClasses = getWidthResizerVisibilityClasses(widthResizerVisibility);
   document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
@@ -551,6 +608,7 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
   }
 
   updateWidthHandlePosition();
+  scheduleLayoutReady();
 }
 
 function handleHostMessage(raw: unknown): void {
@@ -611,10 +669,31 @@ function wireViewerInteraction(): void {
   }, true);
 }
 
+function wireWheelProxy(): void {
+  document.addEventListener("wheel", (event) => {
+    if (viewerChromeEnabled) {
+      return;
+    }
+
+    if (Math.abs(event.deltaY) <= Number.EPSILON || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+      return;
+    }
+
+    postHostMessage({
+      type: "wheel",
+      deltaY: event.deltaY,
+      deltaMode: event.deltaMode
+    });
+    event.preventDefault();
+  }, { capture: true, passive: false });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+  applyViewerChromeState();
   renderMath();
   wireLinks();
   wireViewerInteraction();
+  wireWheelProxy();
   postHostMessage({
     type: "document-ready",
     mathCount: document.querySelectorAll("[data-tex]").length

@@ -167,12 +167,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             {
                 requestedSurface = ApplicateRendererSurfaceKind.Native;
             }
-            else
-            {
-                webPreview.ImageSourceResolver = _session?.ImageSourceResolver;
-                webPreview.ReadingPreferences = CreateWebPreviewPreferences(
-                    _session?.ReadingPreferences ?? ReadingPreferences.Default);
-            }
         }
 
         StagePreviewSurface(requestedSurface);
@@ -295,10 +289,14 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             _session.FileName,
             _session.SourceText);
         var webAlreadyRenderedCurrentDocument = _webPreview.HasLoadedDocumentForSource(source);
+        var widths = CalculatePreviewWidths(Bounds.Width, _session.ReadingPreferences, PreviewDocumentPadding);
 
-        _webPreview.ReadingPreferences = CreateWebPreviewPreferences(_session.ReadingPreferences);
-        _webPreview.ImageSourceResolver = _session.ImageSourceResolver;
-        _webPreview.Source = source;
+        _webPreview.UpdateInputs(
+            source,
+            CreateWebPreviewPreferences(_session.ReadingPreferences),
+            _session.ImageSourceResolver,
+            widths.WebColumnWidth,
+            viewerChromeEnabled: false);
         if (webAlreadyRenderedCurrentDocument)
         {
             CommitPendingPreviewSurface(ApplicateRendererSurfaceKind.WebView);

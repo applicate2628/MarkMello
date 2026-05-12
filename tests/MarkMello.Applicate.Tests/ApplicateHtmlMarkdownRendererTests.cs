@@ -136,7 +136,7 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
-    public async Task RenderDoesNotResolveRemoteImagesThroughResolver()
+    public async Task RenderResolvesRemoteImagesThroughResolverWithoutEmittingRemoteUrls()
     {
         var renderer = new ApplicateHtmlMarkdownRenderer();
         var resolver = new CountingImageSourceResolver();
@@ -148,9 +148,27 @@ public sealed class ApplicateHtmlMarkdownRendererTests
             resolver,
             CancellationToken.None);
 
-        Assert.Equal(0, resolver.CallCount);
+        Assert.Equal(1, resolver.CallCount);
         Assert.DoesNotContain("https://example.com", document.Html, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("data:image/", document.Html, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("data:image/png;base64,", document.Html);
+    }
+
+    [Fact]
+    public async Task RenderInfersRemoteImageMimeTypeFromUrlPathWithoutQueryString()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        var resolver = new CountingImageSourceResolver();
+        var source = new MarkdownSource("docs/sample.md", "sample.md", "![remote](https://example.com/a.jpg?pid=Api)");
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            resolver,
+            CancellationToken.None);
+
+        Assert.Equal(1, resolver.CallCount);
+        Assert.DoesNotContain("https://example.com", document.Html, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("data:image/jpeg;base64,", document.Html);
     }
 
     [Fact]
@@ -182,6 +200,42 @@ public sealed class ApplicateHtmlMarkdownRendererTests
 
         Assert.Contains("overflow-y: visible;", css, StringComparison.Ordinal);
         Assert.DoesNotContain("overflow-y: hidden;", css, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BundledRendererCssDisablesRootScrollbarWhenChromeIsHostedNatively()
+    {
+        var css = await new ApplicateWebAssetEmbedder()
+            .ReadTextAssetAsync("renderer.css", CancellationToken.None);
+
+        Assert.Contains(":root[data-mm-chrome=\"off\"]", css, StringComparison.Ordinal);
+        Assert.Contains("overflow: hidden;", css, StringComparison.Ordinal);
+        Assert.Contains("scrollbar-width: none;", css, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RenderedWebDocumentStartsWithRendererChromeHiddenUntilHostPreferencesArrive()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer(new ApplicateWebAssetEmbedder());
+        var source = new MarkdownSource("sample.md", "sample.md", "Body");
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        Assert.Contains("data-mm-chrome=\"off\"", document.Html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BundledRendererCssUsesShellBackgroundColors()
+    {
+        var css = await new ApplicateWebAssetEmbedder()
+            .ReadTextAssetAsync("renderer.css", CancellationToken.None);
+
+        Assert.Contains("--mm-document-background: #fcfaf6;", css, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("--mm-document-background: #14110e;", css, StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed class CountingImageSourceResolver : IImageSourceResolver

@@ -145,7 +145,7 @@ public sealed class JsonSettingsStoreTests
     }
 
     [Fact]
-    public async Task LoadUsesNativeRendererWhenLegacySettingsHaveNoRendererBackend()
+    public async Task LoadUsesWebViewRendererWhenLegacySettingsHaveNoRendererBackend()
     {
         var rootDirectory = CreateTempDirectory();
         const string json = """
@@ -168,7 +168,7 @@ public sealed class JsonSettingsStoreTests
             var store = new JsonSettingsStore(rootDirectory);
             var preferences = await store.LoadPreferencesAsync();
 
-            Assert.Equal(MarkdownRendererBackend.Native, preferences.RendererBackend);
+            Assert.Equal(MarkdownRendererBackend.WebView, preferences.RendererBackend);
         }
         finally
         {

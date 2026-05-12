@@ -264,7 +264,85 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
             .Replace(@"^{\prime}", "'", StringComparison.Ordinal)
             .Replace(@"^\prime", "'", StringComparison.Ordinal);
 
-        return StripUnsupportedBraceAnnotations(normalized);
+        return StripUnsupportedFormattingCommands(StripUnsupportedBraceAnnotations(normalized));
+    }
+
+    private static string StripUnsupportedFormattingCommands(string tex)
+    {
+        var result = new StringBuilder(tex.Length);
+        var index = 0;
+
+        while (index < tex.Length)
+        {
+            if (TryReadSingleArgumentFormattingCommand(tex, index, @"\boldsymbol", out var body, out var nextIndex) ||
+                TryReadSingleArgumentFormattingCommand(tex, index, @"\boxed", out body, out nextIndex))
+            {
+                result.Append(StripUnsupportedFormattingCommands(body));
+                index = nextIndex;
+                continue;
+            }
+
+            result.Append(tex[index]);
+            index++;
+        }
+
+        return result.ToString();
+    }
+
+    private static bool TryReadSingleArgumentFormattingCommand(
+        string tex,
+        int startIndex,
+        string command,
+        out string body,
+        out int nextIndex)
+    {
+        body = string.Empty;
+        nextIndex = startIndex;
+
+        if (!tex.AsSpan(startIndex).StartsWith(command, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var cursor = startIndex + command.Length;
+        if (cursor < tex.Length && char.IsLetter(tex[cursor]))
+        {
+            return false;
+        }
+
+        cursor = SkipWhitespace(tex, cursor);
+        if (cursor >= tex.Length)
+        {
+            nextIndex = cursor;
+            return true;
+        }
+
+        if (tex[cursor] == '{')
+        {
+            if (!TryReadBalancedGroup(tex, cursor, out body, out nextIndex))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        if (tex[cursor] == '\\')
+        {
+            var commandEnd = cursor + 1;
+            while (commandEnd < tex.Length && char.IsLetter(tex[commandEnd]))
+            {
+                commandEnd++;
+            }
+
+            body = tex[cursor..commandEnd];
+            nextIndex = commandEnd;
+            return true;
+        }
+
+        body = tex[cursor].ToString();
+        nextIndex = cursor + 1;
+        return true;
     }
 
     private static string StripUnsupportedBraceAnnotations(string tex)

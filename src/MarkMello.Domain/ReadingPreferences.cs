@@ -16,7 +16,7 @@ public sealed record ReadingPreferences(
     double LineHeight,
     int ContentWidth,
     DocumentMinimapMode DocumentMinimapMode = DocumentMinimapMode.Auto,
-    MarkdownRendererBackend RendererBackend = MarkdownRendererBackend.Native,
+    MarkdownRendererBackend RendererBackend = MarkdownRendererBackend.WebView,
     WidthResizerVisibility WidthResizerVisibility = WidthResizerVisibility.OnHover)
 {
     public const int MinFontSize = 14;
@@ -44,7 +44,7 @@ public sealed record ReadingPreferences(
         LineHeight: 1.7,
         ContentWidth: MediumContentWidth,
         DocumentMinimapMode: DocumentMinimapMode.Auto,
-        RendererBackend: MarkdownRendererBackend.Native,
+        RendererBackend: MarkdownRendererBackend.WebView,
         WidthResizerVisibility: WidthResizerVisibility.OnHover);
 
     /// <summary>
