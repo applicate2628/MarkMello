@@ -209,7 +209,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void OnEditorScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
-        if (!_syncEnabled || _sharedHost is null || !_isAttachedToHost)
+        if (!_syncEnabled)
         {
             return;
         }
@@ -221,6 +221,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             return;
         }
 
+        // ForwardEditorScrollToPreview branches between WebView (IPC) and
+        // native (_nativeScroll.Offset) internally, so this handler does
+        // not need to know which surface is currently active.
         ForwardEditorScrollToPreview();
     }
 
