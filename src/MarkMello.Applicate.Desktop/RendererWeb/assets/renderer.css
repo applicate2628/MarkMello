@@ -273,3 +273,36 @@ pre.mm-mermaid.is-rendered {
   height: auto;
 }
 
+:root {
+  --mm-minimap-heading-1: rgba(60, 60, 60, 0.9);
+  --mm-minimap-heading-2: rgba(80, 80, 80, 0.85);
+  --mm-minimap-heading-3: rgba(100, 100, 100, 0.75);
+  --mm-minimap-heading-4: rgba(120, 120, 120, 0.6);
+  --mm-minimap-heading-5: rgba(140, 140, 140, 0.5);
+  --mm-minimap-heading-6: rgba(160, 160, 160, 0.4);
+  --mm-minimap-paragraph: rgba(150, 150, 150, 0.3);
+  --mm-minimap-code: rgba(70, 130, 200, 0.5);
+  --mm-minimap-math-display: rgba(180, 80, 80, 0.5);
+  --mm-minimap-mermaid: rgba(80, 180, 80, 0.5);
+  --mm-minimap-table: rgba(140, 110, 70, 0.4);
+  --mm-minimap-list: rgba(150, 150, 150, 0.35);
+  --mm-minimap-quote: rgba(120, 90, 150, 0.35);
+  --mm-minimap-hr: rgba(100, 100, 100, 0.3);
+}
+[data-theme="dark"] {
+  --mm-minimap-heading-1: rgba(220, 220, 220, 0.9);
+  --mm-minimap-heading-2: rgba(200, 200, 200, 0.85);
+  --mm-minimap-heading-3: rgba(180, 180, 180, 0.75);
+  --mm-minimap-heading-4: rgba(160, 160, 160, 0.6);
+  --mm-minimap-heading-5: rgba(140, 140, 140, 0.5);
+  --mm-minimap-heading-6: rgba(120, 120, 120, 0.4);
+  --mm-minimap-paragraph: rgba(160, 160, 160, 0.3);
+  --mm-minimap-code: rgba(130, 180, 230, 0.5);
+  --mm-minimap-math-display: rgba(220, 130, 130, 0.5);
+  --mm-minimap-mermaid: rgba(130, 220, 130, 0.5);
+  --mm-minimap-table: rgba(200, 160, 100, 0.4);
+  --mm-minimap-list: rgba(160, 160, 160, 0.35);
+  --mm-minimap-quote: rgba(170, 130, 200, 0.35);
+  --mm-minimap-hr: rgba(140, 140, 140, 0.3);
+}
+

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   walkDocumentBlocks,
+  renderSchematicSvg,
   type DocumentBlock,
   type DocumentBlockKind,
 } from "../src/schematicMinimap";
@@ -49,5 +50,30 @@ describe("walkDocumentBlocks", () => {
     });
     expect(blocks).toEqual([]);
     document.body.removeChild(root);
+  });
+});
+
+describe("renderSchematicSvg", () => {
+  it("produces SVG in document coordinates with rect per block", () => {
+    const blocks: DocumentBlock[] = [
+      { kind: "heading-1", top: 0, height: 30 },
+      { kind: "paragraph", top: 40, height: 60 },
+      { kind: "math-display", top: 110, height: 80 },
+    ];
+    const svg = renderSchematicSvg(blocks, 800, 200);
+    expect(svg.tagName.toLowerCase()).toBe("svg");
+    expect(svg.getAttribute("viewBox")).toBe("0 0 800 200");
+    expect(svg.getAttribute("preserveAspectRatio")).toBe("none");
+    expect(svg.style.width).toBe("800px");
+    expect(svg.style.height).toBe("200px");
+    const rects = svg.querySelectorAll("rect");
+    expect(rects).toHaveLength(3);
+    expect(rects[0]!.getAttribute("y")).toBe("0");
+    expect(rects[0]!.getAttribute("height")).toBe("30");
+  });
+
+  it("empty blocks produces empty SVG (no crash)", () => {
+    const svg = renderSchematicSvg([], 800, 0);
+    expect(svg.querySelectorAll("rect")).toHaveLength(0);
   });
 });

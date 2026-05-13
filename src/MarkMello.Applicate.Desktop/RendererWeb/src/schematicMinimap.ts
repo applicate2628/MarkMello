@@ -74,3 +74,25 @@ function classify(el: HTMLElement): DocumentBlockKind | null {
   if (tag === "hr") return "hr";
   return null;
 }
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+export function renderSchematicSvg(blocks: DocumentBlock[], documentWidth: number, documentHeight: number): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${documentWidth} ${documentHeight}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.style.width = `${documentWidth}px`;
+  svg.style.height = `${documentHeight}px`;
+  svg.style.display = "block";
+  for (const block of blocks) {
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("x", "0");
+    rect.setAttribute("y", String(block.top));
+    rect.setAttribute("width", String(documentWidth));
+    rect.setAttribute("height", String(block.height));
+    rect.setAttribute("class", `mm-schematic-${block.kind}`);
+    rect.setAttribute("fill", `var(--mm-minimap-${block.kind}, currentColor)`);
+    svg.appendChild(rect);
+  }
+  return svg;
+}
