@@ -261,6 +261,19 @@
     };
   }
 
+  // RendererWeb/src/scrollCoalescer.ts
+  function createScrollCoalescer(deps) {
+    let pending = false;
+    return function queuePostScroll2() {
+      if (pending) return;
+      pending = true;
+      deps.schedule(() => {
+        pending = false;
+        deps.postScroll();
+      });
+    };
+  }
+
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -887,11 +900,17 @@
     }
     document.fonts?.ready.then(() => queueMinimapRefreshAfterLayoutSettles()).catch(() => void 0);
   });
-  document.addEventListener("scroll", () => {
-    window.requestAnimationFrame(() => {
+  var queuePostScroll = createScrollCoalescer({
+    postScroll: () => {
       postScroll();
       queueMinimapViewportUpdate();
-    });
+    },
+    schedule: (cb) => {
+      window.requestAnimationFrame(cb);
+    }
+  });
+  document.addEventListener("scroll", () => {
+    queuePostScroll();
   }, { passive: true });
   window.addEventListener("message", (event) => handleHostMessage(event.data));
   window.addEventListener("resize", () => {

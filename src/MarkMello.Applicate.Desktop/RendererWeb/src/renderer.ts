@@ -10,6 +10,7 @@ import { normalizeHljsLanguage } from "./hljsLanguage";
 import { runInitialRenderPipeline } from "./initialRenderPipeline";
 import { walkDocumentBlocks, renderSchematicSvg, type DocumentBlock } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
+import { createScrollCoalescer } from "./scrollCoalescer";
 
 type KatexApi = {
   render: (
@@ -826,11 +827,16 @@ document.addEventListener("DOMContentLoaded", () => {
   document.fonts?.ready.then(() => queueMinimapRefreshAfterLayoutSettles()).catch(() => undefined);
 });
 
-document.addEventListener("scroll", () => {
-  window.requestAnimationFrame(() => {
+const queuePostScroll = createScrollCoalescer({
+  postScroll: () => {
     postScroll();
     queueMinimapViewportUpdate();
-  });
+  },
+  schedule: (cb) => { window.requestAnimationFrame(cb); },
+});
+
+document.addEventListener("scroll", () => {
+  queuePostScroll();
 }, { passive: true });
 
 window.addEventListener("message", (event) => handleHostMessage(event.data));
