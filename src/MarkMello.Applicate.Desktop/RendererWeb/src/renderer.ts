@@ -98,7 +98,6 @@ let minimapContent: HTMLElement | null = null;
 let minimapViewport: HTMLElement | null = null;
 let currentMinimapLayout: MinimapViewportLayout | null = null;
 let minimapDragging = false;
-let lastMinimapDocumentHeight = 0;
 let minimapSourceReady = false;
 let katexHasRun = false;
 let mermaidRenderGeneration = 0;
@@ -439,7 +438,10 @@ function ensureMinimap(): void {
 }
 
 let minimapBlocks: DocumentBlock[] = [];
+// Read by Task 15 schedulePhaseBRebuild to decide if Phase B rebuild is needed.
 let minimapDocumentHeight = 0;
+// Silence unused-var hint until Task 15 wiring lands.
+void minimapDocumentHeight;
 
 function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   emitMark("mm-minimap-refresh-start", { phase });
@@ -464,7 +466,6 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   const svg = renderSchematicSvg(minimapBlocks, documentWidth, documentHeight);
   minimapContent.replaceChildren(svg);
   minimapSourceReady = true;
-  lastMinimapDocumentHeight = documentHeight;
   updateMinimapVisibility(true);
   updateMinimapViewport();
   emitMark("mm-minimap-refresh-end", { phase, blockCount: minimapBlocks.length });

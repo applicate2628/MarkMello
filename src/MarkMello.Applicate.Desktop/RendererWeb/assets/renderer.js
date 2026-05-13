@@ -280,7 +280,6 @@
   var minimapViewport = null;
   var currentMinimapLayout = null;
   var minimapDragging = false;
-  var lastMinimapDocumentHeight = 0;
   var minimapSourceReady = false;
   var katexHasRun = false;
   var mermaidRenderGeneration = 0;
@@ -594,7 +593,6 @@
     const svg = renderSchematicSvg(minimapBlocks, documentWidth, documentHeight);
     minimapContent.replaceChildren(svg);
     minimapSourceReady = true;
-    lastMinimapDocumentHeight = documentHeight;
     updateMinimapVisibility(true);
     updateMinimapViewport();
     emitMark("mm-minimap-refresh-end", { phase, blockCount: minimapBlocks.length });
