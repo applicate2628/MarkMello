@@ -111,6 +111,95 @@
     deps.scheduleLayoutReady();
   }
 
+  // RendererWeb/src/performanceMarks.ts
+  var state = {
+    marks: [],
+    pendingStarts: /* @__PURE__ */ new Map(),
+    longTasks: [],
+    scrollIpcCount: 0,
+    mathRenderCount: 0,
+    queueSlices: [],
+    fpsSessions: {}
+  };
+  var hasPerformanceApi = typeof performance !== "undefined" && typeof performance.now === "function";
+  function emitMark(name, detail) {
+    if (!hasPerformanceApi) return;
+    const mark = detail !== void 0 ? { name, startTime: performance.now(), duration: 0, detail } : { name, startTime: performance.now(), duration: 0 };
+    state.marks.push(mark);
+  }
+  function recordScrollIpc() {
+    state.scrollIpcCount++;
+    emitMark("mm-scroll-ipc");
+  }
+  function getReport() {
+    return {
+      marks: [...state.marks],
+      longTasks: [...state.longTasks],
+      scrollIpcCount: state.scrollIpcCount,
+      mathRenderCount: state.mathRenderCount,
+      queueSlices: [...state.queueSlices],
+      fpsSessions: { ...state.fpsSessions }
+    };
+  }
+  function installLongTaskObserver() {
+    if (typeof PerformanceObserver === "undefined") return () => {
+    };
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          state.longTasks.push(entry);
+        }
+      });
+      observer.observe({ entryTypes: ["longtask"] });
+      return () => observer.disconnect();
+    } catch {
+      emitMark("mm-longtask-observer-unsupported");
+      return () => {
+      };
+    }
+  }
+  var currentSampler = null;
+  function getFpsSampler() {
+    return {
+      start(key) {
+        if (currentSampler?.running) currentSampler.running = false;
+        currentSampler = {
+          key,
+          deltas: [],
+          lastTime: 0,
+          rafId: 0,
+          running: true
+        };
+        const tick = (t) => {
+          if (!currentSampler || !currentSampler.running) return;
+          if (currentSampler.lastTime > 0) {
+            currentSampler.deltas.push(t - currentSampler.lastTime);
+          }
+          currentSampler.lastTime = t;
+          currentSampler.rafId = requestAnimationFrame(tick);
+        };
+        currentSampler.rafId = requestAnimationFrame(tick);
+      },
+      stop() {
+        if (!currentSampler) {
+          return { minFps: 0, p50: 0, p95: 0, sampleCount: 0 };
+        }
+        currentSampler.running = false;
+        cancelAnimationFrame(currentSampler.rafId);
+        const fps = currentSampler.deltas.map((d) => d > 0 ? 1e3 / d : 0).sort((a, b) => a - b);
+        const session = {
+          minFps: fps[0] ?? 0,
+          p50: fps[Math.floor(fps.length * 0.5)] ?? 0,
+          p95: fps[Math.floor(fps.length * 0.95)] ?? 0,
+          sampleCount: fps.length
+        };
+        state.fpsSessions[currentSampler.key] = session;
+        currentSampler = null;
+        return session;
+      }
+    };
+  }
+
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -171,6 +260,7 @@
     hostWindow.invokeCSharpAction?.(serialized);
   }
   function renderMath() {
+    emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
     const mathNodes = Array.from(document.querySelectorAll("[data-tex]"));
     const katex = hostWindow.katex;
     if (!katex) {
@@ -259,6 +349,7 @@
     };
   }
   function postScroll() {
+    recordScrollIpc();
     postHostMessage({
       type: "scroll",
       ...getScrollState()
@@ -445,8 +536,10 @@
     return clone;
   }
   function refreshMinimapContent() {
+    emitMark("mm-minimap-refresh-start", { phase: "legacy" });
     ensureMinimap();
     if (!minimapContent || !minimapRoot) {
+      emitMark("mm-minimap-refresh-end", { phase: "legacy" });
       return;
     }
     const clone = cloneDocumentForMinimap();
@@ -458,6 +551,7 @@
     lastMinimapDocumentHeight = root.scrollHeight;
     updateMinimapVisibility(true);
     updateMinimapViewport();
+    emitMark("mm-minimap-refresh-end", { phase: "legacy" });
   }
   function shouldShowMinimap() {
     const root = document.scrollingElement ?? document.documentElement;
@@ -732,6 +826,9 @@
     });
   });
   document.addEventListener("DOMContentLoaded", () => {
+    emitMark("mm-doc-loaded");
+    requestAnimationFrame(() => emitMark("mm-doc-painted"));
+    installLongTaskObserver();
     applyViewerChromeState();
     wireLinks();
     wireViewerInteraction();
@@ -763,4 +860,6 @@
     updateWidthHandlePosition();
     queueMinimapViewportUpdate();
   });
+  window.__mmPerfReport = getReport;
+  window.__mmFpsSampler = getFpsSampler();
 })();

@@ -8,6 +8,7 @@ import {
 import { renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
 import { normalizeHljsLanguage } from "./hljsLanguage";
 import { runInitialRenderPipeline } from "./initialRenderPipeline";
+import { markStart, markEnd, emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
 
 type KatexApi = {
   render: (
@@ -141,6 +142,7 @@ function postHostMessage(message: RendererMessage): void {
 }
 
 function renderMath(): void {
+  emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
   const mathNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-tex]"));
   const katex = hostWindow.katex;
   if (!katex) {
@@ -240,6 +242,7 @@ function getScrollState(): { scrollTop: number; scrollHeight: number; clientHeig
 }
 
 function postScroll(): void {
+  recordScrollIpc();
   postHostMessage({
     type: "scroll",
     ...getScrollState()
@@ -465,8 +468,10 @@ function cloneDocumentForMinimap(): HTMLElement | null {
 }
 
 function refreshMinimapContent(): void {
+  emitMark("mm-minimap-refresh-start", { phase: "legacy" });
   ensureMinimap();
   if (!minimapContent || !minimapRoot) {
+    emitMark("mm-minimap-refresh-end", { phase: "legacy" });
     return;
   }
 
@@ -480,6 +485,7 @@ function refreshMinimapContent(): void {
   lastMinimapDocumentHeight = root.scrollHeight;
   updateMinimapVisibility(true);
   updateMinimapViewport();
+  emitMark("mm-minimap-refresh-end", { phase: "legacy" });
 }
 
 function shouldShowMinimap(): boolean {
@@ -814,6 +820,9 @@ document.addEventListener("securitypolicyviolation", (e) => {
 });
 
 document.addEventListener("DOMContentLoaded", () => {
+  emitMark("mm-doc-loaded");
+  requestAnimationFrame(() => emitMark("mm-doc-painted"));
+  installLongTaskObserver();
   applyViewerChromeState();
   // Defer renderMath / renderMermaid / renderCodeBlocks to runInitialRenderPipeline,
   // which is triggered by the first reading-preferences message from the host.
@@ -851,3 +860,6 @@ window.addEventListener("resize", () => {
   updateWidthHandlePosition();
   queueMinimapViewportUpdate();
 });
+
+(window as unknown as { __mmPerfReport: typeof getReport; __mmFpsSampler: ReturnType<typeof getFpsSampler> }).__mmPerfReport = getReport;
+(window as unknown as { __mmPerfReport: typeof getReport; __mmFpsSampler: ReturnType<typeof getFpsSampler> }).__mmFpsSampler = getFpsSampler();
