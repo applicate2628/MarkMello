@@ -460,65 +460,6 @@
   }
 
   // RendererWeb/src/schematicMinimap.ts
-  function walkDocumentBlocks(input) {
-    const blocks = [];
-    const children = input.documentRoot.children;
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
-      if (!(child instanceof HTMLElement)) continue;
-      const kind = classify(child);
-      if (!kind) continue;
-      const top = child.offsetTop;
-      const height = child.offsetHeight;
-      const block = { kind, top, height };
-      if (kind === "paragraph" || kind === "list" || kind === "quote") {
-        const lineHeight = parseFloat(getComputedStyle(child).lineHeight) || 16;
-        block.textLines = Math.max(1, Math.round(height / lineHeight));
-      }
-      blocks.push(block);
-    }
-    return blocks;
-  }
-  function classify(el) {
-    const tag = el.tagName.toLowerCase();
-    if (tag === "h1") return "heading-1";
-    if (tag === "h2") return "heading-2";
-    if (tag === "h3") return "heading-3";
-    if (tag === "h4") return "heading-4";
-    if (tag === "h5") return "heading-5";
-    if (tag === "h6") return "heading-6";
-    if (tag === "p") return "paragraph";
-    if (tag === "pre") {
-      if (el.classList.contains("mm-mermaid")) return "mermaid";
-      return "code";
-    }
-    if (el.classList.contains("math-display")) return "math-display";
-    if (tag === "table") return "table";
-    if (tag === "ul" || tag === "ol") return "list";
-    if (tag === "blockquote") return "quote";
-    if (tag === "hr") return "hr";
-    return null;
-  }
-  var SVG_NS = "http://www.w3.org/2000/svg";
-  function renderSchematicSvg(blocks, documentWidth, documentHeight) {
-    const svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", `0 0 ${documentWidth} ${documentHeight}`);
-    svg.setAttribute("preserveAspectRatio", "none");
-    svg.style.width = `${documentWidth}px`;
-    svg.style.height = `${documentHeight}px`;
-    svg.style.display = "block";
-    for (const block of blocks) {
-      const rect = document.createElementNS(SVG_NS, "rect");
-      rect.setAttribute("x", "0");
-      rect.setAttribute("y", String(block.top));
-      rect.setAttribute("width", String(documentWidth));
-      rect.setAttribute("height", String(block.height));
-      rect.setAttribute("class", `mm-schematic-${block.kind}`);
-      rect.setAttribute("fill", `var(--mm-minimap-${block.kind}, currentColor)`);
-      svg.appendChild(rect);
-    }
-    return svg;
-  }
   function shouldTriggerPhaseB(currentHeight, cachedHeight) {
     if (cachedHeight <= 0) return false;
     return Math.abs(currentHeight - cachedHeight) >= 1;
@@ -555,7 +496,6 @@
   var WIDTH_RESIZER_ALWAYS_CLASS = "mm-width-resizer-always";
   var minimapMode = "off";
   var hasReceivedHostPreferences = false;
-  var minimapFrameRequested = false;
   var minimapViewportFrameRequested = false;
   var minimapRefreshTimer;
   var minimapRoot = null;
@@ -625,9 +565,10 @@
         visibleCount: controller.initialVisibleNodes.size,
         failedCount: countFailedInSet(controller.initialVisibleNodes)
       });
+      refreshMinimapContent("A");
     });
     controller.allMathRendered.then(() => {
-      const allMathNodes = document.querySelectorAll("[data-tex]");
+      const allMathNodes = Array.from(document.querySelectorAll("[data-tex]"));
       emitMark("mm-all-math-rendered", {
         totalCount: controller.totalMathCount,
         failedCount: countFailedInSet(allMathNodes),
@@ -865,32 +806,50 @@
     minimapRoot.addEventListener("pointerup", handleMinimapPointerUp);
     minimapRoot.addEventListener("pointercancel", handleMinimapPointerUp);
   }
-  var minimapBlocks = [];
   var minimapDocumentHeight = 0;
+  function cloneDocumentForMinimap() {
+    const source = document.querySelector(".mm-document");
+    if (!source) {
+      minimapSourceReady = false;
+      return null;
+    }
+    const clone = source.cloneNode(true);
+    minimapSourceReady = true;
+    clone.removeAttribute("id");
+    clone.setAttribute("aria-hidden", "true");
+    clone.inert = true;
+    clone.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
+    clone.querySelectorAll("*").forEach((node) => {
+      for (const attribute of Array.from(node.attributes)) {
+        if (attribute.name === "role" || attribute.name === "name" || attribute.name === "for" || attribute.name.startsWith("aria-") && attribute.name !== "aria-hidden") {
+          node.removeAttribute(attribute.name);
+        }
+      }
+    });
+    clone.querySelectorAll("a, button, input, textarea, select").forEach((node) => {
+      node.setAttribute("tabindex", "-1");
+      node.removeAttribute("href");
+    });
+    return clone;
+  }
   function refreshMinimapContent(phase = "A") {
     emitMark("mm-minimap-refresh-start", { phase });
     ensureMinimap();
     if (!minimapContent || !minimapRoot) {
-      emitMark("mm-minimap-refresh-end", { phase, blockCount: 0, skipped: "no-mount" });
+      emitMark("mm-minimap-refresh-end", { phase, skipped: "no-mount" });
       return;
     }
-    const source = document.querySelector(".mm-document");
-    if (!source) {
-      minimapSourceReady = false;
-      emitMark("mm-minimap-refresh-end", { phase, blockCount: 0, skipped: "no-source" });
+    const clone = cloneDocumentForMinimap();
+    if (!clone) {
+      emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
       return;
     }
     const root = document.scrollingElement ?? document.documentElement;
-    const documentHeight = root.scrollHeight;
-    const documentWidth = Math.max(source.scrollWidth, source.clientWidth, 1);
-    minimapBlocks = walkDocumentBlocks({ documentRoot: source, documentHeight });
-    minimapDocumentHeight = documentHeight;
-    const svg = renderSchematicSvg(minimapBlocks, documentWidth, documentHeight);
-    minimapContent.replaceChildren(svg);
-    minimapSourceReady = true;
+    minimapDocumentHeight = root.scrollHeight;
+    minimapContent.replaceChildren(clone);
     updateMinimapVisibility(true);
     updateMinimapViewport();
-    emitMark("mm-minimap-refresh-end", { phase, blockCount: minimapBlocks.length });
+    emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
   }
   function shouldShowMinimap() {
     const root = document.scrollingElement ?? document.documentElement;
@@ -1027,17 +986,6 @@
       updateMinimapViewport();
     });
   }
-  function queueMinimapRefresh() {
-    if (minimapFrameRequested) {
-      return;
-    }
-    minimapFrameRequested = true;
-    window.requestAnimationFrame(() => {
-      minimapFrameRequested = false;
-      const ready = currentController?.initialVisibleReady ?? Promise.resolve();
-      ready.then(() => refreshMinimapContent("A"));
-    });
-  }
   function queueMinimapRefreshAfterLayoutSettles() {
     window.clearTimeout(minimapRefreshTimer);
     minimapRefreshTimer = window.setTimeout(() => {
@@ -1056,11 +1004,7 @@
     document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
     const hadHostPreferences = hasReceivedHostPreferences;
     hasReceivedHostPreferences = true;
-    if (hadHostPreferences) {
-      queueMinimapViewportUpdate();
-    } else {
-      queueMinimapRefresh();
-    }
+    queueMinimapViewportUpdate();
     updateWidthHandlePosition();
     if (!hadHostPreferences && !initialRenderPipelineCompleted) {
       void runInitialRenderPipeline({

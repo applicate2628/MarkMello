@@ -9,7 +9,7 @@ import { renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
 import { normalizeHljsLanguage } from "./hljsLanguage";
 import { runInitialRenderPipeline, type MathReadinessController } from "./initialRenderPipeline";
 import { renderMath as renderMathInit } from "./mathRenderInit";
-import { walkDocumentBlocks, renderSchematicSvg, schedulePhaseBRebuild, type DocumentBlock } from "./schematicMinimap";
+import { schedulePhaseBRebuild } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
 import { createScrollCoalescer } from "./scrollCoalescer";
 
@@ -92,7 +92,6 @@ const WIDTH_RESIZER_ALWAYS_CLASS = "mm-width-resizer-always";
 
 let minimapMode: MinimapMode = "off";
 let hasReceivedHostPreferences = false;
-let minimapFrameRequested = false;
 let minimapViewportFrameRequested = false;
 let minimapRefreshTimer: number | undefined;
 let minimapRoot: HTMLElement | null = null;
@@ -173,9 +172,13 @@ function renderMath(): MathReadinessController {
       visibleCount: controller.initialVisibleNodes.size,
       failedCount: countFailedInSet(controller.initialVisibleNodes),
     });
+    // Phase A minimap rebuild now happens here — once initial-visible math has
+    // reached terminal state (heights stable), clone the document for the minimap.
+    // This replaces the old katexHasRun gate without racing the rAF in queueMinimapRefresh.
+    refreshMinimapContent("A");
   });
   controller.allMathRendered.then(() => {
-    const allMathNodes = document.querySelectorAll<HTMLElement>("[data-tex]");
+    const allMathNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-tex]"));
     emitMark("mm-all-math-rendered", {
       totalCount: controller.totalMathCount,
       failedCount: countFailedInSet(allMathNodes),
@@ -456,36 +459,56 @@ function ensureMinimap(): void {
   minimapRoot.addEventListener("pointercancel", handleMinimapPointerUp);
 }
 
-let minimapBlocks: DocumentBlock[] = [];
 // Read by Task 15 schedulePhaseBRebuild to decide if Phase B rebuild is needed.
 let minimapDocumentHeight = 0;
+
+function cloneDocumentForMinimap(): HTMLElement | null {
+  const source = document.querySelector<HTMLElement>(".mm-document");
+  if (!source) {
+    minimapSourceReady = false;
+    return null;
+  }
+  const clone = source.cloneNode(true) as HTMLElement;
+  minimapSourceReady = true;
+  clone.removeAttribute("id");
+  clone.setAttribute("aria-hidden", "true");
+  clone.inert = true;
+  clone.querySelectorAll<HTMLElement>("[id]").forEach((node) => node.removeAttribute("id"));
+  clone.querySelectorAll<HTMLElement>("*").forEach((node) => {
+    for (const attribute of Array.from(node.attributes)) {
+      if (attribute.name === "role"
+        || attribute.name === "name"
+        || attribute.name === "for"
+        || (attribute.name.startsWith("aria-") && attribute.name !== "aria-hidden")) {
+        node.removeAttribute(attribute.name);
+      }
+    }
+  });
+  clone.querySelectorAll<HTMLElement>("a, button, input, textarea, select").forEach((node) => {
+    node.setAttribute("tabindex", "-1");
+    node.removeAttribute("href");
+  });
+  return clone;
+}
 
 function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   emitMark("mm-minimap-refresh-start", { phase });
   ensureMinimap();
   if (!minimapContent || !minimapRoot) {
-    emitMark("mm-minimap-refresh-end", { phase, blockCount: 0, skipped: "no-mount" });
+    emitMark("mm-minimap-refresh-end", { phase, skipped: "no-mount" });
     return;
   }
-  const source = document.querySelector<HTMLElement>(".mm-document");
-  if (!source) {
-    minimapSourceReady = false;
-    emitMark("mm-minimap-refresh-end", { phase, blockCount: 0, skipped: "no-source" });
+  const clone = cloneDocumentForMinimap();
+  if (!clone) {
+    emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
     return;
   }
-
   const root = document.scrollingElement ?? document.documentElement;
-  const documentHeight = root.scrollHeight;
-  const documentWidth = Math.max(source.scrollWidth, source.clientWidth, 1);
-
-  minimapBlocks = walkDocumentBlocks({ documentRoot: source, documentHeight });
-  minimapDocumentHeight = documentHeight;
-  const svg = renderSchematicSvg(minimapBlocks, documentWidth, documentHeight);
-  minimapContent.replaceChildren(svg);
-  minimapSourceReady = true;
+  minimapDocumentHeight = root.scrollHeight;
+  minimapContent.replaceChildren(clone);
   updateMinimapVisibility(true);
   updateMinimapViewport();
-  emitMark("mm-minimap-refresh-end", { phase, blockCount: minimapBlocks.length });
+  emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
 }
 
 function shouldShowMinimap(): boolean {
@@ -655,25 +678,6 @@ function queueMinimapViewportUpdate(): void {
   });
 }
 
-function queueMinimapRefresh(): void {
-  if (minimapFrameRequested) {
-    return;
-  }
-
-  minimapFrameRequested = true;
-  window.requestAnimationFrame(() => {
-    minimapFrameRequested = false;
-    // Wait for initial-visible math before building the schematic minimap.
-    // currentController is set synchronously inside renderMath() which the
-    // initialRenderPipeline calls before this rAF fires, so by the time the
-    // promise.then chain runs, the controller exists. If renderMath was never
-    // called (no math in doc), currentController is null and we fall back to a
-    // resolved promise — fine, refresh runs immediately.
-    const ready = currentController?.initialVisibleReady ?? Promise.resolve();
-    ready.then(() => refreshMinimapContent("A"));
-  });
-}
-
 function queueMinimapRefreshAfterLayoutSettles(): void {
   window.clearTimeout(minimapRefreshTimer);
   minimapRefreshTimer = window.setTimeout(() => {
@@ -695,11 +699,10 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
   document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
   const hadHostPreferences = hasReceivedHostPreferences;
   hasReceivedHostPreferences = true;
-  if (hadHostPreferences) {
-    queueMinimapViewportUpdate();
-  } else {
-    queueMinimapRefresh();
-  }
+  // Phase A minimap rebuild is scheduled by renderMath() (subscribed to
+  // controller.initialVisibleReady) so we don't race here. On subsequent
+  // preference updates, only the viewport indicator needs to update.
+  queueMinimapViewportUpdate();
 
   updateWidthHandlePosition();
 
