@@ -6,6 +6,7 @@ import {
   getReport,
   recordScrollIpc,
   installLongTaskObserver,
+  getFpsSampler,
   _resetForTests,
 } from "../src/performanceMarks";
 
@@ -145,6 +146,31 @@ describe("performanceMarks", () => {
     expect(
       report.marks.some((m) => m.name === "mm-longtask-observer-unsupported"),
     ).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("FpsSampler samples rAF deltas and returns p50/p95/min stats", () => {
+    let nextRafCallback: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      nextRafCallback = cb;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+
+    const sampler = getFpsSampler();
+    sampler.start("test");
+    // Simulate 10 frames with constant 16.67ms delta (~60 fps)
+    for (let i = 1; i <= 10; i++) {
+      nextRafCallback?.(i * 16.67);
+    }
+    const session = sampler.stop();
+    expect(session.sampleCount).toBeGreaterThanOrEqual(8);
+    expect(session.p50).toBeCloseTo(60, 0);
+    expect(session.minFps).toBeGreaterThan(50);
+
+    // Stored on report by key
+    expect(getReport().fpsSessions["test"]).toBeDefined();
 
     vi.unstubAllGlobals();
   });

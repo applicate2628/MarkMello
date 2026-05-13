@@ -152,12 +152,56 @@ export interface FpsSampler {
   stop(): FpsSession;
 }
 
-// Stub for Task 3 (FpsSampler). Real body will replace; signature is stable
-// so callers and tests against the public surface compile today.
+type SamplerState = {
+  key: string;
+  deltas: number[];
+  lastTime: number;
+  rafId: number;
+  running: boolean;
+};
+
+let currentSampler: SamplerState | null = null;
+
 export function getFpsSampler(): FpsSampler {
   return {
-    start: () => {},
-    stop: () => ({ minFps: 0, p50: 0, p95: 0, sampleCount: 0 }),
+    start(key: string) {
+      if (currentSampler?.running) currentSampler.running = false;
+      currentSampler = {
+        key,
+        deltas: [],
+        lastTime: 0,
+        rafId: 0,
+        running: true,
+      };
+      const tick = (t: number) => {
+        if (!currentSampler || !currentSampler.running) return;
+        if (currentSampler.lastTime > 0) {
+          currentSampler.deltas.push(t - currentSampler.lastTime);
+        }
+        currentSampler.lastTime = t;
+        currentSampler.rafId = requestAnimationFrame(tick);
+      };
+      currentSampler.rafId = requestAnimationFrame(tick);
+    },
+    stop() {
+      if (!currentSampler) {
+        return { minFps: 0, p50: 0, p95: 0, sampleCount: 0 };
+      }
+      currentSampler.running = false;
+      cancelAnimationFrame(currentSampler.rafId);
+      const fps = currentSampler.deltas
+        .map((d) => (d > 0 ? 1000 / d : 0))
+        .sort((a, b) => a - b);
+      const session: FpsSession = {
+        minFps: fps[0] ?? 0,
+        p50: fps[Math.floor(fps.length * 0.5)] ?? 0,
+        p95: fps[Math.floor(fps.length * 0.95)] ?? 0,
+        sampleCount: fps.length,
+      };
+      state.fpsSessions[currentSampler.key] = session;
+      currentSampler = null;
+      return session;
+    },
   };
 }
 
@@ -170,4 +214,5 @@ export function _resetForTests(): void {
   state.mathRenderCount = 0;
   state.queueSlices.length = 0;
   state.fpsSessions = {};
+  currentSampler = null;
 }
