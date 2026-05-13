@@ -2,6 +2,8 @@ using System.ComponentModel;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Interactivity;
+using Avalonia.Layout;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MarkMello.Applicate.Desktop.Rendering;
@@ -18,8 +20,10 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private readonly IApplicateSharedWebViewHost? _sharedHost;
     private readonly Grid _root = new() { UseLayoutRounding = true };
+    private readonly Grid _surface = new() { UseLayoutRounding = true };
     private readonly ApplicateMarkdownDocumentView _nativePreview;
     private readonly Panel _webSlot = new() { UseLayoutRounding = true };
+    private readonly ToggleButton _syncToggle;
     private readonly DispatcherTimer _webRenderTimer;
     private EditorSessionViewModel? _session;
     private ScrollViewer? _hostScrollViewer;
@@ -27,6 +31,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private bool _isAttachedToHost;
     private bool _webPreviewFailed;
     private bool _hostEventsWired;
+    private bool _syncEnabled;
 
     public ApplicateEditPreviewView(IApplicateSharedWebViewHost? sharedHost)
     {
@@ -37,13 +42,94 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             UseLayoutRounding = true
         };
 
-        _root.Children.Add(_nativePreview);
-        _root.Children.Add(_webSlot);
+        _surface.Children.Add(_nativePreview);
+        _surface.Children.Add(_webSlot);
+
+        _syncToggle = BuildSyncToggle();
+        var toolbar = BuildPreviewToolbar(_syncToggle);
+
+        _root.RowDefinitions = new RowDefinitions("Auto,*");
+        Grid.SetRow(toolbar, 0);
+        Grid.SetRow(_surface, 1);
+        _root.Children.Add(toolbar);
+        _root.Children.Add(_surface);
+
         Content = _root;
         UseLayoutRounding = true;
 
         _webRenderTimer = new DispatcherTimer { Interval = WebPreviewDebounce };
         _webRenderTimer.Tick += OnWebRenderTimerTick;
+    }
+
+    private static Border BuildPreviewToolbar(ToggleButton syncToggle)
+    {
+        var label = new TextBlock
+        {
+            Text = "PREVIEW",
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        label.Classes.Add("mm-editor-toolbar-label");
+
+        var leftGroup = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children = { label }
+        };
+
+        var rightGroup = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Children = { syncToggle }
+        };
+
+        var grid = new Grid();
+        grid.ColumnDefinitions = new ColumnDefinitions("*,Auto");
+        Grid.SetColumn(leftGroup, 0);
+        Grid.SetColumn(rightGroup, 1);
+        grid.Children.Add(leftGroup);
+        grid.Children.Add(rightGroup);
+
+        var toolbar = new Border { Child = grid };
+        toolbar.Classes.Add("mm-editor-toolbar");
+        return toolbar;
+    }
+
+    private ToggleButton BuildSyncToggle()
+    {
+        var toggle = new ToggleButton
+        {
+            Width = 28,
+            Height = 24,
+            MinWidth = 28,
+            MinHeight = 24,
+            Padding = new Thickness(0),
+            CornerRadius = new CornerRadius(4),
+            Background = Avalonia.Media.Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+            Content = new TextBlock
+            {
+                Text = "⇅",
+                FontSize = 14,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            },
+            IsChecked = false,
+            IsThreeState = false
+        };
+        ToolTip.SetTip(toggle, "Editor ↔ preview scroll sync");
+        toggle.IsCheckedChanged += OnSyncToggleChanged;
+        return toggle;
+    }
+
+    private void OnSyncToggleChanged(object? sender, RoutedEventArgs e)
+    {
+        _syncEnabled = _syncToggle.IsChecked == true;
+        // Sync logic itself is wired in a later step; for now this only
+        // records the state so callers can read it once the wiring lands.
     }
 
     protected override void OnDataContextChanged(EventArgs e)
