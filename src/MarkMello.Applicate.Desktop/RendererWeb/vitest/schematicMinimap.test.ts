@@ -77,3 +77,16 @@ describe("renderSchematicSvg", () => {
     expect(svg.querySelectorAll("rect")).toHaveLength(0);
   });
 });
+
+describe("integration", () => {
+  it("walk + render produces matching block count", () => {
+    const root = document.createElement("div");
+    root.className = "mm-document";
+    root.innerHTML = "<h1>A</h1><p>B</p><div class=\"math-display\"></div>";
+    document.body.appendChild(root);
+    const blocks = walkDocumentBlocks({ documentRoot: root, documentHeight: 100 });
+    const svg = renderSchematicSvg(blocks, 800, 100);
+    expect(svg.querySelectorAll("rect")).toHaveLength(blocks.length);
+    document.body.removeChild(root);
+  });
+});

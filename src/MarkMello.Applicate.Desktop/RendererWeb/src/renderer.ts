@@ -8,6 +8,7 @@ import {
 import { renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
 import { normalizeHljsLanguage } from "./hljsLanguage";
 import { runInitialRenderPipeline } from "./initialRenderPipeline";
+import { walkDocumentBlocks, renderSchematicSvg, type DocumentBlock } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
 
 type KatexApi = {
@@ -437,55 +438,36 @@ function ensureMinimap(): void {
   minimapRoot.addEventListener("pointercancel", handleMinimapPointerUp);
 }
 
-function cloneDocumentForMinimap(): HTMLElement | null {
+let minimapBlocks: DocumentBlock[] = [];
+let minimapDocumentHeight = 0;
+
+function refreshMinimapContent(phase: "A" | "B" = "A"): void {
+  emitMark("mm-minimap-refresh-start", { phase });
+  ensureMinimap();
+  if (!minimapContent || !minimapRoot) {
+    emitMark("mm-minimap-refresh-end", { phase, blockCount: 0, skipped: "no-mount" });
+    return;
+  }
   const source = document.querySelector<HTMLElement>(".mm-document");
   if (!source || !katexHasRun) {
     minimapSourceReady = false;
-    return null;
-  }
-
-  const clone = source.cloneNode(true) as HTMLElement;
-  minimapSourceReady = true;
-  clone.removeAttribute("id");
-  clone.setAttribute("aria-hidden", "true");
-  clone.inert = true;
-  clone.querySelectorAll<HTMLElement>("[id]").forEach((node) => node.removeAttribute("id"));
-  clone.querySelectorAll<HTMLElement>("*").forEach((node) => {
-    for (const attribute of Array.from(node.attributes)) {
-      if (attribute.name === "role"
-        || attribute.name === "name"
-        || attribute.name === "for"
-        || (attribute.name.startsWith("aria-") && attribute.name !== "aria-hidden")) {
-        node.removeAttribute(attribute.name);
-      }
-    }
-  });
-  clone.querySelectorAll<HTMLElement>("a, button, input, textarea, select").forEach((node) => {
-    node.setAttribute("tabindex", "-1");
-    node.removeAttribute("href");
-  });
-  return clone;
-}
-
-function refreshMinimapContent(): void {
-  emitMark("mm-minimap-refresh-start", { phase: "legacy" });
-  ensureMinimap();
-  if (!minimapContent || !minimapRoot) {
-    emitMark("mm-minimap-refresh-end", { phase: "legacy" });
+    emitMark("mm-minimap-refresh-end", { phase, blockCount: 0, skipped: "no-math" });
     return;
   }
 
-  const clone = cloneDocumentForMinimap();
-  minimapContent.replaceChildren();
-  if (clone) {
-    minimapContent.append(clone);
-  }
-
   const root = document.scrollingElement ?? document.documentElement;
-  lastMinimapDocumentHeight = root.scrollHeight;
+  const documentHeight = root.scrollHeight;
+  const documentWidth = Math.max(source.scrollWidth, source.clientWidth, 1);
+
+  minimapBlocks = walkDocumentBlocks({ documentRoot: source, documentHeight });
+  minimapDocumentHeight = documentHeight;
+  const svg = renderSchematicSvg(minimapBlocks, documentWidth, documentHeight);
+  minimapContent.replaceChildren(svg);
+  minimapSourceReady = true;
+  lastMinimapDocumentHeight = documentHeight;
   updateMinimapVisibility(true);
   updateMinimapViewport();
-  emitMark("mm-minimap-refresh-end", { phase: "legacy" });
+  emitMark("mm-minimap-refresh-end", { phase, blockCount: minimapBlocks.length });
 }
 
 function shouldShowMinimap(): boolean {
@@ -670,14 +652,9 @@ function queueMinimapRefresh(): void {
 function queueMinimapRefreshAfterLayoutSettles(): void {
   window.clearTimeout(minimapRefreshTimer);
   minimapRefreshTimer = window.setTimeout(() => {
-    const root = document.scrollingElement ?? document.documentElement;
-    if (Math.abs(root.scrollHeight - lastMinimapDocumentHeight) < 1) {
-      queueMinimapViewportUpdate();
-      return;
-    }
-
-    lastMinimapDocumentHeight = root.scrollHeight;
-    queueMinimapRefresh();
+    // Stage 2 decoupling: only viewport update on resize; content rebuild
+    // is driven by content-change OR Phase B (Task 15) — not by layout settling.
+    queueMinimapViewportUpdate();
   }, MINIMAP_REFRESH_DEBOUNCE_MS);
 }
 
