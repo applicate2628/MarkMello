@@ -22,8 +22,8 @@ describe("walkDocumentBlocks", () => {
       <hr>
     `;
     document.body.appendChild(root);
-    const blocks = walkDocumentBlocks({ documentRoot: root, documentHeight: 1000 });
-    const kinds = blocks.map((b) => b.kind);
+    const blocks: DocumentBlock[] = walkDocumentBlocks({ documentRoot: root, documentHeight: 1000 });
+    const kinds: DocumentBlockKind[] = blocks.map((b: DocumentBlock) => b.kind);
     expect(kinds).toEqual<DocumentBlockKind[]>([
       "heading-1",
       "paragraph",
