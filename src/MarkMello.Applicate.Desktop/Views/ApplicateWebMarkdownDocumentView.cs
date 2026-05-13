@@ -48,6 +48,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private double _scrollHeight;
     private double _clientHeight;
     private bool _isUpdatingInputs;
+    private bool _hasReceivedDocumentReady;
+    private int _intentionalReparentDepth;
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -177,8 +179,60 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
-        CancelRender();
+        // Skip cancelling the in-flight render when the detach is part of an
+        // intentional shared-host reparent: the WebView2 instance is kept alive
+        // by NativeWebView.BeginReparenting and we want navigation to continue
+        // straight into the new parent without restart. Real detaches (control
+        // disposed, window closed) still cancel as before.
+        if (_intentionalReparentDepth == 0)
+        {
+            CancelRender();
+        }
+
         base.OnDetachedFromVisualTree(e);
+    }
+
+    /// <summary>
+    /// Begin an intentional reparent that keeps the native WebView adapter and
+    /// in-flight render alive across the detach + re-attach pair. Used by the
+    /// shared-host service when moving the view between viewer and edit-mode
+    /// preview panels. Disposing the returned scope ends the reparent.
+    /// </summary>
+    internal IDisposable BeginIntentionalReparent()
+    {
+        _intentionalReparentDepth++;
+        var inner = _webView.BeginReparenting(false);
+        return new ReparentScope(this, inner);
+    }
+
+    private sealed class ReparentScope : IDisposable
+    {
+        private readonly ApplicateWebMarkdownDocumentView _owner;
+        private IDisposable? _inner;
+
+        public ReparentScope(ApplicateWebMarkdownDocumentView owner, IDisposable inner)
+        {
+            _owner = owner;
+            _inner = inner;
+        }
+
+        public void Dispose()
+        {
+            if (_inner is null)
+            {
+                return;
+            }
+
+            try
+            {
+                _inner.Dispose();
+            }
+            finally
+            {
+                _inner = null;
+                _owner._intentionalReparentDepth--;
+            }
+        }
     }
 
     private void OnRenderInputChanged()
@@ -234,6 +288,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _awaitingLayoutReady = false;
         _hasLayoutReady = false;
         _hasMinimapState = false;
+        _hasReceivedDocumentReady = false;
         _scrollTop = 0;
         _scrollHeight = 0;
         _clientHeight = 0;
@@ -326,6 +381,19 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _isLoadingGeneratedDocument = false;
         if (!e.IsSuccess)
         {
+            // Phase-aware: only treat a navigation failure as a real load error
+            // before the renderer JS posts "document-ready" for the initial
+            // load. After that, !IsSuccess almost always means a stale or
+            // superseded navigation (cancelled by a subsequent Navigate, or
+            // an internal WebView2 reload) — treating those as fallback was
+            // causing edit-mode webview to flash-and-vanish: first nav
+            // rendered and committed the surface, then a stale completion
+            // raised FallbackRequested → _webPreviewFailed → flip to native.
+            if (_hasReceivedDocumentReady)
+            {
+                return;
+            }
+
             FallbackRequested?.Invoke(this, EventArgs.Empty);
         }
     }
@@ -354,6 +422,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (type == "document-ready")
             {
                 _hasLoadedDocument = true;
+                _hasReceivedDocumentReady = true;
                 BeginAwaitingLayoutReady();
                 SendTheme();
                 SendMinimapPolicy();

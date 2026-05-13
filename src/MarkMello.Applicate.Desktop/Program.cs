@@ -39,6 +39,7 @@ internal static class Program
         collection.Replace(ServiceDescriptor.Singleton<IMarkdownDocumentRenderer, ApplicateMarkdownDocumentRenderer>());
         collection.AddSingleton<ApplicateWebAssetEmbedder>();
         collection.AddSingleton<IApplicateHtmlMarkdownRenderer, ApplicateHtmlMarkdownRenderer>();
+        collection.AddSingleton<IApplicateSharedWebViewHost, ApplicateSharedWebViewHost>();
         collection.AddApplication();
         collection.AddPresentation();
         collection.Replace(ServiceDescriptor.Singleton<MainWindow>(provider => new ApplicateMainWindow(
