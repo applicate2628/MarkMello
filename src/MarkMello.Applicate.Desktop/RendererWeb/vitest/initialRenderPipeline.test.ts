@@ -1,5 +1,13 @@
-import { describe, it, expect } from "vitest";
-import { runInitialRenderPipeline } from "../src/initialRenderPipeline";
+import { describe, it, expect, vi } from "vitest";
+import { runInitialRenderPipeline, type MathReadinessController } from "../src/initialRenderPipeline";
+
+function readyController(): MathReadinessController {
+  return {
+    initialVisibleReady: Promise.resolve(),
+    allMathRendered: Promise.resolve(),
+    cancel: () => {},
+  };
+}
 
 describe("runInitialRenderPipeline", () => {
   it("calls dependencies in the documented order", async () => {
@@ -8,7 +16,7 @@ describe("runInitialRenderPipeline", () => {
       getCurrentTheme: () => "dark",
       applyTheme: (t) => { order.push(`apply:${t}`); },
       initMermaidWithTheme: (t) => { order.push(`init:${t}`); },
-      renderMath: () => { order.push("math"); },
+      renderMath: () => { order.push("math"); return readyController(); },
       renderMermaid: async () => { order.push("mermaid"); },
       renderCodeBlocks: () => { order.push("code"); },
       scheduleLayoutReady: () => { order.push("schedule"); }
@@ -22,7 +30,7 @@ describe("runInitialRenderPipeline", () => {
       getCurrentTheme: () => "light",
       applyTheme: (t) => { applied.push(t); },
       initMermaidWithTheme: () => {},
-      renderMath: () => {},
+      renderMath: () => readyController(),
       renderMermaid: async () => {},
       renderCodeBlocks: () => {},
       scheduleLayoutReady: () => {}
@@ -36,7 +44,7 @@ describe("runInitialRenderPipeline", () => {
       getCurrentTheme: () => "light",
       applyTheme: () => {},
       initMermaidWithTheme: () => {},
-      renderMath: () => {},
+      renderMath: () => readyController(),
       renderMermaid: async () => { throw new Error("boom"); },
       renderCodeBlocks: () => {},
       scheduleLayoutReady: () => { scheduled = true; }
@@ -52,7 +60,7 @@ describe("runInitialRenderPipeline", () => {
       getCurrentTheme: () => "light",
       applyTheme: () => {},
       initMermaidWithTheme: () => {},
-      renderMath: () => { events.push("math"); },
+      renderMath: () => { events.push("math"); return readyController(); },
       renderMermaid: async () => { events.push("mermaid:start"); await mermaidPromise; events.push("mermaid:end"); },
       renderCodeBlocks: () => { events.push("code"); },
       scheduleLayoutReady: () => { events.push("schedule"); }
@@ -63,5 +71,51 @@ describe("runInitialRenderPipeline", () => {
     resolveMermaid();
     await pipelinePromise;
     expect(events).toEqual(["math", "mermaid:start", "mermaid:end", "code", "schedule"]);
+  });
+});
+
+describe("runInitialRenderPipeline (MathReadinessController contract)", () => {
+  it("scheduleLayoutReady awaits initialVisibleReady", async () => {
+    let resolveInitial: () => void = () => {};
+    const initialPromise = new Promise<void>(r => { resolveInitial = r; });
+    const controller: MathReadinessController = {
+      initialVisibleReady: initialPromise,
+      allMathRendered: Promise.resolve(),
+      cancel: () => {},
+    };
+    const scheduleLayoutReady = vi.fn();
+    const pipePromise = runInitialRenderPipeline({
+      getCurrentTheme: () => "light",
+      applyTheme: vi.fn(),
+      initMermaidWithTheme: vi.fn(),
+      renderMath: () => controller,
+      renderMermaid: () => Promise.resolve(),
+      renderCodeBlocks: vi.fn(),
+      scheduleLayoutReady,
+    });
+    await new Promise(r => setTimeout(r, 10));
+    expect(scheduleLayoutReady).not.toHaveBeenCalled();
+    resolveInitial();
+    await pipePromise;
+    expect(scheduleLayoutReady).toHaveBeenCalled();
+  });
+
+  it("scheduleLayoutReady still called even if initialVisibleReady resolves immediately (failure-tolerant)", async () => {
+    const controller: MathReadinessController = {
+      initialVisibleReady: Promise.resolve(),
+      allMathRendered: Promise.resolve(),
+      cancel: () => {},
+    };
+    const scheduleLayoutReady = vi.fn();
+    await runInitialRenderPipeline({
+      getCurrentTheme: () => "light",
+      applyTheme: vi.fn(),
+      initMermaidWithTheme: vi.fn(),
+      renderMath: () => controller,
+      renderMermaid: () => Promise.resolve(),
+      renderCodeBlocks: vi.fn(),
+      scheduleLayoutReady,
+    });
+    expect(scheduleLayoutReady).toHaveBeenCalled();
   });
 });

@@ -7,7 +7,8 @@ import {
 } from "./widthResizerVisibility";
 import { renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
 import { normalizeHljsLanguage } from "./hljsLanguage";
-import { runInitialRenderPipeline } from "./initialRenderPipeline";
+import { runInitialRenderPipeline, type MathReadinessController } from "./initialRenderPipeline";
+import { renderMath as renderMathInit } from "./mathRenderInit";
 import { walkDocumentBlocks, renderSchematicSvg, type DocumentBlock } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
 import { createScrollCoalescer } from "./scrollCoalescer";
@@ -142,29 +143,20 @@ function postHostMessage(message: RendererMessage): void {
   hostWindow.invokeCSharpAction?.(serialized);
 }
 
-function renderMath(): void {
-  emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
-  const mathNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-tex]"));
+function renderMath(): MathReadinessController {
+  // Thin wrapper preserves renderer-local side effects (perf mark, katexHasRun)
+  // while delegating the rendering loop to the seam in mathRenderInit.ts.
+  // Task 14 will replace the seam body with the full queue+IO impl.
+  const mathCount = document.querySelectorAll("[data-tex]").length;
+  emitMark("mm-render-math-start", { mathCount });
   const katex = hostWindow.katex;
   if (!katex) {
-    katexHasRun = mathNodes.length === 0;
-    return;
+    katexHasRun = mathCount === 0;
+    return renderMathInit({ katex: undefined, documentRoot: document });
   }
-
-  mathNodes.forEach((node) => {
-    const tex = node.dataset.tex;
-    if (!tex) {
-      return;
-    }
-
-    katex.render(tex, node, {
-      throwOnError: false,
-      displayMode: node.classList.contains("math-display"),
-      strict: "warn",
-      trust: false
-    });
-  });
+  const controller = renderMathInit({ katex, documentRoot: document });
   katexHasRun = true;
+  return controller;
 }
 
 function getCurrentTheme(): "light" | "dark" {

@@ -102,13 +102,49 @@
     const theme = deps.getCurrentTheme();
     deps.applyTheme(theme);
     deps.initMermaidWithTheme(theme);
-    deps.renderMath();
+    const mathController = deps.renderMath();
     try {
       await deps.renderMermaid();
     } catch {
     }
     deps.renderCodeBlocks();
+    await mathController.initialVisibleReady;
     deps.scheduleLayoutReady();
+  }
+
+  // RendererWeb/src/mathRenderInit.ts
+  function renderMath(deps) {
+    const mathNodes = Array.from(deps.documentRoot.querySelectorAll("[data-tex]"));
+    const katex = deps.katex;
+    if (!katex) {
+      return {
+        initialVisibleReady: Promise.resolve(),
+        allMathRendered: Promise.resolve(),
+        cancel: () => {
+        }
+      };
+    }
+    mathNodes.forEach((node) => {
+      const tex = node.dataset["tex"];
+      if (!tex) return;
+      try {
+        katex.render(tex, node, {
+          throwOnError: false,
+          displayMode: node.classList.contains("math-display"),
+          strict: "warn",
+          trust: false
+        });
+        node.dataset["mmMathRendered"] = "true";
+      } catch {
+        node.dataset["mmMathRendered"] = "failed";
+      }
+    });
+    return {
+      initialVisibleReady: Promise.resolve(),
+      allMathRendered: Promise.resolve(),
+      cancel: () => {
+      }
+    };
   }
 
   // RendererWeb/src/schematicMinimap.ts
@@ -332,27 +368,17 @@
     }
     hostWindow.invokeCSharpAction?.(serialized);
   }
-  function renderMath() {
-    emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
-    const mathNodes = Array.from(document.querySelectorAll("[data-tex]"));
+  function renderMath2() {
+    const mathCount = document.querySelectorAll("[data-tex]").length;
+    emitMark("mm-render-math-start", { mathCount });
     const katex = hostWindow.katex;
     if (!katex) {
-      katexHasRun = mathNodes.length === 0;
-      return;
+      katexHasRun = mathCount === 0;
+      return renderMath({ katex: void 0, documentRoot: document });
     }
-    mathNodes.forEach((node) => {
-      const tex = node.dataset.tex;
-      if (!tex) {
-        return;
-      }
-      katex.render(tex, node, {
-        throwOnError: false,
-        displayMode: node.classList.contains("math-display"),
-        strict: "warn",
-        trust: false
-      });
-    });
+    const controller = renderMath({ katex, documentRoot: document });
     katexHasRun = true;
+    return controller;
   }
   function getCurrentTheme() {
     return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
@@ -784,7 +810,7 @@
         getCurrentTheme,
         applyTheme,
         initMermaidWithTheme,
-        renderMath,
+        renderMath: renderMath2,
         renderMermaid,
         renderCodeBlocks,
         scheduleLayoutReady: () => {
