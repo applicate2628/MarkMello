@@ -111,6 +111,9 @@ let viewerChromeEnabled = false;
 let widthHandleRoot: HTMLElement | null = null;
 let widthHandleDragging = false;
 let widthHandleStartClientX = 0;
+// Snapshot of last maxWidth received from host while drag was active.
+// Applied on pointerUp so the final value lands without per-frame reflow.
+let pendingMaxWidthWhileDragging: number | null = null;
 let pendingWidthDragDeltaX = 0;
 let widthDragFrameRequested = false;
 let layoutReadyGeneration = 0;
@@ -418,6 +421,14 @@ function handleWidthHandlePointerUp(event: PointerEvent): void {
     // Pointer capture may already be gone after WebView focus changes.
   }
 
+  // Apply the maxWidth value deferred during drag (last echo from host). One
+  // reflow at end instead of one per pointer move — fixes heavy-formula lag.
+  if (pendingMaxWidthWhileDragging !== null) {
+    document.documentElement.style.setProperty("--mm-document-max-width", `${pendingMaxWidthWhileDragging}px`);
+    pendingMaxWidthWhileDragging = null;
+    updateWidthHandlePosition();
+  }
+
   postHostMessage({ type: "width-drag", phase: "end", deltaX });
   event.preventDefault();
 }
@@ -721,7 +732,17 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
 
   document.documentElement.style.setProperty("--mm-document-font-size", `${next.fontSize}px`);
   document.documentElement.style.setProperty("--mm-document-line-height", `${next.lineHeight}`);
-  document.documentElement.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
+  // While the user is actively dragging the width handle, host echoes new
+  // maxWidth on every pointer move. Applying it triggers a full document
+  // reflow including all KaTeX subtrees — visibly laggy on heavy formula
+  // files. Defer maxWidth until the drag ends; pointerUp's "width-drag end"
+  // arrives one tick before host's final reading-preferences, so the final
+  // value still lands. We store the latest pending value and apply on release.
+  if (widthHandleDragging) {
+    pendingMaxWidthWhileDragging = next.maxWidth;
+  } else {
+    document.documentElement.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
+  }
   minimapMode = next.minimapMode;
   viewerChromeEnabled = next.viewerChromeEnabled;
   applyViewerChromeState();

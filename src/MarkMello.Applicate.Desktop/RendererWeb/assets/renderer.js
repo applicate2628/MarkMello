@@ -515,6 +515,7 @@
   var widthHandleRoot = null;
   var widthHandleDragging = false;
   var widthHandleStartClientX = 0;
+  var pendingMaxWidthWhileDragging = null;
   var pendingWidthDragDeltaX = 0;
   var widthDragFrameRequested = false;
   var layoutReadyGeneration = 0;
@@ -774,6 +775,11 @@
       widthHandleRoot?.releasePointerCapture(event.pointerId);
     } catch {
     }
+    if (pendingMaxWidthWhileDragging !== null) {
+      document.documentElement.style.setProperty("--mm-document-max-width", `${pendingMaxWidthWhileDragging}px`);
+      pendingMaxWidthWhileDragging = null;
+      updateWidthHandlePosition();
+    }
     postHostMessage({ type: "width-drag", phase: "end", deltaX });
     event.preventDefault();
   }
@@ -1005,7 +1011,11 @@
     const visibilityOnlyChange = lastAppliedReadingPreferences !== null && lastAppliedReadingPreferences.fontSize === next.fontSize && lastAppliedReadingPreferences.lineHeight === next.lineHeight && lastAppliedReadingPreferences.maxWidth === next.maxWidth && lastAppliedReadingPreferences.minimapMode === next.minimapMode && lastAppliedReadingPreferences.viewerChromeEnabled === next.viewerChromeEnabled && lastAppliedReadingPreferences.widthResizerVisibility !== next.widthResizerVisibility;
     document.documentElement.style.setProperty("--mm-document-font-size", `${next.fontSize}px`);
     document.documentElement.style.setProperty("--mm-document-line-height", `${next.lineHeight}`);
-    document.documentElement.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
+    if (widthHandleDragging) {
+      pendingMaxWidthWhileDragging = next.maxWidth;
+    } else {
+      document.documentElement.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
+    }
     minimapMode = next.minimapMode;
     viewerChromeEnabled = next.viewerChromeEnabled;
     applyViewerChromeState();
