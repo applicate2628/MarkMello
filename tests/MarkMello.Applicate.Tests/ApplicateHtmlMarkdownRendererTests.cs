@@ -120,6 +120,33 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
+    public async Task RenderEmitsBlockIndexAndKindForSyncMetadata()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        // One heading, one paragraph, one list, one code block, one quote, one rule, one math display.
+        const string sourceText = "# Title\n\nFirst paragraph.\n\n- alpha\n- beta\n\n```python\nprint(1)\n```\n\n> quoted\n\n---\n\n$$x^2$$\n";
+        var source = new MarkdownSource("blocks.md", "blocks.md", sourceText);
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        // Each block in the rendered Blocks list should appear in the HTML
+        // with matching data-mm-block-index plus its kind. The metadata is
+        // what the editor↔preview scroll sync uses to map editor lines to
+        // visible preview elements.
+        Assert.Contains("data-mm-block-index=\"0\" data-mm-block-kind=\"heading\"", document.Html);
+        Assert.Contains("data-mm-block-index=\"1\" data-mm-block-kind=\"paragraph\"", document.Html);
+        Assert.Contains("data-mm-block-index=\"2\" data-mm-block-kind=\"list\"", document.Html);
+        Assert.Contains("data-mm-block-kind=\"code\"", document.Html);
+        Assert.Contains("data-mm-block-kind=\"quote\"", document.Html);
+        Assert.Contains("data-mm-block-kind=\"rule\"", document.Html);
+        Assert.Contains("data-mm-block-kind=\"math\"", document.Html);
+    }
+
+    [Fact]
     public async Task RenderDoesNotEmitExternalImageUrls()
     {
         var renderer = new ApplicateHtmlMarkdownRenderer();
@@ -242,7 +269,8 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     public async Task MermaidCodeBlockEmitsPreCodeMarkup()
     {
         var html = await RenderAsync("```mermaid\ngraph TD\nA-->B\n```\n");
-        Assert.Contains("<pre class=\"mm-mermaid\"><code class=\"language-mermaid\" data-mm-mermaid>", html, StringComparison.Ordinal);
+        Assert.Contains("class=\"mm-mermaid\"", html, StringComparison.Ordinal);
+        Assert.Contains("<code class=\"language-mermaid\" data-mm-mermaid>", html, StringComparison.Ordinal);
         Assert.Contains("graph TD\nA--&gt;B", html, StringComparison.Ordinal);
         Assert.Contains("</code></pre>", html, StringComparison.Ordinal);
     }
