@@ -48,6 +48,69 @@
     };
   }
 
+  // RendererWeb/src/mermaidRender.ts
+  async function renderMermaidNode(node, generation, getCurrentGeneration, mermaid, perDiagramTimeoutMs) {
+    const codeEl = node.querySelector("code[data-mm-mermaid]");
+    if (!codeEl) return;
+    const source = codeEl.textContent ?? "";
+    let timeoutHandle;
+    try {
+      const id = `mm-mermaid-${generation}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error("mermaid render timeout")), perDiagramTimeoutMs);
+      });
+      const { svg } = await Promise.race([mermaid.render(id, source), timeoutPromise]);
+      if (getCurrentGeneration() !== generation) return;
+      let svgHost = node.nextElementSibling;
+      if (!svgHost || !svgHost.classList.contains("mm-mermaid-svg")) {
+        svgHost = document.createElement("div");
+        svgHost.className = "mm-mermaid-svg";
+        node.after(svgHost);
+      }
+      svgHost.innerHTML = svg;
+      node.classList.add("is-rendered");
+    } catch {
+      if (getCurrentGeneration() !== generation) return;
+      node.classList.remove("is-rendered");
+      const sibling = node.nextElementSibling;
+      if (sibling?.classList.contains("mm-mermaid-svg")) sibling.remove();
+    } finally {
+      if (timeoutHandle !== void 0) clearTimeout(timeoutHandle);
+    }
+  }
+
+  // RendererWeb/src/hljsLanguage.ts
+  var ALIASES = {
+    js: "javascript",
+    ts: "typescript",
+    py: "python",
+    rb: "ruby",
+    sh: "bash",
+    ps1: "powershell",
+    rs: "rust",
+    cs: "csharp",
+    kt: "kotlin"
+  };
+  function normalizeHljsLanguage(name) {
+    if (!name) return "plaintext";
+    const lower = name.toLowerCase();
+    return ALIASES[lower] ?? lower;
+  }
+
+  // RendererWeb/src/initialRenderPipeline.ts
+  async function runInitialRenderPipeline(deps) {
+    const theme = deps.getCurrentTheme();
+    deps.applyTheme(theme);
+    deps.initMermaidWithTheme(theme);
+    deps.renderMath();
+    try {
+      await deps.renderMermaid();
+    } catch {
+    }
+    deps.renderCodeBlocks();
+    deps.scheduleLayoutReady();
+  }
+
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -70,6 +133,11 @@
   var lastMinimapDocumentHeight = 0;
   var minimapSourceReady = false;
   var katexHasRun = false;
+  var mermaidRenderGeneration = 0;
+  var initialRenderPipelineCompleted = false;
+  var MAX_MERMAID_DIAGRAMS = 50;
+  var MERMAID_PER_DIAGRAM_TIMEOUT_MS = 3e3;
+  var MERMAID_WATCHDOG_MS = 15e3;
   var widthResizerVisibility = "on-hover";
   var viewerChromeEnabled = false;
   var widthHandleRoot = null;
@@ -122,6 +190,65 @@
       });
     });
     katexHasRun = true;
+  }
+  function getCurrentTheme() {
+    return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  }
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+  }
+  function initMermaidWithTheme(theme) {
+    hostWindow.mermaid?.initialize({
+      startOnLoad: false,
+      theme: theme === "dark" ? "dark" : "default",
+      securityLevel: "strict",
+      maxTextSize: 1e5
+    });
+  }
+  async function renderMermaid() {
+    const mermaid = hostWindow.mermaid;
+    if (!mermaid) return;
+    const allNodes = Array.from(document.querySelectorAll("pre.mm-mermaid"));
+    const nodes = allNodes.slice(0, MAX_MERMAID_DIAGRAMS);
+    if (nodes.length === 0) return;
+    const generation = ++mermaidRenderGeneration;
+    const watchdog = window.setTimeout(() => {
+      if (generation === mermaidRenderGeneration) {
+        ++mermaidRenderGeneration;
+      }
+    }, MERMAID_WATCHDOG_MS);
+    try {
+      for (const node of nodes) {
+        await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+        if (generation !== mermaidRenderGeneration) return;
+      }
+    } finally {
+      window.clearTimeout(watchdog);
+    }
+  }
+  function renderCodeBlocks() {
+    const hljs = hostWindow.hljs;
+    if (!hljs) return;
+    const nodes = Array.from(document.querySelectorAll("code[data-mm-code], code[data-mm-mermaid]"));
+    for (const node of nodes) {
+      const langClass = Array.from(node.classList).find((c) => c.startsWith("language-"));
+      const rawLang = langClass?.slice("language-".length);
+      const normalized = normalizeHljsLanguage(rawLang);
+      if (!hljs.getLanguage(normalized)) continue;
+      if (langClass && langClass !== `language-${normalized}`) {
+        node.classList.remove(langClass);
+        node.classList.add(`language-${normalized}`);
+      }
+      try {
+        hljs.highlightElement(node);
+      } catch {
+      }
+    }
+  }
+  async function handleThemeChange(theme) {
+    applyTheme(theme);
+    initMermaidWithTheme(theme);
+    await renderMermaid();
   }
   function getScrollState() {
     const root = document.scrollingElement ?? document.documentElement;
@@ -507,12 +634,33 @@
       queueMinimapRefresh();
     }
     updateWidthHandlePosition();
-    scheduleLayoutReady();
+    if (!hadHostPreferences && !initialRenderPipelineCompleted) {
+      void runInitialRenderPipeline({
+        getCurrentTheme,
+        applyTheme,
+        initMermaidWithTheme,
+        renderMath,
+        renderMermaid,
+        renderCodeBlocks,
+        scheduleLayoutReady: () => {
+          initialRenderPipelineCompleted = true;
+          scheduleLayoutReady();
+        }
+      });
+      return;
+    }
+    if (initialRenderPipelineCompleted) {
+      scheduleLayoutReady();
+    }
   }
   function handleHostMessage(raw) {
     const message = raw;
     if (message.type === "theme") {
-      document.documentElement.dataset.theme = message.theme;
+      if (initialRenderPipelineCompleted) {
+        void handleThemeChange(message.theme);
+      } else {
+        document.documentElement.dataset.theme = message.theme;
+      }
       return;
     }
     if (message.type === "minimap-policy") {
@@ -573,9 +721,18 @@
       event.preventDefault();
     }, { capture: true, passive: false });
   }
+  document.addEventListener("securitypolicyviolation", (e) => {
+    postHostMessage({
+      type: "csp-violation",
+      blockedURI: (e.blockedURI ?? "").substring(0, 200),
+      violatedDirective: (e.violatedDirective ?? "").substring(0, 200),
+      sourceFile: (e.sourceFile ?? "").substring(0, 200),
+      lineNumber: e.lineNumber ?? 0,
+      columnNumber: e.columnNumber ?? 0
+    });
+  });
   document.addEventListener("DOMContentLoaded", () => {
     applyViewerChromeState();
-    renderMath();
     wireLinks();
     wireViewerInteraction();
     wireWheelProxy();

@@ -399,6 +399,16 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 return;
             }
 
+            if (type == "csp-violation")
+            {
+                var blocked = document.RootElement.TryGetProperty("blockedURI", out var b) ? b.GetString() : "";
+                var directive = document.RootElement.TryGetProperty("violatedDirective", out var d) ? d.GetString() : "";
+                var sourceFile = document.RootElement.TryGetProperty("sourceFile", out var s) ? s.GetString() : "";
+                var line = document.RootElement.TryGetProperty("lineNumber", out var l) && l.TryGetInt32(out var lineVal) ? lineVal : 0;
+                Console.Error.WriteLine($"[CSP] {directive} blocked {blocked} at {sourceFile}:{line}");
+                return;
+            }
+
             if (type == "link-clicked")
             {
                 _ = HandleLinkClickedAsync(document.RootElement);

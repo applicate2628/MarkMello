@@ -5,6 +5,9 @@ import {
   normalizeWidthResizerVisibility,
   type WidthResizerVisibility
 } from "./widthResizerVisibility";
+import { renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
+import { normalizeHljsLanguage } from "./hljsLanguage";
+import { runInitialRenderPipeline } from "./initialRenderPipeline";
 
 type KatexApi = {
   render: (
@@ -19,8 +22,19 @@ type KatexApi = {
   ) => void;
 };
 
+type MermaidApi = MermaidApiLike & {
+  initialize: (config: { startOnLoad: boolean; theme: string; securityLevel: string; maxTextSize: number }) => void;
+};
+
+type HljsApi = {
+  highlightElement: (element: Element) => void;
+  getLanguage: (name: string) => unknown;
+};
+
 type RendererWindow = Window & {
   katex?: KatexApi;
+  mermaid?: MermaidApi;
+  hljs?: HljsApi;
   chrome?: {
     webview?: {
       postMessage: (message: unknown) => void;
@@ -37,7 +51,8 @@ type RendererMessage =
   | { type: "scroll"; scrollTop: number; scrollHeight: number; clientHeight: number }
   | { type: "viewer-interaction" }
   | { type: "wheel"; deltaY: number; deltaMode: number }
-  | { type: "width-drag"; phase: "start" | "move" | "end"; deltaX: number };
+  | { type: "width-drag"; phase: "start" | "move" | "end"; deltaX: number }
+  | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number };
 
 type MinimapMode = "auto" | "on" | "off";
 
@@ -84,6 +99,11 @@ let minimapDragging = false;
 let lastMinimapDocumentHeight = 0;
 let minimapSourceReady = false;
 let katexHasRun = false;
+let mermaidRenderGeneration = 0;
+let initialRenderPipelineCompleted = false;
+const MAX_MERMAID_DIAGRAMS = 50;
+const MERMAID_PER_DIAGRAM_TIMEOUT_MS = 3000;
+const MERMAID_WATCHDOG_MS = 15_000;
 let widthResizerVisibility: WidthResizerVisibility = "on-hover";
 let viewerChromeEnabled = false;
 let widthHandleRoot: HTMLElement | null = null;
@@ -142,6 +162,72 @@ function renderMath(): void {
     });
   });
   katexHasRun = true;
+}
+
+function getCurrentTheme(): "light" | "dark" {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
+function applyTheme(theme: "light" | "dark"): void {
+  document.documentElement.dataset.theme = theme;
+}
+
+function initMermaidWithTheme(theme: "light" | "dark"): void {
+  hostWindow.mermaid?.initialize({
+    startOnLoad: false,
+    theme: theme === "dark" ? "dark" : "default",
+    securityLevel: "strict",
+    maxTextSize: 100_000
+  });
+}
+
+async function renderMermaid(): Promise<void> {
+  const mermaid = hostWindow.mermaid;
+  if (!mermaid) return;
+
+  const allNodes = Array.from(document.querySelectorAll<HTMLElement>("pre.mm-mermaid"));
+  const nodes = allNodes.slice(0, MAX_MERMAID_DIAGRAMS);
+  if (nodes.length === 0) return;
+
+  const generation = ++mermaidRenderGeneration;
+  const watchdog = window.setTimeout(() => {
+    if (generation === mermaidRenderGeneration) {
+      ++mermaidRenderGeneration;
+    }
+  }, MERMAID_WATCHDOG_MS);
+
+  try {
+    for (const node of nodes) {
+      await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+      if (generation !== mermaidRenderGeneration) return;
+    }
+  } finally {
+    window.clearTimeout(watchdog);
+  }
+}
+
+function renderCodeBlocks(): void {
+  const hljs = hostWindow.hljs;
+  if (!hljs) return;
+
+  const nodes = Array.from(document.querySelectorAll<HTMLElement>("code[data-mm-code], code[data-mm-mermaid]"));
+  for (const node of nodes) {
+    const langClass = Array.from(node.classList).find(c => c.startsWith("language-"));
+    const rawLang = langClass?.slice("language-".length);
+    const normalized = normalizeHljsLanguage(rawLang);
+    if (!hljs.getLanguage(normalized)) continue;
+    if (langClass && langClass !== `language-${normalized}`) {
+      node.classList.remove(langClass);
+      node.classList.add(`language-${normalized}`);
+    }
+    try { hljs.highlightElement(node); } catch { /* leave plain */ }
+  }
+}
+
+async function handleThemeChange(theme: "light" | "dark"): Promise<void> {
+  applyTheme(theme);
+  initMermaidWithTheme(theme);
+  await renderMermaid();
 }
 
 function getScrollState(): { scrollTop: number; scrollHeight: number; clientHeight: number } {
@@ -608,13 +694,41 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
   }
 
   updateWidthHandlePosition();
-  scheduleLayoutReady();
+
+  if (!hadHostPreferences && !initialRenderPipelineCompleted) {
+    // First reading-preferences message — run the full Mermaid/code-block pipeline
+    // before emitting layout-ready. Suppress duplicate scheduleLayoutReady calls
+    // from this code path; the pipeline emits its own scheduleLayoutReady at end.
+    void runInitialRenderPipeline({
+      getCurrentTheme,
+      applyTheme,
+      initMermaidWithTheme,
+      renderMath,
+      renderMermaid,
+      renderCodeBlocks,
+      scheduleLayoutReady: () => {
+        initialRenderPipelineCompleted = true;
+        scheduleLayoutReady();
+      }
+    });
+    return;
+  }
+
+  if (initialRenderPipelineCompleted) {
+    scheduleLayoutReady();
+  }
 }
 
 function handleHostMessage(raw: unknown): void {
   const message = raw as HostMessage;
   if (message.type === "theme") {
-    document.documentElement.dataset.theme = message.theme;
+    if (initialRenderPipelineCompleted) {
+      void handleThemeChange(message.theme);
+    } else {
+      // Pre-pipeline theme — just set the attribute; the pipeline will
+      // re-initialize Mermaid with the right theme when it runs.
+      document.documentElement.dataset.theme = message.theme;
+    }
     return;
   }
 
@@ -688,9 +802,21 @@ function wireWheelProxy(): void {
   }, { capture: true, passive: false });
 }
 
+document.addEventListener("securitypolicyviolation", (e) => {
+  postHostMessage({
+    type: "csp-violation",
+    blockedURI: (e.blockedURI ?? "").substring(0, 200),
+    violatedDirective: (e.violatedDirective ?? "").substring(0, 200),
+    sourceFile: (e.sourceFile ?? "").substring(0, 200),
+    lineNumber: e.lineNumber ?? 0,
+    columnNumber: e.columnNumber ?? 0
+  });
+});
+
 document.addEventListener("DOMContentLoaded", () => {
   applyViewerChromeState();
-  renderMath();
+  // Defer renderMath / renderMermaid / renderCodeBlocks to runInitialRenderPipeline,
+  // which is triggered by the first reading-preferences message from the host.
   wireLinks();
   wireViewerInteraction();
   wireWheelProxy();

@@ -248,3 +248,28 @@ body.mm-width-resizer-always .mm-width-handle-track {
   background: var(--mm-minimap-accent);
   opacity: 0.9;
 }
+
+/* === Applicate fork: Mermaid + code-highlight styling === */
+
+pre.mm-mermaid {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+pre.mm-mermaid.is-rendered {
+  display: none;
+}
+
+.mm-mermaid-svg {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 16px 0;
+}
+
+.mm-mermaid-svg svg {
+  max-width: 100%;
+  height: auto;
+}
+
