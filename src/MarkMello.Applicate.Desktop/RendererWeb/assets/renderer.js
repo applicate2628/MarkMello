@@ -509,6 +509,17 @@
     }
     return svg;
   }
+  function shouldTriggerPhaseB(currentHeight, cachedHeight) {
+    if (cachedHeight <= 0) return false;
+    return Math.abs(currentHeight - cachedHeight) >= 1;
+  }
+  function schedulePhaseBRebuild(deps) {
+    deps.allMathRendered.then(() => {
+      if (shouldTriggerPhaseB(deps.getCurrentDocumentHeight(), deps.getCachedDocumentHeight())) {
+        deps.refresh("B");
+      }
+    });
+  }
 
   // RendererWeb/src/scrollCoalescer.ts
   function createScrollCoalescer(deps) {
@@ -590,11 +601,23 @@
       katexHasRun = mathCount === 0;
       const controller2 = renderMath({ katex: void 0, documentRoot: document });
       currentController = controller2;
+      schedulePhaseBRebuild({
+        allMathRendered: controller2.allMathRendered,
+        getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
+        getCachedDocumentHeight: () => minimapDocumentHeight,
+        refresh: refreshMinimapContent
+      });
       return controller2;
     }
     const controller = renderMath({ katex, documentRoot: document });
     katexHasRun = true;
     currentController = controller;
+    schedulePhaseBRebuild({
+      allMathRendered: controller.allMathRendered,
+      getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
+      getCachedDocumentHeight: () => minimapDocumentHeight,
+      refresh: refreshMinimapContent
+    });
     let initialVisibleSize = 0;
     const dataTexNodes = Array.from(document.querySelectorAll("[data-tex]"));
     for (const node of dataTexNodes) {

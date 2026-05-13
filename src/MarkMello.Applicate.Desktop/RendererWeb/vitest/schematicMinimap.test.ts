@@ -1,7 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   walkDocumentBlocks,
   renderSchematicSvg,
+  shouldTriggerPhaseB,
+  schedulePhaseBRebuild,
   type DocumentBlock,
   type DocumentBlockKind,
 } from "../src/schematicMinimap";
@@ -88,5 +90,61 @@ describe("integration", () => {
     const svg = renderSchematicSvg(blocks, 800, 100);
     expect(svg.querySelectorAll("rect")).toHaveLength(blocks.length);
     document.body.removeChild(root);
+  });
+});
+
+describe("Phase B trigger", () => {
+  it("returns true if document height changed >1px after allMathRendered", () => {
+    expect(shouldTriggerPhaseB(1100, 1000)).toBe(true);
+    expect(shouldTriggerPhaseB(999, 1000)).toBe(true);
+  });
+
+  it("returns false if document height is stable (within 1px)", () => {
+    expect(shouldTriggerPhaseB(1000, 1000)).toBe(false);
+    expect(shouldTriggerPhaseB(1000.5, 1000)).toBe(false);
+  });
+
+  it("returns false if cached height is 0 (Phase A never ran)", () => {
+    expect(shouldTriggerPhaseB(1000, 0)).toBe(false);
+  });
+});
+
+describe("schedulePhaseBRebuild (real renderer seam)", () => {
+  it("calls refresh('B') when documentHeight changes after allMathRendered", async () => {
+    const refresh = vi.fn();
+    const currentScrollHeight = 200;
+    const cachedHeight = 100;
+    let resolveMath: () => void = () => {};
+    const allMathRendered = new Promise<void>(r => { resolveMath = r; });
+
+    schedulePhaseBRebuild({
+      allMathRendered,
+      getCurrentDocumentHeight: () => currentScrollHeight,
+      getCachedDocumentHeight: () => cachedHeight,
+      refresh,
+    });
+
+    resolveMath();
+    await allMathRendered;
+    await new Promise(r => setTimeout(r, 0));
+    expect(refresh).toHaveBeenCalledWith("B");
+  });
+
+  it("does NOT call refresh when documentHeight stable", async () => {
+    const refresh = vi.fn();
+    let resolveMath: () => void = () => {};
+    const allMathRendered = new Promise<void>(r => { resolveMath = r; });
+
+    schedulePhaseBRebuild({
+      allMathRendered,
+      getCurrentDocumentHeight: () => 100,
+      getCachedDocumentHeight: () => 100,
+      refresh,
+    });
+
+    resolveMath();
+    await allMathRendered;
+    await new Promise(r => setTimeout(r, 0));
+    expect(refresh).not.toHaveBeenCalled();
   });
 });

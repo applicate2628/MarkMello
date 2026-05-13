@@ -9,7 +9,7 @@ import { renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
 import { normalizeHljsLanguage } from "./hljsLanguage";
 import { runInitialRenderPipeline, type MathReadinessController } from "./initialRenderPipeline";
 import { renderMath as renderMathInit } from "./mathRenderInit";
-import { walkDocumentBlocks, renderSchematicSvg, type DocumentBlock } from "./schematicMinimap";
+import { walkDocumentBlocks, renderSchematicSvg, schedulePhaseBRebuild, type DocumentBlock } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
 import { createScrollCoalescer } from "./scrollCoalescer";
 
@@ -155,11 +155,23 @@ function renderMath(): MathReadinessController {
     katexHasRun = mathCount === 0;
     const controller = renderMathInit({ katex: undefined, documentRoot: document });
     currentController = controller;
+    schedulePhaseBRebuild({
+      allMathRendered: controller.allMathRendered,
+      getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
+      getCachedDocumentHeight: () => minimapDocumentHeight,
+      refresh: refreshMinimapContent,
+    });
     return controller;
   }
   const controller = renderMathInit({ katex, documentRoot: document });
   katexHasRun = true;
   currentController = controller;
+  schedulePhaseBRebuild({
+    allMathRendered: controller.allMathRendered,
+    getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
+    getCachedDocumentHeight: () => minimapDocumentHeight,
+    refresh: refreshMinimapContent,
+  });
   // Track frozen-set size at the moment marks are wired so the lifecycle
   // emit reports the same count the seam committed to. Inline math classifies
   // via parent rect, so we recompute the snapshot once for the mark detail.
@@ -457,8 +469,6 @@ function ensureMinimap(): void {
 let minimapBlocks: DocumentBlock[] = [];
 // Read by Task 15 schedulePhaseBRebuild to decide if Phase B rebuild is needed.
 let minimapDocumentHeight = 0;
-// Silence unused-var hint until Task 15 wiring lands.
-void minimapDocumentHeight;
 
 function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   emitMark("mm-minimap-refresh-start", { phase });

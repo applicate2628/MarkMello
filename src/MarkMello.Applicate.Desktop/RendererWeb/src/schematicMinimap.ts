@@ -96,3 +96,24 @@ export function renderSchematicSvg(blocks: DocumentBlock[], documentWidth: numbe
   }
   return svg;
 }
+
+export function shouldTriggerPhaseB(currentHeight: number, cachedHeight: number): boolean {
+  if (cachedHeight <= 0) return false;
+  // Tolerance: >=1px change triggers Phase B; sub-pixel drift (<1px) is ignored.
+  return Math.abs(currentHeight - cachedHeight) >= 1;
+}
+
+export type PhaseBRebuildDeps = {
+  allMathRendered: Promise<void>;
+  getCurrentDocumentHeight: () => number;
+  getCachedDocumentHeight: () => number;
+  refresh: (phase: "B") => void;
+};
+
+export function schedulePhaseBRebuild(deps: PhaseBRebuildDeps): void {
+  deps.allMathRendered.then(() => {
+    if (shouldTriggerPhaseB(deps.getCurrentDocumentHeight(), deps.getCachedDocumentHeight())) {
+      deps.refresh("B");
+    }
+  });
+}
