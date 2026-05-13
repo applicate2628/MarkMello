@@ -21,7 +21,17 @@ internal sealed class ApplicateEditWorkspaceTemplate : IDataTemplate
         {
             DataContext = param
         };
-        view.TryReplacePreviewDocumentView(preview);
+        if (!view.TryReplacePreviewDocumentView(preview))
+        {
+            // Upstream merge (d902a7f) removed the `PreviewDocumentFrame` Border
+            // name that TryReplacePreviewDocumentView relies on. Locate the
+            // upstream MarkdownDocumentView and swap its anonymous Border child.
+            var nativeDocView = view.FindControl<MarkdownDocumentView>("PreviewDocumentView");
+            if (nativeDocView?.Parent is Border parentBorder)
+            {
+                parentBorder.Child = preview;
+            }
+        }
         return view;
     }
 
