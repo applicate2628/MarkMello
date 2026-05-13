@@ -238,6 +238,55 @@ public sealed class ApplicateHtmlMarkdownRendererTests
         Assert.Contains("--mm-document-background: #14110e;", css, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task MermaidCodeBlockEmitsPreCodeMarkup()
+    {
+        var html = await RenderAsync("```mermaid\ngraph TD\nA-->B\n```\n");
+        Assert.Contains("<pre class=\"mm-mermaid\"><code class=\"language-mermaid\" data-mm-mermaid>", html, StringComparison.Ordinal);
+        Assert.Contains("graph TD\nA--&gt;B", html, StringComparison.Ordinal);
+        Assert.Contains("</code></pre>", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MermaidCodeBlockIsCaseInsensitive()
+    {
+        var html = await RenderAsync("```MERMAID\nx\n```\n");
+        Assert.Contains("data-mm-mermaid", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CodeBlockWithLanguageUsesFirstToken()
+    {
+        var html = await RenderAsync("```js title=foo.js\nconst x = 1;\n```\n");
+        Assert.Contains("class=\"language-js\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-mm-code", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("language-js title", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EmptyCodeBlockDefaultsToPlaintextLanguage()
+    {
+        var html = await RenderAsync("```\nplain text\n```\n");
+        Assert.Contains("class=\"language-plaintext\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-mm-code", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CodeBlockEscapesHtmlSpecialCharacters()
+    {
+        var html = await RenderAsync("```js\n<script>alert(1)</script>\n```\n");
+        Assert.DoesNotContain("<script>alert(1)</script>", html, StringComparison.Ordinal);
+        Assert.Contains("&lt;script&gt;", html, StringComparison.Ordinal);
+    }
+
+    private static async Task<string> RenderAsync(string markdown)
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        var source = new MarkdownSource("test.md", "test.md", markdown);
+        var result = await renderer.RenderAsync(source, ReadingPreferences.Default, imageSourceResolver: null, CancellationToken.None);
+        return result.Html;
+    }
+
     private sealed class CountingImageSourceResolver : IImageSourceResolver
     {
         public int CallCount { get; private set; }

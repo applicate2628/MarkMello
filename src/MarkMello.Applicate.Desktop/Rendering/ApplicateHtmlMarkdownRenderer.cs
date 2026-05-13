@@ -151,11 +151,26 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
 
     private static void RenderCodeBlock(RenderContext context, MarkdownCodeBlock code)
     {
-        var language = string.IsNullOrWhiteSpace(code.Info) ? string.Empty : $" class=\"language-{HtmlAttribute(code.Info)}\"";
         context.PlainText.AppendLine(code.Code);
-        context.Html.Append("<pre><code").Append(language).Append('>')
-            .Append(HtmlText(code.Code))
-            .AppendLine("</code></pre>");
+
+        var infoToken = (code.Info ?? string.Empty).Trim().Split(' ')[0].ToLowerInvariant();
+
+        if (string.Equals(infoToken, "mermaid", StringComparison.Ordinal))
+        {
+            context.HasMermaidBlock = true;
+            context.Html.Append("<pre class=\"mm-mermaid\"><code class=\"language-mermaid\" data-mm-mermaid>")
+                        .Append(HtmlText(code.Code))
+                        .AppendLine("</code></pre>");
+            return;
+        }
+
+        context.HasCodeBlockWithSyntax = true;
+        var langClass = string.IsNullOrEmpty(infoToken)
+            ? "language-plaintext"
+            : $"language-{HtmlAttribute(infoToken)}";
+        context.Html.Append("<pre><code data-mm-code class=\"").Append(langClass).Append("\">")
+                    .Append(HtmlText(code.Code))
+                    .AppendLine("</code></pre>");
     }
 
     private static async Task RenderTableAsync(RenderContext context, MarkdownTableBlock table)
