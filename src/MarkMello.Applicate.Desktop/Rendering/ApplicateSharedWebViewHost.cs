@@ -6,6 +6,7 @@ namespace MarkMello.Applicate.Desktop.Rendering;
 /// <inheritdoc cref="IApplicateSharedWebViewHost"/>
 public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
 {
+    private Panel? _warmupParent;
     private Panel? _currentParent;
 
     public ApplicateSharedWebViewHost(IApplicateHtmlMarkdownRenderer renderer)
@@ -14,6 +15,21 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
     }
 
     public ApplicateWebMarkdownDocumentView View { get; }
+
+    public void SetWarmupParent(Panel parent)
+    {
+        if (ReferenceEquals(_warmupParent, parent))
+        {
+            return;
+        }
+
+        _warmupParent = parent;
+        if (_currentParent is null)
+        {
+            parent.Children.Add(View);
+            _currentParent = parent;
+        }
+    }
 
     public void AttachTo(Panel target)
     {
@@ -47,7 +63,18 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
             return;
         }
 
-        _currentParent.Children.Remove(View);
+        // Return to the warmup parent rather than fully unparenting so the
+        // adapter and document stay alive for the next consumer.
+        if (_warmupParent is not null && !ReferenceEquals(_warmupParent, from))
+        {
+            using var scope = View.BeginIntentionalReparent();
+            from.Children.Remove(View);
+            _warmupParent.Children.Add(View);
+            _currentParent = _warmupParent;
+            return;
+        }
+
+        from.Children.Remove(View);
         _currentParent = null;
     }
 }

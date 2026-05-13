@@ -19,7 +19,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private readonly IApplicateSharedWebViewHost? _sharedHost;
     private readonly Grid _root = new() { UseLayoutRounding = true };
     private readonly ApplicateMarkdownDocumentView _nativePreview;
-    private readonly Panel _webSlot = new() { UseLayoutRounding = true, IsVisible = false };
+    private readonly Panel _webSlot = new() { UseLayoutRounding = true };
     private readonly DispatcherTimer _webRenderTimer;
     private EditorSessionViewModel? _session;
     private ScrollViewer? _hostScrollViewer;
@@ -151,7 +151,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     {
         if (ShouldUseWebPreview())
         {
-            AcquireSharedHost();
+            WireSharedHostEvents();
             QueueWebPreviewRender(immediate: true);
         }
         else
@@ -169,30 +169,24 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
            && !_webPreviewFailed;
 
     private bool IsWebPreviewActiveOrTargeted()
-        => _isAttachedToHost;
-
-    private void AcquireSharedHost()
-    {
-        if (_sharedHost is null || _isAttachedToHost)
-        {
-            return;
-        }
-
-        WireSharedHostEvents();
-        _sharedHost.AttachTo(_webSlot);
-        _isAttachedToHost = true;
-    }
+        => _isAttachedToHost || (ShouldUseWebPreview() && _hostEventsWired);
 
     private void ReleaseSharedHost()
     {
-        if (_sharedHost is null || !_isAttachedToHost)
+        if (_sharedHost is null)
         {
             UnwireSharedHostEvents();
             return;
         }
 
-        _sharedHost.DetachFrom(_webSlot);
-        _isAttachedToHost = false;
+        if (_isAttachedToHost)
+        {
+            // DetachFrom returns the view to the warmup parent so it stays
+            // warm for the next consumer; we just stop showing it.
+            _sharedHost.DetachFrom(_webSlot);
+            _isAttachedToHost = false;
+        }
+
         UnwireSharedHostEvents();
     }
 
@@ -253,7 +247,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void QueueWebPreviewRender(bool immediate)
     {
-        if (!_isAttachedToHost || _sharedHost is null)
+        if (!ShouldUseWebPreview() || _sharedHost is null)
         {
             _webRenderTimer.Stop();
             return;
@@ -278,7 +272,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void ApplyWebPreviewSource()
     {
-        if (_session is null || _sharedHost is null || !_isAttachedToHost)
+        if (_session is null || _sharedHost is null || !ShouldUseWebPreview())
         {
             return;
         }
@@ -299,14 +293,44 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         ApplyVisuals();
     }
 
+    // Single canonical visibility decision:
+    //   showWebView == true  →  reparent shared view into _webSlot, show WebView,
+    //                            hide native preview
+    //   showWebView == false →  detach shared view back to warmup parent, show
+    //                            native preview as placeholder
+    //
+    // showWebView is true only when the user requested WebView, the host has
+    // already rendered the current source, and we have not been told to fall
+    // back. Until then native is shown — the WebView keeps loading offscreen
+    // in the warmup panel so the user never sees a partial/loading paint.
     private void ApplyVisuals()
     {
-        var showWebView = _isAttachedToHost
+        var source = BuildCurrentSource();
+        var showWebView = ShouldUseWebPreview()
                           && _sharedHost is not null
-                          && _sharedHost.View.HasLoadedDocumentForSource(BuildCurrentSource());
+                          && source is not null
+                          && _sharedHost.View.HasLoadedDocumentForSource(source);
 
-        _webSlot.IsVisible = showWebView;
-        _nativePreview.IsVisible = !showWebView;
+        if (showWebView && _sharedHost is not null)
+        {
+            if (!_isAttachedToHost)
+            {
+                _sharedHost.AttachTo(_webSlot);
+                _isAttachedToHost = true;
+            }
+            _webSlot.IsVisible = true;
+            _nativePreview.IsVisible = false;
+        }
+        else
+        {
+            if (_isAttachedToHost && _sharedHost is not null)
+            {
+                _sharedHost.DetachFrom(_webSlot);
+                _isAttachedToHost = false;
+            }
+            _webSlot.IsVisible = false;
+            _nativePreview.IsVisible = true;
+        }
     }
 
     private MarkdownSource? BuildCurrentSource()
