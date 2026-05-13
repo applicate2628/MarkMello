@@ -17,7 +17,7 @@ internal sealed class ApplicateEditWorkspaceTemplate : IDataTemplate
         {
             DataContext = param
         };
-        var preview = new ApplicateEditPreviewView(App.Services?.GetService<IApplicateHtmlMarkdownRenderer>())
+        var preview = new ApplicateEditPreviewView(App.Services?.GetService<IApplicateSharedWebViewHost>())
         {
             DataContext = param
         };

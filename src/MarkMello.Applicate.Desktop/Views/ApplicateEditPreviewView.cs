@@ -16,32 +16,29 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private static readonly Thickness PreviewDocumentPadding = new(72, 96, 72, 160);
     private static readonly TimeSpan WebPreviewDebounce = TimeSpan.FromMilliseconds(180);
 
-    private readonly IApplicateHtmlMarkdownRenderer? _htmlRenderer;
+    private readonly IApplicateSharedWebViewHost? _sharedHost;
     private readonly Grid _root = new() { UseLayoutRounding = true };
     private readonly ApplicateMarkdownDocumentView _nativePreview;
+    private readonly Panel _webSlot = new() { UseLayoutRounding = true, IsVisible = false };
     private readonly DispatcherTimer _webRenderTimer;
-    private ApplicateWebMarkdownDocumentView? _webPreview;
     private EditorSessionViewModel? _session;
     private ScrollViewer? _hostScrollViewer;
     private ScrollBarVisibility? _hostScrollViewerVerticalMode;
-    private MarkdownRendererBackend _lastRequestedRendererBackend = MarkdownRendererBackend.Native;
-    private ApplicateRendererSurfaceKind _activeRendererSurface = ApplicateRendererSurfaceKind.Native;
-    private ApplicateRendererSurfaceKind? _pendingRendererSurface;
-    private bool _pendingRendererReady;
-    private long _rendererSwitchGeneration;
+    private bool _isAttachedToHost;
     private bool _webPreviewFailed;
+    private bool _hostEventsWired;
 
-    public ApplicateEditPreviewView(IApplicateHtmlMarkdownRenderer? htmlRenderer)
+    public ApplicateEditPreviewView(IApplicateSharedWebViewHost? sharedHost)
     {
-        _htmlRenderer = htmlRenderer;
+        _sharedHost = sharedHost;
         _nativePreview = new ApplicateMarkdownDocumentView
         {
             DocumentPadding = PreviewDocumentPadding,
             UseLayoutRounding = true
         };
-        ApplicateRendererSurfaceTransition.EnsureOpacityTransition(_nativePreview);
 
         _root.Children.Add(_nativePreview);
+        _root.Children.Add(_webSlot);
         Content = _root;
         UseLayoutRounding = true;
 
@@ -73,7 +70,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         RestoreHostScrollMode();
         AttachSession(null);
         _webRenderTimer.Stop();
-        DisposeWebPreview();
+        ReleaseSharedHost();
 
         base.OnDetachedFromVisualTree(e);
     }
@@ -92,7 +89,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
         _session = session;
         _webPreviewFailed = false;
-        _lastRequestedRendererBackend = _session?.ReadingPreferences.RendererBackend ?? MarkdownRendererBackend.Native;
 
         if (_session is not null)
         {
@@ -106,16 +102,11 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     {
         if (e.PropertyName is nameof(EditorSessionViewModel.ReadingPreferences))
         {
-            var requestedRendererBackend = _session?.ReadingPreferences.RendererBackend ?? MarkdownRendererBackend.Native;
-            if (_lastRequestedRendererBackend != requestedRendererBackend)
+            if (_session?.ReadingPreferences.RendererBackend == MarkdownRendererBackend.WebView)
             {
-                _lastRequestedRendererBackend = requestedRendererBackend;
-                if (requestedRendererBackend == MarkdownRendererBackend.WebView)
-                {
-                    _webPreviewFailed = false;
-                }
+                // Re-arm fallback on explicit user-pref switch back to WebView.
+                _webPreviewFailed = false;
             }
-
             ApplySession();
             return;
         }
@@ -158,79 +149,101 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void ApplyRendererMode()
     {
-        var requestedSurface = ResolveRequestedPreviewSurface();
-
-        if (requestedSurface == ApplicateRendererSurfaceKind.WebView)
+        if (ShouldUseWebPreview())
         {
-            var webPreview = EnsureWebPreview();
-            if (webPreview is null)
-            {
-                requestedSurface = ApplicateRendererSurfaceKind.Native;
-            }
-        }
-
-        StagePreviewSurface(requestedSurface);
-        if (requestedSurface == ApplicateRendererSurfaceKind.WebView)
-        {
+            AcquireSharedHost();
             QueueWebPreviewRender(immediate: true);
         }
+        else
+        {
+            ReleaseSharedHost();
+        }
 
+        ApplyVisuals();
         UpdateHostScrollMode();
     }
 
-    private ApplicateWebMarkdownDocumentView? EnsureWebPreview()
+    private bool ShouldUseWebPreview()
+        => _session?.ReadingPreferences.RendererBackend == MarkdownRendererBackend.WebView
+           && _sharedHost is not null
+           && !_webPreviewFailed;
+
+    private bool IsWebPreviewActiveOrTargeted()
+        => _isAttachedToHost;
+
+    private void AcquireSharedHost()
     {
-        if (_webPreview is not null)
+        if (_sharedHost is null || _isAttachedToHost)
         {
-            return _webPreview;
+            return;
         }
 
-        if (_htmlRenderer is null)
-        {
-            return null;
-        }
-
-        var webPreview = new ApplicateWebMarkdownDocumentView(_htmlRenderer)
-        {
-            IsVisible = false,
-            MinHeight = 1,
-            UseLayoutRounding = true,
-            ViewerChromeEnabled = false
-        };
-        ApplicateRendererSurfaceTransition.EnsureOpacityTransition(webPreview);
-        webPreview.DocumentRendered += OnWebPreviewDocumentRendered;
-        webPreview.FallbackRequested += OnWebPreviewFallbackRequested;
-        webPreview.ViewerInteractionRequested += OnWebPreviewViewerInteractionRequested;
-        _webPreview = webPreview;
-        _root.Children.Add(webPreview);
-        return webPreview;
+        WireSharedHostEvents();
+        _sharedHost.AttachTo(_webSlot);
+        _isAttachedToHost = true;
     }
 
-    private void OnWebPreviewDocumentRendered(object? sender, EventArgs e)
+    private void ReleaseSharedHost()
     {
-        if (_pendingRendererSurface == ApplicateRendererSurfaceKind.WebView)
+        if (_sharedHost is null || !_isAttachedToHost)
         {
-            CommitPendingPreviewSurface(ApplicateRendererSurfaceKind.WebView);
+            UnwireSharedHostEvents();
+            return;
         }
+
+        _sharedHost.DetachFrom(_webSlot);
+        _isAttachedToHost = false;
+        UnwireSharedHostEvents();
     }
 
-    private void OnWebPreviewFallbackRequested(object? sender, EventArgs e)
+    private void WireSharedHostEvents()
+    {
+        if (_sharedHost is null || _hostEventsWired)
+        {
+            return;
+        }
+
+        _sharedHost.View.DocumentRendered += OnSharedDocumentRendered;
+        _sharedHost.View.DocumentRenderInvalidated += OnSharedDocumentInvalidated;
+        _sharedHost.View.FallbackRequested += OnSharedFallbackRequested;
+        _sharedHost.View.ViewerInteractionRequested += OnSharedViewerInteractionRequested;
+        _hostEventsWired = true;
+    }
+
+    private void UnwireSharedHostEvents()
+    {
+        if (_sharedHost is null || !_hostEventsWired)
+        {
+            return;
+        }
+
+        _sharedHost.View.DocumentRendered -= OnSharedDocumentRendered;
+        _sharedHost.View.DocumentRenderInvalidated -= OnSharedDocumentInvalidated;
+        _sharedHost.View.FallbackRequested -= OnSharedFallbackRequested;
+        _sharedHost.View.ViewerInteractionRequested -= OnSharedViewerInteractionRequested;
+        _hostEventsWired = false;
+    }
+
+    private void OnSharedDocumentRendered(object? sender, EventArgs e)
+    {
+        ApplyVisuals();
+    }
+
+    private void OnSharedDocumentInvalidated(object? sender, EventArgs e)
+    {
+        // New render is starting; the WebView's current paint is no longer for
+        // our source. Reveal native as placeholder until DocumentRendered fires.
+        ApplyVisuals();
+    }
+
+    private void OnSharedFallbackRequested(object? sender, EventArgs e)
     {
         _webPreviewFailed = true;
-        if (_pendingRendererSurface == ApplicateRendererSurfaceKind.WebView)
-        {
-            CancelPendingPreviewSurface();
-        }
-
-        if (_activeRendererSurface == ApplicateRendererSurfaceKind.WebView)
-        {
-            StagePreviewSurface(ApplicateRendererSurfaceKind.Native);
-        }
-
-        ApplyRendererMode();
+        ReleaseSharedHost();
+        ApplyVisuals();
     }
 
-    private void OnWebPreviewViewerInteractionRequested(object? sender, EventArgs e)
+    private void OnSharedViewerInteractionRequested(object? sender, EventArgs e)
     {
         if (TopLevel.GetTopLevel(this)?.DataContext is MainWindowViewModel { HasOpenOverlay: true } viewModel)
         {
@@ -238,23 +251,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         }
     }
 
-    private bool ShouldRequestWebPreview()
-        => _session?.ReadingPreferences.RendererBackend == MarkdownRendererBackend.WebView
-           && _htmlRenderer is not null
-           && !_webPreviewFailed;
-
-    private bool IsWebPreviewVisibleOrTargeted()
-        => _activeRendererSurface == ApplicateRendererSurfaceKind.WebView
-           || _pendingRendererSurface == ApplicateRendererSurfaceKind.WebView;
-
-    private ApplicateRendererSurfaceKind ResolveRequestedPreviewSurface()
-        => ShouldRequestWebPreview()
-            ? ApplicateRendererSurfaceKind.WebView
-            : ApplicateRendererSurfaceKind.Native;
-
     private void QueueWebPreviewRender(bool immediate)
     {
-        if (!ShouldRequestWebPreview() || _webPreview is null)
+        if (!_isAttachedToHost || _sharedHost is null)
         {
             _webRenderTimer.Stop();
             return;
@@ -279,7 +278,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void ApplyWebPreviewSource()
     {
-        if (_session is null || _webPreview is null || !ShouldRequestWebPreview())
+        if (_session is null || _sharedHost is null || !_isAttachedToHost)
         {
             return;
         }
@@ -288,117 +287,39 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             _session.CurrentPath ?? string.Empty,
             _session.FileName,
             _session.SourceText);
-        var webAlreadyRenderedCurrentDocument = _webPreview.HasLoadedDocumentForSource(source);
         var widths = CalculatePreviewWidths(Bounds.Width, _session.ReadingPreferences, PreviewDocumentPadding);
 
-        _webPreview.UpdateInputs(
+        _sharedHost.View.UpdateInputs(
             source,
             CreateWebPreviewPreferences(_session.ReadingPreferences),
             _session.ImageSourceResolver,
             widths.WebColumnWidth,
             viewerChromeEnabled: false);
-        if (webAlreadyRenderedCurrentDocument)
-        {
-            CommitPendingPreviewSurface(ApplicateRendererSurfaceKind.WebView);
-        }
+
+        ApplyVisuals();
     }
 
-    private void StagePreviewSurface(ApplicateRendererSurfaceKind requestedSurface)
+    private void ApplyVisuals()
     {
-        if (_pendingRendererSurface == requestedSurface)
-        {
-            ApplyPreviewSurfaceVisuals();
-            return;
-        }
+        var showWebView = _isAttachedToHost
+                          && _sharedHost is not null
+                          && _sharedHost.View.HasLoadedDocumentForSource(BuildCurrentSource());
 
-        if (_pendingRendererSurface is not null && requestedSurface == _activeRendererSurface)
-        {
-            CancelPendingPreviewSurface();
-            return;
-        }
-
-        if (_activeRendererSurface == requestedSurface)
-        {
-            _pendingRendererSurface = null;
-            _pendingRendererReady = false;
-            ApplyPreviewSurfaceVisuals();
-            return;
-        }
-
-        _pendingRendererSurface = requestedSurface;
-        _pendingRendererReady = requestedSurface == ApplicateRendererSurfaceKind.Native;
-        _rendererSwitchGeneration++;
-        ApplyPreviewSurfaceVisuals();
-
-        if (_pendingRendererReady)
-        {
-            CommitPendingPreviewSurface(requestedSurface);
-        }
+        _webSlot.IsVisible = showWebView;
+        _nativePreview.IsVisible = !showWebView;
     }
 
-    private void CommitPendingPreviewSurface(ApplicateRendererSurfaceKind surface)
+    private MarkdownSource? BuildCurrentSource()
     {
-        if (_pendingRendererSurface != surface)
+        if (_session is null)
         {
-            return;
+            return null;
         }
 
-        _pendingRendererReady = true;
-        var generation = ++_rendererSwitchGeneration;
-        ApplyPreviewSurfaceVisuals();
-        UpdateHostScrollMode();
-        _ = CompletePreviewSwitchAfterDelayAsync(surface, generation);
-    }
-
-    private async Task CompletePreviewSwitchAfterDelayAsync(
-        ApplicateRendererSurfaceKind surface,
-        long generation)
-    {
-        await Task.Delay(ApplicateRendererSurfaceTransition.FadeDuration).ConfigureAwait(false);
-        await Dispatcher.UIThread.InvokeAsync(() =>
-        {
-            if (generation != _rendererSwitchGeneration || _pendingRendererSurface != surface || !_pendingRendererReady)
-            {
-                return;
-            }
-
-            _activeRendererSurface = surface;
-            _pendingRendererSurface = null;
-            _pendingRendererReady = false;
-            ApplyPreviewSurfaceVisuals();
-            UpdateHostScrollMode();
-        });
-    }
-
-    private void CancelPendingPreviewSurface()
-    {
-        _pendingRendererSurface = null;
-        _pendingRendererReady = false;
-        _rendererSwitchGeneration++;
-        ApplyPreviewSurfaceVisuals();
-        UpdateHostScrollMode();
-    }
-
-    private void ApplyPreviewSurfaceVisuals()
-    {
-        ApplicateRendererSurfaceTransition.ApplyVisualState(
-            _nativePreview,
-            ApplicateRendererSurfaceTransition.CalculateVisualState(
-                ApplicateRendererSurfaceKind.Native,
-                _activeRendererSurface,
-                _pendingRendererSurface,
-                _pendingRendererReady));
-
-        if (_webPreview is not null)
-        {
-            ApplicateRendererSurfaceTransition.ApplyVisualState(
-                _webPreview,
-                ApplicateRendererSurfaceTransition.CalculateVisualState(
-                    ApplicateRendererSurfaceKind.WebView,
-                    _activeRendererSurface,
-                    _pendingRendererSurface,
-                    _pendingRendererReady));
-        }
+        return new MarkdownSource(
+            _session.CurrentPath ?? string.Empty,
+            _session.FileName,
+            _session.SourceText);
     }
 
     private void ApplyAvailableWidth()
@@ -406,10 +327,10 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         var preferences = _session?.ReadingPreferences ?? ReadingPreferences.Default;
         var widths = CalculatePreviewWidths(Bounds.Width, preferences, PreviewDocumentPadding);
         _nativePreview.AvailableContentWidth = widths.NativeContentWidth;
-        if (_webPreview is not null)
+        if (_sharedHost is not null && _isAttachedToHost)
         {
-            _webPreview.AvailableContentWidth = widths.WebColumnWidth;
-            _webPreview.MinHeight = CalculateWebPreviewMinHeight(Bounds.Height);
+            _sharedHost.View.AvailableContentWidth = widths.WebColumnWidth;
+            _sharedHost.View.MinHeight = CalculateWebPreviewMinHeight(Bounds.Height);
         }
     }
 
@@ -454,7 +375,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         }
 
         _hostScrollViewer.VerticalScrollBarVisibility = CalculateHostVerticalScrollMode(
-            IsWebPreviewVisibleOrTargeted(),
+            IsWebPreviewActiveOrTargeted(),
             _hostScrollViewerVerticalMode ?? ScrollBarVisibility.Auto);
     }
 
@@ -487,26 +408,12 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         return null;
     }
 
-    private void DisposeWebPreview()
-    {
-        if (_webPreview is null)
-        {
-            return;
-        }
-
-        _webPreview.FallbackRequested -= OnWebPreviewFallbackRequested;
-        _webPreview.ViewerInteractionRequested -= OnWebPreviewViewerInteractionRequested;
-        _webPreview.DocumentRendered -= OnWebPreviewDocumentRendered;
-        _webPreview.Dispose();
-        _webPreview = null;
-    }
-
     public void Dispose()
     {
         _webRenderTimer.Stop();
         RestoreHostScrollMode();
         AttachSession(null);
-        DisposeWebPreview();
+        ReleaseSharedHost();
         _webRenderTimer.Tick -= OnWebRenderTimerTick;
     }
 }
