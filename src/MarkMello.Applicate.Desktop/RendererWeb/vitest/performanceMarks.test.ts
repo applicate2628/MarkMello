@@ -5,6 +5,7 @@ import {
   emitMark,
   getReport,
   recordScrollIpc,
+  installLongTaskObserver,
   _resetForTests,
 } from "../src/performanceMarks";
 
@@ -87,5 +88,45 @@ describe("performanceMarks", () => {
       vi.unstubAllGlobals();
       vi.resetModules();
     }
+  });
+
+  it("installLongTaskObserver returns disposer; entries collected from observer callback", () => {
+    let lastObserverCallback:
+      | ((list: { getEntries: () => PerformanceEntry[] }) => void)
+      | null = null;
+    const observeArgs: PerformanceObserverInit[] = [];
+    const disconnectMock = vi.fn();
+    const FakeObserver = vi
+      .fn()
+      .mockImplementation(
+        (cb: (list: { getEntries: () => PerformanceEntry[] }) => void) => {
+          lastObserverCallback = cb;
+          return {
+            observe: (opts: PerformanceObserverInit) => observeArgs.push(opts),
+            disconnect: disconnectMock,
+          };
+        },
+      );
+    (FakeObserver as unknown as { supportedEntryTypes: string[] }).supportedEntryTypes = [
+      "longtask",
+    ];
+    vi.stubGlobal("PerformanceObserver", FakeObserver);
+
+    const dispose = installLongTaskObserver();
+    expect(observeArgs).toEqual([{ entryTypes: ["longtask"] }]);
+
+    // Simulate longtask entry
+    lastObserverCallback!({
+      getEntries: () => [
+        { name: "longTask1", duration: 60 } as unknown as PerformanceEntry,
+      ],
+    });
+    const report = getReport();
+    expect(report.longTasks.map((t) => t.name)).toEqual(["longTask1"]);
+
+    dispose();
+    expect(disconnectMock).toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
   });
 });

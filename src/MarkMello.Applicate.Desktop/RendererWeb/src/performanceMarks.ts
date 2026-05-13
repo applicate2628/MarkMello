@@ -131,11 +131,21 @@ export function getReport(): PerfReport {
   };
 }
 
-// Stubs for Task 2 (LongTask observer) and Task 3 (FpsSampler).
-// Real bodies will replace these; signatures are stable so callers and tests
-// against the public surface compile today.
+// Stub for Task 3 (FpsSampler). Real body will replace; signature is stable
+// so callers and tests against the public surface compile today.
 export function installLongTaskObserver(): () => void {
-  return () => {};
+  if (typeof PerformanceObserver === "undefined") return () => {};
+  try {
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        state.longTasks.push(entry);
+      }
+    });
+    observer.observe({ entryTypes: ["longtask"] });
+    return () => observer.disconnect();
+  } catch {
+    return () => {};
+  }
 }
 
 export interface FpsSampler {
