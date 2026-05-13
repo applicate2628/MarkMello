@@ -56,6 +56,12 @@ const hasPerformanceApi =
   typeof performance !== "undefined" &&
   typeof performance.now === "function";
 
+/**
+ * Records a start timestamp under `name`. If `markStart(name)` is called twice
+ * without an intervening `markEnd(name)`, the second call replaces the pending
+ * entry (single-flight per name). Callers that need overlapping scopes should
+ * use distinct names.
+ */
 export function markStart(name: string, detail?: unknown): void {
   if (!hasPerformanceApi) return;
   const entry: PendingStart =

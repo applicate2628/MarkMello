@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   markStart,
   markEnd,
@@ -55,7 +55,37 @@ describe("performanceMarks", () => {
     );
   });
 
-  it("methods are no-op when performance.now is undefined", () => {
-    expect(() => emitMark("x")).not.toThrow();
+  it("markStart for same name twice keeps latest start (single-flight contract)", async () => {
+    markStart("op", { attempt: 1 });
+    await new Promise((r) => setTimeout(r, 2));
+    markStart("op", { attempt: 2 });
+    await new Promise((r) => setTimeout(r, 2));
+    const mark = markEnd("op", { ok: true });
+    expect(mark).not.toBeNull();
+    expect(mark!.detail).toMatchObject({
+      start: { attempt: 2 },
+      end: { ok: true },
+    });
+  });
+
+  it("methods are no-op when performance.now is undefined", async () => {
+    vi.resetModules();
+    // happy-dom always provides a `performance` object; stub `now` to undefined
+    // so the module-load capability check (`typeof performance.now === "function"`)
+    // evaluates to false in the freshly re-imported module instance.
+    vi.stubGlobal("performance", { ...performance, now: undefined });
+    try {
+      const mod = await import("../src/performanceMarks");
+      mod._resetForTests();
+      mod.markStart("x");
+      const result = mod.markEnd("x");
+      expect(result).toBeNull();
+      expect(mod.getReport().marks).toHaveLength(0);
+      mod.emitMark("y");
+      expect(mod.getReport().marks).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
   });
 });
