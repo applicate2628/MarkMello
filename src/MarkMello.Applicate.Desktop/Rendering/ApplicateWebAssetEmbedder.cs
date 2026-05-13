@@ -121,3 +121,23 @@ public sealed record ApplicateWebAssetBundle(
         KatexScript: string.Empty,
         RendererScript: string.Empty);
 }
+
+public sealed record ApplicateWebBaseAssets(
+    string RendererCss,
+    string KatexCss,
+    string KatexScript,
+    string RendererScript)
+{
+    public static ApplicateWebBaseAssets Empty { get; } = new(
+        RendererCss: string.Empty,
+        KatexCss: string.Empty,
+        KatexScript: string.Empty,
+        RendererScript: string.Empty);
+}
+
+public sealed record ApplicateWebMermaidAssets(string Script);
+
+public sealed record ApplicateWebHighlightAssets(
+    string Script,
+    string LightCss,
+    string DarkCss);
