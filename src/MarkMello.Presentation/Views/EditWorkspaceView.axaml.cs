@@ -1,9 +1,11 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using MarkMello.Presentation.Editing;
 using MarkMello.Presentation.ViewModels;
 
@@ -11,6 +13,18 @@ namespace MarkMello.Presentation.Views;
 
 public partial class EditWorkspaceView : UserControl
 {
+    private const double ScrollSyncViewportAnchorRatio = 0.38;
+    private const double ScrollSyncMinViewportAnchorY = 24;
+    private const double ScrollSyncHitTestX = 2;
+    private const int MaxScrollSyncAttachAttempts = 4;
+
+    private TextBox? _editorTextBox;
+    private TextPresenter? _editorTextPresenter;
+    private ScrollViewer? _editorScrollViewer;
+    private ScrollViewer? _previewScrollViewer;
+    private MarkdownDocumentView? _previewDocumentView;
+    private bool _isSynchronizingScroll;
+
     public EditWorkspaceView()
     {
         InitializeComponent();
@@ -21,18 +35,326 @@ public partial class EditWorkspaceView : UserControl
         base.OnAttachedToVisualTree(e);
         DataContextChanged += OnDataContextChanged;
         ApplySplitRatio();
+        AttachScrollSynchronizationAsync();
         FocusEditorAsync();
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         DataContextChanged -= OnDataContextChanged;
+        DetachScrollSynchronization();
         base.OnDetachedFromVisualTree(e);
     }
 
     private void OnDataContextChanged(object? sender, EventArgs e)
     {
         ApplySplitRatio();
+        SynchronizePreviewToEditor();
+    }
+
+    private void AttachScrollSynchronizationAsync(int attempt = 0)
+    {
+        Dispatcher.UIThread.Post(() => AttachScrollSynchronization(attempt), DispatcherPriority.Background);
+    }
+
+    private void AttachScrollSynchronization(int attempt)
+    {
+        if (VisualRoot is null)
+        {
+            return;
+        }
+
+        DetachScrollSynchronization();
+
+        _editorTextBox = this.FindControl<TextBox>("EditorTextBox");
+        _previewScrollViewer = this.FindControl<ScrollViewer>("PreviewScrollViewer");
+        _previewDocumentView = this.FindControl<MarkdownDocumentView>("PreviewDocumentView");
+        var editorVisuals = _editorTextBox?
+            .GetVisualDescendants()
+            .ToArray();
+        _editorScrollViewer = editorVisuals?
+            .OfType<ScrollViewer>()
+            .FirstOrDefault();
+        _editorTextPresenter = editorVisuals?
+            .OfType<TextPresenter>()
+            .FirstOrDefault(static presenter => presenter.Name == "PART_TextPresenter")
+            ?? editorVisuals?
+                .OfType<TextPresenter>()
+                .FirstOrDefault();
+
+        if (_editorScrollViewer is null
+            || _editorTextPresenter is null
+            || _previewScrollViewer is null
+            || _previewDocumentView is null)
+        {
+            if (attempt < MaxScrollSyncAttachAttempts)
+            {
+                AttachScrollSynchronizationAsync(attempt + 1);
+            }
+
+            return;
+        }
+
+        _editorScrollViewer.PropertyChanged += OnScrollViewerPropertyChanged;
+        _previewScrollViewer.PropertyChanged += OnScrollViewerPropertyChanged;
+        _previewDocumentView.DocumentRendered += OnPreviewDocumentRendered;
+        _previewDocumentView.DocumentRenderInvalidated += OnPreviewDocumentRenderInvalidated;
+
+        SynchronizePreviewToEditor();
+    }
+
+    private void DetachScrollSynchronization()
+    {
+        if (_editorScrollViewer is not null)
+        {
+            _editorScrollViewer.PropertyChanged -= OnScrollViewerPropertyChanged;
+        }
+
+        if (_previewScrollViewer is not null)
+        {
+            _previewScrollViewer.PropertyChanged -= OnScrollViewerPropertyChanged;
+        }
+
+        if (_previewDocumentView is not null)
+        {
+            _previewDocumentView.DocumentRendered -= OnPreviewDocumentRendered;
+            _previewDocumentView.DocumentRenderInvalidated -= OnPreviewDocumentRenderInvalidated;
+        }
+
+        _editorTextBox = null;
+        _editorTextPresenter = null;
+        _editorScrollViewer = null;
+        _previewScrollViewer = null;
+        _previewDocumentView = null;
+        _isSynchronizingScroll = false;
+    }
+
+    private void OnScrollViewerPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property != ScrollViewer.OffsetProperty || _isSynchronizingScroll)
+        {
+            return;
+        }
+
+        if (ReferenceEquals(sender, _editorScrollViewer))
+        {
+            SynchronizePreviewToEditor();
+            return;
+        }
+
+        if (ReferenceEquals(sender, _previewScrollViewer))
+        {
+            SynchronizeEditorToPreview();
+        }
+    }
+
+    private void OnPreviewDocumentRendered(object? sender, EventArgs e)
+        => SynchronizePreviewToEditor();
+
+    private void OnPreviewDocumentRenderInvalidated(object? sender, EventArgs e)
+    {
+        // The preview is about to rebuild and its source-line anchors are stale.
+        // The rendered event will restore synchronization after the new layout pass.
+    }
+
+    private void SynchronizePreviewToEditor()
+    {
+        if (_previewScrollViewer is null
+            || _previewDocumentView is null
+            || !TryGetEditorSourceLineAtViewportAnchor(out var sourceLine)
+            || !_previewDocumentView.TryGetVerticalOffsetForSourceLine(sourceLine, out var previewDocumentOffsetY)
+            || !TryGetViewportRelativeOriginY(_previewDocumentView, _previewScrollViewer, out var previewDocumentOriginY))
+        {
+            return;
+        }
+
+        var targetOffsetY = _previewScrollViewer.Offset.Y
+            + previewDocumentOriginY
+            + previewDocumentOffsetY
+            - GetViewportAnchorY(_previewScrollViewer);
+        SetSynchronizedVerticalOffset(_previewScrollViewer, targetOffsetY);
+    }
+
+    private void SynchronizeEditorToPreview()
+    {
+        if (_previewScrollViewer is null
+            || _previewDocumentView is null
+            || !TryGetViewportRelativeOriginY(_previewDocumentView, _previewScrollViewer, out var previewDocumentOriginY))
+        {
+            return;
+        }
+
+        var previewDocumentOffsetY = Math.Max(
+            0,
+            GetViewportAnchorY(_previewScrollViewer) - previewDocumentOriginY);
+
+        if (!_previewDocumentView.TryGetSourceLineForVerticalOffset(previewDocumentOffsetY, out var sourceLine)
+            || !TryGetEditorVerticalOffsetForSourceLine(sourceLine, out var editorOffsetY))
+        {
+            return;
+        }
+
+        SetSynchronizedVerticalOffset(_editorScrollViewer!, editorOffsetY);
+    }
+
+    private bool TryGetEditorSourceLineAtViewportAnchor(out int sourceLine)
+    {
+        sourceLine = 0;
+        if (_editorTextBox is null
+            || _editorTextPresenter is null
+            || _editorScrollViewer is null
+            || !TryGetViewportRelativeOriginY(_editorTextPresenter, _editorScrollViewer, out var presenterOriginY))
+        {
+            return false;
+        }
+
+        var text = _editorTextBox.Text ?? string.Empty;
+        var localY = Math.Clamp(
+            GetViewportAnchorY(_editorScrollViewer) - presenterOriginY,
+            0,
+            Math.Max(0, _editorTextPresenter.Bounds.Height - 1));
+        var localX = Math.Clamp(
+            ScrollSyncHitTestX,
+            0,
+            Math.Max(0, _editorTextPresenter.Bounds.Width - 1));
+
+        var hit = _editorTextPresenter.TextLayout.HitTestPoint(new Point(localX, localY));
+        var characterIndex = Math.Clamp(hit.TextPosition, 0, text.Length);
+        sourceLine = GetSourceLineFromCharacterIndex(text, characterIndex);
+        sourceLine = Math.Clamp(sourceLine, 0, Math.Max(0, CountSourceLines(text) - 1));
+        return true;
+    }
+
+    private bool TryGetEditorVerticalOffsetForSourceLine(int sourceLine, out double offsetY)
+    {
+        offsetY = 0;
+        if (_editorTextBox is null
+            || _editorTextPresenter is null
+            || _editorScrollViewer is null
+            || !TryGetViewportRelativeOriginY(_editorTextPresenter, _editorScrollViewer, out var presenterOriginY))
+        {
+            return false;
+        }
+
+        var text = _editorTextBox.Text ?? string.Empty;
+        var lineStartCharacterIndex = GetLineStartCharacterIndex(text, sourceLine);
+        var lineBounds = _editorTextPresenter.TextLayout.HitTestTextPosition(lineStartCharacterIndex);
+        offsetY = _editorScrollViewer.Offset.Y
+            + presenterOriginY
+            + lineBounds.Y
+            - GetViewportAnchorY(_editorScrollViewer);
+        return true;
+    }
+
+    private static bool TryGetViewportRelativeOriginY(Control control, Visual relativeTo, out double originY)
+    {
+        originY = 0;
+        var origin = control.TranslatePoint(new Point(0, 0), relativeTo);
+        if (origin is null)
+        {
+            return false;
+        }
+
+        originY = origin.Value.Y;
+        return true;
+    }
+
+    private static double GetViewportAnchorY(ScrollViewer scrollViewer)
+    {
+        var viewportHeight = Math.Max(0, scrollViewer.Bounds.Height);
+        if (viewportHeight <= 0)
+        {
+            return ScrollSyncMinViewportAnchorY;
+        }
+
+        if (viewportHeight <= ScrollSyncMinViewportAnchorY * 2)
+        {
+            return viewportHeight * 0.5;
+        }
+
+        return Math.Clamp(
+            viewportHeight * ScrollSyncViewportAnchorRatio,
+            ScrollSyncMinViewportAnchorY,
+            viewportHeight - ScrollSyncMinViewportAnchorY);
+    }
+
+    private static int GetSourceLineFromCharacterIndex(string text, int characterIndex)
+    {
+        var normalizedIndex = Math.Clamp(characterIndex, 0, text.Length);
+        var line = 0;
+        for (var index = 0; index < normalizedIndex; index++)
+        {
+            if (text[index] == '\n')
+            {
+                line++;
+            }
+        }
+
+        return line;
+    }
+
+    private static int GetLineStartCharacterIndex(string text, int sourceLine)
+    {
+        if (string.IsNullOrEmpty(text) || sourceLine <= 0)
+        {
+            return 0;
+        }
+
+        var currentLine = 0;
+        for (var index = 0; index < text.Length; index++)
+        {
+            if (text[index] != '\n')
+            {
+                continue;
+            }
+
+            currentLine++;
+            if (currentLine >= sourceLine)
+            {
+                return Math.Min(text.Length, index + 1);
+            }
+        }
+
+        return text.Length;
+    }
+
+    private static int CountSourceLines(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 1;
+        }
+
+        var count = 1;
+        foreach (var c in text)
+        {
+            if (c == '\n')
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private void SetSynchronizedVerticalOffset(ScrollViewer scrollViewer, double offsetY)
+    {
+        var maximumY = Math.Max(0, scrollViewer.ScrollBarMaximum.Y);
+        var normalizedY = Math.Clamp(offsetY, 0, maximumY);
+        if (Math.Abs(scrollViewer.Offset.Y - normalizedY) < 0.5)
+        {
+            return;
+        }
+
+        _isSynchronizingScroll = true;
+        try
+        {
+            scrollViewer.Offset = new Vector(scrollViewer.Offset.X, normalizedY);
+        }
+        finally
+        {
+            _isSynchronizingScroll = false;
+        }
     }
 
     private void OnFormatButtonClick(object? sender, RoutedEventArgs e)

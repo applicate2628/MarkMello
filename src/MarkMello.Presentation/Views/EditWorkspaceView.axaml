@@ -179,15 +179,14 @@
                   PointerCaptureLost="OnSplitterPointerCaptureLost"
                   DragCompleted="OnSplitterDragCompleted" />
 
-    <ScrollViewer Grid.Column="2"
-                  Name="PreviewPane"
+    <ScrollViewer Name="PreviewScrollViewer"
+                  Grid.Column="2"
                   MinWidth="280"
                   HorizontalScrollBarVisibility="Disabled"
                   VerticalScrollBarVisibility="Auto"
                   UseLayoutRounding="True">
       <Grid UseLayoutRounding="True">
-        <Border Name="PreviewDocumentFrame"
-                MaxWidth="{Binding DocumentColumnMaxWidth}"
+        <Border MaxWidth="{Binding DocumentColumnMaxWidth}"
                 HorizontalAlignment="Center"
                 UseLayoutRounding="True">
           <Border.Transitions>
@@ -196,7 +195,8 @@
                                 Duration="0:0:0.18" />
             </Transitions>
           </Border.Transitions>
-          <views:MarkdownDocumentView Document="{Binding RenderedPreview}"
+          <views:MarkdownDocumentView Name="PreviewDocumentView"
+                                      Document="{Binding RenderedPreview}"
                                       DocumentPadding="72,96,72,160"
                                       ReadingPreferences="{Binding ReadingPreferences}"
                                       ImageSourceResolver="{Binding ImageSourceResolver}"

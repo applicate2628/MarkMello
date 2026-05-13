@@ -2,6 +2,21 @@
 
 These repo-local rules supplement the user's global rules. Keep them short, practical, and specific to this repository.
 
+## Commit Messages
+
+Commit messages should follow the rules defined in:
+
+- `.agents/GitCommitMessages.md` — commit message format and rules.
+- `.agents/GitCommitEmoji.md` — emoji-to-change-type mapping.
+
+Short format:
+
+`:emoji: type(scope)!: short description`
+
+Example:
+
+`:sparkles: feat(api)!: send an email to the customer when a product is shipped`
+
 ## Claude and External Provider Reviews
 
 Use file-based prompts for Claude or any other external provider CLI that receives a substantive task.

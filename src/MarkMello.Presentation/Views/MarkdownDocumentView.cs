@@ -44,6 +44,7 @@ public sealed class MarkdownDocumentView : UserControl
         AvaloniaProperty.Register<MarkdownDocumentView, IImageSourceResolver?>(nameof(ImageSourceResolver));
 
     private const double DragSelectionThreshold = 4;
+    private const double CodeBlockHorizontalScrollBarReserve = 16;
 
     private readonly StackPanel _root = new()
     {
@@ -60,6 +61,7 @@ public sealed class MarkdownDocumentView : UserControl
     private readonly List<MarkdownDocumentSelectionFragmentBase> _selectionFragments = [];
     private readonly Dictionary<string, Control> _headingAnchorTargets = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _headingAnchorCounts = new(StringComparer.Ordinal);
+    private readonly List<MarkdownSourceLineVisualAnchor> _sourceLineAnchors = [];
     private MarkdownDocumentTextMap _textMap = MarkdownDocumentTextMap.Empty;
     private bool _isPointerPressed;
     private bool _isDraggingSelection;
@@ -203,6 +205,136 @@ public sealed class MarkdownDocumentView : UserControl
     public event EventHandler? DocumentRendered;
 
     public event EventHandler? DocumentRenderInvalidated;
+
+    internal bool TryGetVerticalOffsetForSourceLine(int sourceLine, out double offsetY)
+    {
+        offsetY = 0;
+        if (sourceLine < 0)
+        {
+            return false;
+        }
+
+        var anchors = CreateMeasuredSourceLineAnchors();
+        if (anchors.Count == 0)
+        {
+            return false;
+        }
+
+        anchors.Sort(static (left, right) =>
+        {
+            var sourceComparison = left.StartLine.CompareTo(right.StartLine);
+            return sourceComparison != 0
+                ? sourceComparison
+                : left.Y.CompareTo(right.Y);
+        });
+
+        var selectedIndex = 0;
+        for (var index = 0; index < anchors.Count; index++)
+        {
+            if (anchors[index].StartLine > sourceLine)
+            {
+                break;
+            }
+
+            selectedIndex = index;
+
+            if (sourceLine <= anchors[index].EndLine)
+            {
+                break;
+            }
+        }
+
+        var selected = anchors[selectedIndex];
+        offsetY = selected.Y;
+
+        if (sourceLine > selected.StartLine
+            && sourceLine <= selected.EndLine
+            && selectedIndex + 1 < anchors.Count)
+        {
+            var next = anchors[selectedIndex + 1];
+            var lineSpan = Math.Max(1, selected.EndLine - selected.StartLine);
+            var visualSpan = Math.Max(0, next.Y - selected.Y);
+            var ratio = Math.Clamp((double)(sourceLine - selected.StartLine) / lineSpan, 0, 1);
+            offsetY = selected.Y + visualSpan * ratio;
+        }
+
+        offsetY = Math.Max(0, offsetY);
+        return true;
+    }
+
+    internal bool TryGetSourceLineForVerticalOffset(double offsetY, out int sourceLine)
+    {
+        sourceLine = 0;
+        var anchors = CreateMeasuredSourceLineAnchors();
+        if (anchors.Count == 0)
+        {
+            return false;
+        }
+
+        var selectedIndex = 0;
+        var normalizedOffset = Math.Max(0, offsetY);
+        for (var index = 0; index < anchors.Count; index++)
+        {
+            if (anchors[index].Y > normalizedOffset)
+            {
+                break;
+            }
+
+            selectedIndex = index;
+        }
+
+        var selected = anchors[selectedIndex];
+        sourceLine = selected.StartLine;
+
+        if (selected.EndLine > selected.StartLine && selectedIndex + 1 < anchors.Count)
+        {
+            var next = anchors[selectedIndex + 1];
+            var visualSpan = next.Y - selected.Y;
+            if (visualSpan > 1)
+            {
+                var ratio = Math.Clamp((normalizedOffset - selected.Y) / visualSpan, 0, 1);
+                var lineSpan = selected.EndLine - selected.StartLine;
+                sourceLine = selected.StartLine + (int)Math.Round(lineSpan * ratio, MidpointRounding.AwayFromZero);
+            }
+        }
+
+        sourceLine = Math.Clamp(sourceLine, selected.StartLine, selected.EndLine);
+        return true;
+    }
+
+    private List<MarkdownSourceLineAnchorSnapshot> CreateMeasuredSourceLineAnchors()
+    {
+        var result = new List<MarkdownSourceLineAnchorSnapshot>(_sourceLineAnchors.Count);
+
+        foreach (var anchor in _sourceLineAnchors)
+        {
+            if (anchor.Control.Bounds.Width <= 0 || anchor.Control.Bounds.Height <= 0)
+            {
+                continue;
+            }
+
+            var origin = anchor.Control.TranslatePoint(new Point(0, 0), this);
+            if (origin is null)
+            {
+                continue;
+            }
+
+            result.Add(new MarkdownSourceLineAnchorSnapshot(
+                anchor.SourceSpan.StartLine,
+                anchor.SourceSpan.EndLine,
+                Math.Max(0, origin.Value.Y)));
+        }
+
+        result.Sort(static (left, right) =>
+        {
+            var visualComparison = left.Y.CompareTo(right.Y);
+            return visualComparison != 0
+                ? visualComparison
+                : left.StartLine.CompareTo(right.StartLine);
+        });
+
+        return result;
+    }
 
     internal DocumentMiniatureSnapshot CreateMiniatureSnapshot()
     {
@@ -450,6 +582,7 @@ public sealed class MarkdownDocumentView : UserControl
         _root.Children.Clear();
         _headingAnchorTargets.Clear();
         _headingAnchorCounts.Clear();
+        _sourceLineAnchors.Clear();
         ResetPointerState();
 
         var document = Document;
@@ -545,7 +678,8 @@ public sealed class MarkdownDocumentView : UserControl
     }
 
     private Control BuildBlock(MarkdownBlock block, string path, bool nested, bool insideQuote = false)
-        => block switch
+    {
+        var control = block switch
         {
             MarkdownHeadingBlock heading => BuildHeading(heading, path),
             MarkdownParagraphBlock paragraph => BuildParagraph(paragraph, path, nested, insideQuote),
@@ -557,6 +691,20 @@ public sealed class MarkdownDocumentView : UserControl
             MarkdownImageBlock image => BuildImageBlock(image),
             _ => BuildFallback(block)
         };
+
+        RegisterSourceLineAnchor(block, control);
+        return control;
+    }
+
+    private void RegisterSourceLineAnchor(MarkdownBlock block, Control control)
+    {
+        if (block.SourceSpan is not { } sourceSpan)
+        {
+            return;
+        }
+
+        _sourceLineAnchors.Add(new MarkdownSourceLineVisualAnchor(control, sourceSpan));
+    }
 
     private MarkdownImageView BuildImageBlock(MarkdownImageBlock block)
         => new(
@@ -763,7 +911,11 @@ public sealed class MarkdownDocumentView : UserControl
         {
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            Content = codeFragment
+            Content = new Border
+            {
+                Padding = new Thickness(0, 0, 0, CodeBlockHorizontalScrollBarReserve),
+                Child = codeFragment
+            }
         });
 
         return new Border
@@ -1024,6 +1176,11 @@ public sealed class MarkdownDocumentView : UserControl
 
     private void OnPointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        if (IsPointerInputFromScrollBarChrome(e.Source))
+        {
+            return;
+        }
+
         if (!TryResolveFragment(e.GetPosition(this), out var fragment, out var localPosition))
         {
             return;
@@ -1436,6 +1593,16 @@ public sealed class MarkdownDocumentView : UserControl
             Math.Clamp(point.Y, 0, height - 1));
     }
 
+    internal static bool IsPointerInputFromScrollBarChrome(object? source)
+    {
+        if (source is not Control control)
+        {
+            return false;
+        }
+
+        return control is ScrollBar || control.FindAncestorOfType<ScrollBar>() is not null;
+    }
+
     private static bool HasCommandModifier(KeyModifiers modifiers)
         => modifiers.HasFlag(KeyModifiers.Control) || modifiers.HasFlag(KeyModifiers.Meta);
 
@@ -1512,3 +1679,7 @@ public sealed class MarkdownDocumentView : UserControl
             ? brush
             : null;
 }
+
+internal readonly record struct MarkdownSourceLineVisualAnchor(Control Control, MarkdownSourceSpan SourceSpan);
+
+internal readonly record struct MarkdownSourceLineAnchorSnapshot(int StartLine, int EndLine, double Y);

@@ -33,7 +33,32 @@ public sealed record RenderedMarkdownDocument(
     }
 }
 
-public abstract record MarkdownBlock;
+/// <summary>
+/// Zero-based source line span for a rendered markdown block.
+/// Used by edit-mode scroll synchronization to map source lines to preview blocks.
+/// </summary>
+public readonly record struct MarkdownSourceSpan
+{
+    public MarkdownSourceSpan(int startLine, int endLine)
+    {
+        StartLine = Math.Max(0, startLine);
+        EndLine = Math.Max(StartLine, endLine);
+    }
+
+    public MarkdownSourceSpan(int line)
+        : this(line, line)
+    {
+    }
+
+    public int StartLine { get; }
+
+    public int EndLine { get; }
+}
+
+public abstract record MarkdownBlock
+{
+    public MarkdownSourceSpan? SourceSpan { get; init; }
+}
 
 public sealed record MarkdownHeadingBlock(int Level, IReadOnlyList<MarkdownInline> Inlines) : MarkdownBlock;
 
