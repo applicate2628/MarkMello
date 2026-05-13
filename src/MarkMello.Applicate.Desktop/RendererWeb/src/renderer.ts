@@ -111,9 +111,6 @@ let viewerChromeEnabled = false;
 let widthHandleRoot: HTMLElement | null = null;
 let widthHandleDragging = false;
 let widthHandleStartClientX = 0;
-// Snapshot of last maxWidth received from host while drag was active.
-// Applied on pointerUp so the final value lands without per-frame reflow.
-let pendingMaxWidthWhileDragging: number | null = null;
 let pendingWidthDragDeltaX = 0;
 let widthDragFrameRequested = false;
 let layoutReadyGeneration = 0;
@@ -383,6 +380,9 @@ function postWidthDragMove(): void {
   });
 }
 
+// Snapshot of maxWidth at the moment drag started, used for local preview.
+let widthHandleStartMaxWidth = 0;
+
 function handleWidthHandlePointerDown(event: PointerEvent): void {
   if (event.button !== 0 || !widthHandleRoot) {
     return;
@@ -391,6 +391,14 @@ function handleWidthHandlePointerDown(event: PointerEvent): void {
   widthHandleDragging = true;
   widthHandleStartClientX = event.clientX;
   pendingWidthDragDeltaX = 0;
+  // Snapshot current maxWidth for local live-preview during drag. Read from
+  // the inline style if set, else fall back to last applied prefs.
+  const inlineMaxWidth = parseFloat(
+    document.documentElement.style.getPropertyValue("--mm-document-max-width")
+  );
+  widthHandleStartMaxWidth = Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0
+    ? inlineMaxWidth
+    : (lastAppliedReadingPreferences?.maxWidth ?? 720);
   widthHandleRoot.classList.add(WIDTH_HANDLE_DRAGGING_CLASS);
   widthHandleRoot.setPointerCapture(event.pointerId);
   postHostMessage({ type: "width-drag", phase: "start", deltaX: 0 });
@@ -403,11 +411,14 @@ function handleWidthHandlePointerMove(event: PointerEvent): void {
   }
 
   pendingWidthDragDeltaX = event.clientX - widthHandleStartClientX;
-  // Live preview: pin the handle to the cursor while dragging. The document
-  // column is intentionally not reflowed during drag (heavy-formula files),
-  // so updateWidthHandlePosition() reading getBoundingClientRect would keep
-  // the handle pinned to the old column edge. Direct cursor-tracking gives
-  // the visual feedback the user expects.
+  // Live local preview: compute new maxWidth from deltaX and apply directly.
+  // Document is centered, so handle moves by deltaX implies column width
+  // changes by 2*deltaX (both sides expand/shrink). Bypass the host round-
+  // trip — renderer owns the visual during drag, host gets final value on
+  // release. Eliminates per-frame IPC + host layout pass.
+  const previewMaxWidth = Math.max(200, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
+  document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
+  // Pin handle to cursor — readable feedback even if reflow lags briefly.
   if (widthHandleRoot) {
     const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
     const maxLeft = Math.max(0, window.innerWidth - hitArea);
@@ -432,13 +443,11 @@ function handleWidthHandlePointerUp(event: PointerEvent): void {
     // Pointer capture may already be gone after WebView focus changes.
   }
 
-  // Apply the maxWidth value deferred during drag (last echo from host). One
-  // reflow at end instead of one per pointer move — fixes heavy-formula lag.
-  if (pendingMaxWidthWhileDragging !== null) {
-    document.documentElement.style.setProperty("--mm-document-max-width", `${pendingMaxWidthWhileDragging}px`);
-    pendingMaxWidthWhileDragging = null;
-    updateWidthHandlePosition();
-  }
+  // Local preview already applied final maxWidth via the move handler.
+  // Host's reading-preferences echo (with its own clamped value) arrives after
+  // width-drag end and will overwrite the preview — small visual snap if host
+  // clamps differently, but it's a single reflow.
+  updateWidthHandlePosition();
 
   postHostMessage({ type: "width-drag", phase: "end", deltaX });
   event.preventDefault();
@@ -743,15 +752,12 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
 
   document.documentElement.style.setProperty("--mm-document-font-size", `${next.fontSize}px`);
   document.documentElement.style.setProperty("--mm-document-line-height", `${next.lineHeight}`);
-  // While the user is actively dragging the width handle, host echoes new
-  // maxWidth on every pointer move. Applying it triggers a full document
-  // reflow including all KaTeX subtrees — visibly laggy on heavy formula
-  // files. Defer maxWidth until the drag ends; pointerUp's "width-drag end"
-  // arrives one tick before host's final reading-preferences, so the final
-  // value still lands. We store the latest pending value and apply on release.
-  if (widthHandleDragging) {
-    pendingMaxWidthWhileDragging = next.maxWidth;
-  } else {
+  // While the user is actively dragging the width handle, the renderer owns
+  // the visual via local preview (set in handleWidthHandlePointerMove). Skip
+  // applying host's echoed maxWidth — it would overwrite our preview and
+  // snap the column back to a stale value. Host's final clamped value is
+  // accepted on pointerUp.
+  if (!widthHandleDragging) {
     document.documentElement.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
   }
   minimapMode = next.minimapMode;

@@ -515,7 +515,6 @@
   var widthHandleRoot = null;
   var widthHandleDragging = false;
   var widthHandleStartClientX = 0;
-  var pendingMaxWidthWhileDragging = null;
   var pendingWidthDragDeltaX = 0;
   var widthDragFrameRequested = false;
   var layoutReadyGeneration = 0;
@@ -744,6 +743,7 @@
       postHostMessage({ type: "width-drag", phase: "move", deltaX: pendingWidthDragDeltaX });
     });
   }
+  var widthHandleStartMaxWidth = 0;
   function handleWidthHandlePointerDown(event) {
     if (event.button !== 0 || !widthHandleRoot) {
       return;
@@ -751,6 +751,10 @@
     widthHandleDragging = true;
     widthHandleStartClientX = event.clientX;
     pendingWidthDragDeltaX = 0;
+    const inlineMaxWidth = parseFloat(
+      document.documentElement.style.getPropertyValue("--mm-document-max-width")
+    );
+    widthHandleStartMaxWidth = Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0 ? inlineMaxWidth : lastAppliedReadingPreferences?.maxWidth ?? 720;
     widthHandleRoot.classList.add(WIDTH_HANDLE_DRAGGING_CLASS);
     widthHandleRoot.setPointerCapture(event.pointerId);
     postHostMessage({ type: "width-drag", phase: "start", deltaX: 0 });
@@ -761,6 +765,8 @@
       return;
     }
     pendingWidthDragDeltaX = event.clientX - widthHandleStartClientX;
+    const previewMaxWidth = Math.max(200, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
+    document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
     if (widthHandleRoot) {
       const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
       const maxLeft = Math.max(0, window.innerWidth - hitArea);
@@ -781,11 +787,7 @@
       widthHandleRoot?.releasePointerCapture(event.pointerId);
     } catch {
     }
-    if (pendingMaxWidthWhileDragging !== null) {
-      document.documentElement.style.setProperty("--mm-document-max-width", `${pendingMaxWidthWhileDragging}px`);
-      pendingMaxWidthWhileDragging = null;
-      updateWidthHandlePosition();
-    }
+    updateWidthHandlePosition();
     postHostMessage({ type: "width-drag", phase: "end", deltaX });
     event.preventDefault();
   }
@@ -1017,9 +1019,7 @@
     const visibilityOnlyChange = lastAppliedReadingPreferences !== null && lastAppliedReadingPreferences.fontSize === next.fontSize && lastAppliedReadingPreferences.lineHeight === next.lineHeight && lastAppliedReadingPreferences.maxWidth === next.maxWidth && lastAppliedReadingPreferences.minimapMode === next.minimapMode && lastAppliedReadingPreferences.viewerChromeEnabled === next.viewerChromeEnabled && lastAppliedReadingPreferences.widthResizerVisibility !== next.widthResizerVisibility;
     document.documentElement.style.setProperty("--mm-document-font-size", `${next.fontSize}px`);
     document.documentElement.style.setProperty("--mm-document-line-height", `${next.lineHeight}`);
-    if (widthHandleDragging) {
-      pendingMaxWidthWhileDragging = next.maxWidth;
-    } else {
+    if (!widthHandleDragging) {
       document.documentElement.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
     }
     minimapMode = next.minimapMode;
