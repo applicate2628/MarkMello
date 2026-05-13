@@ -769,7 +769,9 @@
     document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
     if (widthHandleRoot) {
       const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
-      const maxLeft = Math.max(0, window.innerWidth - hitArea);
+      const minimapReservedWidth = getCurrentMinimapReservedWidth();
+      const maxLeftBeforeMinimap = window.innerWidth - minimapReservedWidth - hitArea;
+      const maxLeft = Math.max(0, Math.min(window.innerWidth - hitArea, maxLeftBeforeMinimap));
       const clampedLeft = Math.max(0, Math.min(maxLeft, event.clientX - hitArea / 2));
       widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
     }
