@@ -512,6 +512,8 @@
   var MERMAID_WATCHDOG_MS = 15e3;
   var widthResizerVisibility = "on-hover";
   var viewerChromeEnabled = false;
+  var documentScrollEnabled = true;
+  var wheelProxyEnabled = false;
   var widthHandleRoot = null;
   var widthHandleDragging = false;
   var widthHandleStartClientX = 0;
@@ -531,7 +533,10 @@
   };
   function applyViewerChromeState() {
     document.documentElement.dataset.mmChrome = viewerChromeEnabled ? "on" : "off";
-    if (!viewerChromeEnabled) {
+  }
+  function applyDocumentScrollState() {
+    document.documentElement.dataset.mmDocumentScroll = documentScrollEnabled ? "on" : "off";
+    if (!documentScrollEnabled) {
       window.scrollTo({ left: 0, top: 0, behavior: "instant" });
     }
   }
@@ -1018,6 +1023,8 @@
       maxWidth: message.maxWidth,
       minimapMode: message.minimapMode,
       viewerChromeEnabled: message.viewerChromeEnabled ?? true,
+      documentScrollEnabled: message.documentScrollEnabled ?? true,
+      wheelProxyEnabled: message.wheelProxyEnabled ?? false,
       widthResizerVisibility: normalizeWidthResizerVisibility(message.widthResizerVisibility)
     };
     if (applyPrefsFrameRequested) return;
@@ -1036,6 +1043,8 @@
     const maxWidthChanged = !prev || prev.maxWidth !== next.maxWidth;
     const minimapModeChanged = !prev || prev.minimapMode !== next.minimapMode;
     const viewerChromeChanged = !prev || prev.viewerChromeEnabled !== next.viewerChromeEnabled;
+    const documentScrollChanged = !prev || prev.documentScrollEnabled !== next.documentScrollEnabled;
+    const wheelProxyChanged = !prev || prev.wheelProxyEnabled !== next.wheelProxyEnabled;
     const widthResizerVisibilityChanged = !prev || prev.widthResizerVisibility !== next.widthResizerVisibility;
     const root = document.documentElement;
     if (fontFamilyChanged) root.dataset.mmFontFamily = next.fontFamily;
@@ -1048,6 +1057,13 @@
     if (viewerChromeChanged) {
       viewerChromeEnabled = next.viewerChromeEnabled;
       applyViewerChromeState();
+    }
+    if (documentScrollChanged) {
+      documentScrollEnabled = next.documentScrollEnabled;
+      applyDocumentScrollState();
+    }
+    if (wheelProxyChanged) {
+      wheelProxyEnabled = next.wheelProxyEnabled;
     }
     if (widthResizerVisibilityChanged) {
       widthResizerVisibility = next.widthResizerVisibility;
@@ -1113,6 +1129,10 @@
     }
     if (message.type === "scroll-to-progress") {
       scrollToProgress(message.progressPercent);
+      return;
+    }
+    if (message.type === "scroll-by") {
+      window.scrollBy({ top: message.deltaY, behavior: "instant" });
     }
   }
   function wireLinks() {
@@ -1142,7 +1162,7 @@
   }
   function wireWheelProxy() {
     document.addEventListener("wheel", (event) => {
-      if (viewerChromeEnabled) {
+      if (!wheelProxyEnabled) {
         return;
       }
       if (Math.abs(event.deltaY) <= Number.EPSILON || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
@@ -1171,6 +1191,7 @@
     requestAnimationFrame(() => emitMark("mm-doc-painted"));
     installLongTaskObserver();
     applyViewerChromeState();
+    applyDocumentScrollState();
     wireLinks();
     wireViewerInteraction();
     wireWheelProxy();

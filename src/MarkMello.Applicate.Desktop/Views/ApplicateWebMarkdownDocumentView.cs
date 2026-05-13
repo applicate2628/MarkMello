@@ -34,6 +34,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     public static readonly StyledProperty<bool> ViewerChromeEnabledProperty =
         AvaloniaProperty.Register<ApplicateWebMarkdownDocumentView, bool>(nameof(ViewerChromeEnabled), true);
 
+    public static readonly StyledProperty<bool> DocumentScrollEnabledProperty =
+        AvaloniaProperty.Register<ApplicateWebMarkdownDocumentView, bool>(nameof(DocumentScrollEnabled), true);
+
+    public static readonly StyledProperty<bool> WheelProxyEnabledProperty =
+        AvaloniaProperty.Register<ApplicateWebMarkdownDocumentView, bool>(nameof(WheelProxyEnabled), false);
+
     private readonly IApplicateHtmlMarkdownRenderer _renderer;
     private readonly NativeWebView _webView;
     private CancellationTokenSource? _renderCancellation;
@@ -58,6 +64,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ReadingPreferencesProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.OnLiveInputChanged());
         AvailableContentWidthProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.OnLiveInputChanged());
         ViewerChromeEnabledProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.OnLiveInputChanged());
+        DocumentScrollEnabledProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.OnLiveInputChanged());
+        WheelProxyEnabledProperty.Changed.AddClassHandler<ApplicateWebMarkdownDocumentView>((view, _) => view.OnLiveInputChanged());
     }
 
     public ApplicateWebMarkdownDocumentView(IApplicateHtmlMarkdownRenderer renderer)
@@ -117,6 +125,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         set => SetValue(ViewerChromeEnabledProperty, value);
     }
 
+    public bool DocumentScrollEnabled
+    {
+        get => GetValue(DocumentScrollEnabledProperty);
+        set => SetValue(DocumentScrollEnabledProperty, value);
+    }
+
+    public bool WheelProxyEnabled
+    {
+        get => GetValue(WheelProxyEnabledProperty);
+        set => SetValue(WheelProxyEnabledProperty, value);
+    }
+
     public event EventHandler? DocumentRendered;
 
     public event EventHandler? DocumentRenderInvalidated;
@@ -141,7 +161,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ReadingPreferences readingPreferences,
         IImageSourceResolver? imageSourceResolver,
         double availableContentWidth,
-        bool viewerChromeEnabled)
+        bool viewerChromeEnabled,
+        bool documentScrollEnabled = true,
+        bool wheelProxyEnabled = false)
     {
         var action = DetermineInputUpdateAction(
             sourceChanged: !Equals(Source, source),
@@ -149,7 +171,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             hasLoadedDocument: _hasLoadedDocument,
             readingPreferencesChanged: ReadingPreferences != readingPreferences,
             availableContentWidthChanged: !AreEqual(AvailableContentWidth, availableContentWidth),
-            viewerChromeEnabledChanged: ViewerChromeEnabled != viewerChromeEnabled);
+            viewerChromeEnabledChanged: ViewerChromeEnabled != viewerChromeEnabled,
+            documentScrollEnabledChanged: DocumentScrollEnabled != documentScrollEnabled,
+            wheelProxyEnabledChanged: WheelProxyEnabled != wheelProxyEnabled);
 
         _isUpdatingInputs = true;
         try
@@ -158,6 +182,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             ImageSourceResolver = imageSourceResolver;
             AvailableContentWidth = availableContentWidth;
             ViewerChromeEnabled = viewerChromeEnabled;
+            DocumentScrollEnabled = documentScrollEnabled;
+            WheelProxyEnabled = wheelProxyEnabled;
             Source = source;
         }
         finally
@@ -175,6 +201,21 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             ApplyReadingPreferences();
         }
+    }
+
+    /// <summary>
+    /// Scroll the document by a delta from the host. Used when the host owns
+    /// wheel routing (WheelProxyEnabled = true) and needs to translate a
+    /// wheel event back into a document scroll.
+    /// </summary>
+    internal void ScrollDocumentBy(double deltaY)
+    {
+        if (!_hasLoadedDocument)
+        {
+            return;
+        }
+
+        PostRendererMessage(new { type = "scroll-by", deltaY });
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
@@ -261,14 +302,20 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         bool hasLoadedDocument,
         bool readingPreferencesChanged,
         bool availableContentWidthChanged,
-        bool viewerChromeEnabledChanged)
+        bool viewerChromeEnabledChanged,
+        bool documentScrollEnabledChanged = false,
+        bool wheelProxyEnabledChanged = false)
     {
         if (sourceChanged || imageSourceResolverChanged || !hasLoadedDocument)
         {
             return ApplicateWebInputUpdateAction.Render;
         }
 
-        return readingPreferencesChanged || availableContentWidthChanged || viewerChromeEnabledChanged
+        return readingPreferencesChanged
+               || availableContentWidthChanged
+               || viewerChromeEnabledChanged
+               || documentScrollEnabledChanged
+               || wheelProxyEnabledChanged
             ? ApplicateWebInputUpdateAction.ApplyLivePreferences
             : ApplicateWebInputUpdateAction.None;
     }
@@ -745,6 +792,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 maxWidth,
                 minimapMode = ReadingPreferences.DocumentMinimapMode.ToString().ToLowerInvariant(),
                 viewerChromeEnabled = ViewerChromeEnabled,
+                documentScrollEnabled = DocumentScrollEnabled,
+                wheelProxyEnabled = WheelProxyEnabled,
                 widthResizerVisibility = ToRendererWidthResizerVisibility(ReadingPreferences.WidthResizerVisibility)
             });
     }

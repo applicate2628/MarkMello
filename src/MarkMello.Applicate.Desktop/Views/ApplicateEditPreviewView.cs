@@ -288,7 +288,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             CreateWebPreviewPreferences(_session.ReadingPreferences),
             _session.ImageSourceResolver,
             widths.WebColumnWidth,
-            viewerChromeEnabled: false);
+            viewerChromeEnabled: false,
+            documentScrollEnabled: true,
+            wheelProxyEnabled: false);
 
         ApplyVisuals();
     }

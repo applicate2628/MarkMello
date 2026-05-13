@@ -47,13 +47,17 @@ html {
 
 :root[data-mm-chrome="off"],
 :root[data-mm-chrome="off"] body {
-  overflow: hidden;
   scrollbar-gutter: auto;
+}
+
+:root[data-mm-document-scroll="off"],
+:root[data-mm-document-scroll="off"] body {
+  overflow: hidden;
   scrollbar-width: none;
 }
 
-:root[data-mm-chrome="off"]::-webkit-scrollbar,
-:root[data-mm-chrome="off"] body::-webkit-scrollbar {
+:root[data-mm-document-scroll="off"]::-webkit-scrollbar,
+:root[data-mm-document-scroll="off"] body::-webkit-scrollbar {
   display: none;
   width: 0;
   height: 0;

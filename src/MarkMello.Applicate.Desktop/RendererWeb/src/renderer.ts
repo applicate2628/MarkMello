@@ -79,8 +79,11 @@ type HostMessage =
       minimapMode: MinimapMode;
       fontFamily?: FontFamilyMode;
       viewerChromeEnabled?: boolean;
+      documentScrollEnabled?: boolean;
+      wheelProxyEnabled?: boolean;
       widthResizerVisibility?: WidthResizerVisibility;
     }
+  | { type: "scroll-by"; deltaY: number }
   | { type: "scroll-to"; anchor: string }
   | { type: "scroll-to-progress"; progressPercent: number };
 
@@ -111,6 +114,8 @@ const MERMAID_PER_DIAGRAM_TIMEOUT_MS = 3000;
 const MERMAID_WATCHDOG_MS = 15_000;
 let widthResizerVisibility: WidthResizerVisibility = "on-hover";
 let viewerChromeEnabled = false;
+let documentScrollEnabled = true;
+let wheelProxyEnabled = false;
 let widthHandleRoot: HTMLElement | null = null;
 let widthHandleDragging = false;
 let widthHandleStartClientX = 0;
@@ -131,7 +136,14 @@ let minimapPolicy: MinimapPolicy = {
 
 function applyViewerChromeState(): void {
   document.documentElement.dataset.mmChrome = viewerChromeEnabled ? "on" : "off";
-  if (!viewerChromeEnabled) {
+}
+
+function applyDocumentScrollState(): void {
+  document.documentElement.dataset.mmDocumentScroll = documentScrollEnabled ? "on" : "off";
+  if (!documentScrollEnabled) {
+    // When the host owns scroll (viewer mode forwarding wheel to the outer
+    // Avalonia ScrollViewer), force the document to position 0 so the host
+    // and renderer agree on the starting offset.
     window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior });
   }
 }
@@ -722,6 +734,8 @@ type AppliedReadingPreferences = {
   maxWidth: number;
   minimapMode: MinimapMode;
   viewerChromeEnabled: boolean;
+  documentScrollEnabled: boolean;
+  wheelProxyEnabled: boolean;
   widthResizerVisibility: WidthResizerVisibility;
 };
 
@@ -751,6 +765,8 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
     maxWidth: message.maxWidth,
     minimapMode: message.minimapMode,
     viewerChromeEnabled: message.viewerChromeEnabled ?? true,
+    documentScrollEnabled: message.documentScrollEnabled ?? true,
+    wheelProxyEnabled: message.wheelProxyEnabled ?? false,
     widthResizerVisibility: normalizeWidthResizerVisibility(message.widthResizerVisibility),
   };
   if (applyPrefsFrameRequested) return;
@@ -771,6 +787,8 @@ function flushPendingReadingPreferences(): void {
   const maxWidthChanged = !prev || prev.maxWidth !== next.maxWidth;
   const minimapModeChanged = !prev || prev.minimapMode !== next.minimapMode;
   const viewerChromeChanged = !prev || prev.viewerChromeEnabled !== next.viewerChromeEnabled;
+  const documentScrollChanged = !prev || prev.documentScrollEnabled !== next.documentScrollEnabled;
+  const wheelProxyChanged = !prev || prev.wheelProxyEnabled !== next.wheelProxyEnabled;
   const widthResizerVisibilityChanged = !prev || prev.widthResizerVisibility !== next.widthResizerVisibility;
 
   // Phase A — presentation (cheap, synchronous).
@@ -787,6 +805,13 @@ function flushPendingReadingPreferences(): void {
   if (viewerChromeChanged) {
     viewerChromeEnabled = next.viewerChromeEnabled;
     applyViewerChromeState();
+  }
+  if (documentScrollChanged) {
+    documentScrollEnabled = next.documentScrollEnabled;
+    applyDocumentScrollState();
+  }
+  if (wheelProxyChanged) {
+    wheelProxyEnabled = next.wheelProxyEnabled;
   }
   if (widthResizerVisibilityChanged) {
     widthResizerVisibility = next.widthResizerVisibility;
@@ -881,6 +906,11 @@ function handleHostMessage(raw: unknown): void {
 
   if (message.type === "scroll-to-progress") {
     scrollToProgress(message.progressPercent);
+    return;
+  }
+
+  if (message.type === "scroll-by") {
+    window.scrollBy({ top: message.deltaY, behavior: "instant" as ScrollBehavior });
   }
 }
 
@@ -916,7 +946,12 @@ function wireViewerInteraction(): void {
 
 function wireWheelProxy(): void {
   document.addEventListener("wheel", (event) => {
-    if (viewerChromeEnabled) {
+    // Orthogonal to document scroll: wheel proxying is its own routing
+    // decision. Some surfaces (viewer mode) need to forward wheel to the
+    // host even when the document itself owns scroll — the host translates
+    // the wheel into a scroll-by IPC back into the document. Surfaces that
+    // rely on Chromium's default wheel handling leave the proxy disabled.
+    if (!wheelProxyEnabled) {
       return;
     }
 
@@ -949,6 +984,7 @@ document.addEventListener("DOMContentLoaded", () => {
   requestAnimationFrame(() => emitMark("mm-doc-painted"));
   installLongTaskObserver();
   applyViewerChromeState();
+  applyDocumentScrollState();
   // Defer renderMath / renderMermaid / renderCodeBlocks to runInitialRenderPipeline,
   // which is triggered by the first reading-preferences message from the host.
   wireLinks();
