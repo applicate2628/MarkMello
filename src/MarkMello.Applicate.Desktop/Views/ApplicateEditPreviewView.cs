@@ -18,20 +18,31 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private static readonly Thickness PreviewDocumentPadding = new(72, 96, 72, 160);
     private static readonly TimeSpan WebPreviewDebounce = TimeSpan.FromMilliseconds(180);
 
+    // Window after a programmatic scroll during which the OPPOSITE side's
+    // scroll events are ignored, suppressing the editor↔preview ping-pong
+    // loop. 200ms covers a typical Avalonia scroll animation tick + the
+    // round-trip into WebView2's renderer thread.
+    private static readonly TimeSpan SyncOriginGuard = TimeSpan.FromMilliseconds(200);
+
     private readonly IApplicateSharedWebViewHost? _sharedHost;
     private readonly Grid _root = new() { UseLayoutRounding = true };
     private readonly Grid _surface = new() { UseLayoutRounding = true };
     private readonly ApplicateMarkdownDocumentView _nativePreview;
+    private readonly ScrollViewer _nativeScroll;
     private readonly Panel _webSlot = new() { UseLayoutRounding = true };
     private readonly ToggleButton _syncToggle;
     private readonly DispatcherTimer _webRenderTimer;
     private EditorSessionViewModel? _session;
     private ScrollViewer? _hostScrollViewer;
     private ScrollBarVisibility? _hostScrollViewerVerticalMode;
+    private TextBox? _editorTextBox;
+    private ScrollViewer? _editorScrollViewer;
     private bool _isAttachedToHost;
     private bool _webPreviewFailed;
     private bool _hostEventsWired;
     private bool _syncEnabled;
+    private DateTime _ignoreEditorScrollUntil;
+    private DateTime _ignorePreviewScrollUntil;
 
     public ApplicateEditPreviewView(IApplicateSharedWebViewHost? sharedHost)
     {
@@ -42,7 +53,20 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             UseLayoutRounding = true
         };
 
-        _surface.Children.Add(_nativePreview);
+        // Wrap native preview in its own ScrollViewer so the surface row
+        // itself does not need to scroll. This keeps the toolbar (Row 0)
+        // fixed when the outer host scroll viewer is disabled, and gives us
+        // a single scroll source to sync against in native mode.
+        _nativeScroll = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            UseLayoutRounding = true,
+            Content = _nativePreview
+        };
+        _nativeScroll.ScrollChanged += OnNativeScrollChanged;
+
+        _surface.Children.Add(_nativeScroll);
         _surface.Children.Add(_webSlot);
 
         _syncToggle = BuildSyncToggle();
@@ -128,8 +152,153 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private void OnSyncToggleChanged(object? sender, RoutedEventArgs e)
     {
         _syncEnabled = _syncToggle.IsChecked == true;
-        // Sync logic itself is wired in a later step; for now this only
-        // records the state so callers can read it once the wiring lands.
+        if (_syncEnabled)
+        {
+            EnsureEditorWiring();
+            // On enable, snap the preview to the editor's current position so
+            // the two surfaces start aligned.
+            ForwardEditorScrollToPreview();
+        }
+    }
+
+    private void EnsureEditorWiring()
+    {
+        if (_editorTextBox is not null && _editorScrollViewer is not null)
+        {
+            return;
+        }
+
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null)
+        {
+            return;
+        }
+
+        // Upstream EditWorkspaceView.axaml names the editor TextBox "EditorTextBox".
+        // It lives in the same TopLevel as this preview (left pane of the split).
+        var textBox = topLevel.GetVisualDescendants()
+            .OfType<TextBox>()
+            .FirstOrDefault(static tb => string.Equals(tb.Name, "EditorTextBox", StringComparison.Ordinal));
+        if (textBox is null)
+        {
+            return;
+        }
+
+        var scrollViewer = textBox.GetVisualDescendants()
+            .OfType<ScrollViewer>()
+            .FirstOrDefault();
+        if (scrollViewer is null)
+        {
+            return;
+        }
+
+        _editorTextBox = textBox;
+        _editorScrollViewer = scrollViewer;
+        _editorScrollViewer.ScrollChanged += OnEditorScrollChanged;
+    }
+
+    private void TeardownEditorWiring()
+    {
+        if (_editorScrollViewer is not null)
+        {
+            _editorScrollViewer.ScrollChanged -= OnEditorScrollChanged;
+        }
+        _editorScrollViewer = null;
+        _editorTextBox = null;
+    }
+
+    private void OnEditorScrollChanged(object? sender, ScrollChangedEventArgs e)
+    {
+        if (!_syncEnabled || _sharedHost is null || !_isAttachedToHost)
+        {
+            return;
+        }
+
+        if (DateTime.UtcNow < _ignoreEditorScrollUntil)
+        {
+            // Preview-origin scroll just propagated through editor; suppress
+            // this echo to break the ping-pong loop.
+            return;
+        }
+
+        ForwardEditorScrollToPreview();
+    }
+
+    private void ForwardEditorScrollToPreview()
+    {
+        if (_editorScrollViewer is null)
+        {
+            return;
+        }
+
+        var maximum = _editorScrollViewer.Extent.Height - _editorScrollViewer.Viewport.Height;
+        if (maximum <= 0)
+        {
+            return;
+        }
+
+        var percent = SysMath.Clamp(_editorScrollViewer.Offset.Y / maximum * 100.0, 0, 100);
+
+        if (_isAttachedToHost && _sharedHost is not null)
+        {
+            // WebView preview active: forward percent through the IPC.
+            _ignorePreviewScrollUntil = DateTime.UtcNow + SyncOriginGuard;
+            _sharedHost.View.ScrollToProgress(percent);
+            return;
+        }
+
+        // Native preview active: drive _nativeScroll directly.
+        var nativeMaximum = _nativeScroll.Extent.Height - _nativeScroll.Viewport.Height;
+        if (nativeMaximum <= 0)
+        {
+            return;
+        }
+        _ignorePreviewScrollUntil = DateTime.UtcNow + SyncOriginGuard;
+        _nativeScroll.Offset = _nativeScroll.Offset.WithY(percent / 100.0 * nativeMaximum);
+    }
+
+    private void ForwardPreviewScrollToEditor(double previewProgressPercent)
+    {
+        if (_editorScrollViewer is null)
+        {
+            return;
+        }
+
+        var maximum = _editorScrollViewer.Extent.Height - _editorScrollViewer.Viewport.Height;
+        if (maximum <= 0)
+        {
+            return;
+        }
+
+        var targetOffset = SysMath.Clamp(previewProgressPercent / 100.0, 0, 1) * maximum;
+        _ignoreEditorScrollUntil = DateTime.UtcNow + SyncOriginGuard;
+        _editorScrollViewer.Offset = _editorScrollViewer.Offset.WithY(targetOffset);
+    }
+
+    private void OnNativeScrollChanged(object? sender, ScrollChangedEventArgs e)
+    {
+        if (!_syncEnabled || _isAttachedToHost)
+        {
+            // Sync disabled OR WebView preview is active (its own
+            // ScrollStateChanged drives editor sync). Don't double-drive.
+            return;
+        }
+
+        if (DateTime.UtcNow < _ignorePreviewScrollUntil)
+        {
+            // Editor-origin scroll just propagated to native; suppress this
+            // echo to break the ping-pong loop.
+            return;
+        }
+
+        var maximum = _nativeScroll.Extent.Height - _nativeScroll.Viewport.Height;
+        if (maximum <= 0)
+        {
+            return;
+        }
+
+        var percent = SysMath.Clamp(_nativeScroll.Offset.Y / maximum * 100.0, 0, 100);
+        ForwardPreviewScrollToEditor(percent);
     }
 
     protected override void OnDataContextChanged(EventArgs e)
@@ -154,6 +323,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         RestoreHostScrollMode();
+        TeardownEditorWiring();
         AttachSession(null);
         _webRenderTimer.Stop();
         ReleaseSharedHost();
@@ -287,6 +457,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         _sharedHost.View.DocumentRenderInvalidated += OnSharedDocumentInvalidated;
         _sharedHost.View.FallbackRequested += OnSharedFallbackRequested;
         _sharedHost.View.ViewerInteractionRequested += OnSharedViewerInteractionRequested;
+        _sharedHost.View.ScrollStateChanged += OnSharedScrollStateChanged;
         _hostEventsWired = true;
     }
 
@@ -301,7 +472,25 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         _sharedHost.View.DocumentRenderInvalidated -= OnSharedDocumentInvalidated;
         _sharedHost.View.FallbackRequested -= OnSharedFallbackRequested;
         _sharedHost.View.ViewerInteractionRequested -= OnSharedViewerInteractionRequested;
+        _sharedHost.View.ScrollStateChanged -= OnSharedScrollStateChanged;
         _hostEventsWired = false;
+    }
+
+    private void OnSharedScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)
+    {
+        if (!_syncEnabled)
+        {
+            return;
+        }
+
+        if (DateTime.UtcNow < _ignorePreviewScrollUntil)
+        {
+            // Editor-origin scroll just propagated to preview; suppress this
+            // echo to break the ping-pong loop.
+            return;
+        }
+
+        ForwardPreviewScrollToEditor(e.ProgressPercent);
     }
 
     private void OnSharedDocumentRendered(object? sender, EventArgs e)
@@ -407,7 +596,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
                 _isAttachedToHost = true;
             }
             _webSlot.IsVisible = true;
-            _nativePreview.IsVisible = false;
+            _nativeScroll.IsVisible = false;
         }
         else
         {
@@ -417,7 +606,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
                 _isAttachedToHost = false;
             }
             _webSlot.IsVisible = false;
-            _nativePreview.IsVisible = true;
+            _nativeScroll.IsVisible = true;
         }
     }
 
@@ -442,7 +631,13 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         if (_sharedHost is not null && _isAttachedToHost)
         {
             _sharedHost.View.AvailableContentWidth = widths.WebColumnWidth;
-            _sharedHost.View.MinHeight = CalculateWebPreviewMinHeight(Bounds.Height);
+            // Use the surface (Row 1) height, not the whole preview pane.
+            // Bounds.Height includes the toolbar (Row 0) above _surface; if we
+            // size the WebView2 wrapper to the full pane height its native HWND
+            // overflows into the toolbar area (Avalonia layout positions the
+            // wrapper inside _surface, but the HWND respects MinHeight first).
+            var surfaceHeight = _surface.Bounds.Height > 0 ? _surface.Bounds.Height : Bounds.Height;
+            _sharedHost.View.MinHeight = CalculateWebPreviewMinHeight(surfaceHeight);
         }
     }
 
@@ -486,11 +681,20 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             return;
         }
 
-        _hostScrollViewer.VerticalScrollBarVisibility = CalculateHostVerticalScrollMode(
-            IsWebPreviewActiveOrTargeted(),
-            _hostScrollViewerVerticalMode ?? ScrollBarVisibility.Auto);
+        // Always disable the outer host ScrollViewer: scroll lives inside the
+        // preview surface (WebView's own scroll or _nativeScroll). Otherwise
+        // the outer scroll would lift the toolbar (Row 0) along with the
+        // content when it scrolls in native mode.
+        _hostScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
     }
 
+    /// <remarks>
+    /// Kept for backward compatibility with existing tests that exercise the
+    /// previous mode-dependent behaviour. The runtime path now always returns
+    /// <see cref="ScrollBarVisibility.Disabled"/> regardless of mode because
+    /// the surface owns its own scroll source (WebView internal scroll or
+    /// <c>_nativeScroll</c>).
+    /// </remarks>
     internal static ScrollBarVisibility CalculateHostVerticalScrollMode(
         bool useWebPreview,
         ScrollBarVisibility originalMode)
