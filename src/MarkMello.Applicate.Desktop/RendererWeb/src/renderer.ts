@@ -687,24 +687,64 @@ function queueMinimapRefreshAfterLayoutSettles(): void {
   }, MINIMAP_REFRESH_DEBOUNCE_MS);
 }
 
+type AppliedReadingPreferences = {
+  fontSize: number;
+  lineHeight: number;
+  maxWidth: number;
+  minimapMode: MinimapMode;
+  viewerChromeEnabled: boolean;
+  widthResizerVisibility: WidthResizerVisibility;
+};
+
+let lastAppliedReadingPreferences: AppliedReadingPreferences | null = null;
+
 function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-preferences" }>): void {
-  document.documentElement.style.setProperty("--mm-document-font-size", `${message.fontSize}px`);
-  document.documentElement.style.setProperty("--mm-document-line-height", `${message.lineHeight}`);
-  document.documentElement.style.setProperty("--mm-document-max-width", `${message.maxWidth}px`);
-  minimapMode = message.minimapMode;
-  viewerChromeEnabled = message.viewerChromeEnabled ?? true;
+  const next: AppliedReadingPreferences = {
+    fontSize: message.fontSize,
+    lineHeight: message.lineHeight,
+    maxWidth: message.maxWidth,
+    minimapMode: message.minimapMode,
+    viewerChromeEnabled: message.viewerChromeEnabled ?? true,
+    widthResizerVisibility: normalizeWidthResizerVisibility(message.widthResizerVisibility),
+  };
+
+  // Detect if ONLY widthResizerVisibility changed — visual-preference fast path.
+  // Skip the heavy minimap viewport update + scheduleLayoutReady that would
+  // otherwise cause visible jank during host's on-hover/always toggle.
+  const visibilityOnlyChange = lastAppliedReadingPreferences !== null
+    && lastAppliedReadingPreferences.fontSize === next.fontSize
+    && lastAppliedReadingPreferences.lineHeight === next.lineHeight
+    && lastAppliedReadingPreferences.maxWidth === next.maxWidth
+    && lastAppliedReadingPreferences.minimapMode === next.minimapMode
+    && lastAppliedReadingPreferences.viewerChromeEnabled === next.viewerChromeEnabled
+    && lastAppliedReadingPreferences.widthResizerVisibility !== next.widthResizerVisibility;
+
+  document.documentElement.style.setProperty("--mm-document-font-size", `${next.fontSize}px`);
+  document.documentElement.style.setProperty("--mm-document-line-height", `${next.lineHeight}`);
+  document.documentElement.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
+  minimapMode = next.minimapMode;
+  viewerChromeEnabled = next.viewerChromeEnabled;
   applyViewerChromeState();
-  widthResizerVisibility = normalizeWidthResizerVisibility(message.widthResizerVisibility);
+  widthResizerVisibility = next.widthResizerVisibility;
   const widthResizerClasses = getWidthResizerVisibilityClasses(widthResizerVisibility);
   document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
+
   const hadHostPreferences = hasReceivedHostPreferences;
   hasReceivedHostPreferences = true;
+  lastAppliedReadingPreferences = next;
+
+  updateWidthHandlePosition();
+
+  if (visibilityOnlyChange) {
+    // Visibility-only fast path: skip viewport update + layout-ready re-emit.
+    // CSS already handles handle opacity/width transition.
+    return;
+  }
+
   // Phase A minimap rebuild is scheduled by renderMath() (subscribed to
   // controller.initialVisibleReady) so we don't race here. On subsequent
   // preference updates, only the viewport indicator needs to update.
   queueMinimapViewportUpdate();
-
-  updateWidthHandlePosition();
 
   if (!hadHostPreferences && !initialRenderPipelineCompleted) {
     // First reading-preferences message — run the full Mermaid/code-block pipeline
@@ -722,16 +762,13 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
         scheduleLayoutReady();
       }
     });
-    return;
   }
 
-  if (initialRenderPipelineCompleted) {
-    // Live preference updates: re-emit layout-ready so host can ack the new
-    // preferences. Host no longer resets _hasMinimapState on live updates
-    // (see ApplicateWebMarkdownDocumentView.SendReadingPreferences), so no
-    // force-post of minimap-state is needed here.
-    scheduleLayoutReady();
-  }
+  // Note: live preference updates (subsequent applyReadingPreferences after
+  // initial render completed) intentionally do NOT call scheduleLayoutReady().
+  // The host removed _awaitingLayoutReady reset from SendReadingPreferences on
+  // live updates, so re-emitting layout-ready added per-frame IPC traffic
+  // during width drag without serving any host-side state machine.
 }
 
 function handleHostMessage(raw: unknown): void {

@@ -992,20 +992,34 @@
       queueMinimapViewportUpdate();
     }, MINIMAP_REFRESH_DEBOUNCE_MS);
   }
+  var lastAppliedReadingPreferences = null;
   function applyReadingPreferences(message) {
-    document.documentElement.style.setProperty("--mm-document-font-size", `${message.fontSize}px`);
-    document.documentElement.style.setProperty("--mm-document-line-height", `${message.lineHeight}`);
-    document.documentElement.style.setProperty("--mm-document-max-width", `${message.maxWidth}px`);
-    minimapMode = message.minimapMode;
-    viewerChromeEnabled = message.viewerChromeEnabled ?? true;
+    const next = {
+      fontSize: message.fontSize,
+      lineHeight: message.lineHeight,
+      maxWidth: message.maxWidth,
+      minimapMode: message.minimapMode,
+      viewerChromeEnabled: message.viewerChromeEnabled ?? true,
+      widthResizerVisibility: normalizeWidthResizerVisibility(message.widthResizerVisibility)
+    };
+    const visibilityOnlyChange = lastAppliedReadingPreferences !== null && lastAppliedReadingPreferences.fontSize === next.fontSize && lastAppliedReadingPreferences.lineHeight === next.lineHeight && lastAppliedReadingPreferences.maxWidth === next.maxWidth && lastAppliedReadingPreferences.minimapMode === next.minimapMode && lastAppliedReadingPreferences.viewerChromeEnabled === next.viewerChromeEnabled && lastAppliedReadingPreferences.widthResizerVisibility !== next.widthResizerVisibility;
+    document.documentElement.style.setProperty("--mm-document-font-size", `${next.fontSize}px`);
+    document.documentElement.style.setProperty("--mm-document-line-height", `${next.lineHeight}`);
+    document.documentElement.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
+    minimapMode = next.minimapMode;
+    viewerChromeEnabled = next.viewerChromeEnabled;
     applyViewerChromeState();
-    widthResizerVisibility = normalizeWidthResizerVisibility(message.widthResizerVisibility);
+    widthResizerVisibility = next.widthResizerVisibility;
     const widthResizerClasses = getWidthResizerVisibilityClasses(widthResizerVisibility);
     document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
     const hadHostPreferences = hasReceivedHostPreferences;
     hasReceivedHostPreferences = true;
-    queueMinimapViewportUpdate();
+    lastAppliedReadingPreferences = next;
     updateWidthHandlePosition();
+    if (visibilityOnlyChange) {
+      return;
+    }
+    queueMinimapViewportUpdate();
     if (!hadHostPreferences && !initialRenderPipelineCompleted) {
       void runInitialRenderPipeline({
         getCurrentTheme,
@@ -1019,10 +1033,6 @@
           scheduleLayoutReady();
         }
       });
-      return;
-    }
-    if (initialRenderPipelineCompleted) {
-      scheduleLayoutReady();
     }
   }
   function handleHostMessage(raw) {
