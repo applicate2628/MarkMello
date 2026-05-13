@@ -515,6 +515,7 @@
   var widthHandleRoot = null;
   var widthHandleDragging = false;
   var widthHandleStartClientX = 0;
+  var widthHandleStartMaxWidth = 0;
   var pendingWidthDragDeltaX = 0;
   var widthDragFrameRequested = false;
   var layoutReadyGeneration = 0;
@@ -743,7 +744,6 @@
       postHostMessage({ type: "width-drag", phase: "move", deltaX: pendingWidthDragDeltaX });
     });
   }
-  var widthHandleStartMaxWidth = 0;
   function handleWidthHandlePointerDown(event) {
     if (event.button !== 0 || !widthHandleRoot) {
       return;

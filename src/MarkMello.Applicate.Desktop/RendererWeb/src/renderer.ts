@@ -111,6 +111,7 @@ let viewerChromeEnabled = false;
 let widthHandleRoot: HTMLElement | null = null;
 let widthHandleDragging = false;
 let widthHandleStartClientX = 0;
+let widthHandleStartMaxWidth = 0;
 let pendingWidthDragDeltaX = 0;
 let widthDragFrameRequested = false;
 let layoutReadyGeneration = 0;
@@ -379,9 +380,6 @@ function postWidthDragMove(): void {
     postHostMessage({ type: "width-drag", phase: "move", deltaX: pendingWidthDragDeltaX });
   });
 }
-
-// Snapshot of maxWidth at the moment drag started, used for local preview.
-let widthHandleStartMaxWidth = 0;
 
 function handleWidthHandlePointerDown(event: PointerEvent): void {
   if (event.button !== 0 || !widthHandleRoot) {
