@@ -131,8 +131,6 @@ export function getReport(): PerfReport {
   };
 }
 
-// Stub for Task 3 (FpsSampler). Real body will replace; signature is stable
-// so callers and tests against the public surface compile today.
 export function installLongTaskObserver(): () => void {
   if (typeof PerformanceObserver === "undefined") return () => {};
   try {
@@ -144,6 +142,7 @@ export function installLongTaskObserver(): () => void {
     observer.observe({ entryTypes: ["longtask"] });
     return () => observer.disconnect();
   } catch {
+    emitMark("mm-longtask-observer-unsupported");
     return () => {};
   }
 }
@@ -153,6 +152,8 @@ export interface FpsSampler {
   stop(): FpsSession;
 }
 
+// Stub for Task 3 (FpsSampler). Real body will replace; signature is stable
+// so callers and tests against the public surface compile today.
 export function getFpsSampler(): FpsSampler {
   return {
     start: () => {},

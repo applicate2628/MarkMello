@@ -129,4 +129,23 @@ describe("performanceMarks", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("installLongTaskObserver: silent fallback emits mm-longtask-observer-unsupported on observe throw", () => {
+    const FakeObserver = vi.fn().mockImplementation(() => ({
+      observe: () => {
+        throw new Error("longtask not supported");
+      },
+      disconnect: vi.fn(),
+    }));
+    vi.stubGlobal("PerformanceObserver", FakeObserver);
+
+    const dispose = installLongTaskObserver();
+    expect(typeof dispose).toBe("function");
+    const report = getReport();
+    expect(
+      report.marks.some((m) => m.name === "mm-longtask-observer-unsupported"),
+    ).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
 });
