@@ -52,7 +52,7 @@ type RendererMessage =
   | { type: "layout-ready"; scrollTop: number; scrollHeight: number; clientHeight: number }
   | { type: "link-clicked"; href: string; button: number; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }
   | { type: "minimap-state"; visible: boolean; reservedWidth: number }
-  | { type: "scroll"; scrollTop: number; scrollHeight: number; clientHeight: number }
+  | { type: "scroll"; scrollTop: number; scrollHeight: number; clientHeight: number; topBlockIndex: number | null }
   | { type: "viewer-interaction" }
   | { type: "wheel"; deltaY: number; deltaMode: number }
   | { type: "width-drag"; phase: "start" | "move" | "end"; deltaX: number }
@@ -84,6 +84,7 @@ type HostMessage =
       widthResizerVisibility?: WidthResizerVisibility;
     }
   | { type: "scroll-by"; deltaY: number }
+  | { type: "scroll-to-block"; blockIndex: number }
   | { type: "scroll-to"; anchor: string }
   | { type: "scroll-to-progress"; progressPercent: number };
 
@@ -279,11 +280,33 @@ function getScrollState(): { scrollTop: number; scrollHeight: number; clientHeig
   };
 }
 
+// The top visible block: the first element with data-mm-block-index whose
+// bottom edge is below the viewport's top. Returns null if no annotated
+// block exists yet (before first render, or document without blocks).
+function findTopVisibleBlockIndex(): number | null {
+  const elements = document.querySelectorAll<HTMLElement>("[data-mm-block-index]");
+  if (elements.length === 0) return null;
+  const viewportTop = 0;
+  for (const el of Array.from(elements)) {
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom >= viewportTop) {
+      const raw = el.dataset["mmBlockIndex"];
+      const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+  }
+  // All blocks above viewport — return the last one.
+  const lastRaw = elements[elements.length - 1]!.dataset["mmBlockIndex"];
+  const lastParsed = lastRaw === undefined ? Number.NaN : Number.parseInt(lastRaw, 10);
+  return Number.isFinite(lastParsed) ? lastParsed : null;
+}
+
 function postScroll(): void {
   recordScrollIpc();
   postHostMessage({
     type: "scroll",
-    ...getScrollState()
+    ...getScrollState(),
+    topBlockIndex: findTopVisibleBlockIndex()
   });
 }
 
@@ -911,6 +934,16 @@ function handleHostMessage(raw: unknown): void {
 
   if (message.type === "scroll-by") {
     window.scrollBy({ top: message.deltaY, behavior: "instant" as ScrollBehavior });
+    return;
+  }
+
+  if (message.type === "scroll-to-block") {
+    const target = document.querySelector<HTMLElement>(
+      `[data-mm-block-index="${message.blockIndex}"]`
+    );
+    if (target) {
+      target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
+    }
   }
 }
 

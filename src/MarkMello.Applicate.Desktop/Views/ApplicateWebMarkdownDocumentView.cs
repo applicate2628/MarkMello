@@ -218,6 +218,21 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         PostRendererMessage(new { type = "scroll-by", deltaY });
     }
 
+    /// <summary>
+    /// Scroll the renderer to the block carrying the given
+    /// <c>data-mm-block-index</c> attribute. No-op when the document has not
+    /// loaded yet or no matching element exists.
+    /// </summary>
+    internal void ScrollToBlock(int blockIndex)
+    {
+        if (!_hasLoadedDocument || blockIndex < 0)
+        {
+            return;
+        }
+
+        PostRendererMessage(new { type = "scroll-to-block", blockIndex });
+    }
+
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         // Skip cancelling the in-flight render when the detach is part of an
@@ -554,9 +569,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             ? SysMath.Clamp(scrollTop / maximum * 100.0, 0, 100)
             : 0;
 
+        int? topBlockIndex = null;
+        if (root.TryGetProperty("topBlockIndex", out var topBlockProperty)
+            && topBlockProperty.ValueKind == JsonValueKind.Number
+            && topBlockProperty.TryGetInt32(out var parsedTopBlock)
+            && parsedTopBlock >= 0)
+        {
+            topBlockIndex = parsedTopBlock;
+        }
+
         ScrollStateChanged?.Invoke(
             this,
-            new ApplicateWebDocumentScrollEventArgs(progress, scrollTop, scrollHeight, clientHeight));
+            new ApplicateWebDocumentScrollEventArgs(progress, scrollTop, scrollHeight, clientHeight, topBlockIndex));
     }
 
     private void HandleMinimapStateMessage(JsonElement root)
@@ -998,7 +1022,8 @@ public sealed class ApplicateWebDocumentScrollEventArgs(
     double progressPercent,
     double scrollTop,
     double scrollHeight,
-    double clientHeight) : EventArgs
+    double clientHeight,
+    int? topBlockIndex = null) : EventArgs
 {
     public double ProgressPercent { get; } = progressPercent;
 
@@ -1007,6 +1032,13 @@ public sealed class ApplicateWebDocumentScrollEventArgs(
     public double ScrollHeight { get; } = scrollHeight;
 
     public double ClientHeight { get; } = clientHeight;
+
+    /// <summary>
+    /// Block index of the topmost element with <c>data-mm-block-index</c> that
+    /// is at or below the viewport top. Null when the renderer has not yet
+    /// emitted block metadata or no annotated block exists.
+    /// </summary>
+    public int? TopBlockIndex { get; } = topBlockIndex;
 }
 
 public sealed class ApplicateWebMinimapStateEventArgs(

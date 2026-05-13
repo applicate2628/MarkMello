@@ -650,11 +650,28 @@
       clientHeight: root.clientHeight
     };
   }
+  function findTopVisibleBlockIndex() {
+    const elements = document.querySelectorAll("[data-mm-block-index]");
+    if (elements.length === 0) return null;
+    const viewportTop = 0;
+    for (const el of Array.from(elements)) {
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom >= viewportTop) {
+        const raw = el.dataset["mmBlockIndex"];
+        const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+    }
+    const lastRaw = elements[elements.length - 1].dataset["mmBlockIndex"];
+    const lastParsed = lastRaw === void 0 ? Number.NaN : Number.parseInt(lastRaw, 10);
+    return Number.isFinite(lastParsed) ? lastParsed : null;
+  }
   function postScroll() {
     recordScrollIpc();
     postHostMessage({
       type: "scroll",
-      ...getScrollState()
+      ...getScrollState(),
+      topBlockIndex: findTopVisibleBlockIndex()
     });
   }
   function postLayoutReady() {
@@ -1133,6 +1150,15 @@
     }
     if (message.type === "scroll-by") {
       window.scrollBy({ top: message.deltaY, behavior: "instant" });
+      return;
+    }
+    if (message.type === "scroll-to-block") {
+      const target = document.querySelector(
+        `[data-mm-block-index="${message.blockIndex}"]`
+      );
+      if (target) {
+        target.scrollIntoView({ block: "start", behavior: "instant" });
+      }
     }
   }
   function wireLinks() {
