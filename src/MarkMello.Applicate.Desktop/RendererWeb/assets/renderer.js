@@ -767,14 +767,7 @@
     pendingWidthDragDeltaX = event.clientX - widthHandleStartClientX;
     const previewMaxWidth = Math.max(200, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
     document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
-    if (widthHandleRoot) {
-      const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
-      const minimapReservedWidth = getCurrentMinimapReservedWidth();
-      const maxLeftBeforeMinimap = window.innerWidth - minimapReservedWidth - hitArea;
-      const maxLeft = Math.max(0, Math.min(window.innerWidth - hitArea, maxLeftBeforeMinimap));
-      const clampedLeft = Math.max(0, Math.min(maxLeft, event.clientX - hitArea / 2));
-      widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
-    }
+    updateWidthHandlePosition();
     postWidthDragMove();
     event.preventDefault();
   }

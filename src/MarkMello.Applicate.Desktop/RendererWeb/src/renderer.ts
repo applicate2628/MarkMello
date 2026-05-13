@@ -413,22 +413,14 @@ function handleWidthHandlePointerMove(event: PointerEvent): void {
   pendingWidthDragDeltaX = event.clientX - widthHandleStartClientX;
   // Live local preview: compute new maxWidth from deltaX and apply directly.
   // Document is centered, so handle moves by deltaX implies column width
-  // changes by 2*deltaX (both sides expand/shrink). Bypass the host round-
-  // trip — renderer owns the visual during drag, host gets final value on
-  // release. Eliminates per-frame IPC + host layout pass.
+  // changes by 2*deltaX. Bypass host round-trip — renderer owns the visual
+  // during drag, host gets final value on release.
   const previewMaxWidth = Math.max(200, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
   document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
-  // Pin handle to cursor — readable feedback even if reflow lags briefly.
-  // Clamp to the same bounds as updateWidthHandlePosition: stay left of the
-  // minimap-reserved area so the handle doesn't overlap the minimap.
-  if (widthHandleRoot) {
-    const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
-    const minimapReservedWidth = getCurrentMinimapReservedWidth();
-    const maxLeftBeforeMinimap = window.innerWidth - minimapReservedWidth - hitArea;
-    const maxLeft = Math.max(0, Math.min(window.innerWidth - hitArea, maxLeftBeforeMinimap));
-    const clampedLeft = Math.max(0, Math.min(maxLeft, event.clientX - hitArea / 2));
-    widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
-  }
+  // Position handle from real document layout (after maxWidth reflow). This
+  // matches the steady-state logic and inherits the minimap-clamping baked
+  // into updateWidthHandlePosition — no overlap with the minimap area.
+  updateWidthHandlePosition();
   postWidthDragMove();
   event.preventDefault();
 }
