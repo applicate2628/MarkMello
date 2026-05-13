@@ -3,10 +3,13 @@
   "type": "module",
   "scripts": {
     "check:renderer": "tsc -p RendererWeb/tsconfig.json --noEmit",
-    "build:renderer": "esbuild RendererWeb/src/renderer.ts --bundle --format=iife --target=es2020 --outfile=RendererWeb/assets/renderer.js --legal-comments=none"
+    "build:renderer": "esbuild RendererWeb/src/renderer.ts --bundle --format=iife --target=es2020 --outfile=RendererWeb/assets/renderer.js --legal-comments=none",
+    "test:renderer": "vitest run --config vitest.config.ts"
   },
   "devDependencies": {
     "esbuild": "0.28.0",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "vitest": "2.1.8",
+    "happy-dom": "15.11.7"
   }
 }
