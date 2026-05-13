@@ -101,7 +101,6 @@ let minimapViewport: HTMLElement | null = null;
 let currentMinimapLayout: MinimapViewportLayout | null = null;
 let minimapDragging = false;
 let minimapSourceReady = false;
-let katexHasRun = false;
 let mermaidRenderGeneration = 0;
 let initialRenderPipelineCompleted = false;
 let currentController: MathReadinessController | null = null;
@@ -145,14 +144,13 @@ function postHostMessage(message: RendererMessage): void {
 }
 
 function renderMath(): MathReadinessController {
-  // Thin wrapper preserves renderer-local side effects (perf marks, katexHasRun,
+  // Thin wrapper preserves renderer-local side effects (perf marks,
   // __mmRendererState exposure) while delegating the rendering loop to the
-  // seam in mathRenderInit.ts. Task 16 will replace the katexHasRun flag.
+  // seam in mathRenderInit.ts.
   const mathCount = document.querySelectorAll("[data-tex]").length;
   emitMark("mm-render-math-start", { mathCount });
   const katex = hostWindow.katex;
   if (!katex) {
-    katexHasRun = mathCount === 0;
     const controller = renderMathInit({ katex: undefined, documentRoot: document });
     currentController = controller;
     schedulePhaseBRebuild({
@@ -164,7 +162,6 @@ function renderMath(): MathReadinessController {
     return controller;
   }
   const controller = renderMathInit({ katex, documentRoot: document });
-  katexHasRun = true;
   currentController = controller;
   schedulePhaseBRebuild({
     allMathRendered: controller.allMathRendered,
@@ -478,9 +475,9 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
     return;
   }
   const source = document.querySelector<HTMLElement>(".mm-document");
-  if (!source || !katexHasRun) {
+  if (!source) {
     minimapSourceReady = false;
-    emitMark("mm-minimap-refresh-end", { phase, blockCount: 0, skipped: "no-math" });
+    emitMark("mm-minimap-refresh-end", { phase, blockCount: 0, skipped: "no-source" });
     return;
   }
 
@@ -673,7 +670,14 @@ function queueMinimapRefresh(): void {
   minimapFrameRequested = true;
   window.requestAnimationFrame(() => {
     minimapFrameRequested = false;
-    refreshMinimapContent();
+    // Wait for initial-visible math before building the schematic minimap.
+    // currentController is set synchronously inside renderMath() which the
+    // initialRenderPipeline calls before this rAF fires, so by the time the
+    // promise.then chain runs, the controller exists. If renderMath was never
+    // called (no math in doc), currentController is null and we fall back to a
+    // resolved promise — fine, refresh runs immediately.
+    const ready = currentController?.initialVisibleReady ?? Promise.resolve();
+    ready.then(() => refreshMinimapContent("A"));
   });
 }
 

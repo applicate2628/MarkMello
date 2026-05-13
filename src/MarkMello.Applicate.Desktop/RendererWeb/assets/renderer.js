@@ -554,7 +554,6 @@
   var currentMinimapLayout = null;
   var minimapDragging = false;
   var minimapSourceReady = false;
-  var katexHasRun = false;
   var mermaidRenderGeneration = 0;
   var initialRenderPipelineCompleted = false;
   var currentController = null;
@@ -598,7 +597,6 @@
     emitMark("mm-render-math-start", { mathCount });
     const katex = hostWindow.katex;
     if (!katex) {
-      katexHasRun = mathCount === 0;
       const controller2 = renderMath({ katex: void 0, documentRoot: document });
       currentController = controller2;
       schedulePhaseBRebuild({
@@ -610,7 +608,6 @@
       return controller2;
     }
     const controller = renderMath({ katex, documentRoot: document });
-    katexHasRun = true;
     currentController = controller;
     schedulePhaseBRebuild({
       allMathRendered: controller.allMathRendered,
@@ -874,9 +871,9 @@
       return;
     }
     const source = document.querySelector(".mm-document");
-    if (!source || !katexHasRun) {
+    if (!source) {
       minimapSourceReady = false;
-      emitMark("mm-minimap-refresh-end", { phase, blockCount: 0, skipped: "no-math" });
+      emitMark("mm-minimap-refresh-end", { phase, blockCount: 0, skipped: "no-source" });
       return;
     }
     const root = document.scrollingElement ?? document.documentElement;
@@ -1033,7 +1030,8 @@
     minimapFrameRequested = true;
     window.requestAnimationFrame(() => {
       minimapFrameRequested = false;
-      refreshMinimapContent();
+      const ready = currentController?.initialVisibleReady ?? Promise.resolve();
+      ready.then(() => refreshMinimapContent("A"));
     });
   }
   function queueMinimapRefreshAfterLayoutSettles() {
