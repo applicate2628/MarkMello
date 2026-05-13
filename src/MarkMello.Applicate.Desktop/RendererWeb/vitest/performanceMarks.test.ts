@@ -151,9 +151,9 @@ describe("performanceMarks", () => {
   });
 
   it("FpsSampler samples rAF deltas and returns p50/p95/min stats", () => {
-    let nextRafCallback: FrameRequestCallback | null = null;
+    const rafRef: { current: FrameRequestCallback | null } = { current: null };
     vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
-      nextRafCallback = cb;
+      rafRef.current = cb;
       return 1;
     });
     vi.stubGlobal("cancelAnimationFrame", () => {});
@@ -162,7 +162,7 @@ describe("performanceMarks", () => {
     sampler.start("test");
     // Simulate 10 frames with constant 16.67ms delta (~60 fps)
     for (let i = 1; i <= 10; i++) {
-      nextRafCallback?.(i * 16.67);
+      rafRef.current?.(i * 16.67);
     }
     const session = sampler.stop();
     expect(session.sampleCount).toBeGreaterThanOrEqual(8);
