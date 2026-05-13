@@ -670,6 +670,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             new
             {
                 type = "reading-preferences",
+                fontFamily = ReadingPreferences.FontFamily.ToString().ToLowerInvariant(),
                 fontSize = ReadingPreferences.FontSize,
                 lineHeight = ReadingPreferences.LineHeight,
                 maxWidth,

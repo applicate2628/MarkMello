@@ -4,6 +4,10 @@
   --mm-document-line-height: 1.7;
   --mm-document-max-width: 820px;
   --mm-document-base-padding-x: 72px;
+  --mm-document-font-family-serif: "Source Serif 4", "Source Serif Pro", "Iowan Old Style", Georgia, Cambria, ui-serif, serif;
+  --mm-document-font-family-sans: "Inter Tight", "Segoe UI Variable", "Segoe UI", Inter, system-ui, sans-serif;
+  --mm-document-font-family-mono: "JetBrains Mono", "Cascadia Code", Consolas, Menlo, ui-monospace, monospace;
+  --mm-document-font-family: var(--mm-document-font-family-serif);
   --mm-minimap-width: 136px;
   --mm-minimap-gap: 16px;
   --mm-minimap-accent: color-mix(in srgb, var(--mm-accent, #d46d3d) 88%, transparent);
@@ -92,10 +96,18 @@ body::-webkit-scrollbar-thumb:hover {
   background-color: var(--mm-scrollbar-thumb-active);
 }
 
+:root[data-mm-font-family="sans"] {
+  --mm-document-font-family: var(--mm-document-font-family-sans);
+}
+
+:root[data-mm-font-family="mono"] {
+  --mm-document-font-family: var(--mm-document-font-family-mono);
+}
+
 body {
   background: var(--mm-document-background);
   color: var(--mm-document-text);
-  font: var(--mm-document-font-size) / var(--mm-document-line-height) ui-serif, Georgia, "Times New Roman", serif;
+  font: var(--mm-document-font-size) / var(--mm-document-line-height) var(--mm-document-font-family);
 }
 
 .mm-document {

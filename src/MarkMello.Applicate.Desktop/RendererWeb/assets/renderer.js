@@ -1002,8 +1002,17 @@
     }, MINIMAP_REFRESH_DEBOUNCE_MS);
   }
   var lastAppliedReadingPreferences = null;
+  var pendingReadingPreferences = null;
+  var applyPrefsFrameRequested = false;
+  var heavyLiveUpdateTimer;
+  var HEAVY_LIVE_UPDATE_DEBOUNCE_MS = 80;
+  function normalizeFontFamilyMode(value) {
+    if (value === "sans" || value === "mono") return value;
+    return "serif";
+  }
   function applyReadingPreferences(message) {
-    const next = {
+    pendingReadingPreferences = {
+      fontFamily: normalizeFontFamilyMode(message.fontFamily),
       fontSize: message.fontSize,
       lineHeight: message.lineHeight,
       maxWidth: message.maxWidth,
@@ -1011,26 +1020,50 @@
       viewerChromeEnabled: message.viewerChromeEnabled ?? true,
       widthResizerVisibility: normalizeWidthResizerVisibility(message.widthResizerVisibility)
     };
-    const visibilityOnlyChange = lastAppliedReadingPreferences !== null && lastAppliedReadingPreferences.fontSize === next.fontSize && lastAppliedReadingPreferences.lineHeight === next.lineHeight && lastAppliedReadingPreferences.maxWidth === next.maxWidth && lastAppliedReadingPreferences.minimapMode === next.minimapMode && lastAppliedReadingPreferences.viewerChromeEnabled === next.viewerChromeEnabled && lastAppliedReadingPreferences.widthResizerVisibility !== next.widthResizerVisibility;
-    document.documentElement.style.setProperty("--mm-document-font-size", `${next.fontSize}px`);
-    document.documentElement.style.setProperty("--mm-document-line-height", `${next.lineHeight}`);
-    if (!widthHandleDragging) {
-      document.documentElement.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
+    if (applyPrefsFrameRequested) return;
+    applyPrefsFrameRequested = true;
+    requestAnimationFrame(flushPendingReadingPreferences);
+  }
+  function flushPendingReadingPreferences() {
+    applyPrefsFrameRequested = false;
+    const next = pendingReadingPreferences;
+    pendingReadingPreferences = null;
+    if (!next) return;
+    const prev = lastAppliedReadingPreferences;
+    const fontFamilyChanged = !prev || prev.fontFamily !== next.fontFamily;
+    const fontSizeChanged = !prev || prev.fontSize !== next.fontSize;
+    const lineHeightChanged = !prev || prev.lineHeight !== next.lineHeight;
+    const maxWidthChanged = !prev || prev.maxWidth !== next.maxWidth;
+    const minimapModeChanged = !prev || prev.minimapMode !== next.minimapMode;
+    const viewerChromeChanged = !prev || prev.viewerChromeEnabled !== next.viewerChromeEnabled;
+    const widthResizerVisibilityChanged = !prev || prev.widthResizerVisibility !== next.widthResizerVisibility;
+    const root = document.documentElement;
+    if (fontFamilyChanged) root.dataset.mmFontFamily = next.fontFamily;
+    if (fontSizeChanged) root.style.setProperty("--mm-document-font-size", `${next.fontSize}px`);
+    if (lineHeightChanged) root.style.setProperty("--mm-document-line-height", `${next.lineHeight}`);
+    if (maxWidthChanged && !widthHandleDragging) {
+      root.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
     }
-    minimapMode = next.minimapMode;
-    viewerChromeEnabled = next.viewerChromeEnabled;
-    applyViewerChromeState();
-    widthResizerVisibility = next.widthResizerVisibility;
-    const widthResizerClasses = getWidthResizerVisibilityClasses(widthResizerVisibility);
-    document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
+    if (minimapModeChanged) minimapMode = next.minimapMode;
+    if (viewerChromeChanged) {
+      viewerChromeEnabled = next.viewerChromeEnabled;
+      applyViewerChromeState();
+    }
+    if (widthResizerVisibilityChanged) {
+      widthResizerVisibility = next.widthResizerVisibility;
+      const widthResizerClasses = getWidthResizerVisibilityClasses(widthResizerVisibility);
+      document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
+    }
     const hadHostPreferences = hasReceivedHostPreferences;
     hasReceivedHostPreferences = true;
     lastAppliedReadingPreferences = next;
-    updateWidthHandlePosition();
-    if (visibilityOnlyChange) {
-      return;
+    if (maxWidthChanged || viewerChromeChanged || widthResizerVisibilityChanged) {
+      updateWidthHandlePosition();
     }
-    queueMinimapViewportUpdate();
+    const layoutAffectingChange = fontFamilyChanged || fontSizeChanged || lineHeightChanged || maxWidthChanged || minimapModeChanged || viewerChromeChanged;
+    if (layoutAffectingChange) {
+      scheduleHeavyLiveUpdate();
+    }
     if (!hadHostPreferences && !initialRenderPipelineCompleted) {
       void runInitialRenderPipeline({
         getCurrentTheme,
@@ -1045,6 +1078,15 @@
         }
       });
     }
+  }
+  function scheduleHeavyLiveUpdate() {
+    if (heavyLiveUpdateTimer !== void 0) {
+      window.clearTimeout(heavyLiveUpdateTimer);
+    }
+    heavyLiveUpdateTimer = window.setTimeout(() => {
+      heavyLiveUpdateTimer = void 0;
+      queueMinimapViewportUpdate();
+    }, HEAVY_LIVE_UPDATE_DEBOUNCE_MS);
   }
   function handleHostMessage(raw) {
     const message = raw;

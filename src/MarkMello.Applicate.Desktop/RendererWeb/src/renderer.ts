@@ -66,6 +66,8 @@ type MinimapPolicy = {
   maxDetailedDocumentHeight: number;
 };
 
+type FontFamilyMode = "serif" | "sans" | "mono";
+
 type HostMessage =
   | { type: "theme"; theme: "light" | "dark" }
   | { type: "minimap-policy"; minimapPolicy: MinimapPolicy }
@@ -75,6 +77,7 @@ type HostMessage =
       lineHeight: number;
       maxWidth: number;
       minimapMode: MinimapMode;
+      fontFamily?: FontFamilyMode;
       viewerChromeEnabled?: boolean;
       widthResizerVisibility?: WidthResizerVisibility;
     }
@@ -713,6 +716,7 @@ function queueMinimapRefreshAfterLayoutSettles(): void {
 }
 
 type AppliedReadingPreferences = {
+  fontFamily: FontFamilyMode;
   fontSize: number;
   lineHeight: number;
   maxWidth: number;
@@ -722,9 +726,26 @@ type AppliedReadingPreferences = {
 };
 
 let lastAppliedReadingPreferences: AppliedReadingPreferences | null = null;
+let pendingReadingPreferences: AppliedReadingPreferences | null = null;
+let applyPrefsFrameRequested = false;
+let heavyLiveUpdateTimer: number | undefined;
+const HEAVY_LIVE_UPDATE_DEBOUNCE_MS = 80;
 
+function normalizeFontFamilyMode(value: string | undefined): FontFamilyMode {
+  if (value === "sans" || value === "mono") return value;
+  return "serif";
+}
+
+// Single canonical live-preference application:
+//   Step 1 — stash latest desired values; coalesce rapid IPC bursts via rAF
+//   Step 2 (rAF) — diff vs last-applied → Phase A (sync CSS) → Phase B (debounced)
+// Coalescing matters on heavy docs: each delta causes a CSS reflow over the
+// whole document, and when reflow takes >16ms the browser naturally skips rAFs
+// until done — so apply rate self-throttles to what the device can sustain.
+// One pipeline, one fast path, data-driven by which fields actually changed.
 function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-preferences" }>): void {
-  const next: AppliedReadingPreferences = {
+  pendingReadingPreferences = {
+    fontFamily: normalizeFontFamilyMode(message.fontFamily),
     fontSize: message.fontSize,
     lineHeight: message.lineHeight,
     maxWidth: message.maxWidth,
@@ -732,56 +753,74 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
     viewerChromeEnabled: message.viewerChromeEnabled ?? true,
     widthResizerVisibility: normalizeWidthResizerVisibility(message.widthResizerVisibility),
   };
+  if (applyPrefsFrameRequested) return;
+  applyPrefsFrameRequested = true;
+  requestAnimationFrame(flushPendingReadingPreferences);
+}
 
-  // Detect if ONLY widthResizerVisibility changed — visual-preference fast path.
-  // Skip the heavy minimap viewport update + scheduleLayoutReady that would
-  // otherwise cause visible jank during host's on-hover/always toggle.
-  const visibilityOnlyChange = lastAppliedReadingPreferences !== null
-    && lastAppliedReadingPreferences.fontSize === next.fontSize
-    && lastAppliedReadingPreferences.lineHeight === next.lineHeight
-    && lastAppliedReadingPreferences.maxWidth === next.maxWidth
-    && lastAppliedReadingPreferences.minimapMode === next.minimapMode
-    && lastAppliedReadingPreferences.viewerChromeEnabled === next.viewerChromeEnabled
-    && lastAppliedReadingPreferences.widthResizerVisibility !== next.widthResizerVisibility;
+function flushPendingReadingPreferences(): void {
+  applyPrefsFrameRequested = false;
+  const next = pendingReadingPreferences;
+  pendingReadingPreferences = null;
+  if (!next) return;
 
-  document.documentElement.style.setProperty("--mm-document-font-size", `${next.fontSize}px`);
-  document.documentElement.style.setProperty("--mm-document-line-height", `${next.lineHeight}`);
-  // While the user is actively dragging the width handle, the renderer owns
-  // the visual via local preview (set in handleWidthHandlePointerMove). Skip
-  // applying host's echoed maxWidth — it would overwrite our preview and
-  // snap the column back to a stale value. Host's final clamped value is
-  // accepted on pointerUp.
-  if (!widthHandleDragging) {
-    document.documentElement.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
+  const prev = lastAppliedReadingPreferences;
+  const fontFamilyChanged = !prev || prev.fontFamily !== next.fontFamily;
+  const fontSizeChanged = !prev || prev.fontSize !== next.fontSize;
+  const lineHeightChanged = !prev || prev.lineHeight !== next.lineHeight;
+  const maxWidthChanged = !prev || prev.maxWidth !== next.maxWidth;
+  const minimapModeChanged = !prev || prev.minimapMode !== next.minimapMode;
+  const viewerChromeChanged = !prev || prev.viewerChromeEnabled !== next.viewerChromeEnabled;
+  const widthResizerVisibilityChanged = !prev || prev.widthResizerVisibility !== next.widthResizerVisibility;
+
+  // Phase A — presentation (cheap, synchronous).
+  const root = document.documentElement;
+  if (fontFamilyChanged) root.dataset.mmFontFamily = next.fontFamily;
+  if (fontSizeChanged) root.style.setProperty("--mm-document-font-size", `${next.fontSize}px`);
+  if (lineHeightChanged) root.style.setProperty("--mm-document-line-height", `${next.lineHeight}`);
+  // Width drag owns its own local preview via handleWidthHandlePointerMove;
+  // skip applying host's echo during drag so the column doesn't snap.
+  if (maxWidthChanged && !widthHandleDragging) {
+    root.style.setProperty("--mm-document-max-width", `${next.maxWidth}px`);
   }
-  minimapMode = next.minimapMode;
-  viewerChromeEnabled = next.viewerChromeEnabled;
-  applyViewerChromeState();
-  widthResizerVisibility = next.widthResizerVisibility;
-  const widthResizerClasses = getWidthResizerVisibilityClasses(widthResizerVisibility);
-  document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
+  if (minimapModeChanged) minimapMode = next.minimapMode;
+  if (viewerChromeChanged) {
+    viewerChromeEnabled = next.viewerChromeEnabled;
+    applyViewerChromeState();
+  }
+  if (widthResizerVisibilityChanged) {
+    widthResizerVisibility = next.widthResizerVisibility;
+    const widthResizerClasses = getWidthResizerVisibilityClasses(widthResizerVisibility);
+    document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
+  }
 
   const hadHostPreferences = hasReceivedHostPreferences;
   hasReceivedHostPreferences = true;
   lastAppliedReadingPreferences = next;
 
-  updateWidthHandlePosition();
-
-  if (visibilityOnlyChange) {
-    // Visibility-only fast path: skip viewport update + layout-ready re-emit.
-    // CSS already handles handle opacity/width transition.
-    return;
+  // Width handle anchor depends on max-width / chrome / resizer-visibility;
+  // recompute when any of those changed.
+  if (maxWidthChanged || viewerChromeChanged || widthResizerVisibilityChanged) {
+    updateWidthHandlePosition();
   }
 
-  // Phase A minimap rebuild is scheduled by renderMath() (subscribed to
-  // controller.initialVisibleReady) so we don't race here. On subsequent
-  // preference updates, only the viewport indicator needs to update.
-  queueMinimapViewportUpdate();
+  // Phase B — heavy work (minimap viewport recompute). Only schedule when a
+  // layout-affecting field actually changed; debounce so rapid slider drags
+  // coalesce to one recompute per quiet period instead of one per IPC frame.
+  // widthResizerVisibility changes only handle opacity → no minimap impact.
+  const layoutAffectingChange = fontFamilyChanged
+    || fontSizeChanged
+    || lineHeightChanged
+    || maxWidthChanged
+    || minimapModeChanged
+    || viewerChromeChanged;
+  if (layoutAffectingChange) {
+    scheduleHeavyLiveUpdate();
+  }
 
   if (!hadHostPreferences && !initialRenderPipelineCompleted) {
-    // First reading-preferences message — run the full Mermaid/code-block pipeline
-    // before emitting layout-ready. Suppress duplicate scheduleLayoutReady calls
-    // from this code path; the pipeline emits its own scheduleLayoutReady at end.
+    // First reading-preferences — run the full Mermaid/code-block pipeline
+    // before emitting layout-ready. Pipeline schedules its own layout-ready.
     void runInitialRenderPipeline({
       getCurrentTheme,
       applyTheme,
@@ -796,11 +835,19 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
     });
   }
 
-  // Note: live preference updates (subsequent applyReadingPreferences after
-  // initial render completed) intentionally do NOT call scheduleLayoutReady().
-  // The host removed _awaitingLayoutReady reset from SendReadingPreferences on
-  // live updates, so re-emitting layout-ready added per-frame IPC traffic
-  // during width drag without serving any host-side state machine.
+  // Live updates intentionally do NOT call scheduleLayoutReady(). The host's
+  // SendReadingPreferences no longer resets _awaitingLayoutReady on live
+  // updates, so re-emitting it would only add per-frame IPC noise.
+}
+
+function scheduleHeavyLiveUpdate(): void {
+  if (heavyLiveUpdateTimer !== undefined) {
+    window.clearTimeout(heavyLiveUpdateTimer);
+  }
+  heavyLiveUpdateTimer = window.setTimeout(() => {
+    heavyLiveUpdateTimer = undefined;
+    queueMinimapViewportUpdate();
+  }, HEAVY_LIVE_UPDATE_DEBOUNCE_MS);
 }
 
 function handleHostMessage(raw: unknown): void {
