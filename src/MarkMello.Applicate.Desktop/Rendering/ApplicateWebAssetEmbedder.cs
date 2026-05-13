@@ -36,6 +36,34 @@ public sealed class ApplicateWebAssetEmbedder
             rendererScript);
     }
 
+    public async Task<ApplicateWebBaseAssets> LoadBaseBundleAsync(CancellationToken cancellationToken)
+    {
+        var rendererCss = await ReadTextAssetAsync("renderer.css", cancellationToken).ConfigureAwait(false);
+        var rendererScript = await ReadTextAssetAsync("renderer.js", cancellationToken).ConfigureAwait(false);
+        var katexCss = await ReadTextAssetAsync("katex/katex.min.css", cancellationToken).ConfigureAwait(false);
+        var katexScript = await ReadTextAssetAsync("katex/katex.min.js", cancellationToken).ConfigureAwait(false);
+
+        return new ApplicateWebBaseAssets(
+            rendererCss,
+            await InlineKatexFontsAsync(katexCss, cancellationToken).ConfigureAwait(false),
+            katexScript,
+            rendererScript);
+    }
+
+    public async Task<ApplicateWebMermaidAssets> LoadMermaidAsync(CancellationToken cancellationToken)
+    {
+        var script = await ReadTextAssetAsync("mermaid/mermaid.min.js", cancellationToken).ConfigureAwait(false);
+        return new ApplicateWebMermaidAssets(script);
+    }
+
+    public async Task<ApplicateWebHighlightAssets> LoadHighlightAsync(CancellationToken cancellationToken)
+    {
+        var script = await ReadTextAssetAsync("highlightjs/highlight.min.js", cancellationToken).ConfigureAwait(false);
+        var lightCss = await ReadTextAssetAsync("highlightjs/github.min.css", cancellationToken).ConfigureAwait(false);
+        var darkCss = await ReadTextAssetAsync("highlightjs/github-dark.min.css", cancellationToken).ConfigureAwait(false);
+        return new ApplicateWebHighlightAssets(script, lightCss, darkCss);
+    }
+
     public async Task<string> ReadTextAssetAsync(string relativePath, CancellationToken cancellationToken)
     {
         var path = ResolveKnownAssetPath(relativePath);
