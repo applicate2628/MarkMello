@@ -656,10 +656,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void SendReadingPreferences()
     {
-        if (_hasLoadedDocument)
-        {
-            BeginAwaitingLayoutReady();
-        }
+        // Note: do NOT reset _hasLayoutReady / _hasMinimapState here. Callers that
+        // need to await a fresh renderer ack (initial document-ready handler at
+        // line 357) call BeginAwaitingLayoutReady() explicitly. Live preference
+        // updates (font size, width drag, chrome toggle) must not invalidate
+        // readiness — otherwise the renderer is forced to re-emit layout-ready
+        // and minimap-state on every drag delta, causing visible lag.
 
         var maxWidth = double.IsFinite(AvailableContentWidth) && AvailableContentWidth > 0
             ? AvailableContentWidth

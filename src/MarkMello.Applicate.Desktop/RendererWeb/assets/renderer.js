@@ -1022,7 +1022,6 @@
       return;
     }
     if (initialRenderPipelineCompleted) {
-      updateMinimapVisibility(true);
       scheduleLayoutReady();
     }
   }
