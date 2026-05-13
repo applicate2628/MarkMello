@@ -4,6 +4,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using CSharpMath.Avalonia;
 using MarkMello.Applicate.Desktop.Math;
+using MarkMello.Applicate.Desktop.Rendering;
 using SysMath = System.Math;
 
 namespace MarkMello.Applicate.Desktop.Views;
@@ -19,7 +20,7 @@ internal sealed class ApplicateWrappingMathView : WrapPanel
 
     public ApplicateWrappingMathView(string tex, float fontSize, Color textColor)
     {
-        _tex = tex;
+        _tex = ApplicateMarkdownDocumentRenderer.NormalizeTexForRenderer(tex);
         _fontSize = fontSize;
         _textColor = textColor;
 

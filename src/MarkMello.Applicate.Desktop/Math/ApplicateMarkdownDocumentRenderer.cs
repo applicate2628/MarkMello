@@ -254,6 +254,10 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         }
     }
 
+    private static readonly System.Text.RegularExpressions.Regex SubscriptSuperscriptCommandPattern = new(
+        @"(_|\^)(\\[a-zA-Z]+)(?!\s*\{)",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
     public static string NormalizeTexForRenderer(string tex)
     {
         ArgumentNullException.ThrowIfNull(tex);
@@ -263,6 +267,14 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
             .Replace(@"\dfrac", @"\frac", StringComparison.Ordinal)
             .Replace(@"^{\prime}", "'", StringComparison.Ordinal)
             .Replace(@"^\prime", "'", StringComparison.Ordinal);
+
+        // Wrap `_\command` / `^\command` into `_{\command}` / `^{\command}`
+        // because CSharpMath rejects bare command tokens as subscript or
+        // superscript content (it expects a single atom). The negative
+        // lookahead `(?!\s*\{)` skips commands that already take an
+        // explicit argument like `_\sqrt{x}` to avoid producing
+        // `_{\sqrt}{x}` which would change the meaning.
+        normalized = SubscriptSuperscriptCommandPattern.Replace(normalized, "$1{$2}");
 
         return StripUnsupportedFormattingCommands(StripUnsupportedBraceAnnotations(normalized));
     }
@@ -275,7 +287,15 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         while (index < tex.Length)
         {
             if (TryReadSingleArgumentFormattingCommand(tex, index, @"\boldsymbol", out var body, out var nextIndex) ||
-                TryReadSingleArgumentFormattingCommand(tex, index, @"\boxed", out body, out nextIndex))
+                TryReadSingleArgumentFormattingCommand(tex, index, @"\boxed", out body, out nextIndex) ||
+                TryReadSingleArgumentFormattingCommand(tex, index, @"\mathrel", out body, out nextIndex) ||
+                TryReadSingleArgumentFormattingCommand(tex, index, @"\mathord", out body, out nextIndex) ||
+                TryReadSingleArgumentFormattingCommand(tex, index, @"\mathbin", out body, out nextIndex) ||
+                TryReadSingleArgumentFormattingCommand(tex, index, @"\mathop", out body, out nextIndex) ||
+                TryReadSingleArgumentFormattingCommand(tex, index, @"\mathpunct", out body, out nextIndex) ||
+                TryReadSingleArgumentFormattingCommand(tex, index, @"\mathopen", out body, out nextIndex) ||
+                TryReadSingleArgumentFormattingCommand(tex, index, @"\mathclose", out body, out nextIndex) ||
+                TryReadSingleArgumentFormattingCommand(tex, index, @"\mathinner", out body, out nextIndex))
             {
                 result.Append(StripUnsupportedFormattingCommands(body));
                 index = nextIndex;

@@ -35,6 +35,7 @@ public static class ApplicateMathLineBreaker
         var chunks = new List<string>();
         var depth = 0;
         var delimiterDepth = 0;
+        var environmentDepth = 0;
         var segmentStart = 0;
 
         for (var index = 0; index < tex.Length; index++)
@@ -58,7 +59,21 @@ public static class ApplicateMathLineBreaker
                         continue;
                     }
 
-                    if (depth == 0 && delimiterDepth == 0 && IsBreakCommand(command))
+                    if (command == @"\begin")
+                    {
+                        environmentDepth++;
+                        index += commandLength - 1;
+                        continue;
+                    }
+
+                    if (command == @"\end")
+                    {
+                        environmentDepth = SysMath.Max(0, environmentDepth - 1);
+                        index += commandLength - 1;
+                        continue;
+                    }
+
+                    if (depth == 0 && delimiterDepth == 0 && environmentDepth == 0 && IsBreakCommand(command))
                     {
                         AddChunk(tex, segmentStart, index, chunks);
                         segmentStart = index;
@@ -86,7 +101,29 @@ public static class ApplicateMathLineBreaker
                 continue;
             }
 
-            if (depth == 0 && delimiterDepth == 0 && IsBreakCharacter(current) && index > segmentStart)
+            if (current == '_' || current == '^')
+            {
+                // Subscript / superscript content is a single atom. Skip past
+                // it so that break characters (`=`, `+`, ...) inside the atom
+                // are not treated as splitting points. Without this, input
+                // like `f_\Omega=0` is split into `f_\Omega` and `=0`, and
+                // CSharpMath rejects the lone `f_\Omega` because the
+                // subscript content `\Omega` is a command and not enclosed
+                // in braces.
+                var atomEnd = SkipAtom(tex, index + 1);
+                if (atomEnd > index + 1)
+                {
+                    index = atomEnd - 1;
+                }
+
+                continue;
+            }
+
+            if (depth == 0
+                && delimiterDepth == 0
+                && environmentDepth == 0
+                && IsBreakCharacter(current)
+                && index > segmentStart)
             {
                 AddChunk(tex, segmentStart, index, chunks);
                 segmentStart = index;
@@ -177,6 +214,52 @@ public static class ApplicateMathLineBreaker
         command = tex[index..cursor];
         commandLength = command.Length;
         return true;
+    }
+
+    private static int SkipAtom(string tex, int start)
+    {
+        if (start >= tex.Length)
+        {
+            return start;
+        }
+
+        var ch = tex[start];
+        if (ch == '\\')
+        {
+            return TryReadCommand(tex, start, out _, out var commandLength)
+                ? start + commandLength
+                : SysMath.Min(tex.Length, start + 2);
+        }
+
+        if (ch == '{')
+        {
+            var braceDepth = 1;
+            var cursor = start + 1;
+            while (cursor < tex.Length && braceDepth > 0)
+            {
+                var c = tex[cursor];
+                if (c == '\\' && cursor + 1 < tex.Length)
+                {
+                    cursor += 2;
+                    continue;
+                }
+
+                if (c == '{')
+                {
+                    braceDepth++;
+                }
+                else if (c == '}')
+                {
+                    braceDepth--;
+                }
+
+                cursor++;
+            }
+
+            return cursor;
+        }
+
+        return start + 1;
     }
 
     private static void AddChunk(string tex, int start, int end, List<string> chunks)
