@@ -596,7 +596,8 @@
     katexHasRun = true;
     currentController = controller;
     let initialVisibleSize = 0;
-    for (const node of document.querySelectorAll("[data-tex]")) {
+    const dataTexNodes = Array.from(document.querySelectorAll("[data-tex]"));
+    for (const node of dataTexNodes) {
       const visEl = node.classList.contains("math-inline") ? node.parentElement ?? node : node;
       const rect = visEl.getBoundingClientRect();
       if (rect.bottom >= -500 && rect.top <= window.innerHeight + 500) {

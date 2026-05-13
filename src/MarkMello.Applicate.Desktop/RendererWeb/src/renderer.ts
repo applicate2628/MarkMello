@@ -164,7 +164,8 @@ function renderMath(): MathReadinessController {
   // emit reports the same count the seam committed to. Inline math classifies
   // via parent rect, so we recompute the snapshot once for the mark detail.
   let initialVisibleSize = 0;
-  for (const node of document.querySelectorAll<HTMLElement>("[data-tex]")) {
+  const dataTexNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-tex]"));
+  for (const node of dataTexNodes) {
     const visEl = node.classList.contains("math-inline")
       ? (node.parentElement ?? node)
       : node;
