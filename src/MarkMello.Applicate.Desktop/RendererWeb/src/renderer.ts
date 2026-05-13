@@ -726,6 +726,11 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
   }
 
   if (initialRenderPipelineCompleted) {
+    // Host calls BeginAwaitingLayoutReady() before re-sending reading-preferences
+    // (e.g. when switching back to webview after native), which resets
+    // _hasLayoutReady AND _hasMinimapState. Re-emit BOTH signals so the host
+    // can complete CompleteLayoutReady() and swap to the webview surface.
+    updateMinimapVisibility(true);
     scheduleLayoutReady();
   }
 }
