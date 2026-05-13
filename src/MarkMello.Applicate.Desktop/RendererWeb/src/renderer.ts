@@ -143,24 +143,20 @@ function postHostMessage(message: RendererMessage): void {
   hostWindow.invokeCSharpAction?.(serialized);
 }
 
+function countFailedInSet(nodes: Iterable<HTMLElement>): number {
+  let count = 0;
+  for (const node of nodes) {
+    if (node.dataset["mmMathRendered"] === "failed") count++;
+  }
+  return count;
+}
+
 function renderMath(): MathReadinessController {
   // Thin wrapper preserves renderer-local side effects (perf marks,
-  // __mmRendererState exposure) while delegating the rendering loop to the
-  // seam in mathRenderInit.ts.
-  const mathCount = document.querySelectorAll("[data-tex]").length;
-  emitMark("mm-render-math-start", { mathCount });
-  const katex = hostWindow.katex;
-  if (!katex) {
-    const controller = renderMathInit({ katex: undefined, documentRoot: document });
-    currentController = controller;
-    schedulePhaseBRebuild({
-      allMathRendered: controller.allMathRendered,
-      getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
-      getCachedDocumentHeight: () => minimapDocumentHeight,
-      refresh: refreshMinimapContent,
-    });
-    return controller;
-  }
+  // __mmRendererState exposure, Phase B scheduling) while delegating the
+  // rendering loop to the seam in mathRenderInit.ts.
+  emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
+  const katex = hostWindow.katex ?? undefined;
   const controller = renderMathInit({ katex, documentRoot: document });
   currentController = controller;
   schedulePhaseBRebuild({
@@ -169,25 +165,22 @@ function renderMath(): MathReadinessController {
     getCachedDocumentHeight: () => minimapDocumentHeight,
     refresh: refreshMinimapContent,
   });
-  // Track frozen-set size at the moment marks are wired so the lifecycle
-  // emit reports the same count the seam committed to. Inline math classifies
-  // via parent rect, so we recompute the snapshot once for the mark detail.
-  let initialVisibleSize = 0;
-  const dataTexNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-tex]"));
-  for (const node of dataTexNodes) {
-    const visEl = node.classList.contains("math-inline")
-      ? (node.parentElement ?? node)
-      : node;
-    const rect = visEl.getBoundingClientRect();
-    if (rect.bottom >= -500 && rect.top <= window.innerHeight + 500) {
-      initialVisibleSize++;
-    }
-  }
+  // Lifecycle marks read failed-counts from the controller's frozen set (single
+  // source of truth — no duplicate classification). For all-math, walk all
+  // [data-tex] nodes since IO may have rendered nodes outside the frozen set.
   controller.initialVisibleReady.then(() => {
-    emitMark("mm-initial-visible-ready", { visibleCount: initialVisibleSize, failedCount: 0 });
+    emitMark("mm-initial-visible-ready", {
+      visibleCount: controller.initialVisibleNodes.size,
+      failedCount: countFailedInSet(controller.initialVisibleNodes),
+    });
   });
   controller.allMathRendered.then(() => {
-    emitMark("mm-all-math-rendered", { totalCount: mathCount, failedCount: 0, cancelled: false });
+    const allMathNodes = document.querySelectorAll<HTMLElement>("[data-tex]");
+    emitMark("mm-all-math-rendered", {
+      totalCount: controller.totalMathCount,
+      failedCount: countFailedInSet(allMathNodes),
+      cancelled: controller.isCancelled(),
+    });
   });
   return controller;
 }

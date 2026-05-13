@@ -1,5 +1,5 @@
 import type { MathReadinessController } from "./initialRenderPipeline";
-import { MathRenderQueue, type MathRenderTask } from "./mathRenderQueue";
+import { MathRenderQueue, isTerminalMathState, type MathRenderTask } from "./mathRenderQueue";
 
 type KatexLike = {
   render(
@@ -52,6 +52,9 @@ export function renderMath(deps: RenderMathDeps): MathReadinessController {
       initialVisibleReady: Promise.resolve(),
       allMathRendered: Promise.resolve(),
       cancel: () => {},
+      initialVisibleNodes: new Set<HTMLElement>(),
+      totalMathCount: mathNodes.length,
+      isCancelled: () => false,
     };
   }
 
@@ -125,8 +128,7 @@ export function renderMath(deps: RenderMathDeps): MathReadinessController {
       const targets = observedToMathNodes.get(visEl);
       if (!targets) continue;
       for (const targetNode of targets) {
-        const state = targetNode.dataset["mmMathRendered"];
-        if (state === "true" || state === "failed") continue;
+        if (isTerminalMathState(targetNode.dataset["mmMathRendered"])) continue;
         const tex = targetNode.dataset["tex"] ?? "";
         const task: MathRenderTask = {
           node: targetNode,
@@ -141,12 +143,17 @@ export function renderMath(deps: RenderMathDeps): MathReadinessController {
     observer.observe(visEl);
   }
 
+  let cancelled = false;
   return {
     initialVisibleReady,
     allMathRendered,
     cancel: () => {
+      cancelled = true;
       observer.disconnect();
       queue.cancel();
     },
+    initialVisibleNodes,
+    totalMathCount: mathNodes.length,
+    isCancelled: () => cancelled,
   };
 }

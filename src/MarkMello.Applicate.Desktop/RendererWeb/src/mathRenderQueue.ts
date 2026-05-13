@@ -118,6 +118,11 @@ export class MathRenderQueue {
               trust: false,
             });
             entry.task.node.dataset["mmMathRendered"] = "true";
+            // Clear placeholder minHeight set by reserveMathPlaceholder so the
+            // KaTeX-rendered formula's natural height takes over (spec line 484).
+            if (entry.task.displayMode) {
+              entry.task.node.style.minHeight = "";
+            }
           } catch (e) {
             entry.task.node.dataset["mmMathRendered"] = "failed";
             emitMark("mm-render-math-fail", { tex: entry.task.tex, error: String(e) });

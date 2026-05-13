@@ -6,6 +6,9 @@ function readyController(): MathReadinessController {
     initialVisibleReady: Promise.resolve(),
     allMathRendered: Promise.resolve(),
     cancel: () => {},
+    initialVisibleNodes: new Set<HTMLElement>(),
+    totalMathCount: 0,
+    isCancelled: () => false,
   };
 }
 
@@ -82,6 +85,9 @@ describe("runInitialRenderPipeline (MathReadinessController contract)", () => {
       initialVisibleReady: initialPromise,
       allMathRendered: Promise.resolve(),
       cancel: () => {},
+      initialVisibleNodes: new Set<HTMLElement>(),
+      totalMathCount: 0,
+      isCancelled: () => false,
     };
     const scheduleLayoutReady = vi.fn();
     const pipePromise = runInitialRenderPipeline({
@@ -105,6 +111,9 @@ describe("runInitialRenderPipeline (MathReadinessController contract)", () => {
       initialVisibleReady: Promise.resolve(),
       allMathRendered: Promise.resolve(),
       cancel: () => {},
+      initialVisibleNodes: new Set<HTMLElement>(),
+      totalMathCount: 0,
+      isCancelled: () => false,
     };
     const scheduleLayoutReady = vi.fn();
     await runInitialRenderPipeline({

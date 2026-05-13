@@ -2,6 +2,13 @@ export type MathReadinessController = {
   initialVisibleReady: Promise<void>;
   allMathRendered: Promise<void>;
   cancel: () => void;
+  // Stats for lifecycle marks (mm-initial-visible-ready, mm-all-math-rendered).
+  // initialVisibleNodes is the FROZEN set captured at construction time.
+  // Renderer derives failedCount by scanning dataset.mmMathRendered === "failed"
+  // against these surfaces (single source of truth — no duplicate classification).
+  initialVisibleNodes: ReadonlySet<HTMLElement>;
+  totalMathCount: number;
+  isCancelled(): boolean;
 };
 
 export type InitialRenderPipelineDeps = {

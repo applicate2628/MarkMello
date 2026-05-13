@@ -281,6 +281,9 @@
                 trust: false
               });
               entry.task.node.dataset["mmMathRendered"] = "true";
+              if (entry.task.displayMode) {
+                entry.task.node.style.minHeight = "";
+              }
             } catch (e) {
               entry.task.node.dataset["mmMathRendered"] = "failed";
               emitMark("mm-render-math-fail", { tex: entry.task.tex, error: String(e) });
@@ -366,7 +369,10 @@
         initialVisibleReady: Promise.resolve(),
         allMathRendered: Promise.resolve(),
         cancel: () => {
-        }
+        },
+        initialVisibleNodes: /* @__PURE__ */ new Set(),
+        totalMathCount: mathNodes.length,
+        isCancelled: () => false
       };
     }
     mathNodes.forEach(reserveMathPlaceholder);
@@ -424,8 +430,7 @@
         const targets = observedToMathNodes.get(visEl);
         if (!targets) continue;
         for (const targetNode of targets) {
-          const state2 = targetNode.dataset["mmMathRendered"];
-          if (state2 === "true" || state2 === "failed") continue;
+          if (isTerminalMathState(targetNode.dataset["mmMathRendered"])) continue;
           const tex = targetNode.dataset["tex"] ?? "";
           const task = {
             node: targetNode,
@@ -439,13 +444,18 @@
     for (const visEl of observedToMathNodes.keys()) {
       observer.observe(visEl);
     }
+    let cancelled = false;
     return {
       initialVisibleReady,
       allMathRendered,
       cancel: () => {
+        cancelled = true;
         observer.disconnect();
         queue.cancel();
-      }
+      },
+      initialVisibleNodes,
+      totalMathCount: mathNodes.length,
+      isCancelled: () => cancelled
     };
   }
 
@@ -592,21 +602,16 @@
     }
     hostWindow.invokeCSharpAction?.(serialized);
   }
-  function renderMath2() {
-    const mathCount = document.querySelectorAll("[data-tex]").length;
-    emitMark("mm-render-math-start", { mathCount });
-    const katex = hostWindow.katex;
-    if (!katex) {
-      const controller2 = renderMath({ katex: void 0, documentRoot: document });
-      currentController = controller2;
-      schedulePhaseBRebuild({
-        allMathRendered: controller2.allMathRendered,
-        getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
-        getCachedDocumentHeight: () => minimapDocumentHeight,
-        refresh: refreshMinimapContent
-      });
-      return controller2;
+  function countFailedInSet(nodes) {
+    let count = 0;
+    for (const node of nodes) {
+      if (node.dataset["mmMathRendered"] === "failed") count++;
     }
+    return count;
+  }
+  function renderMath2() {
+    emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
+    const katex = hostWindow.katex ?? void 0;
     const controller = renderMath({ katex, documentRoot: document });
     currentController = controller;
     schedulePhaseBRebuild({
@@ -615,20 +620,19 @@
       getCachedDocumentHeight: () => minimapDocumentHeight,
       refresh: refreshMinimapContent
     });
-    let initialVisibleSize = 0;
-    const dataTexNodes = Array.from(document.querySelectorAll("[data-tex]"));
-    for (const node of dataTexNodes) {
-      const visEl = node.classList.contains("math-inline") ? node.parentElement ?? node : node;
-      const rect = visEl.getBoundingClientRect();
-      if (rect.bottom >= -500 && rect.top <= window.innerHeight + 500) {
-        initialVisibleSize++;
-      }
-    }
     controller.initialVisibleReady.then(() => {
-      emitMark("mm-initial-visible-ready", { visibleCount: initialVisibleSize, failedCount: 0 });
+      emitMark("mm-initial-visible-ready", {
+        visibleCount: controller.initialVisibleNodes.size,
+        failedCount: countFailedInSet(controller.initialVisibleNodes)
+      });
     });
     controller.allMathRendered.then(() => {
-      emitMark("mm-all-math-rendered", { totalCount: mathCount, failedCount: 0, cancelled: false });
+      const allMathNodes = document.querySelectorAll("[data-tex]");
+      emitMark("mm-all-math-rendered", {
+        totalCount: controller.totalMathCount,
+        failedCount: countFailedInSet(allMathNodes),
+        cancelled: controller.isCancelled()
+      });
     });
     return controller;
   }
