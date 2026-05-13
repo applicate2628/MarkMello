@@ -761,6 +761,12 @@
       return;
     }
     pendingWidthDragDeltaX = event.clientX - widthHandleStartClientX;
+    if (widthHandleRoot) {
+      const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
+      const maxLeft = Math.max(0, window.innerWidth - hitArea);
+      const clampedLeft = Math.max(0, Math.min(maxLeft, event.clientX - hitArea / 2));
+      widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
+    }
     postWidthDragMove();
     event.preventDefault();
   }

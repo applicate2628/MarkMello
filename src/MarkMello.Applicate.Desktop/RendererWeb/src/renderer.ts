@@ -403,6 +403,17 @@ function handleWidthHandlePointerMove(event: PointerEvent): void {
   }
 
   pendingWidthDragDeltaX = event.clientX - widthHandleStartClientX;
+  // Live preview: pin the handle to the cursor while dragging. The document
+  // column is intentionally not reflowed during drag (heavy-formula files),
+  // so updateWidthHandlePosition() reading getBoundingClientRect would keep
+  // the handle pinned to the old column edge. Direct cursor-tracking gives
+  // the visual feedback the user expects.
+  if (widthHandleRoot) {
+    const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
+    const maxLeft = Math.max(0, window.innerWidth - hitArea);
+    const clampedLeft = Math.max(0, Math.min(maxLeft, event.clientX - hitArea / 2));
+    widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
+  }
   postWidthDragMove();
   event.preventDefault();
 }
