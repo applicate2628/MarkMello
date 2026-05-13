@@ -492,5 +492,9 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         public string? BaseDirectory { get; } = baseDirectory;
 
         public CancellationToken CancellationToken { get; } = cancellationToken;
+
+        public bool HasMermaidBlock { get; set; }
+
+        public bool HasCodeBlockWithSyntax { get; set; }
     }
 }
