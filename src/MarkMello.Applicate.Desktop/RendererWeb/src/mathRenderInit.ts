@@ -1,4 +1,5 @@
 import type { MathReadinessController } from "./initialRenderPipeline";
+import { MathRenderQueue, type MathRenderTask } from "./mathRenderQueue";
 
 type KatexLike = {
   render(
@@ -13,12 +14,40 @@ export type RenderMathDeps = {
   documentRoot: Document;
 };
 
-// Stage 4 Task 14 replaces this stub body with full queue+IO impl.
-// The exported seam (renderMath) is stable; only the implementation changes.
+const INITIAL_LOOKAHEAD_PX = 500;
+
+function complexityScore(tex: string): number {
+  let score = 1;
+  score += (tex.match(/\\frac/g)?.length ?? 0) * 2;
+  score += (tex.match(/\\sum/g)?.length ?? 0) * 2;
+  score += (tex.match(/\\int/g)?.length ?? 0) * 2;
+  score += (tex.match(/\\\\/g)?.length ?? 0) * 3;
+  return score;
+}
+
+function reserveMathPlaceholder(node: HTMLElement): void {
+  if (!node.classList.contains("math-display")) return;
+  const tex = node.dataset["tex"] ?? "";
+  const score = complexityScore(tex);
+  const minHeight = Math.max(28, 28 * Math.ceil(score / 5));
+  node.style.minHeight = `${minHeight}px`;
+}
+
+function getVisibilityElement(node: HTMLElement): HTMLElement {
+  if (node.classList.contains("math-inline")) {
+    return node.parentElement ?? node;
+  }
+  return node;
+}
+
+function rafYield(): Promise<void> {
+  return new Promise(r => window.requestAnimationFrame(() => r()));
+}
+
 export function renderMath(deps: RenderMathDeps): MathReadinessController {
   const mathNodes = Array.from(deps.documentRoot.querySelectorAll<HTMLElement>("[data-tex]"));
   const katex = deps.katex;
-  if (!katex) {
+  if (!katex || mathNodes.length === 0) {
     return {
       initialVisibleReady: Promise.resolve(),
       allMathRendered: Promise.resolve(),
@@ -26,26 +55,98 @@ export function renderMath(deps: RenderMathDeps): MathReadinessController {
     };
   }
 
-  // Sync-preserving stub — Task 14 replaces this loop with queue dispatch.
-  mathNodes.forEach((node) => {
-    const tex = node.dataset["tex"];
-    if (!tex) return;
-    try {
-      katex.render(tex, node, {
-        throwOnError: false,
-        displayMode: node.classList.contains("math-display"),
-        strict: "warn",
-        trust: false,
-      });
-      node.dataset["mmMathRendered"] = "true";
-    } catch {
-      node.dataset["mmMathRendered"] = "failed";
-    }
+  // 1. Reserve display-math placeholders synchronously (no layout shift later).
+  //    Inline math intentionally has no placeholder reservation.
+  mathNodes.forEach(reserveMathPlaceholder);
+
+  // 2. Build queue with rAF yield and performance.now timing.
+  const queue = new MathRenderQueue({
+    katex,
+    timeBudgetMs: 7,
+    now: () => performance.now(),
+    yield: rafYield,
   });
 
+  // 3. Freeze initial-visible set via getBoundingClientRect of the
+  //    visibility element (parent for inline math, self for display math).
+  //    The frozen set is what initialVisibleReady awaits; IO promotions
+  //    later in the lifecycle must NOT extend this set.
+  const viewportHeight = window.innerHeight;
+  const initialVisibleNodes = new Set<HTMLElement>();
+  for (const node of mathNodes) {
+    const visEl = getVisibilityElement(node);
+    const rect = visEl.getBoundingClientRect();
+    const tex = node.dataset["tex"] ?? "";
+    const task: MathRenderTask = {
+      node,
+      tex,
+      displayMode: node.classList.contains("math-display"),
+    };
+    if (rect.bottom >= -INITIAL_LOOKAHEAD_PX && rect.top <= viewportHeight + INITIAL_LOOKAHEAD_PX) {
+      initialVisibleNodes.add(node);
+      queue.enqueue(task, "high");
+    } else {
+      queue.enqueue(task, "low");
+    }
+  }
+
+  // 4. Build initialVisibleReady — resolves when ALL frozen nodes reach a
+  //    terminal state (success OR failure). Subscribed via onTaskComplete;
+  //    completion is observed regardless of which priority bucket the task
+  //    landed in or any later IO promotion.
+  let initialPending = initialVisibleNodes.size;
+  const initialVisibleReady = new Promise<void>((resolve) => {
+    if (initialPending === 0) { resolve(); return; }
+    const unsubscribe = queue.onTaskComplete((node) => {
+      if (initialVisibleNodes.has(node)) {
+        initialPending--;
+        if (initialPending === 0) { unsubscribe(); resolve(); }
+      }
+    });
+  });
+
+  // 5. Start queue — returns full-drain promise.
+  const allMathRendered = queue.start();
+
+  // 6. IntersectionObserver: observe one entry per unique visibility element
+  //    (parent for inline math); on intersection event, re-enqueue the
+  //    associated math nodes with the appropriate priority. Terminal-state
+  //    nodes are skipped. The frozen initial-visible set is NOT extended.
+  const observedToMathNodes = new Map<HTMLElement, HTMLElement[]>();
+  for (const node of mathNodes) {
+    const visEl = getVisibilityElement(node);
+    const bucket = observedToMathNodes.get(visEl) ?? [];
+    bucket.push(node);
+    observedToMathNodes.set(visEl, bucket);
+  }
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const visEl = entry.target as HTMLElement;
+      const targets = observedToMathNodes.get(visEl);
+      if (!targets) continue;
+      for (const targetNode of targets) {
+        const state = targetNode.dataset["mmMathRendered"];
+        if (state === "true" || state === "failed") continue;
+        const tex = targetNode.dataset["tex"] ?? "";
+        const task: MathRenderTask = {
+          node: targetNode,
+          tex,
+          displayMode: targetNode.classList.contains("math-display"),
+        };
+        queue.enqueue(task, entry.isIntersecting ? "high" : "low");
+      }
+    }
+  }, { rootMargin: `${INITIAL_LOOKAHEAD_PX}px` });
+  for (const visEl of observedToMathNodes.keys()) {
+    observer.observe(visEl);
+  }
+
   return {
-    initialVisibleReady: Promise.resolve(),
-    allMathRendered: Promise.resolve(),
-    cancel: () => {},
+    initialVisibleReady,
+    allMathRendered,
+    cancel: () => {
+      observer.disconnect();
+      queue.cancel();
+    },
   };
 }

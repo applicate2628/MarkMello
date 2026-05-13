@@ -1,3 +1,5 @@
+import { emitMark, recordQueueSlice } from "./performanceMarks";
+
 export type MathPriority = "high" | "low";
 
 export type MathRenderTask = {
@@ -43,6 +45,7 @@ export class MathRenderQueue {
   private processing = false;
   private idlePromise: Promise<void> | null = null;
   private idleResolver: (() => void) | null = null;
+  private sliceCounter = 0;
 
   constructor(private deps: MathRenderQueueDeps) {}
 
@@ -98,6 +101,7 @@ export class MathRenderQueue {
       while (!this.cancelled && this.high.length + this.low.length > 0) {
         const frameStart = this.deps.now();
         const budget = this.deps.timeBudgetMs ?? 7;
+        let tasksCompleted = 0;
         while (!this.cancelled && this.high.length + this.low.length > 0) {
           const entry = (this.high.length > 0
             ? this.high.shift()
@@ -114,13 +118,19 @@ export class MathRenderQueue {
               trust: false,
             });
             entry.task.node.dataset["mmMathRendered"] = "true";
-          } catch {
+          } catch (e) {
             entry.task.node.dataset["mmMathRendered"] = "failed";
+            emitMark("mm-render-math-fail", { tex: entry.task.tex, error: String(e) });
           } finally {
+            tasksCompleted++;
             for (const listener of this.taskListeners) listener(entry.task.node);
           }
           if (this.deps.now() - frameStart > budget) break;
         }
+        const sliceName = `mm-queue-slice-${this.sliceCounter++}`;
+        const sliceDurationMs = this.deps.now() - frameStart;
+        emitMark(sliceName, { tasksCompleted, durationMs: sliceDurationMs });
+        recordQueueSlice(sliceName, sliceDurationMs, tasksCompleted);
         if (!this.cancelled && this.high.length + this.low.length > 0) {
           await this.deps.yield();
         }

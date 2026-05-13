@@ -104,6 +104,7 @@ let minimapSourceReady = false;
 let katexHasRun = false;
 let mermaidRenderGeneration = 0;
 let initialRenderPipelineCompleted = false;
+let currentController: MathReadinessController | null = null;
 const MAX_MERMAID_DIAGRAMS = 50;
 const MERMAID_PER_DIAGRAM_TIMEOUT_MS = 3000;
 const MERMAID_WATCHDOG_MS = 15_000;
@@ -144,18 +145,40 @@ function postHostMessage(message: RendererMessage): void {
 }
 
 function renderMath(): MathReadinessController {
-  // Thin wrapper preserves renderer-local side effects (perf mark, katexHasRun)
-  // while delegating the rendering loop to the seam in mathRenderInit.ts.
-  // Task 14 will replace the seam body with the full queue+IO impl.
+  // Thin wrapper preserves renderer-local side effects (perf marks, katexHasRun,
+  // __mmRendererState exposure) while delegating the rendering loop to the
+  // seam in mathRenderInit.ts. Task 16 will replace the katexHasRun flag.
   const mathCount = document.querySelectorAll("[data-tex]").length;
   emitMark("mm-render-math-start", { mathCount });
   const katex = hostWindow.katex;
   if (!katex) {
     katexHasRun = mathCount === 0;
-    return renderMathInit({ katex: undefined, documentRoot: document });
+    const controller = renderMathInit({ katex: undefined, documentRoot: document });
+    currentController = controller;
+    return controller;
   }
   const controller = renderMathInit({ katex, documentRoot: document });
   katexHasRun = true;
+  currentController = controller;
+  // Track frozen-set size at the moment marks are wired so the lifecycle
+  // emit reports the same count the seam committed to. Inline math classifies
+  // via parent rect, so we recompute the snapshot once for the mark detail.
+  let initialVisibleSize = 0;
+  for (const node of document.querySelectorAll<HTMLElement>("[data-tex]")) {
+    const visEl = node.classList.contains("math-inline")
+      ? (node.parentElement ?? node)
+      : node;
+    const rect = visEl.getBoundingClientRect();
+    if (rect.bottom >= -500 && rect.top <= window.innerHeight + 500) {
+      initialVisibleSize++;
+    }
+  }
+  controller.initialVisibleReady.then(() => {
+    emitMark("mm-initial-visible-ready", { visibleCount: initialVisibleSize, failedCount: 0 });
+  });
+  controller.allMathRendered.then(() => {
+    emitMark("mm-all-math-rendered", { totalCount: mathCount, failedCount: 0, cancelled: false });
+  });
   return controller;
 }
 
@@ -839,3 +862,7 @@ window.addEventListener("resize", () => {
 
 (window as unknown as { __mmPerfReport: typeof getReport; __mmFpsSampler: ReturnType<typeof getFpsSampler> }).__mmPerfReport = getReport;
 (window as unknown as { __mmPerfReport: typeof getReport; __mmFpsSampler: ReturnType<typeof getFpsSampler> }).__mmFpsSampler = getFpsSampler();
+(window as unknown as { __mmRendererState: { initialVisibleReady: Promise<void>; allMathRendered: Promise<void> } }).__mmRendererState = {
+  get initialVisibleReady() { return currentController?.initialVisibleReady ?? Promise.resolve(); },
+  get allMathRendered() { return currentController?.allMathRendered ?? Promise.resolve(); },
+};

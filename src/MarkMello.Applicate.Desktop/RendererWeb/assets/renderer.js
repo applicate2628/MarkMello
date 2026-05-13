@@ -112,102 +112,6 @@
     deps.scheduleLayoutReady();
   }
 
-  // RendererWeb/src/mathRenderInit.ts
-  function renderMath(deps) {
-    const mathNodes = Array.from(deps.documentRoot.querySelectorAll("[data-tex]"));
-    const katex = deps.katex;
-    if (!katex) {
-      return {
-        initialVisibleReady: Promise.resolve(),
-        allMathRendered: Promise.resolve(),
-        cancel: () => {
-        }
-      };
-    }
-    mathNodes.forEach((node) => {
-      const tex = node.dataset["tex"];
-      if (!tex) return;
-      try {
-        katex.render(tex, node, {
-          throwOnError: false,
-          displayMode: node.classList.contains("math-display"),
-          strict: "warn",
-          trust: false
-        });
-        node.dataset["mmMathRendered"] = "true";
-      } catch {
-        node.dataset["mmMathRendered"] = "failed";
-      }
-    });
-    return {
-      initialVisibleReady: Promise.resolve(),
-      allMathRendered: Promise.resolve(),
-      cancel: () => {
-      }
-    };
-  }
-
-  // RendererWeb/src/schematicMinimap.ts
-  function walkDocumentBlocks(input) {
-    const blocks = [];
-    const children = input.documentRoot.children;
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
-      if (!(child instanceof HTMLElement)) continue;
-      const kind = classify(child);
-      if (!kind) continue;
-      const top = child.offsetTop;
-      const height = child.offsetHeight;
-      const block = { kind, top, height };
-      if (kind === "paragraph" || kind === "list" || kind === "quote") {
-        const lineHeight = parseFloat(getComputedStyle(child).lineHeight) || 16;
-        block.textLines = Math.max(1, Math.round(height / lineHeight));
-      }
-      blocks.push(block);
-    }
-    return blocks;
-  }
-  function classify(el) {
-    const tag = el.tagName.toLowerCase();
-    if (tag === "h1") return "heading-1";
-    if (tag === "h2") return "heading-2";
-    if (tag === "h3") return "heading-3";
-    if (tag === "h4") return "heading-4";
-    if (tag === "h5") return "heading-5";
-    if (tag === "h6") return "heading-6";
-    if (tag === "p") return "paragraph";
-    if (tag === "pre") {
-      if (el.classList.contains("mm-mermaid")) return "mermaid";
-      return "code";
-    }
-    if (el.classList.contains("math-display")) return "math-display";
-    if (tag === "table") return "table";
-    if (tag === "ul" || tag === "ol") return "list";
-    if (tag === "blockquote") return "quote";
-    if (tag === "hr") return "hr";
-    return null;
-  }
-  var SVG_NS = "http://www.w3.org/2000/svg";
-  function renderSchematicSvg(blocks, documentWidth, documentHeight) {
-    const svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", `0 0 ${documentWidth} ${documentHeight}`);
-    svg.setAttribute("preserveAspectRatio", "none");
-    svg.style.width = `${documentWidth}px`;
-    svg.style.height = `${documentHeight}px`;
-    svg.style.display = "block";
-    for (const block of blocks) {
-      const rect = document.createElementNS(SVG_NS, "rect");
-      rect.setAttribute("x", "0");
-      rect.setAttribute("y", String(block.top));
-      rect.setAttribute("width", String(documentWidth));
-      rect.setAttribute("height", String(block.height));
-      rect.setAttribute("class", `mm-schematic-${block.kind}`);
-      rect.setAttribute("fill", `var(--mm-minimap-${block.kind}, currentColor)`);
-      svg.appendChild(rect);
-    }
-    return svg;
-  }
-
   // RendererWeb/src/performanceMarks.ts
   var state = {
     marks: [],
@@ -227,6 +131,9 @@
   function recordScrollIpc() {
     state.scrollIpcCount++;
     emitMark("mm-scroll-ipc");
+  }
+  function recordQueueSlice(name, durationMs, tasksCompleted) {
+    state.queueSlices.push({ name, durationMs, tasksCompleted });
   }
   function getReport() {
     return {
@@ -297,6 +204,312 @@
     };
   }
 
+  // RendererWeb/src/mathRenderQueue.ts
+  function isTerminalMathState(state2) {
+    return state2 === "true" || state2 === "failed";
+  }
+  var MathRenderQueue = class {
+    constructor(deps) {
+      this.deps = deps;
+      this.high = [];
+      this.low = [];
+      this.inQueue = /* @__PURE__ */ new Map();
+      this.taskListeners = /* @__PURE__ */ new Set();
+      this.cancelled = false;
+      this.processing = false;
+      this.idlePromise = null;
+      this.idleResolver = null;
+      this.sliceCounter = 0;
+    }
+    enqueue(task, priority) {
+      if (this.cancelled) return;
+      if (isTerminalMathState(task.node.dataset["mmMathRendered"])) return;
+      const existing = this.inQueue.get(task.node);
+      if (existing) {
+        if (priority === "high" && existing.priority === "low") {
+          const idx = this.low.indexOf(existing);
+          if (idx >= 0) this.low.splice(idx, 1);
+          existing.priority = "high";
+          this.high.push(existing);
+        }
+        return;
+      }
+      const entry = { task, priority };
+      this.inQueue.set(task.node, entry);
+      if (priority === "high") this.high.push(entry);
+      else this.low.push(entry);
+      this.kick();
+    }
+    start() {
+      if (!this.idlePromise) {
+        this.idlePromise = new Promise((resolve) => {
+          this.idleResolver = resolve;
+        });
+      }
+      const promise = this.idlePromise;
+      if (this.high.length + this.low.length === 0 && !this.processing) {
+        this.resolveIdle();
+        return promise;
+      }
+      this.kick();
+      return promise;
+    }
+    kick() {
+      if (this.processing || this.cancelled) return;
+      if (this.high.length + this.low.length === 0) return;
+      this.processing = true;
+      void this.processLoop();
+    }
+    async processLoop() {
+      try {
+        await this.deps.yield();
+        while (!this.cancelled && this.high.length + this.low.length > 0) {
+          const frameStart = this.deps.now();
+          const budget = this.deps.timeBudgetMs ?? 7;
+          let tasksCompleted = 0;
+          while (!this.cancelled && this.high.length + this.low.length > 0) {
+            const entry = this.high.length > 0 ? this.high.shift() : this.low.shift();
+            this.inQueue.delete(entry.task.node);
+            if (isTerminalMathState(entry.task.node.dataset["mmMathRendered"])) {
+              continue;
+            }
+            try {
+              this.deps.katex.render(entry.task.tex, entry.task.node, {
+                throwOnError: false,
+                displayMode: entry.task.displayMode,
+                strict: "warn",
+                trust: false
+              });
+              entry.task.node.dataset["mmMathRendered"] = "true";
+            } catch (e) {
+              entry.task.node.dataset["mmMathRendered"] = "failed";
+              emitMark("mm-render-math-fail", { tex: entry.task.tex, error: String(e) });
+            } finally {
+              tasksCompleted++;
+              for (const listener of this.taskListeners) listener(entry.task.node);
+            }
+            if (this.deps.now() - frameStart > budget) break;
+          }
+          const sliceName = `mm-queue-slice-${this.sliceCounter++}`;
+          const sliceDurationMs = this.deps.now() - frameStart;
+          emitMark(sliceName, { tasksCompleted, durationMs: sliceDurationMs });
+          recordQueueSlice(sliceName, sliceDurationMs, tasksCompleted);
+          if (!this.cancelled && this.high.length + this.low.length > 0) {
+            await this.deps.yield();
+          }
+        }
+      } finally {
+        this.processing = false;
+        this.resolveIdle();
+      }
+    }
+    resolveIdle() {
+      if (this.idleResolver) {
+        const r = this.idleResolver;
+        this.idleResolver = null;
+        this.idlePromise = null;
+        r();
+      }
+    }
+    cancel() {
+      this.cancelled = true;
+      this.high.length = 0;
+      this.low.length = 0;
+      this.inQueue.clear();
+      if (!this.processing) this.resolveIdle();
+    }
+    isProcessing() {
+      return this.processing;
+    }
+    size() {
+      return { high: this.high.length, low: this.low.length };
+    }
+    onTaskComplete(listener) {
+      this.taskListeners.add(listener);
+      return () => {
+        this.taskListeners.delete(listener);
+      };
+    }
+  };
+
+  // RendererWeb/src/mathRenderInit.ts
+  var INITIAL_LOOKAHEAD_PX = 500;
+  function complexityScore(tex) {
+    let score = 1;
+    score += (tex.match(/\\frac/g)?.length ?? 0) * 2;
+    score += (tex.match(/\\sum/g)?.length ?? 0) * 2;
+    score += (tex.match(/\\int/g)?.length ?? 0) * 2;
+    score += (tex.match(/\\\\/g)?.length ?? 0) * 3;
+    return score;
+  }
+  function reserveMathPlaceholder(node) {
+    if (!node.classList.contains("math-display")) return;
+    const tex = node.dataset["tex"] ?? "";
+    const score = complexityScore(tex);
+    const minHeight = Math.max(28, 28 * Math.ceil(score / 5));
+    node.style.minHeight = `${minHeight}px`;
+  }
+  function getVisibilityElement(node) {
+    if (node.classList.contains("math-inline")) {
+      return node.parentElement ?? node;
+    }
+    return node;
+  }
+  function rafYield() {
+    return new Promise((r) => window.requestAnimationFrame(() => r()));
+  }
+  function renderMath(deps) {
+    const mathNodes = Array.from(deps.documentRoot.querySelectorAll("[data-tex]"));
+    const katex = deps.katex;
+    if (!katex || mathNodes.length === 0) {
+      return {
+        initialVisibleReady: Promise.resolve(),
+        allMathRendered: Promise.resolve(),
+        cancel: () => {
+        }
+      };
+    }
+    mathNodes.forEach(reserveMathPlaceholder);
+    const queue = new MathRenderQueue({
+      katex,
+      timeBudgetMs: 7,
+      now: () => performance.now(),
+      yield: rafYield
+    });
+    const viewportHeight = window.innerHeight;
+    const initialVisibleNodes = /* @__PURE__ */ new Set();
+    for (const node of mathNodes) {
+      const visEl = getVisibilityElement(node);
+      const rect = visEl.getBoundingClientRect();
+      const tex = node.dataset["tex"] ?? "";
+      const task = {
+        node,
+        tex,
+        displayMode: node.classList.contains("math-display")
+      };
+      if (rect.bottom >= -INITIAL_LOOKAHEAD_PX && rect.top <= viewportHeight + INITIAL_LOOKAHEAD_PX) {
+        initialVisibleNodes.add(node);
+        queue.enqueue(task, "high");
+      } else {
+        queue.enqueue(task, "low");
+      }
+    }
+    let initialPending = initialVisibleNodes.size;
+    const initialVisibleReady = new Promise((resolve) => {
+      if (initialPending === 0) {
+        resolve();
+        return;
+      }
+      const unsubscribe = queue.onTaskComplete((node) => {
+        if (initialVisibleNodes.has(node)) {
+          initialPending--;
+          if (initialPending === 0) {
+            unsubscribe();
+            resolve();
+          }
+        }
+      });
+    });
+    const allMathRendered = queue.start();
+    const observedToMathNodes = /* @__PURE__ */ new Map();
+    for (const node of mathNodes) {
+      const visEl = getVisibilityElement(node);
+      const bucket = observedToMathNodes.get(visEl) ?? [];
+      bucket.push(node);
+      observedToMathNodes.set(visEl, bucket);
+    }
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const visEl = entry.target;
+        const targets = observedToMathNodes.get(visEl);
+        if (!targets) continue;
+        for (const targetNode of targets) {
+          const state2 = targetNode.dataset["mmMathRendered"];
+          if (state2 === "true" || state2 === "failed") continue;
+          const tex = targetNode.dataset["tex"] ?? "";
+          const task = {
+            node: targetNode,
+            tex,
+            displayMode: targetNode.classList.contains("math-display")
+          };
+          queue.enqueue(task, entry.isIntersecting ? "high" : "low");
+        }
+      }
+    }, { rootMargin: `${INITIAL_LOOKAHEAD_PX}px` });
+    for (const visEl of observedToMathNodes.keys()) {
+      observer.observe(visEl);
+    }
+    return {
+      initialVisibleReady,
+      allMathRendered,
+      cancel: () => {
+        observer.disconnect();
+        queue.cancel();
+      }
+    };
+  }
+
+  // RendererWeb/src/schematicMinimap.ts
+  function walkDocumentBlocks(input) {
+    const blocks = [];
+    const children = input.documentRoot.children;
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      if (!(child instanceof HTMLElement)) continue;
+      const kind = classify(child);
+      if (!kind) continue;
+      const top = child.offsetTop;
+      const height = child.offsetHeight;
+      const block = { kind, top, height };
+      if (kind === "paragraph" || kind === "list" || kind === "quote") {
+        const lineHeight = parseFloat(getComputedStyle(child).lineHeight) || 16;
+        block.textLines = Math.max(1, Math.round(height / lineHeight));
+      }
+      blocks.push(block);
+    }
+    return blocks;
+  }
+  function classify(el) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === "h1") return "heading-1";
+    if (tag === "h2") return "heading-2";
+    if (tag === "h3") return "heading-3";
+    if (tag === "h4") return "heading-4";
+    if (tag === "h5") return "heading-5";
+    if (tag === "h6") return "heading-6";
+    if (tag === "p") return "paragraph";
+    if (tag === "pre") {
+      if (el.classList.contains("mm-mermaid")) return "mermaid";
+      return "code";
+    }
+    if (el.classList.contains("math-display")) return "math-display";
+    if (tag === "table") return "table";
+    if (tag === "ul" || tag === "ol") return "list";
+    if (tag === "blockquote") return "quote";
+    if (tag === "hr") return "hr";
+    return null;
+  }
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function renderSchematicSvg(blocks, documentWidth, documentHeight) {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", `0 0 ${documentWidth} ${documentHeight}`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.style.width = `${documentWidth}px`;
+    svg.style.height = `${documentHeight}px`;
+    svg.style.display = "block";
+    for (const block of blocks) {
+      const rect = document.createElementNS(SVG_NS, "rect");
+      rect.setAttribute("x", "0");
+      rect.setAttribute("y", String(block.top));
+      rect.setAttribute("width", String(documentWidth));
+      rect.setAttribute("height", String(block.height));
+      rect.setAttribute("class", `mm-schematic-${block.kind}`);
+      rect.setAttribute("fill", `var(--mm-minimap-${block.kind}, currentColor)`);
+      svg.appendChild(rect);
+    }
+    return svg;
+  }
+
   // RendererWeb/src/scrollCoalescer.ts
   function createScrollCoalescer(deps) {
     let pending = false;
@@ -333,6 +546,7 @@
   var katexHasRun = false;
   var mermaidRenderGeneration = 0;
   var initialRenderPipelineCompleted = false;
+  var currentController = null;
   var MAX_MERMAID_DIAGRAMS = 50;
   var MERMAID_PER_DIAGRAM_TIMEOUT_MS = 3e3;
   var MERMAID_WATCHDOG_MS = 15e3;
@@ -374,10 +588,27 @@
     const katex = hostWindow.katex;
     if (!katex) {
       katexHasRun = mathCount === 0;
-      return renderMath({ katex: void 0, documentRoot: document });
+      const controller2 = renderMath({ katex: void 0, documentRoot: document });
+      currentController = controller2;
+      return controller2;
     }
     const controller = renderMath({ katex, documentRoot: document });
     katexHasRun = true;
+    currentController = controller;
+    let initialVisibleSize = 0;
+    for (const node of document.querySelectorAll("[data-tex]")) {
+      const visEl = node.classList.contains("math-inline") ? node.parentElement ?? node : node;
+      const rect = visEl.getBoundingClientRect();
+      if (rect.bottom >= -500 && rect.top <= window.innerHeight + 500) {
+        initialVisibleSize++;
+      }
+    }
+    controller.initialVisibleReady.then(() => {
+      emitMark("mm-initial-visible-ready", { visibleCount: initialVisibleSize, failedCount: 0 });
+    });
+    controller.allMathRendered.then(() => {
+      emitMark("mm-all-math-rendered", { totalCount: mathCount, failedCount: 0, cancelled: false });
+    });
     return controller;
   }
   function getCurrentTheme() {
@@ -945,4 +1176,12 @@
   });
   window.__mmPerfReport = getReport;
   window.__mmFpsSampler = getFpsSampler();
+  window.__mmRendererState = {
+    get initialVisibleReady() {
+      return currentController?.initialVisibleReady ?? Promise.resolve();
+    },
+    get allMathRendered() {
+      return currentController?.allMathRendered ?? Promise.resolve();
+    }
+  };
 })();
