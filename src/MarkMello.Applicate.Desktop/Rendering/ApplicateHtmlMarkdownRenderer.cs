@@ -47,9 +47,6 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         var baseDirectory = ResolveBaseDirectory(source.Path);
         var rendered = _markdownRenderer.Render(source.Content, baseDirectory);
         var context = new RenderContext(imageSourceResolver, baseDirectory, cancellationToken);
-        var assets = _assetEmbedder is null
-            ? ApplicateWebAssetBundle.Empty
-            : await _assetEmbedder.LoadBundleAsync(cancellationToken).ConfigureAwait(false);
 
         foreach (var block in rendered.Blocks)
         {
@@ -57,8 +54,27 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         }
 
         var body = context.Html.ToString();
+
+        var baseAssets = _assetEmbedder is null
+            ? ApplicateWebBaseAssets.Empty
+            : await _assetEmbedder.LoadBaseBundleAsync(cancellationToken).ConfigureAwait(false);
+
+        ApplicateWebMermaidAssets? mermaidAssets = null;
+        if (context.HasMermaidBlock && _assetEmbedder is not null)
+        {
+            mermaidAssets = await _assetEmbedder.LoadMermaidAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        // hljs included для mermaid fallback (when render fails, source remains
+        // as code block that may be highlighted) as well as regular code blocks.
+        ApplicateWebHighlightAssets? hljsAssets = null;
+        if ((context.HasCodeBlockWithSyntax || context.HasMermaidBlock) && _assetEmbedder is not null)
+        {
+            hljsAssets = await _assetEmbedder.LoadHighlightAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         return new ApplicateHtmlDocument(
-            ApplicateHtmlDocumentTemplate.Build(source.FileName, body, preferences, assets),
+            ApplicateHtmlDocumentTemplate.Build(source.FileName, body, preferences, baseAssets, mermaidAssets, hljsAssets),
             context.PlainText.ToString(),
             context.Headings,
             context.Blocks);

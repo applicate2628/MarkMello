@@ -279,6 +279,66 @@ public sealed class ApplicateHtmlMarkdownRendererTests
         Assert.Contains("&lt;script&gt;", html, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RenderPlainDocumentExcludesMermaidAndHljsBundles()
+    {
+        var tempRoot = ApplicateWebAssetEmbedderTests.CreateAssetsFixture();
+        try
+        {
+            var embedder = new ApplicateWebAssetEmbedder(tempRoot);
+            var renderer = new ApplicateHtmlMarkdownRenderer(embedder);
+            var source = new MarkdownSource("test.md", "test.md", "Just text\n");
+            var doc = await renderer.RenderAsync(source, ReadingPreferences.Default, imageSourceResolver: null, CancellationToken.None);
+
+            Assert.DoesNotContain("/* mermaid-js */", doc.Html);
+            Assert.DoesNotContain("/* hljs */", doc.Html);
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RenderMermaidDocumentIncludesMermaidAndHljs()
+    {
+        var tempRoot = ApplicateWebAssetEmbedderTests.CreateAssetsFixture();
+        try
+        {
+            var embedder = new ApplicateWebAssetEmbedder(tempRoot);
+            var renderer = new ApplicateHtmlMarkdownRenderer(embedder);
+            var source = new MarkdownSource("test.md", "test.md", "```mermaid\ngraph TD\n```\n");
+            var doc = await renderer.RenderAsync(source, ReadingPreferences.Default, imageSourceResolver: null, CancellationToken.None);
+
+            Assert.Contains("/* mermaid-js */", doc.Html);
+            Assert.Contains("/* hljs */", doc.Html);
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RenderCodeOnlyDocumentIncludesHljsButNotMermaid()
+    {
+        var tempRoot = ApplicateWebAssetEmbedderTests.CreateAssetsFixture();
+        try
+        {
+            var embedder = new ApplicateWebAssetEmbedder(tempRoot);
+            var renderer = new ApplicateHtmlMarkdownRenderer(embedder);
+            var source = new MarkdownSource("test.md", "test.md", "```js\nconst x = 1;\n```\n");
+            var doc = await renderer.RenderAsync(source, ReadingPreferences.Default, imageSourceResolver: null, CancellationToken.None);
+
+            Assert.Contains("/* hljs */", doc.Html);
+            Assert.DoesNotContain("/* mermaid-js */", doc.Html);
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
     private static async Task<string> RenderAsync(string markdown)
     {
         var renderer = new ApplicateHtmlMarkdownRenderer();
