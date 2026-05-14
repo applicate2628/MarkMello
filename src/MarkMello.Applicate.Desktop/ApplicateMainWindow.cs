@@ -45,7 +45,58 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallActiveDocumentBridge(viewModel);
         InstallPopupZOrderFollow(viewModel);
         InstallApplicateAboutPanel();
+        InstallPopupFadeIn();
         Opened += (_, _) => Title = $"{Title} [Applicate overlay]";
+    }
+
+    private void InstallPopupFadeIn()
+    {
+        // Smooth open transition for the named popup overlays. Avalonia's
+        // Popup pops a PopupRoot window instantly, so we instead animate
+        // the popup's Child opacity from 0 to 1 on each Opened event. The
+        // Transitions collection is installed once per popup; the fade is
+        // triggered by setting Opacity = 1 on a dispatch-back-to-UI tick
+        // so Avalonia detects a property change to animate over.
+        string[] popupNames = ["AppMenuPanel", "AppSettingsPanel", "AppAboutPanel", "SettingsPanel"];
+        foreach (var name in popupNames)
+        {
+            var popup = this.FindControl<Avalonia.Controls.Primitives.Popup>(name);
+            if (popup is null)
+            {
+                continue;
+            }
+            popup.Opened += OnTrackedPopupOpened;
+        }
+    }
+
+    private static void OnTrackedPopupOpened(object? sender, System.EventArgs e)
+    {
+        if (sender is not Avalonia.Controls.Primitives.Popup popup || popup.Child is not { } child)
+        {
+            return;
+        }
+
+        if (child.Transitions is null)
+        {
+            child.Transitions = new Avalonia.Animation.Transitions
+            {
+                new Avalonia.Animation.DoubleTransition
+                {
+                    Property = Avalonia.Visual.OpacityProperty,
+                    Duration = System.TimeSpan.FromMilliseconds(140),
+                    Easing = new Avalonia.Animation.Easings.CubicEaseOut()
+                }
+            };
+        }
+
+        // Set opacity to 0 BEFORE the dispatcher post so the first paint
+        // shows the popup invisible, then schedule the fade-in. Avalonia's
+        // DoubleTransition only animates between two distinct values, so
+        // we cannot set opacity = 1 in the same tick.
+        child.Opacity = 0;
+        Avalonia.Threading.Dispatcher.UIThread.Post(
+            () => child.Opacity = 1,
+            Avalonia.Threading.DispatcherPriority.Background);
     }
 
     private void InstallApplicateAboutPanel()
