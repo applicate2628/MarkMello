@@ -40,6 +40,33 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - WebView mode has its own document minimap, scroll progress, width-resizer handle, and edit-preview rendering surface.
 - Native/WebView backend switching keeps the previous renderer visible until the target renderer is ready, then crossfades without a blank frame.
 
+## Multi-Document Tabs Scope
+
+- A fork-only tabs strip rendered above the document body shows every open document; each tab has a close-button and the active tab is visually distinct (brighter background, semibold label).
+- The strip lives in `src/MarkMello.Applicate.Desktop/Views/ApplicateTabsView.cs` as a code-only `UserControl`; it is mounted on top of `BodyPanel` at runtime by `ApplicateMainWindow` without modifying upstream XAML.
+- Document state is owned by `IOpenDocumentsService` (`src/MarkMello.Applicate.Desktop/Editing/`). The service is the single source of truth for the open document list and the active document; the upstream `MainWindowViewModel.Document` is mirrored from it via a bridge.
+- Tabs support click-to-activate, click-`×`-to-close (active-tab close routes through the upstream dirty prompt so cancel does not orphan the tab), and click+drag horizontal reorder with animated neighbour displacement.
+- Drag reorder uses Avalonia `TransformOperationsTransition` for neighbour tabs sliding into a new slot (160ms cubic ease-out); the dragged tab follows the cursor without transition so the press point stays anchored.
+- Open documents and the active tab are persisted between launches in JSON at `%AppData%/MarkMello/applicate-session.json` via `JsonApplicateSessionStore`.
+
+## Drag-and-Drop Scope
+
+- The Applicate WebView body and edit-preview surfaces accept file drag-and-drop without modifying upstream surfaces.
+- Reading-mode drops route through `IOpenDocumentsService.OpenAsync` and open the dropped file as a new tab; the service deduplicates by file content-hash so dropping the same file twice (or dropping a file that is already open) does not create a duplicate tab.
+- Edit-mode drops insert the file at the caret position. Image files are saved next to the document under `images/` with a content-hash collision suffix when a same-name image with different content already exists, and inserted as Markdown `![alt](images/name.png)` so the document remains portable.
+- Cross-source dedupe in the active-document bridge also catches files opened from different paths but with identical content and display name.
+
+## About-Panel Scope
+
+- Upstream `AppAboutPanelView` content is preserved unchanged. The fork swaps the popup's `Child` at runtime in `ApplicateMainWindow` to `ApplicateAppAboutPanelView`, which subclasses the upstream view and appends a second credit row underneath the upstream one.
+- The new row reads `Applicate additions by Dmitry Denisenko (applicate2628)` and links to the fork maintainer's GitHub profile. Upstream copyright notices remain visible per GPL-3.0 §5.
+- No upstream files are edited for the About panel; the override is contained in `src/MarkMello.Applicate.Desktop/Views/ApplicateAppAboutPanelView.cs`.
+
+## Renderer Pipeline Scope
+
+- The WebView renderer hides the document body, minimap, and width-resizer handle until the bootstrap pipeline finishes math + mermaid + code-block rendering and posts `layout-ready`. Without this gate the user briefly sees a fallback state on tab switch and fresh launch (web fonts not yet swapped, `\[ ... \]` math placeholders, raw mermaid source, width handle at a stale X coordinate). The reveal uses a 120ms CSS opacity transition shared by all three surfaces.
+- The hide-rule is scoped to `body > main.mm-document` (and the minimap aside, and the width-handle div) so that the minimap's cloned `.mm-document` subtree is not affected; the clone always renders at full opacity inside the minimap container.
+
 ## Packaging Scope
 
 - The upstream Windows installer remains in `packaging/windows/MarkMello.iss`.

@@ -26,7 +26,10 @@ Applicate additions:
 - keep the native renderer as a fallback and compatibility mode;
 - add flexible reader-width resizing by dragging the content edge while preserving the original Narrow, Medium, and Wide presets;
 - add a WebView minimap while preserving the native minimap for the native renderer;
-- keep reading, resize, theme, edit preview, and Native/WebView switching synchronized without a blank frame.
+- keep reading, resize, theme, edit preview, and Native/WebView switching synchronized without a blank frame;
+- add a tab strip above the document and a multi-document model: several `.md` files can be open at once, click a tab to switch, click `×` to close, drag a tab horizontally to reorder it within the strip;
+- remember the open document list and the active tab across launches (`%AppData%/MarkMello/applicate-session.json`);
+- accept file drag-and-drop in the window: in reading mode the dropped file opens as a new tab, in editing mode it is inserted at the caret position (images are saved next to the document and inserted as a relative link in the form `![](images/name.png)`).
 
 ## How it differs from regular Markdown editors
 

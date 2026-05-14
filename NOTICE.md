@@ -33,6 +33,16 @@ Applicate additions are distributed under GPL-3.0 as part of this fork.
   and Wide presets.
 - Native and WebView minimap support for the Applicate viewer path.
 - Smooth Native/WebView renderer switching without a blank preview frame.
+- Multi-document tab strip above the body with click-to-activate, close-button
+  per tab, and drag-to-reorder with animated neighbor displacement.
+- Open-document and active-tab persistence across launches via a JSON session
+  store under `%AppData%/MarkMello/applicate-session.json`.
+- File drag-and-drop into the window: reading-mode drops open as new tabs,
+  edit-mode drops insert at the caret position with image files saved next
+  to the document and inserted as relative-link Markdown.
+- Fork-specific About panel credit row exposing this fork's authorship next
+  to the upstream credit, both rendered side by side without modifying the
+  upstream About view file.
 - Separate Windows installer metadata so the fork installs as `MarkMello Applicate`
   and does not reuse the upstream MarkMello AppId or ProgId.
 
