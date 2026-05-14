@@ -24,6 +24,19 @@ internal sealed class ApplicateAppAboutPanelView : AppAboutPanelView
 
     private bool _forkRowInjected;
 
+    public ApplicateAppAboutPanelView()
+    {
+        // Inject as soon as the visual tree is materialized. The popup
+        // first attaches OnAttachedToVisualTree but the inner XAML
+        // descendants may not all be reachable via GetVisualDescendants
+        // on that first tick; on the next dispatcher tick they are.
+        // Loaded fires after layout has measured and arranged the tree,
+        // guaranteeing the upstream WrapPanel is present. We hook BOTH
+        // events: Loaded as the reliable path, OnAttachedToVisualTree
+        // as a fallback in case Loaded fires earlier in some host.
+        Loaded += (_, _) => InjectForkCreditsRow();
+    }
+
     protected override void OnAttachedToVisualTree(Avalonia.VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);

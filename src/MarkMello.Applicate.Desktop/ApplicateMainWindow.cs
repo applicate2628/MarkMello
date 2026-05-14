@@ -69,34 +69,49 @@ public sealed class ApplicateMainWindow : MainWindow
         }
     }
 
-    private static void OnTrackedPopupOpened(object? sender, System.EventArgs e)
+    private static async void OnTrackedPopupOpened(object? sender, System.EventArgs e)
     {
         if (sender is not Avalonia.Controls.Primitives.Popup popup || popup.Child is not { } child)
         {
             return;
         }
 
-        if (child.Transitions is null)
+        // Use Animation.RunAsync to guarantee the fade-in plays even when
+        // the popup's Child is freshly attached to the visual tree. A
+        // simpler Transitions+Opacity approach fights the popup lifecycle:
+        // the Child is attached at the moment Opened fires, and any
+        // property change in the same dispatcher tick races against the
+        // first layout pass that paints the popup at its final opacity.
+        var animation = new Avalonia.Animation.Animation
         {
-            child.Transitions = new Avalonia.Animation.Transitions
+            Duration = System.TimeSpan.FromMilliseconds(140),
+            Easing = new Avalonia.Animation.Easings.CubicEaseOut(),
+            FillMode = Avalonia.Animation.FillMode.Forward,
+            Children =
             {
-                new Avalonia.Animation.DoubleTransition
+                new Avalonia.Animation.KeyFrame
                 {
-                    Property = Avalonia.Visual.OpacityProperty,
-                    Duration = System.TimeSpan.FromMilliseconds(140),
-                    Easing = new Avalonia.Animation.Easings.CubicEaseOut()
+                    Cue = new Avalonia.Animation.Cue(0d),
+                    Setters = { new Avalonia.Styling.Setter(Avalonia.Visual.OpacityProperty, 0d) }
+                },
+                new Avalonia.Animation.KeyFrame
+                {
+                    Cue = new Avalonia.Animation.Cue(1d),
+                    Setters = { new Avalonia.Styling.Setter(Avalonia.Visual.OpacityProperty, 1d) }
                 }
-            };
-        }
+            }
+        };
 
-        // Set opacity to 0 BEFORE the dispatcher post so the first paint
-        // shows the popup invisible, then schedule the fade-in. Avalonia's
-        // DoubleTransition only animates between two distinct values, so
-        // we cannot set opacity = 1 in the same tick.
-        child.Opacity = 0;
-        Avalonia.Threading.Dispatcher.UIThread.Post(
-            () => child.Opacity = 1,
-            Avalonia.Threading.DispatcherPriority.Background);
+        try
+        {
+            await animation.RunAsync(child).ConfigureAwait(true);
+        }
+        catch (System.Exception)
+        {
+            // Animation failure is non-fatal — popup is visible at final
+            // opacity regardless. Swallow so the popup never disappears.
+            child.Opacity = 1;
+        }
     }
 
     private void InstallApplicateAboutPanel()
