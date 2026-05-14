@@ -40,6 +40,7 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly string _aboutLicense = "GPLv3";
     private AppUpdatePackage? _availableUpdatePackage;
     private ReadingPreferences _documentReadingPreferences = GetDocumentRenderingPreferences(ReadingPreferences.Default);
+    private ReadingPreferences _lastNotifiedReadingPreferences = ReadingPreferences.Default;
 
     public event EventHandler? CloseRequested;
 
@@ -444,6 +445,50 @@ public partial class MainWindowViewModel : ObservableObject
         }
     }
 
+    public WidthResizerVisibility SelectedWidthResizerVisibility
+    {
+        get => ReadingPreferences.WidthResizerVisibility;
+        set
+        {
+            if (ReadingPreferences.WidthResizerVisibility == value)
+            {
+                return;
+            }
+
+            ApplyReadingPreferences(ReadingPreferences with { WidthResizerVisibility = value });
+        }
+    }
+
+    public bool IsWidthResizerAlwaysSelected
+    {
+        get => ReadingPreferences.WidthResizerVisibility == WidthResizerVisibility.Always;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsWidthResizerAlwaysSelected));
+                return;
+            }
+
+            SelectedWidthResizerVisibility = WidthResizerVisibility.Always;
+        }
+    }
+
+    public bool IsWidthResizerOnHoverSelected
+    {
+        get => ReadingPreferences.WidthResizerVisibility == WidthResizerVisibility.OnHover;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsWidthResizerOnHoverSelected));
+                return;
+            }
+
+            SelectedWidthResizerVisibility = WidthResizerVisibility.OnHover;
+        }
+    }
+
 
     public DocumentMinimapMode SelectedDocumentMinimapMode
     {
@@ -501,6 +546,50 @@ public partial class MainWindowViewModel : ObservableObject
             }
 
             SelectedDocumentMinimapMode = DocumentMinimapMode.Off;
+        }
+    }
+
+    public MarkdownRendererBackend SelectedRendererBackend
+    {
+        get => ReadingPreferences.RendererBackend;
+        set
+        {
+            if (ReadingPreferences.RendererBackend == value)
+            {
+                return;
+            }
+
+            ApplyReadingPreferences(ReadingPreferences with { RendererBackend = value });
+        }
+    }
+
+    public bool IsNativeRendererSelected
+    {
+        get => ReadingPreferences.RendererBackend == MarkdownRendererBackend.Native;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsNativeRendererSelected));
+                return;
+            }
+
+            SelectedRendererBackend = MarkdownRendererBackend.Native;
+        }
+    }
+
+    public bool IsWebViewRendererSelected
+    {
+        get => ReadingPreferences.RendererBackend == MarkdownRendererBackend.WebView;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsWebViewRendererSelected));
+                return;
+            }
+
+            SelectedRendererBackend = MarkdownRendererBackend.WebView;
         }
     }
 
@@ -1015,6 +1104,8 @@ public partial class MainWindowViewModel : ObservableObject
 
     partial void OnReadingPreferencesChanged(ReadingPreferences value)
     {
+        var oldValue = _lastNotifiedReadingPreferences;
+        _lastNotifiedReadingPreferences = value;
         var documentRenderingPreferences = GetDocumentRenderingPreferences(value);
         var documentRenderingPreferencesChanged = documentRenderingPreferences != _documentReadingPreferences;
         _documentReadingPreferences = documentRenderingPreferences;
@@ -1025,23 +1116,63 @@ public partial class MainWindowViewModel : ObservableObject
             OnPropertyChanged(nameof(DocumentReadingPreferences));
         }
 
-        OnPropertyChanged(nameof(SelectedFontFamilyMode));
-        OnPropertyChanged(nameof(FontSizeSetting));
-        OnPropertyChanged(nameof(LineHeightSetting));
-        OnPropertyChanged(nameof(ContentWidthSetting));
-        OnPropertyChanged(nameof(DocumentColumnMaxWidth));
-        OnPropertyChanged(nameof(FontSizeLabel));
-        OnPropertyChanged(nameof(LineHeightLabel));
-        OnPropertyChanged(nameof(IsSerifFontSelected));
-        OnPropertyChanged(nameof(IsSansFontSelected));
-        OnPropertyChanged(nameof(IsMonoFontSelected));
-        OnPropertyChanged(nameof(IsNarrowWidthSelected));
-        OnPropertyChanged(nameof(IsMediumWidthSelected));
-        OnPropertyChanged(nameof(IsWideWidthSelected));
-        OnPropertyChanged(nameof(SelectedDocumentMinimapMode));
-        OnPropertyChanged(nameof(IsDocumentMinimapAutoSelected));
-        OnPropertyChanged(nameof(IsDocumentMinimapOnSelected));
-        OnPropertyChanged(nameof(IsDocumentMinimapOffSelected));
+        NotifyReadingPreferenceDependentBindings(oldValue, value);
+    }
+
+    private void NotifyReadingPreferenceDependentBindings(
+        ReadingPreferences oldValue,
+        ReadingPreferences value)
+    {
+        if (oldValue.FontFamily != value.FontFamily)
+        {
+            OnPropertyChanged(nameof(SelectedFontFamilyMode));
+            OnPropertyChanged(nameof(IsSerifFontSelected));
+            OnPropertyChanged(nameof(IsSansFontSelected));
+            OnPropertyChanged(nameof(IsMonoFontSelected));
+        }
+
+        if (Math.Abs(oldValue.FontSize - value.FontSize) > 0.0001)
+        {
+            OnPropertyChanged(nameof(FontSizeSetting));
+            OnPropertyChanged(nameof(FontSizeLabel));
+        }
+
+        if (Math.Abs(oldValue.LineHeight - value.LineHeight) > 0.0001)
+        {
+            OnPropertyChanged(nameof(LineHeightSetting));
+            OnPropertyChanged(nameof(LineHeightLabel));
+        }
+
+        if (Math.Abs(oldValue.ContentWidth - value.ContentWidth) > 0.0001)
+        {
+            OnPropertyChanged(nameof(ContentWidthSetting));
+            OnPropertyChanged(nameof(DocumentColumnMaxWidth));
+            OnPropertyChanged(nameof(IsNarrowWidthSelected));
+            OnPropertyChanged(nameof(IsMediumWidthSelected));
+            OnPropertyChanged(nameof(IsWideWidthSelected));
+        }
+
+        if (oldValue.WidthResizerVisibility != value.WidthResizerVisibility)
+        {
+            OnPropertyChanged(nameof(SelectedWidthResizerVisibility));
+            OnPropertyChanged(nameof(IsWidthResizerAlwaysSelected));
+            OnPropertyChanged(nameof(IsWidthResizerOnHoverSelected));
+        }
+
+        if (oldValue.DocumentMinimapMode != value.DocumentMinimapMode)
+        {
+            OnPropertyChanged(nameof(SelectedDocumentMinimapMode));
+            OnPropertyChanged(nameof(IsDocumentMinimapAutoSelected));
+            OnPropertyChanged(nameof(IsDocumentMinimapOnSelected));
+            OnPropertyChanged(nameof(IsDocumentMinimapOffSelected));
+        }
+
+        if (oldValue.RendererBackend != value.RendererBackend)
+        {
+            OnPropertyChanged(nameof(SelectedRendererBackend));
+            OnPropertyChanged(nameof(IsNativeRendererSelected));
+            OnPropertyChanged(nameof(IsWebViewRendererSelected));
+        }
     }
 
     private async Task OpenFileCoreAsync()

@@ -453,6 +453,20 @@ public partial class EditWorkspaceView : UserControl
         }, DispatcherPriority.Background);
     }
 
+    public bool TryReplacePreviewDocumentView(Control previewDocumentView)
+    {
+        ArgumentNullException.ThrowIfNull(previewDocumentView);
+
+        var frame = this.FindControl<Border>("PreviewDocumentFrame");
+        if (frame is null)
+        {
+            return false;
+        }
+
+        frame.Child = previewDocumentView;
+        return true;
+    }
+
     private static void SetSplitterDraggingState(object? sender, bool isDragging)
     {
         if (sender is Control control)

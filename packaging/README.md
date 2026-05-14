@@ -4,6 +4,17 @@ This folder captures the first release baseline from `ADR-0004`.
 
 ## Release matrix
 
+Applicate fork Windows assets:
+
+- `MarkMello.Applicate-setup-win-x64.exe`
+- `MarkMello.Applicate-setup-win-arm64.exe`
+
+The GitHub Actions release workflow currently publishes the Applicate Windows
+installer assets only. Applicate-branded macOS packaging is intentionally
+disabled until the fork has macOS-specific app bundle metadata and asset names.
+
+Upstream baseline assets:
+
 - `MarkMello-setup-win-x64.exe`
 - `MarkMello-setup-win-arm64.exe`
 - `MarkMello-macos-arm64.dmg`
@@ -14,6 +25,9 @@ This folder captures the first release baseline from `ADR-0004`.
 
 - `windows/MarkMello.iss` is the per-user Inno Setup installer.
 - `windows/build-installer.ps1` compiles the installer from a published app folder.
+- `windows/MarkMello.Applicate.iss` is the Applicate fork installer metadata.
+- `windows/build-applicate-installer.ps1` compiles the Applicate fork installer
+  from a published `MarkMello.Applicate` app folder.
 - `windows/sign-files.ps1` signs published binaries and installers when a PFX certificate is provided.
 - `windows/markmello-installer.ico` is the installer icon generated from the shared master icon.
 - The installer registers MarkMello as an available `.md` handler and adds `Open with MarkMello`-style shell integration without forcing a system-wide default.
@@ -39,6 +53,39 @@ dotnet publish .\src\MarkMello.Desktop\MarkMello.Desktop.csproj `
   -PublishDir .\publish\win-x64 `
   -RuntimeId win-x64 `
   -Version 0.6.0
+```
+
+Applicate fork example:
+
+```powershell
+npm --prefix .\src\MarkMello.Applicate.Desktop install
+npm --prefix .\src\MarkMello.Applicate.Desktop run build:renderer
+
+dotnet publish .\src\MarkMello.Applicate.Desktop\MarkMello.Applicate.Desktop.csproj `
+  -c Release -r win-x64 --self-contained true `
+  -p:PublishSingleFile=false `
+  -p:MarkMelloReleaseOwner=applicate2628 `
+  -p:MarkMelloReleaseRepo=MarkMello `
+  -o .\publish\applicate-win-x64
+
+.\packaging\windows\build-applicate-installer.ps1 `
+  -PublishDir .\publish\applicate-win-x64 `
+  -RuntimeId win-x64 `
+  -Version 0.6.0 `
+  -OutputDir .\artifacts\applicate-win-x64
+```
+
+The Applicate installer installs as `MarkMello Applicate`, uses
+`MarkMello.Applicate.exe`, and has a fork-specific AppId and ProgId so it does
+not reuse the upstream MarkMello installer identity.
+
+The Applicate fork currently targets .NET SDK 10. Release workflows and local
+packaging hosts must install .NET 10, not the older upstream .NET 9 baseline.
+
+Local installer builds require Inno Setup 6. On Windows it can be installed with:
+
+```powershell
+winget install --id JRSoftware.InnoSetup --source winget
 ```
 
 ## macOS
@@ -67,8 +114,7 @@ dotnet publish .\src\MarkMello.Desktop\MarkMello.Desktop.csproj `
 Example:
 
 ```powershell
-$py = "C:\Users\drmar\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
-& $py .\packaging\generate-icons.py
+py .\packaging\generate-icons.py
 ```
 
 ## Update source
@@ -77,8 +123,9 @@ The in-app `Settings -> Updates` flow reads GitHub Releases coordinates from the
 
 - `MarkMelloReleaseOwner`
 - `MarkMelloReleaseRepo`
+- `MarkMelloReleaseAssetPrefix`
 
-Those values default in `src/MarkMello.Desktop/MarkMello.Desktop.csproj`, and can be overridden in CI or local release builds with MSBuild properties.
+Those values default in the selected desktop project (`src/MarkMello.Desktop/MarkMello.Desktop.csproj` for upstream builds, `src/MarkMello.Applicate.Desktop/MarkMello.Applicate.Desktop.csproj` for Applicate builds), and can be overridden in CI or local release builds with MSBuild properties. Applicate uses `MarkMello.Applicate` as its update asset prefix.
 
 ## Signing and notarization
 
@@ -93,3 +140,14 @@ If you want the Windows workflow to sign artifacts, configure:
 
 - `WINDOWS_SIGNING_CERT_BASE64` — base64-encoded `.pfx`
 - `WINDOWS_SIGNING_CERT_PASSWORD` — password for that certificate
+
+## Terms and Abbreviations
+
+- `AppId`: Inno Setup application identifier used to distinguish installed apps.
+- `Applicate`: the fork-specific MarkMello overlay.
+- `AppImage`: portable Linux application packaging format.
+- `DMG`: macOS disk image distribution format.
+- `Inno Setup`: Windows installer generator used by this repository.
+- `PFX`: certificate container format used for Windows code signing.
+- `ProgId`: Windows file-association program identifier.
+- `runtime ID`: .NET target runtime such as `win-x64` or `win-arm64`.

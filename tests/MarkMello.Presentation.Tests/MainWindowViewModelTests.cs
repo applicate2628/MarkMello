@@ -498,6 +498,23 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void RendererPreferenceChangeDoesNotNotifyUnrelatedReadingSettingButtons()
+    {
+        var harness = CreateHarness();
+        var names = new List<string?>();
+        harness.ViewModel.PropertyChanged += (_, e) => names.Add(e.PropertyName);
+
+        harness.ViewModel.IsNativeRendererSelected = true;
+
+        Assert.Contains(nameof(MainWindowViewModel.SelectedRendererBackend), names);
+        Assert.Contains(nameof(MainWindowViewModel.IsNativeRendererSelected), names);
+        Assert.Contains(nameof(MainWindowViewModel.IsWebViewRendererSelected), names);
+        Assert.DoesNotContain(nameof(MainWindowViewModel.IsDocumentMinimapAutoSelected), names);
+        Assert.DoesNotContain(nameof(MainWindowViewModel.IsSerifFontSelected), names);
+        Assert.DoesNotContain(nameof(MainWindowViewModel.IsWideWidthSelected), names);
+    }
+
+    [Fact]
     public void LanguageOptionsKeepsStableItemReferencesBetweenLocalizationChanges()
     {
         var harness = CreateHarness();

@@ -1,0 +1,379 @@
+/* Reveal-on-ready: hide the document body until the renderer pipeline
+ * has finished math + mermaid + code-block rendering and posted
+ * layout-ready. Without this, the user sees ~130ms of fallback state
+ * on tab switch and fresh launch: title at a different font size
+ * (web fonts not yet loaded), `\[ ... \]` math placeholders, and the
+ * raw mermaid source code in a code block. The renderer.ts pipeline
+ * adds `mm-rendered` after scheduleLayoutReady has posted, which
+ * fades the body in. CSS transition keeps the reveal soft (120ms).
+ * Safety: scheduleLayoutReady has a 250ms timeout that fires even if
+ * `document.fonts.ready` never resolves, so the body cannot stay
+ * hidden forever.
+ *
+ * Selector is restricted to `body > main.mm-document` because the
+ * minimap clones the .mm-document element via cloneNode and nests
+ * the clone inside `<div class="mm-minimap-content">`. Without the
+ * body-direct-child scope, the clone would also inherit opacity 0
+ * and never receive the mm-rendered toggle, leaving the minimap
+ * permanently blank. */
+body > main.mm-document,
+aside.mm-minimap,
+div.mm-width-handle {
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+body > main.mm-document.mm-rendered,
+aside.mm-minimap.mm-rendered,
+div.mm-width-handle.mm-rendered {
+  opacity: 1;
+}
+
+:root {
+  color-scheme: light dark;
+  --mm-document-font-size: 18px;
+  --mm-document-line-height: 1.7;
+  --mm-document-max-width: 820px;
+  --mm-document-base-padding-x: 72px;
+  --mm-document-font-family-serif: "Source Serif 4", "Source Serif Pro", "Iowan Old Style", Georgia, Cambria, ui-serif, serif;
+  --mm-document-font-family-sans: "Inter Tight", "Segoe UI Variable", "Segoe UI", Inter, system-ui, sans-serif;
+  --mm-document-font-family-mono: "JetBrains Mono", "Cascadia Code", Consolas, Menlo, ui-monospace, monospace;
+  --mm-document-font-family: var(--mm-document-font-family-serif);
+  --mm-accent: #BD592F;
+  --mm-accent-soft: #FFE4D4;
+  --mm-minimap-width: 136px;
+  --mm-minimap-gap: 16px;
+  --mm-minimap-accent: color-mix(in srgb, var(--mm-accent, #d46d3d) 88%, transparent);
+  --mm-width-handle-hit-area: 24px;
+  --mm-width-handle-idle-track: 2px;
+  --mm-width-handle-hover-track: 5px;
+  --mm-width-handle-drag-track: 7px;
+  --mm-document-text: #1d1d1f;
+  --mm-document-muted: #5f6368;
+  --mm-document-background: #fcfaf6;
+  --mm-document-code-background: rgba(0, 0, 0, 0.055);
+  --mm-document-rule: rgba(25, 25, 25, 0.14);
+  --mm-scrollbar-thumb: color-mix(in srgb, var(--mm-document-text) 24%, transparent);
+  --mm-scrollbar-thumb-hover: color-mix(in srgb, var(--mm-document-text) 38%, transparent);
+  --mm-scrollbar-thumb-active: color-mix(in srgb, var(--mm-document-text) 52%, transparent);
+}
+
+:root[data-theme="dark"] {
+  --mm-accent: #E38A67;
+  --mm-accent-soft: #432519;
+  --mm-document-text: #e8e6df;
+  --mm-document-muted: #a7a39a;
+  --mm-document-background: #14110e;
+  --mm-document-code-background: rgba(255, 255, 255, 0.08);
+  --mm-document-rule: rgba(255, 255, 255, 0.16);
+}
+
+.mm-drop-overlay {
+  position: fixed;
+  inset: 12px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: var(--mm-accent-soft);
+  border: 2px solid var(--mm-accent);
+  border-radius: 10px;
+  color: var(--mm-accent);
+  font-family: var(--mm-document-font-family-sans);
+  font-size: 14px;
+  z-index: 9999;
+}
+
+.mm-drop-overlay[data-visible="true"] {
+  display: flex;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+html {
+  scrollbar-color: var(--mm-scrollbar-thumb) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+:root[data-mm-chrome="off"],
+:root[data-mm-chrome="off"] body {
+  scrollbar-gutter: auto;
+}
+
+:root[data-mm-document-scroll="off"],
+:root[data-mm-document-scroll="off"] body {
+  overflow: hidden;
+  scrollbar-width: none;
+}
+
+:root[data-mm-document-scroll="off"]::-webkit-scrollbar,
+:root[data-mm-document-scroll="off"] body::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+  background: transparent;
+}
+
+html:hover::-webkit-scrollbar,
+body:hover::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+html::-webkit-scrollbar-track,
+body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+html::-webkit-scrollbar-thumb,
+body::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-color: var(--mm-scrollbar-thumb);
+  background-clip: content-box;
+}
+
+html:hover::-webkit-scrollbar-thumb,
+body:hover::-webkit-scrollbar-thumb {
+  background-color: var(--mm-scrollbar-thumb-hover);
+}
+
+html::-webkit-scrollbar-thumb:hover,
+body::-webkit-scrollbar-thumb:hover {
+  background-color: var(--mm-scrollbar-thumb-active);
+}
+
+:root[data-mm-font-family="sans"] {
+  --mm-document-font-family: var(--mm-document-font-family-sans);
+}
+
+:root[data-mm-font-family="mono"] {
+  --mm-document-font-family: var(--mm-document-font-family-mono);
+}
+
+body {
+  background: var(--mm-document-background);
+  color: var(--mm-document-text);
+  font: var(--mm-document-font-size) / var(--mm-document-line-height) var(--mm-document-font-family);
+}
+
+.mm-document {
+  box-sizing: border-box;
+  max-width: var(--mm-document-max-width);
+  margin: 0 auto;
+  padding: 96px var(--mm-document-base-padding-x) 160px;
+}
+
+body.mm-has-minimap .mm-document {
+  max-width: calc(var(--mm-document-max-width) + var(--mm-minimap-width) + var(--mm-minimap-gap) * 2);
+  padding-right: calc(var(--mm-document-base-padding-x) + var(--mm-minimap-width) + var(--mm-minimap-gap) * 2);
+}
+
+a {
+  color: inherit;
+  text-decoration-color: color-mix(in srgb, currentColor 42%, transparent);
+  text-underline-offset: 0.18em;
+}
+
+code {
+  border: 1px solid var(--mm-document-rule);
+  border-radius: 0.3em;
+  background: var(--mm-document-code-background);
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.9em;
+  padding: 0.08em 0.28em;
+}
+
+pre {
+  overflow: auto;
+  border: 1px solid var(--mm-document-rule);
+  border-radius: 0.5rem;
+  background: var(--mm-document-code-background);
+  padding: 1rem;
+}
+
+blockquote {
+  margin-inline: 0;
+  border-left: 3px solid var(--mm-document-rule);
+  color: var(--mm-document-muted);
+  padding-left: 1rem;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+.math-inline {
+  overflow-wrap: anywhere;
+}
+
+.math-display {
+  display: block;
+  overflow-x: auto;
+  overflow-y: visible;
+  padding: 0.7em 0;
+}
+
+.mm-minimap {
+  position: fixed;
+  top: 64px;
+  right: var(--mm-minimap-gap);
+  bottom: 64px;
+  width: var(--mm-minimap-width);
+  z-index: 8;
+  overflow: hidden;
+  border-radius: 10px;
+  opacity: 0.72;
+  cursor: pointer;
+  contain: layout paint;
+}
+
+.mm-minimap[hidden] {
+  display: none;
+}
+
+.mm-minimap-content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: max-content;
+  transform-origin: top left;
+  pointer-events: none;
+  user-select: none;
+  color: color-mix(in srgb, var(--mm-document-text) 72%, transparent);
+}
+
+.mm-minimap-content .mm-document {
+  margin: 0;
+  padding: 0;
+  max-width: none;
+}
+
+.mm-minimap-viewport {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  min-height: 22px;
+  border: 1px solid var(--mm-minimap-accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--mm-minimap-accent) 16%, transparent);
+  box-sizing: border-box;
+}
+
+.mm-width-handle {
+  position: fixed;
+  top: 42px;
+  bottom: 42px;
+  width: var(--mm-width-handle-hit-area);
+  z-index: 9;
+  display: flex;
+  justify-content: flex-end;
+  cursor: ew-resize;
+  touch-action: none;
+  user-select: none;
+  opacity: 1;
+}
+
+.mm-width-handle[hidden] {
+  display: none;
+}
+
+.mm-width-handle-track {
+  width: var(--mm-width-handle-idle-track);
+  margin-right: 6px;
+  border-radius: 999px;
+  background: var(--mm-document-muted);
+  opacity: 0;
+  transition:
+    width 160ms cubic-bezier(0.2, 0, 0, 1),
+    opacity 160ms cubic-bezier(0.2, 0, 0, 1),
+    background-color 160ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+body.mm-width-resizer-always .mm-width-handle-track {
+  opacity: 0.18;
+}
+
+.mm-width-handle:hover .mm-width-handle-track {
+  width: var(--mm-width-handle-hover-track);
+  background: var(--mm-minimap-accent);
+  opacity: 0.72;
+}
+
+.mm-width-handle.mm-dragging .mm-width-handle-track {
+  width: var(--mm-width-handle-drag-track);
+  background: var(--mm-minimap-accent);
+  opacity: 0.9;
+}
+
+/* === Applicate fork: Mermaid + code-highlight styling === */
+
+pre.mm-mermaid {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+pre.mm-mermaid.is-rendered {
+  display: none;
+}
+
+.mm-mermaid-svg {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 16px 0;
+}
+
+.mm-mermaid-svg svg {
+  max-width: 100%;
+  height: auto;
+}
+
+:root {
+  --mm-minimap-heading-1: rgba(60, 60, 60, 0.9);
+  --mm-minimap-heading-2: rgba(80, 80, 80, 0.85);
+  --mm-minimap-heading-3: rgba(100, 100, 100, 0.75);
+  --mm-minimap-heading-4: rgba(120, 120, 120, 0.6);
+  --mm-minimap-heading-5: rgba(140, 140, 140, 0.5);
+  --mm-minimap-heading-6: rgba(160, 160, 160, 0.4);
+  --mm-minimap-paragraph: rgba(150, 150, 150, 0.3);
+  --mm-minimap-code: rgba(70, 130, 200, 0.5);
+  --mm-minimap-math-display: rgba(180, 80, 80, 0.5);
+  --mm-minimap-mermaid: rgba(80, 180, 80, 0.5);
+  --mm-minimap-table: rgba(140, 110, 70, 0.4);
+  --mm-minimap-list: rgba(150, 150, 150, 0.35);
+  --mm-minimap-quote: rgba(120, 90, 150, 0.35);
+  --mm-minimap-hr: rgba(100, 100, 100, 0.3);
+}
+[data-theme="dark"] {
+  --mm-minimap-heading-1: rgba(220, 220, 220, 0.9);
+  --mm-minimap-heading-2: rgba(200, 200, 200, 0.85);
+  --mm-minimap-heading-3: rgba(180, 180, 180, 0.75);
+  --mm-minimap-heading-4: rgba(160, 160, 160, 0.6);
+  --mm-minimap-heading-5: rgba(140, 140, 140, 0.5);
+  --mm-minimap-heading-6: rgba(120, 120, 120, 0.4);
+  --mm-minimap-paragraph: rgba(160, 160, 160, 0.3);
+  --mm-minimap-code: rgba(130, 180, 230, 0.5);
+  --mm-minimap-math-display: rgba(220, 130, 130, 0.5);
+  --mm-minimap-mermaid: rgba(130, 220, 130, 0.5);
+  --mm-minimap-table: rgba(200, 160, 100, 0.4);
+  --mm-minimap-list: rgba(160, 160, 160, 0.35);
+  --mm-minimap-quote: rgba(170, 130, 200, 0.35);
+  --mm-minimap-hr: rgba(140, 140, 140, 0.3);
+}
+

@@ -1,0 +1,16 @@
+{
+  "name": "highlight.js",
+  "version": "11.11.1",
+  "preset": "common",
+  "license": "BSD-3-Clause",
+  "source_urls": [
+    "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css",
+    "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css"
+  ],
+  "sha256": {
+    "highlight.min.js": "C4A399DD6F488BC97A3546E3476747B3E714C99C57B9473154C6FB8D259B9381",
+    "github.min.css": "3A9A5DEF8B9C311E5AE43ABDE85C63133185EED4F0D9F67FEA4B00A8308CF066",
+    "github-dark.min.css": "9F208D022102B1D0C7AEBFECD8E42CA7997D5DE636649D2B31EA63093D809019"
+  }
+}

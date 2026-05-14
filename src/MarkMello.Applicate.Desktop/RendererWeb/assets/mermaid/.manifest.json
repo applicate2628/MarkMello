@@ -1,0 +1,7 @@
+{
+  "name": "mermaid",
+  "version": "11.15.0",
+  "source_url": "https://unpkg.com/mermaid@11.15.0/dist/mermaid.min.js",
+  "license": "MIT",
+  "sha256": "70137E77BB273BB2EF972B86E8B0400CCA8BE53CB25BFC45911A186DC98665DE"
+}

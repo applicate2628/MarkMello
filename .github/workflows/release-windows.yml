@@ -1,4 +1,4 @@
-name: Release Desktop
+name: Release Applicate Desktop
 
 on:
   push:
@@ -43,11 +43,23 @@ jobs:
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 9.0.x
+          dotnet-version: 10.0.x
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 25
 
       - name: Restore solution
         shell: pwsh
         run: dotnet restore .\MarkMello.sln -m:1
+
+      - name: Verify WebView renderer assets
+        shell: pwsh
+        run: |
+          npm --prefix .\src\MarkMello.Applicate.Desktop install
+          npm --prefix .\src\MarkMello.Applicate.Desktop run check:renderer
+          npm --prefix .\src\MarkMello.Applicate.Desktop run build:renderer
 
       - name: Test domain layer
         shell: pwsh
@@ -57,9 +69,13 @@ jobs:
         shell: pwsh
         run: dotnet test .\tests\MarkMello.Presentation.Tests\MarkMello.Presentation.Tests.csproj --no-restore -m:1 -nologo
 
-      - name: Build desktop app in Release
+      - name: Test Applicate layer
         shell: pwsh
-        run: dotnet build .\src\MarkMello.Desktop\MarkMello.Desktop.csproj -c Release --no-restore -m:1 -nologo
+        run: dotnet test .\tests\MarkMello.Applicate.Tests\MarkMello.Applicate.Tests.csproj --no-restore -m:1 -nologo
+
+      - name: Build Applicate desktop app in Release
+        shell: pwsh
+        run: dotnet build .\src\MarkMello.Applicate.Desktop\MarkMello.Applicate.Desktop.csproj -c Release --no-restore -m:1 -nologo
 
   prepare_release:
     name: Ensure GitHub Release
@@ -195,7 +211,18 @@ jobs:
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 9.0.x
+          dotnet-version: 10.0.x
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 25
+
+      - name: Build WebView renderer assets
+        shell: pwsh
+        run: |
+          npm --prefix .\src\MarkMello.Applicate.Desktop install
+          npm --prefix .\src\MarkMello.Applicate.Desktop run build:renderer
 
       - name: Install Inno Setup
         shell: pwsh
@@ -206,12 +233,11 @@ jobs:
         run: |
           $publishDir = Join-Path $env:GITHUB_WORKSPACE "publish" "${{ matrix.runtime_id }}"
 
-          dotnet publish .\src\MarkMello.Desktop\MarkMello.Desktop.csproj `
+          dotnet publish .\src\MarkMello.Applicate.Desktop\MarkMello.Applicate.Desktop.csproj `
             -m:1 `
             -c Release `
             -r "${{ matrix.runtime_id }}" `
             --self-contained true `
-            -p:PublishAot=true `
             -p:PublishSingleFile=false `
             -p:Version=$env:RELEASE_VERSION `
             -p:FileVersion=$env:RELEASE_VERSION_WINDOWS `
@@ -227,8 +253,8 @@ jobs:
         run: |
           $publishDir = Join-Path $env:GITHUB_WORKSPACE "publish" "${{ matrix.runtime_id }}"
           $paths = @(
-            (Join-Path $publishDir "MarkMello.exe"),
-            (Join-Path $publishDir "MarkMello.dll")
+            (Join-Path $publishDir "MarkMello.Applicate.exe"),
+            (Join-Path $publishDir "MarkMello.Applicate.dll")
           ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
 
           .\packaging\windows\sign-files.ps1 `
@@ -242,7 +268,7 @@ jobs:
           $publishDir = Join-Path $env:GITHUB_WORKSPACE "publish" "${{ matrix.runtime_id }}"
           $outputDir = Join-Path $env:GITHUB_WORKSPACE "artifacts" "${{ matrix.runtime_id }}"
 
-          .\packaging\windows\build-installer.ps1 `
+          .\packaging\windows\build-applicate-installer.ps1 `
             -PublishDir $publishDir `
             -RuntimeId "${{ matrix.runtime_id }}" `
             -Version $env:RELEASE_VERSION `
@@ -255,7 +281,7 @@ jobs:
         shell: pwsh
         run: |
           $outputDir = Join-Path $env:GITHUB_WORKSPACE "artifacts" "${{ matrix.runtime_id }}"
-          $installerPath = Join-Path $outputDir "MarkMello-setup-${{ matrix.runtime_id }}.exe"
+          $installerPath = Join-Path $outputDir "MarkMello.Applicate-setup-${{ matrix.runtime_id }}.exe"
 
           .\packaging\windows\sign-files.ps1 `
             -Paths @($installerPath) `
@@ -266,7 +292,7 @@ jobs:
         shell: pwsh
         run: |
           $outputDir = Join-Path $env:GITHUB_WORKSPACE "artifacts" "${{ matrix.runtime_id }}"
-          $installerPath = Join-Path $outputDir "MarkMello-setup-${{ matrix.runtime_id }}.exe"
+          $installerPath = Join-Path $outputDir "MarkMello.Applicate-setup-${{ matrix.runtime_id }}.exe"
           $hash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
           $checksumPath = "$installerPath.sha256"
           [System.IO.File]::WriteAllText(
@@ -278,8 +304,8 @@ jobs:
         with:
           name: windows-${{ matrix.runtime_id }}
           path: |
-            artifacts/${{ matrix.runtime_id }}/MarkMello-setup-${{ matrix.runtime_id }}.exe
-            artifacts/${{ matrix.runtime_id }}/MarkMello-setup-${{ matrix.runtime_id }}.exe.sha256
+            artifacts/${{ matrix.runtime_id }}/MarkMello.Applicate-setup-${{ matrix.runtime_id }}.exe
+            artifacts/${{ matrix.runtime_id }}/MarkMello.Applicate-setup-${{ matrix.runtime_id }}.exe.sha256
           if-no-files-found: error
 
       - name: Upload release assets
@@ -289,13 +315,16 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           $outputDir = Join-Path $env:GITHUB_WORKSPACE "artifacts" "${{ matrix.runtime_id }}"
-          $installerPath = Join-Path $outputDir "MarkMello-setup-${{ matrix.runtime_id }}.exe"
+          $installerPath = Join-Path $outputDir "MarkMello.Applicate-setup-${{ matrix.runtime_id }}.exe"
           $checksumPath = "$installerPath.sha256"
 
           gh release upload $env:RELEASE_TAG $installerPath $checksumPath --clobber
 
   build_macos:
     name: Build ${{ matrix.runtime_id }} DMG
+    # Applicate-branded macOS packaging is not wired yet. Keep this disabled so
+    # fork releases cannot accidentally publish upstream MarkMello assets.
+    if: ${{ false }}
     needs: prepare_release
     runs-on: ${{ matrix.runner }}
 
@@ -326,7 +355,7 @@ jobs:
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 9.0.x
+          dotnet-version: 10.0.x
 
       - name: Restore solution
         shell: bash
@@ -523,7 +552,6 @@ jobs:
     needs:
       - prepare_release
       - build_windows
-      - build_macos
     if: ${{ needs.prepare_release.outputs.publish_after_upload == 'true' }}
 
     steps:

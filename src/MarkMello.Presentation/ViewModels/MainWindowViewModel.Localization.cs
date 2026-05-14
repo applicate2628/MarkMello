@@ -96,6 +96,14 @@ public partial class MainWindowViewModel
         nameof(ReadingMinimapLabel),
         nameof(ReadingMinimapOff),
         nameof(ReadingMinimapOn),
+        nameof(ReadingRendererHint),
+        nameof(ReadingRendererLabel),
+        nameof(ReadingRendererNative),
+        nameof(ReadingRendererWebView),
+        nameof(ReadingResizerAlways),
+        nameof(ReadingResizerHint),
+        nameof(ReadingResizerLabel),
+        nameof(ReadingResizerOnHover),
         nameof(ReadingSettingsTooltip),
         nameof(ReadingSizeHint),
         nameof(ReadingSizeLabel),
@@ -167,6 +175,14 @@ public partial class MainWindowViewModel
     public string ReadingMinimapLabel => _localization["ReadingMinimapLabel"];
     public string ReadingMinimapOff => _localization["ReadingMinimapOff"];
     public string ReadingMinimapOn => _localization["ReadingMinimapOn"];
+    public string ReadingRendererHint => _localization["ReadingRendererHint"];
+    public string ReadingRendererLabel => _localization["ReadingRendererLabel"];
+    public string ReadingRendererNative => _localization["ReadingRendererNative"];
+    public string ReadingRendererWebView => _localization["ReadingRendererWebView"];
+    public string ReadingResizerAlways => _localization["ReadingResizerAlways"];
+    public string ReadingResizerHint => _localization["ReadingResizerHint"];
+    public string ReadingResizerLabel => _localization["ReadingResizerLabel"];
+    public string ReadingResizerOnHover => _localization["ReadingResizerOnHover"];
     public string ReadingSettingsTooltip => _localization["ReadingSettingsTooltip"];
     public string ReadingSizeHint => _localization["ReadingSizeHint"];
     public string ReadingSizeLabel => _localization["ReadingSizeLabel"];
@@ -537,4 +553,3 @@ public sealed record LanguageSelectionItem(AppLanguage Language, string Label)
 {
     public override string ToString() => Label;
 }
-

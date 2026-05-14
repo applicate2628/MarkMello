@@ -26,6 +26,7 @@ public partial class MainWindow : Window
     private readonly Task _startupInitializationTask = Task.CompletedTask;
     private WindowPlacement? _lastNormalWindowPlacement;
     private bool _allowConfirmedClose;
+    private bool _isTopChromeHovering;
 
     public MainWindow()
     {
@@ -64,6 +65,7 @@ public partial class MainWindow : Window
         PositionChanged += OnWindowPositionChanged;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
         _viewModel.CloseRequested += OnViewModelCloseRequested;
+        Deactivated += OnWindowDeactivated;
 
         _startupInitializationTask = InitializeStartupAsync();
     }
@@ -165,6 +167,7 @@ public partial class MainWindow : Window
         PositionChanged -= OnWindowPositionChanged;
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
         _viewModel.CloseRequested -= OnViewModelCloseRequested;
+        Deactivated -= OnWindowDeactivated;
         base.OnClosed(e);
     }
 
@@ -188,6 +191,11 @@ public partial class MainWindow : Window
         }
 
         if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        if (e.Source is Visual source && IsInteractiveTitleBarSource(source))
         {
             return;
         }
@@ -221,6 +229,30 @@ public partial class MainWindow : Window
         }
 
         _viewModel.CloseOverlayCommand.Execute(null);
+    }
+
+    private void OnWindowDeactivated(object? sender, EventArgs e)
+    {
+        _isTopChromeHovering = false;
+        SyncOverlayWindowClasses();
+        if (_viewModel.IsDirtyPromptOpen || !_viewModel.HasOpenOverlay)
+        {
+            return;
+        }
+
+        _viewModel.CloseOverlayCommand.Execute(null);
+    }
+
+    private void OnTopChromePointerEntered(object? sender, PointerEventArgs e)
+    {
+        _isTopChromeHovering = true;
+        SyncOverlayWindowClasses();
+    }
+
+    private void OnTopChromePointerExited(object? sender, PointerEventArgs e)
+    {
+        _isTopChromeHovering = false;
+        SyncOverlayWindowClasses();
     }
 
     private void OnWindowKeyDown(object? sender, KeyEventArgs e)
@@ -341,6 +373,19 @@ public partial class MainWindow : Window
         for (Visual? current = source; current is not null; current = current.GetVisualParent())
         {
             if (ReferenceEquals(current, target))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsInteractiveTitleBarSource(Visual source)
+    {
+        for (Visual? current = source; current is not null; current = current.GetVisualParent())
+        {
+            if (current is Button or ToggleButton or TextBox)
             {
                 return true;
             }
@@ -640,6 +685,7 @@ public partial class MainWindow : Window
 
     private void SyncOverlayWindowClasses()
     {
+        Classes.Set("mm-top-chrome-hover", _isTopChromeHovering);
         Classes.Set("mm-overlay-open", _viewModel.HasOpenOverlay);
         Classes.Set("mm-reading-settings-open", _viewModel.IsSettingsOpen);
         Classes.Set("mm-app-menu-open", _viewModel.IsAppMenuOpen);
