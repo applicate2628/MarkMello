@@ -8,6 +8,7 @@ using Avalonia.Animation.Easings;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Transformation;
@@ -226,21 +227,62 @@ internal sealed class ApplicateTabsView : UserControl
         tab.PointerMoved += (s, e) => OnTabPointerMoved(tab, e);
         tab.PointerReleased += (s, e) => OnTabPointerReleased(tab, doc, e);
         tab.PointerCaptureLost += (s, e) => CancelDrag();
+        tab.ContextMenu = BuildTabContextMenu(doc);
 
         return tab;
     }
 
-    private void OnCloseClicked(OpenDocument doc, Avalonia.Interactivity.RoutedEventArgs e)
+    private ContextMenu BuildTabContextMenu(OpenDocument doc)
     {
-        e.Handled = true;
+        // Standard tab context menu: close current/others/right/all, then
+        // path utilities. Items rebuild per tab because IsEnabled depends
+        // on the document's position in the strip at the moment the menu
+        // opens.
+        var menu = new ContextMenu();
 
-        // If the user is closing the currently-active tab, route the
-        // close through the upstream VM so the "Unsaved changes" prompt
-        // can prevent the close if the user cancels. The bridge mirrors
-        // the resulting VM.Document = null back into the service, so
-        // the tab disappears only after the prompt is resolved.
-        // Without this, service.Close runs first and the tab is gone
-        // even if the user clicks "Cancel" on the prompt.
+        var closeItem = new MenuItem { Header = "Close" };
+        closeItem.Click += (_, _) => CloseDocument(doc);
+
+        var closeOthersItem = new MenuItem
+        {
+            Header = "Close Others",
+            IsEnabled = _openDocsService.OpenDocuments.Count > 1
+        };
+        closeOthersItem.Click += (_, _) => CloseOthers(doc);
+
+        var closeToRightItem = new MenuItem
+        {
+            Header = "Close to the Right",
+            IsEnabled = _openDocsService.OpenDocuments.IndexOf(doc) <
+                        _openDocsService.OpenDocuments.Count - 1
+        };
+        closeToRightItem.Click += (_, _) => CloseToRight(doc);
+
+        var closeAllItem = new MenuItem { Header = "Close All" };
+        closeAllItem.Click += (_, _) => CloseAll();
+
+        var copyPathItem = new MenuItem { Header = "Copy Path" };
+        copyPathItem.Click += async (_, _) => await CopyPathAsync(doc).ConfigureAwait(true);
+
+        var revealItem = new MenuItem { Header = "Reveal in File Explorer" };
+        revealItem.Click += (_, _) => RevealInExplorer(doc);
+
+        menu.Items.Add(closeItem);
+        menu.Items.Add(closeOthersItem);
+        menu.Items.Add(closeToRightItem);
+        menu.Items.Add(closeAllItem);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(copyPathItem);
+        menu.Items.Add(revealItem);
+
+        return menu;
+    }
+
+    private void CloseDocument(OpenDocument doc)
+    {
+        // Same logic as the × button: route active-tab close through the
+        // VM so the dirty-prompt can prevent it; non-active close goes
+        // through the service directly.
         if (ReferenceEquals(doc, _openDocsService.ActiveDocument)
             && TopLevel.GetTopLevel(this)?.DataContext
                 is MarkMello.Presentation.ViewModels.MainWindowViewModel vm
@@ -249,8 +291,94 @@ internal sealed class ApplicateTabsView : UserControl
             vm.CloseFileCommand.Execute(null);
             return;
         }
-
         _openDocsService.Close(doc);
+    }
+
+    private void CloseOthers(OpenDocument keep)
+    {
+        // Snapshot before mutating; the collection changes underneath as
+        // each Close fires CollectionChanged → Rebuild → menu rebuild.
+        var toClose = _openDocsService.OpenDocuments
+            .Where(d => !ReferenceEquals(d, keep))
+            .ToList();
+        foreach (var doc in toClose)
+        {
+            _openDocsService.Close(doc);
+        }
+    }
+
+    private void CloseToRight(OpenDocument anchor)
+    {
+        var anchorIndex = _openDocsService.OpenDocuments.IndexOf(anchor);
+        if (anchorIndex < 0)
+        {
+            return;
+        }
+        var toClose = _openDocsService.OpenDocuments
+            .Skip(anchorIndex + 1)
+            .ToList();
+        foreach (var doc in toClose)
+        {
+            _openDocsService.Close(doc);
+        }
+    }
+
+    private void CloseAll()
+    {
+        var toClose = _openDocsService.OpenDocuments.ToList();
+        foreach (var doc in toClose)
+        {
+            _openDocsService.Close(doc);
+        }
+    }
+
+    private async System.Threading.Tasks.Task CopyPathAsync(OpenDocument doc)
+    {
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clipboard is null)
+        {
+            return;
+        }
+        await clipboard.SetTextAsync(doc.FilePath).ConfigureAwait(true);
+    }
+
+    private static void RevealInExplorer(OpenDocument doc)
+    {
+        if (string.IsNullOrEmpty(doc.FilePath))
+        {
+            return;
+        }
+
+        try
+        {
+            if (System.OperatingSystem.IsWindows())
+            {
+                System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{doc.FilePath}\"");
+            }
+            else if (System.OperatingSystem.IsMacOS())
+            {
+                System.Diagnostics.Process.Start("open", new[] { "-R", doc.FilePath });
+            }
+            else if (System.OperatingSystem.IsLinux())
+            {
+                var dir = System.IO.Path.GetDirectoryName(doc.FilePath);
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    System.Diagnostics.Process.Start("xdg-open", dir);
+                }
+            }
+        }
+        catch (System.Exception)
+        {
+            // No reliable fallback if the file manager cannot be launched;
+            // swallow so the menu does not crash the host.
+        }
+    }
+
+    private void OnCloseClicked(OpenDocument doc, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        e.Handled = true;
+        CloseDocument(doc);
     }
 
     private void OnTabPointerPressed(Border tab, OpenDocument doc, PointerPressedEventArgs e)
