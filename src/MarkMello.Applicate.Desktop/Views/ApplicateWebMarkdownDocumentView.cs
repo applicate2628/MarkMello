@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.Json;
 using System.Text;
 using Avalonia;
@@ -56,6 +57,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _isUpdatingInputs;
     private bool _hasReceivedDocumentReady;
     private int _intentionalReparentDepth;
+    private MarkMello.Presentation.ViewModels.MainWindowViewModel? _mainWindowViewModel;
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -91,7 +93,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         UseLayoutRounding = true;
         ClipToBounds = true;
         ActualThemeVariantChanged += OnThemeChanged;
-        AddHandler(DragDrop.DropEvent, OnDropIntoWebView, handledEventsToo: true);
         AddHandler(KeyDownEvent, OnWebViewKeyDown, handledEventsToo: true);
     }
 
@@ -233,8 +234,35 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         PostRendererMessage(new { type = "scroll-to-block", blockIndex });
     }
 
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+
+        // The WebView2 child HWND occludes any Avalonia overlay that draws in
+        // its rectangle (Windows airspace). The upstream "Unsaved changes"
+        // modal lives in BodyPanel as a sibling overlay and would otherwise
+        // be partially covered. Hide the HWND while that modal is open so the
+        // dialog renders cleanly. Other upstream popups (settings, app menu)
+        // are intentionally non-overlay top-level windows so they already
+        // sit above the WebView and do not need this treatment.
+        _mainWindowViewModel =
+            TopLevel.GetTopLevel(this)?.DataContext as MarkMello.Presentation.ViewModels.MainWindowViewModel;
+        if (_mainWindowViewModel is not null)
+        {
+            _mainWindowViewModel.PropertyChanged += OnMainWindowViewModelPropertyChanged;
+            SyncWebViewAirspaceVisibility();
+        }
+    }
+
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
+        if (_mainWindowViewModel is not null)
+        {
+            _mainWindowViewModel.PropertyChanged -= OnMainWindowViewModelPropertyChanged;
+            _mainWindowViewModel = null;
+            _webView.IsVisible = true;
+        }
+
         // Skip cancelling the in-flight render when the detach is part of an
         // intentional shared-host reparent: the WebView2 instance is kept alive
         // by NativeWebView.BeginReparenting and we want navigation to continue
@@ -246,6 +274,21 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         base.OnDetachedFromVisualTree(e);
+    }
+
+    private void OnMainWindowViewModelPropertyChanged(
+        object? sender,
+        System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MarkMello.Presentation.ViewModels.MainWindowViewModel.IsDirtyPromptOpen))
+        {
+            SyncWebViewAirspaceVisibility();
+        }
+    }
+
+    private void SyncWebViewAirspaceVisibility()
+    {
+        _webView.IsVisible = _mainWindowViewModel?.IsDirtyPromptOpen != true;
     }
 
     /// <summary>
@@ -543,12 +586,121 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (type == "link-clicked")
             {
                 _ = HandleLinkClickedAsync(document.RootElement);
+                return;
+            }
+
+            if (type == "drag-hover")
+            {
+                HandleDragHoverMessage(document.RootElement);
+                return;
+            }
+
+            if (type == "drop-file")
+            {
+                _ = HandleDropFileMessageAsync(document.RootElement);
             }
         }
         catch (JsonException)
         {
             // Ignore malformed renderer messages; the WebView cannot drive shell state through them.
         }
+    }
+
+    private void HandleDragHoverMessage(JsonElement root)
+    {
+        if (!root.TryGetProperty("hovering", out var prop) || prop.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            return;
+        }
+
+        var hovering = prop.GetBoolean();
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel?.DataContext is MarkMello.Presentation.ViewModels.MainWindowViewModel vm)
+        {
+            vm.IsDragHovering = hovering;
+        }
+    }
+
+    private async Task HandleDropFileMessageAsync(JsonElement root)
+    {
+        if (!root.TryGetProperty("name", out var nameProp) || nameProp.ValueKind != JsonValueKind.String
+            || !root.TryGetProperty("text", out var textProp) || textProp.ValueKind != JsonValueKind.String)
+        {
+            return;
+        }
+
+        var name = nameProp.GetString();
+        var text = textProp.GetString();
+        if (string.IsNullOrWhiteSpace(name) || text is null)
+        {
+            return;
+        }
+
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel?.DataContext is not MarkMello.Presentation.ViewModels.MainWindowViewModel vm)
+        {
+            return;
+        }
+
+        // Stamp dropped content into the user's temp folder under the
+        // original filename so the tab tab title matches the source file
+        // and re-dropping the same file dedupes through the existing
+        // OpenDocumentsService FilePath check (which mirrors VM.Document).
+        // When two different files share a name, we add a short content
+        // hash suffix to keep them distinct.
+        var tempDir = Path.Combine(Path.GetTempPath(), "MarkMello", "Dropped");
+        Directory.CreateDirectory(tempDir);
+        var safeName = MakeSafeFileName(name);
+        var tempPath = Path.Combine(tempDir, safeName);
+
+        try
+        {
+            if (File.Exists(tempPath))
+            {
+                var existingContent = await File.ReadAllTextAsync(tempPath, Encoding.UTF8).ConfigureAwait(true);
+                if (!string.Equals(existingContent, text, StringComparison.Ordinal))
+                {
+                    var nameWithoutExt = Path.GetFileNameWithoutExtension(safeName);
+                    var ext = Path.GetExtension(safeName);
+                    var hash = ShortContentHash(text);
+                    tempPath = Path.Combine(tempDir, $"{nameWithoutExt}-{hash}{ext}");
+                    if (!File.Exists(tempPath))
+                    {
+                        await File.WriteAllTextAsync(tempPath, text, Encoding.UTF8).ConfigureAwait(true);
+                    }
+                }
+            }
+            else
+            {
+                await File.WriteAllTextAsync(tempPath, text, Encoding.UTF8).ConfigureAwait(true);
+            }
+
+            await vm.OpenDroppedFileAsync(tempPath).ConfigureAwait(true);
+        }
+        catch
+        {
+            // VM surfaces load errors through its own state; nothing to add here.
+        }
+    }
+
+    private static string MakeSafeFileName(string input)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        Span<char> buffer = stackalloc char[input.Length];
+        for (var i = 0; i < input.Length; i++)
+        {
+            var c = input[i];
+            buffer[i] = Array.IndexOf(invalid, c) >= 0 ? '_' : c;
+        }
+        return new string(buffer);
+    }
+
+    private static string ShortContentHash(string content)
+    {
+        var bytes = Encoding.UTF8.GetBytes(content);
+        Span<byte> hash = stackalloc byte[32];
+        System.Security.Cryptography.SHA256.HashData(bytes, hash);
+        return Convert.ToHexString(hash[..4]).ToLowerInvariant();
     }
 
     private void HandleScrollMessage(JsonElement root)
@@ -980,11 +1132,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
     }
 
-    private static void OnDropIntoWebView(object? sender, DragEventArgs e)
-    {
-        e.Handled = true;
-    }
-
     private static void OnWebViewKeyDown(object? sender, KeyEventArgs e)
     {
         if (e.Key is Key.F5
@@ -1012,7 +1159,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _webView.NewWindowRequested -= OnNewWindowRequested;
         _webView.WebMessageReceived -= OnWebMessageReceived;
         ActualThemeVariantChanged -= OnThemeChanged;
-        RemoveHandler(DragDrop.DropEvent, OnDropIntoWebView);
         RemoveHandler(KeyDownEvent, OnWebViewKeyDown);
         GC.SuppressFinalize(this);
     }

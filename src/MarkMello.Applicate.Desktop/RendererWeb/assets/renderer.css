@@ -1,3 +1,34 @@
+/* Reveal-on-ready: hide the document body until the renderer pipeline
+ * has finished math + mermaid + code-block rendering and posted
+ * layout-ready. Without this, the user sees ~130ms of fallback state
+ * on tab switch and fresh launch: title at a different font size
+ * (web fonts not yet loaded), `\[ ... \]` math placeholders, and the
+ * raw mermaid source code in a code block. The renderer.ts pipeline
+ * adds `mm-rendered` after scheduleLayoutReady has posted, which
+ * fades the body in. CSS transition keeps the reveal soft (120ms).
+ * Safety: scheduleLayoutReady has a 250ms timeout that fires even if
+ * `document.fonts.ready` never resolves, so the body cannot stay
+ * hidden forever.
+ *
+ * Selector is restricted to `body > main.mm-document` because the
+ * minimap clones the .mm-document element via cloneNode and nests
+ * the clone inside `<div class="mm-minimap-content">`. Without the
+ * body-direct-child scope, the clone would also inherit opacity 0
+ * and never receive the mm-rendered toggle, leaving the minimap
+ * permanently blank. */
+body > main.mm-document,
+aside.mm-minimap,
+div.mm-width-handle {
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+body > main.mm-document.mm-rendered,
+aside.mm-minimap.mm-rendered,
+div.mm-width-handle.mm-rendered {
+  opacity: 1;
+}
+
 :root {
   color-scheme: light dark;
   --mm-document-font-size: 18px;
@@ -8,6 +39,8 @@
   --mm-document-font-family-sans: "Inter Tight", "Segoe UI Variable", "Segoe UI", Inter, system-ui, sans-serif;
   --mm-document-font-family-mono: "JetBrains Mono", "Cascadia Code", Consolas, Menlo, ui-monospace, monospace;
   --mm-document-font-family: var(--mm-document-font-family-serif);
+  --mm-accent: #BD592F;
+  --mm-accent-soft: #FFE4D4;
   --mm-minimap-width: 136px;
   --mm-minimap-gap: 16px;
   --mm-minimap-accent: color-mix(in srgb, var(--mm-accent, #d46d3d) 88%, transparent);
@@ -26,11 +59,33 @@
 }
 
 :root[data-theme="dark"] {
+  --mm-accent: #E38A67;
+  --mm-accent-soft: #432519;
   --mm-document-text: #e8e6df;
   --mm-document-muted: #a7a39a;
   --mm-document-background: #14110e;
   --mm-document-code-background: rgba(255, 255, 255, 0.08);
   --mm-document-rule: rgba(255, 255, 255, 0.16);
+}
+
+.mm-drop-overlay {
+  position: fixed;
+  inset: 12px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: var(--mm-accent-soft);
+  border: 2px solid var(--mm-accent);
+  border-radius: 10px;
+  color: var(--mm-accent);
+  font-family: var(--mm-document-font-family-sans);
+  font-size: 14px;
+  z-index: 9999;
+}
+
+.mm-drop-overlay[data-visible="true"] {
+  display: flex;
 }
 
 html,

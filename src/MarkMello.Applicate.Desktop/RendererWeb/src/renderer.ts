@@ -56,6 +56,8 @@ type RendererMessage =
   | { type: "viewer-interaction" }
   | { type: "wheel"; deltaY: number; deltaMode: number }
   | { type: "width-drag"; phase: "start" | "move" | "end"; deltaX: number }
+  | { type: "drag-hover"; hovering: boolean }
+  | { type: "drop-file"; name: string; text: string }
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number };
 
 type MinimapMode = "auto" | "on" | "off";
@@ -316,6 +318,27 @@ function postLayoutReady(): void {
     type: "layout-ready",
     ...getScrollState()
   });
+  // Reveal the document body now that math + mermaid + code blocks
+  // have finished rendering and layout has settled. Renderer.css holds
+  // `main.mm-document` at opacity 0 until this class is added, which
+  // hides the ~130ms "fallback" state (web fonts not yet swapped,
+  // KaTeX `\[ ... \]` placeholders, raw mermaid source) that would
+  // otherwise be visible during a tab switch or fresh launch. See the
+  // .mm-rendered rule in renderer.css for the reveal transition.
+  document.querySelector("main.mm-document")?.classList.add("mm-rendered");
+  // Also reveal the minimap aside. CSS keeps it at opacity 0 until this
+  // class is added so the user does not see the Phase A → Phase B
+  // minimap rebuild flash (Phase A captures the doc immediately after
+  // initialVisibleReady, Phase B re-clones after allMathRendered if
+  // heights changed). With this gate the minimap fades in once with
+  // the body.
+  document.querySelector("aside.mm-minimap")?.classList.add("mm-rendered");
+  // Also reveal the width-resizer handle. Without this fade, the handle
+  // is positioned during the blank-fade window using a documentRect with
+  // partial layout (math/mermaid not yet rendered), producing a vertical
+  // bar at the wrong X coordinate that flashes for a frame during the
+  // transition.
+  document.querySelector("div.mm-width-handle")?.classList.add("mm-rendered");
 }
 
 function scheduleLayoutReady(): void {
@@ -400,10 +423,16 @@ function updateWidthHandlePosition(): void {
   const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
   const minimapReservedWidth = getCurrentMinimapReservedWidth();
   const documentRect = documentElement.getBoundingClientRect();
-  const documentColumnRight = documentRect.right - minimapReservedWidth;
-  const maxLeftBeforeMinimap = window.innerWidth - minimapReservedWidth - hitArea;
-  const maxLeft = Math.max(0, Math.min(window.innerWidth - hitArea, maxLeftBeforeMinimap));
-  const clampedLeft = Math.max(0, Math.min(maxLeft, documentColumnRight));
+  // documentRect already includes the 72px padding around the text. Push the
+  // hit area further right by a small grace so the visible track sits in
+  // the gap between the document container and the minimap (or the viewport
+  // edge when minimap is hidden) instead of biting into the right padding
+  // band that occasionally surfaces wide characters at narrow widths.
+  const trackGraceRight = 4;
+  const idealHandleLeft = documentRect.right + trackGraceRight;
+  const minimapLeftEdge = window.innerWidth - minimapReservedWidth;
+  const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
+  const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
   widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
 }
 
@@ -1001,6 +1030,106 @@ function wireWheelProxy(): void {
   }, { capture: true, passive: false });
 }
 
+// File drop on viewer body — bridges Windows OLE drop (which is captured
+// by the WebView2 HWND and never reaches the Avalonia parent) to the host
+// via JS. Visual: in-page overlay matching the upstream IsDragHovering
+// Border. Behaviour: read dropped .md/.markdown file content, post it to
+// the host, which writes a temp file and routes through the existing
+// MainWindowViewModel.OpenDroppedFileAsync pipeline.
+const MARKDOWN_EXTENSIONS = [".md", ".markdown", ".mdown", ".markdn"] as const;
+const DROP_OVERLAY_ID = "mm-drop-overlay";
+const DROP_OVERLAY_TEXT = "Drop your Markdown file to open";
+let dropDragCounter = 0;
+
+function isFileDrag(event: DragEvent): boolean {
+  const types = event.dataTransfer?.types;
+  if (!types) return false;
+  for (let i = 0; i < types.length; i++) {
+    if (types[i] === "Files") return true;
+  }
+  return false;
+}
+
+function isMarkdownFileName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return MARKDOWN_EXTENSIONS.some(ext => lower.endsWith(ext));
+}
+
+function ensureDropOverlay(): HTMLElement {
+  const existing = document.getElementById(DROP_OVERLAY_ID);
+  if (existing) return existing;
+  const node = document.createElement("div");
+  node.id = DROP_OVERLAY_ID;
+  node.className = "mm-drop-overlay";
+  node.textContent = DROP_OVERLAY_TEXT;
+  // Append to documentElement so the overlay survives even when body is
+  // briefly empty during a re-render.
+  (document.body ?? document.documentElement).appendChild(node);
+  return node;
+}
+
+function setDropOverlayVisible(visible: boolean): void {
+  const node = ensureDropOverlay();
+  if (visible) {
+    node.setAttribute("data-visible", "true");
+  } else {
+    node.removeAttribute("data-visible");
+  }
+}
+
+function wireFileDrop(): void {
+  document.addEventListener("dragenter", (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dropDragCounter++;
+    if (dropDragCounter === 1) {
+      setDropOverlayVisible(true);
+      postHostMessage({ type: "drag-hover", hovering: true });
+    }
+  });
+
+  document.addEventListener("dragover", (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "copy";
+    }
+  });
+
+  document.addEventListener("dragleave", (event) => {
+    if (!isFileDrag(event)) return;
+    dropDragCounter--;
+    if (dropDragCounter <= 0) {
+      dropDragCounter = 0;
+      setDropOverlayVisible(false);
+      postHostMessage({ type: "drag-hover", hovering: false });
+    }
+  });
+
+  document.addEventListener("drop", async (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dropDragCounter = 0;
+    setDropOverlayVisible(false);
+    postHostMessage({ type: "drag-hover", hovering: false });
+
+    const files = event.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    for (let i = 0; i < files.length; i++) {
+      const file = files.item(i);
+      if (file && isMarkdownFileName(file.name)) {
+        try {
+          const text = await file.text();
+          postHostMessage({ type: "drop-file", name: file.name, text });
+        } catch {
+          // Ignore unreadable file; user can retry.
+        }
+        return;
+      }
+    }
+  });
+}
+
 document.addEventListener("securitypolicyviolation", (e) => {
   postHostMessage({
     type: "csp-violation",
@@ -1023,6 +1152,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireLinks();
   wireViewerInteraction();
   wireWheelProxy();
+  wireFileDrop();
   postHostMessage({
     type: "document-ready",
     mathCount: document.querySelectorAll("[data-tex]").length

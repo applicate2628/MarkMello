@@ -680,6 +680,9 @@
       type: "layout-ready",
       ...getScrollState()
     });
+    document.querySelector("main.mm-document")?.classList.add("mm-rendered");
+    document.querySelector("aside.mm-minimap")?.classList.add("mm-rendered");
+    document.querySelector("div.mm-width-handle")?.classList.add("mm-rendered");
   }
   function scheduleLayoutReady() {
     const generation = ++layoutReadyGeneration;
@@ -750,10 +753,11 @@
     const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
     const minimapReservedWidth = getCurrentMinimapReservedWidth();
     const documentRect = documentElement.getBoundingClientRect();
-    const documentColumnRight = documentRect.right - minimapReservedWidth;
-    const maxLeftBeforeMinimap = window.innerWidth - minimapReservedWidth - hitArea;
-    const maxLeft = Math.max(0, Math.min(window.innerWidth - hitArea, maxLeftBeforeMinimap));
-    const clampedLeft = Math.max(0, Math.min(maxLeft, documentColumnRight));
+    const trackGraceRight = 4;
+    const idealHandleLeft = documentRect.right + trackGraceRight;
+    const minimapLeftEdge = window.innerWidth - minimapReservedWidth;
+    const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
+    const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
     widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
   }
   function postWidthDragMove() {
@@ -1202,6 +1206,87 @@
       event.preventDefault();
     }, { capture: true, passive: false });
   }
+  var MARKDOWN_EXTENSIONS = [".md", ".markdown", ".mdown", ".markdn"];
+  var DROP_OVERLAY_ID = "mm-drop-overlay";
+  var DROP_OVERLAY_TEXT = "Drop your Markdown file to open";
+  var dropDragCounter = 0;
+  function isFileDrag(event) {
+    const types = event.dataTransfer?.types;
+    if (!types) return false;
+    for (let i = 0; i < types.length; i++) {
+      if (types[i] === "Files") return true;
+    }
+    return false;
+  }
+  function isMarkdownFileName(name) {
+    const lower = name.toLowerCase();
+    return MARKDOWN_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  }
+  function ensureDropOverlay() {
+    const existing = document.getElementById(DROP_OVERLAY_ID);
+    if (existing) return existing;
+    const node = document.createElement("div");
+    node.id = DROP_OVERLAY_ID;
+    node.className = "mm-drop-overlay";
+    node.textContent = DROP_OVERLAY_TEXT;
+    (document.body ?? document.documentElement).appendChild(node);
+    return node;
+  }
+  function setDropOverlayVisible(visible) {
+    const node = ensureDropOverlay();
+    if (visible) {
+      node.setAttribute("data-visible", "true");
+    } else {
+      node.removeAttribute("data-visible");
+    }
+  }
+  function wireFileDrop() {
+    document.addEventListener("dragenter", (event) => {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      dropDragCounter++;
+      if (dropDragCounter === 1) {
+        setDropOverlayVisible(true);
+        postHostMessage({ type: "drag-hover", hovering: true });
+      }
+    });
+    document.addEventListener("dragover", (event) => {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "copy";
+      }
+    });
+    document.addEventListener("dragleave", (event) => {
+      if (!isFileDrag(event)) return;
+      dropDragCounter--;
+      if (dropDragCounter <= 0) {
+        dropDragCounter = 0;
+        setDropOverlayVisible(false);
+        postHostMessage({ type: "drag-hover", hovering: false });
+      }
+    });
+    document.addEventListener("drop", async (event) => {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      dropDragCounter = 0;
+      setDropOverlayVisible(false);
+      postHostMessage({ type: "drag-hover", hovering: false });
+      const files = event.dataTransfer?.files;
+      if (!files || files.length === 0) return;
+      for (let i = 0; i < files.length; i++) {
+        const file = files.item(i);
+        if (file && isMarkdownFileName(file.name)) {
+          try {
+            const text = await file.text();
+            postHostMessage({ type: "drop-file", name: file.name, text });
+          } catch {
+          }
+          return;
+        }
+      }
+    });
+  }
   document.addEventListener("securitypolicyviolation", (e) => {
     postHostMessage({
       type: "csp-violation",
@@ -1221,6 +1306,7 @@
     wireLinks();
     wireViewerInteraction();
     wireWheelProxy();
+    wireFileDrop();
     postHostMessage({
       type: "document-ready",
       mathCount: document.querySelectorAll("[data-tex]").length

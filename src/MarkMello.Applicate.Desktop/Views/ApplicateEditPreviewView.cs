@@ -1,9 +1,15 @@
+using System;
 using System.ComponentModel;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MarkMello.Applicate.Desktop.Rendering;
@@ -37,6 +43,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private ScrollBarVisibility? _hostScrollViewerVerticalMode;
     private TextBox? _editorTextBox;
     private ScrollViewer? _editorScrollViewer;
+    private TextBox? _dropTargetTextBox;
     private bool _isAttachedToHost;
     private bool _webPreviewFailed;
     private bool _hostEventsWired;
@@ -207,6 +214,249 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         _editorTextBox = null;
     }
 
+    private static readonly string[] MarkdownInsertExtensions =
+        new[] { ".md", ".markdown", ".mdown", ".markdn", ".txt" };
+
+    private static readonly string[] ImageInsertExtensions =
+        new[] { ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg" };
+
+    private void EnsureEditorDropWiring()
+    {
+        if (_dropTargetTextBox is not null)
+        {
+            return;
+        }
+
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null)
+        {
+            return;
+        }
+
+        var textBox = topLevel.GetVisualDescendants()
+            .OfType<TextBox>()
+            .FirstOrDefault(static tb => string.Equals(tb.Name, "EditorTextBox", StringComparison.Ordinal));
+        if (textBox is null)
+        {
+            return;
+        }
+
+        DragDrop.SetAllowDrop(textBox, true);
+        textBox.AddHandler(DragDrop.DragOverEvent, OnEditorDragOver);
+        textBox.AddHandler(DragDrop.DropEvent, OnEditorDrop);
+        _dropTargetTextBox = textBox;
+    }
+
+    private void TeardownEditorDropWiring()
+    {
+        if (_dropTargetTextBox is null)
+        {
+            return;
+        }
+
+        _dropTargetTextBox.RemoveHandler(DragDrop.DragOverEvent, OnEditorDragOver);
+        _dropTargetTextBox.RemoveHandler(DragDrop.DropEvent, OnEditorDrop);
+        _dropTargetTextBox = null;
+    }
+
+    private void OnEditorDragOver(object? sender, DragEventArgs e)
+    {
+        if (TryGetFirstFilePath(e) is { Length: > 0 } path
+            && IsInsertableFile(path))
+        {
+            e.DragEffects = DragDropEffects.Copy;
+            e.Handled = true;
+        }
+    }
+
+    private async void OnEditorDrop(object? sender, DragEventArgs e)
+    {
+        if (_session is null || _dropTargetTextBox is null)
+        {
+            return;
+        }
+
+        var path = TryGetFirstFilePath(e);
+        if (string.IsNullOrEmpty(path) || !IsInsertableFile(path))
+        {
+            return;
+        }
+
+        try
+        {
+            var insertText = await BuildInsertTextAsync(path, _session.CurrentPath).ConfigureAwait(true);
+            if (string.IsNullOrEmpty(insertText))
+            {
+                return;
+            }
+            InsertAtCaret(insertText);
+            e.Handled = true;
+        }
+        catch
+        {
+            // Best-effort: an unreadable file just no-ops; user can retry.
+        }
+    }
+
+    private static string? TryGetFirstFilePath(DragEventArgs e)
+    {
+        var files = e.DataTransfer.TryGetFiles();
+        if (files is null)
+        {
+            return null;
+        }
+
+        foreach (var item in files)
+        {
+            if (item is IStorageFile file)
+            {
+                var path = file.TryGetLocalPath();
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    return path;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsInsertableFile(string path)
+    {
+        var ext = Path.GetExtension(path).ToLowerInvariant();
+        return MarkdownInsertExtensions.Contains(ext) || ImageInsertExtensions.Contains(ext);
+    }
+
+    private static async Task<string?> BuildInsertTextAsync(string sourcePath, string? currentDocumentPath)
+    {
+        var ext = Path.GetExtension(sourcePath).ToLowerInvariant();
+
+        if (ImageInsertExtensions.Contains(ext))
+        {
+            return await BuildImageInsertAsync(sourcePath, currentDocumentPath, ext).ConfigureAwait(true);
+        }
+
+        if (MarkdownInsertExtensions.Contains(ext))
+        {
+            return await File.ReadAllTextAsync(sourcePath).ConfigureAwait(true);
+        }
+
+        return null;
+    }
+
+    private static async Task<string> BuildImageInsertAsync(
+        string sourcePath,
+        string? currentDocumentPath,
+        string ext)
+    {
+        var altText = Path.GetFileNameWithoutExtension(sourcePath);
+
+        // Default: copy the image next to the markdown under an `images/`
+        // subdirectory and emit a relative reference. Base64 inlining bloats
+        // the document and slows rendering, so we only fall back to it when
+        // the host document has not been saved yet (no anchor directory).
+        var documentDirectory = string.IsNullOrWhiteSpace(currentDocumentPath)
+            ? null
+            : Path.GetDirectoryName(currentDocumentPath);
+
+        if (!string.IsNullOrWhiteSpace(documentDirectory) && Directory.Exists(documentDirectory))
+        {
+            var imagesDir = Path.Combine(documentDirectory, "images");
+            Directory.CreateDirectory(imagesDir);
+
+            var fileName = Path.GetFileName(sourcePath);
+            var targetPath = Path.Combine(imagesDir, fileName);
+            var sourceBytes = await File.ReadAllBytesAsync(sourcePath).ConfigureAwait(true);
+
+            targetPath = await ReserveTargetPathAsync(targetPath, sourceBytes).ConfigureAwait(true);
+
+            if (!File.Exists(targetPath))
+            {
+                await File.WriteAllBytesAsync(targetPath, sourceBytes).ConfigureAwait(true);
+            }
+
+            var relative = "images/" + Path.GetFileName(targetPath).Replace('\\', '/');
+            return $"![{altText}]({relative})";
+        }
+
+        // Untitled or unwritable directory: fall back to base64 so the user
+        // still gets a working reference.
+        var bytes = await File.ReadAllBytesAsync(sourcePath).ConfigureAwait(true);
+        var base64 = Convert.ToBase64String(bytes);
+        var mime = MimeTypeFromExtension(ext);
+        return $"![{altText}](data:{mime};base64,{base64})";
+    }
+
+    private static async Task<string> ReserveTargetPathAsync(string desiredPath, byte[] sourceBytes)
+    {
+        if (File.Exists(desiredPath))
+        {
+            var existing = await File.ReadAllBytesAsync(desiredPath).ConfigureAwait(true);
+            if (existing.AsSpan().SequenceEqual(sourceBytes))
+            {
+                return desiredPath;
+            }
+
+            var directory = Path.GetDirectoryName(desiredPath)!;
+            var nameOnly = Path.GetFileNameWithoutExtension(desiredPath);
+            var extension = Path.GetExtension(desiredPath);
+            for (var i = 1; i < 1000; i++)
+            {
+                var candidate = Path.Combine(directory, $"{nameOnly}-{i}{extension}");
+                if (!File.Exists(candidate))
+                {
+                    return candidate;
+                }
+                var candidateBytes = await File.ReadAllBytesAsync(candidate).ConfigureAwait(true);
+                if (candidateBytes.AsSpan().SequenceEqual(sourceBytes))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        return desiredPath;
+    }
+
+    private static string MimeTypeFromExtension(string ext) => ext switch
+    {
+        ".png" => "image/png",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".gif" => "image/gif",
+        ".webp" => "image/webp",
+        ".bmp" => "image/bmp",
+        ".svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    };
+
+    private void InsertAtCaret(string insertText)
+    {
+        if (_session is null || _dropTargetTextBox is null)
+        {
+            return;
+        }
+
+        var caret = _dropTargetTextBox.CaretIndex;
+        var currentText = _session.SourceText;
+        if (caret < 0 || caret > currentText.Length)
+        {
+            caret = currentText.Length;
+        }
+
+        _session.SourceText = currentText.Insert(caret, insertText);
+
+        var newCaret = caret + insertText.Length;
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_dropTargetTextBox is null)
+            {
+                return;
+            }
+            _dropTargetTextBox.CaretIndex = SysMath.Min(newCaret, _dropTargetTextBox.Text?.Length ?? 0);
+            _dropTargetTextBox.Focus();
+        }, DispatcherPriority.Background);
+    }
+
     private void OnEditorScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
         if (!_syncEnabled)
@@ -315,6 +565,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         base.OnAttachedToVisualTree(e);
         AttachSession(DataContext as EditorSessionViewModel);
         UpdateHostScrollMode();
+        Dispatcher.UIThread.Post(EnsureEditorDropWiring, DispatcherPriority.Background);
     }
 
     protected override void OnSizeChanged(SizeChangedEventArgs e)
@@ -326,6 +577,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         RestoreHostScrollMode();
+        TeardownEditorDropWiring();
         TeardownEditorWiring();
         AttachSession(null);
         _webRenderTimer.Stop();

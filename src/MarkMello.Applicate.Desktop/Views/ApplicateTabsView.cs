@@ -1,0 +1,571 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.Specialized;
+using System.Linq;
+using Avalonia;
+using Avalonia.Animation;
+using Avalonia.Animation.Easings;
+using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Input;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Media.Transformation;
+using Avalonia.Platform.Storage;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
+using MarkMello.Applicate.Desktop.Editing;
+
+namespace MarkMello.Applicate.Desktop.Views;
+
+/// <summary>
+/// Code-only tabs strip rendered above the document area. Subscribes to
+/// <see cref="IOpenDocumentsService"/> and reflects the open document
+/// list: click a tab to activate, click <c>×</c> to close, click
+/// <c>+</c> to open a new file via the OS file picker, and drag a tab
+/// horizontally to reorder it within the strip.
+/// </summary>
+internal sealed class ApplicateTabsView : UserControl
+{
+    private static readonly FilePickerFileType MarkdownFileType = new("Markdown")
+    {
+        Patterns = new[] { "*.md", "*.markdown", "*.txt" }
+    };
+
+    private static readonly FilePickerFileType[] PickerFilters = new[] { MarkdownFileType };
+
+    // Pointer travel before a press becomes a drag. Below threshold the
+    // press is still treated as a click so tab activation keeps working
+    // when the user lets go without intentionally dragging.
+    private const double DragThresholdPixels = 5.0;
+
+    // Stack panel gap between tab borders (mirrors _tabsPanel.Spacing).
+    // When the dragged tab moves N slots over, neighbors translate by
+    // (DraggedTabWidth + TabSpacingPixels) to fill the gap.
+    private const double TabSpacingPixels = 4.0;
+
+    // Animation timing for non-dragged tabs sliding into a new slot.
+    // Short enough to feel responsive, long enough to read as motion.
+    private static readonly TimeSpan ReorderAnimationDuration = TimeSpan.FromMilliseconds(160);
+
+    private readonly IOpenDocumentsService _openDocsService;
+    private readonly StackPanel _tabsPanel;
+    private readonly Button _addButton;
+    private readonly Dictionary<Control, OpenDocument> _tabToDocument = new();
+
+    private DragState? _dragState;
+
+    public ApplicateTabsView(IOpenDocumentsService openDocsService)
+    {
+        _openDocsService = openDocsService ?? throw new ArgumentNullException(nameof(openDocsService));
+
+        MinHeight = 36;
+        Background = new SolidColorBrush(Colors.Transparent);
+
+        _tabsPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 4,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            Margin = new Thickness(6, 4, 6, 0)
+        };
+
+        var scroll = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Content = _tabsPanel
+        };
+
+        _addButton = BuildAddButton();
+        ToolTip.SetTip(_addButton, "Open file");
+        _addButton.Click += async (_, _) => await OnAddClickAsync().ConfigureAwait(true);
+
+        var root = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto")
+        };
+        Grid.SetColumn(scroll, 0);
+        Grid.SetColumn(_addButton, 1);
+        root.Children.Add(scroll);
+        root.Children.Add(_addButton);
+
+        // Bottom border separates the tabs strip from the document body
+        // and gives the active tab a clear baseline to "merge" into.
+        var rootBorder = new Border
+        {
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            BorderBrush = ResolveBrush("MmBorderBrush"),
+            Background = ResolveBrush("MmSurfaceBrush"),
+            Child = root
+        };
+        Content = rootBorder;
+
+        AttachedToVisualTree += OnAttached;
+        DetachedFromVisualTree += OnDetached;
+    }
+
+    private static Button BuildAddButton()
+    {
+        return new Button
+        {
+            Content = "+",
+            Padding = new Thickness(10, 4, 10, 4),
+            Margin = new Thickness(0, 4, 6, 4),
+            VerticalAlignment = VerticalAlignment.Center,
+            FontSize = 14,
+            FontWeight = FontWeight.Bold,
+            Background = ResolveBrush("MmBackgroundBrush"),
+            BorderBrush = ResolveBrush("MmBorderBrush"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(4),
+            Cursor = new Cursor(StandardCursorType.Hand)
+        };
+    }
+
+    private void OnAttached(object? sender, VisualTreeAttachmentEventArgs e)
+    {
+        ((INotifyCollectionChanged)_openDocsService.OpenDocuments).CollectionChanged += OnOpenDocumentsChanged;
+        _openDocsService.ActiveDocumentChanged += OnActiveDocumentChanged;
+        Rebuild();
+    }
+
+    private void OnDetached(object? sender, VisualTreeAttachmentEventArgs e)
+    {
+        ((INotifyCollectionChanged)_openDocsService.OpenDocuments).CollectionChanged -= OnOpenDocumentsChanged;
+        _openDocsService.ActiveDocumentChanged -= OnActiveDocumentChanged;
+        CancelDrag();
+    }
+
+    private void OnOpenDocumentsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+        => Dispatcher.UIThread.Post(Rebuild);
+
+    private void OnActiveDocumentChanged(object? sender, ActiveDocumentChangedEventArgs e)
+        => Dispatcher.UIThread.Post(Rebuild);
+
+    private void Rebuild()
+    {
+        CancelDrag();
+        _tabsPanel.Children.Clear();
+        _tabToDocument.Clear();
+
+        foreach (var doc in _openDocsService.OpenDocuments)
+        {
+            var tab = BuildTab(doc);
+            _tabToDocument[tab] = doc;
+            _tabsPanel.Children.Add(tab);
+        }
+    }
+
+    private Control BuildTab(OpenDocument doc)
+    {
+        var isActive = ReferenceEquals(doc, _openDocsService.ActiveDocument);
+
+        var label = new TextBlock
+        {
+            Text = doc.DisplayName,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(10, 0, 4, 0),
+            FontWeight = isActive ? FontWeight.SemiBold : FontWeight.Normal,
+            Foreground = isActive
+                ? ResolveBrush("MmTextBrush")
+                : ResolveBrush("MmTextBrush")
+        };
+
+        var closeButton = new Button
+        {
+            Content = "×",
+            Width = 18,
+            Height = 18,
+            Padding = new Thickness(0),
+            Margin = new Thickness(4, 0, 6, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Background = new SolidColorBrush(Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            FontSize = 14,
+            CornerRadius = new CornerRadius(3)
+        };
+        ToolTip.SetTip(closeButton, "Close");
+        closeButton.Click += (_, e) => OnCloseClicked(doc, e);
+
+        var tabContent = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            VerticalAlignment = VerticalAlignment.Stretch
+        };
+        Grid.SetColumn(label, 0);
+        Grid.SetColumn(closeButton, 1);
+        tabContent.Children.Add(label);
+        tabContent.Children.Add(closeButton);
+
+        // Active tab pops out: brighter background (MmBackgroundBrush) than
+        // the strip surface, and merges into the body below by having no
+        // bottom border. Inactive tabs use the muted surface tone and a
+        // full border so they read as "behind" the active one.
+        var tab = new Border
+        {
+            Padding = new Thickness(0),
+            MinWidth = 100,
+            MinHeight = 28,
+            Child = tabContent,
+            Cursor = new Cursor(StandardCursorType.Hand),
+            CornerRadius = new CornerRadius(6, 6, 0, 0),
+            Background = isActive
+                ? ResolveBrush("MmBackgroundBrush")
+                : ResolveBrush("MmSurfaceBrush"),
+            BorderBrush = ResolveBrush("MmBorderBrush"),
+            BorderThickness = isActive
+                ? new Thickness(1, 1, 1, 0)
+                : new Thickness(1, 1, 1, 1)
+        };
+        ToolTip.SetTip(tab, doc.FilePath);
+
+        tab.PointerPressed += (s, e) => OnTabPointerPressed(tab, doc, e);
+        tab.PointerMoved += (s, e) => OnTabPointerMoved(tab, e);
+        tab.PointerReleased += (s, e) => OnTabPointerReleased(tab, doc, e);
+        tab.PointerCaptureLost += (s, e) => CancelDrag();
+
+        return tab;
+    }
+
+    private void OnCloseClicked(OpenDocument doc, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        e.Handled = true;
+
+        // If the user is closing the currently-active tab, route the
+        // close through the upstream VM so the "Unsaved changes" prompt
+        // can prevent the close if the user cancels. The bridge mirrors
+        // the resulting VM.Document = null back into the service, so
+        // the tab disappears only after the prompt is resolved.
+        // Without this, service.Close runs first and the tab is gone
+        // even if the user clicks "Cancel" on the prompt.
+        if (ReferenceEquals(doc, _openDocsService.ActiveDocument)
+            && TopLevel.GetTopLevel(this)?.DataContext
+                is MarkMello.Presentation.ViewModels.MainWindowViewModel vm
+            && vm.CloseFileCommand.CanExecute(null))
+        {
+            vm.CloseFileCommand.Execute(null);
+            return;
+        }
+
+        _openDocsService.Close(doc);
+    }
+
+    private void OnTabPointerPressed(Border tab, OpenDocument doc, PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(tab).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        var initialIndex = _openDocsService.OpenDocuments.IndexOf(doc);
+        if (initialIndex < 0)
+        {
+            return;
+        }
+
+        _dragState = new DragState(
+            Document: doc,
+            Tab: tab,
+            PressedInStrip: e.GetPosition(_tabsPanel),
+            IsActiveDrag: false,
+            InitialIndex: initialIndex,
+            DraggedTabWidth: tab.Bounds.Width,
+            CurrentVisualIndex: initialIndex);
+    }
+
+    private void OnTabPointerMoved(Border tab, PointerEventArgs e)
+    {
+        if (_dragState is null || !ReferenceEquals(_dragState.Tab, tab))
+        {
+            return;
+        }
+
+        var current = e.GetPosition(_tabsPanel);
+        if (!_dragState.IsActiveDrag)
+        {
+            var dx0 = current.X - _dragState.PressedInStrip.X;
+            var dy0 = current.Y - _dragState.PressedInStrip.Y;
+            if (System.Math.Sqrt((dx0 * dx0) + (dy0 * dy0)) < DragThresholdPixels)
+            {
+                return;
+            }
+
+            _dragState = _dragState with
+            {
+                IsActiveDrag = true,
+                DraggedTabWidth = tab.Bounds.Width
+            };
+            e.Pointer.Capture(tab);
+
+            // Lift the dragged tab above neighbors so its body slides over
+            // them instead of being clipped, and hint at "picked up" state
+            // with a slight opacity change. The dragged tab itself has no
+            // RenderTransform Transitions because the cursor must track it
+            // instantly; only the OTHER tabs animate during reorder.
+            tab.ZIndex = 100;
+            tab.Opacity = 0.92;
+            InstallReorderTransitionsOnNeighbors();
+        }
+
+        // Translate the dragged tab to follow the cursor.
+        var dx = current.X - _dragState.PressedInStrip.X;
+        tab.RenderTransform = new TranslateTransform(dx, 0);
+
+        // Recompute target index from the dragged tab's CURRENT visual
+        // center, not from the cursor X. Otherwise the press-anchor
+        // offset inside the tab biases the drop trigger: a user who
+        // grabs the left edge and drags right would see the tab body
+        // overlap the neighbor BEFORE the cursor crosses that
+        // neighbor's center, so displacement would not fire until too
+        // late. Using the dragged tab's center makes the trigger
+        // boundary match the visual edge of the dragged tab.
+        var draggedVisualCenterX = tab.Bounds.X + (tab.Bounds.Width / 2.0) + dx;
+        var newVisualIndex = ComputeTargetIndexFromVisualCenter(draggedVisualCenterX);
+        if (newVisualIndex != _dragState.CurrentVisualIndex)
+        {
+            _dragState = _dragState with { CurrentVisualIndex = newVisualIndex };
+            ApplyNeighborDisplacement(newVisualIndex);
+        }
+    }
+
+    private void OnTabPointerReleased(Border tab, OpenDocument doc, PointerReleasedEventArgs e)
+    {
+        if (_dragState is null || !ReferenceEquals(_dragState.Tab, tab))
+        {
+            // Released without an active drag context (or on a different
+            // tab — Avalonia routed it here because we captured pointer).
+            ActivateIfClickOnly(doc);
+            CancelDrag();
+            return;
+        }
+
+        if (!_dragState.IsActiveDrag)
+        {
+            // Below drag threshold → treat as a plain click and activate.
+            ActivateIfClickOnly(doc);
+            CancelDrag();
+            return;
+        }
+
+        // Snapshot ALL needed dragState fields BEFORE releasing pointer
+        // capture. Capture(null) raises PointerCaptureLost on the tab,
+        // which calls CancelDrag and nulls _dragState — any subsequent
+        // _dragState.* dereference throws NullReferenceException.
+        var draggedDocument = _dragState.Document;
+        var targetIndex = _dragState.CurrentVisualIndex;
+        var initialIndex = _dragState.InitialIndex;
+        e.Pointer.Capture(null);
+
+        if (targetIndex >= 0 && targetIndex != initialIndex)
+        {
+            _openDocsService.Move(draggedDocument, targetIndex);
+            // Rebuild fires from CollectionChanged → fresh borders without
+            // transforms or transitions. CancelDrag below is then a no-op
+            // because Rebuild already cleared _dragState.
+        }
+
+        CancelDrag();
+    }
+
+    private void ActivateIfClickOnly(OpenDocument doc)
+    {
+        _openDocsService.Activate(doc);
+    }
+
+    private int ComputeTargetIndexFromVisualCenter(double draggedCenterX)
+    {
+        if (_dragState is null)
+        {
+            return -1;
+        }
+
+        // For each non-dragged tab, take its ORIGINAL (pre-drag) center X
+        // (i.e. its layout position with the dragged tab still in place).
+        // The dragged tab's final index is the count of non-dragged tabs
+        // whose original centers are to the left of the dragged tab's
+        // visual center.
+        var targetIndex = 0;
+        for (var i = 0; i < _tabsPanel.Children.Count; i++)
+        {
+            var child = _tabsPanel.Children[i] as Control;
+            if (child is null || ReferenceEquals(child, _dragState.Tab))
+            {
+                continue;
+            }
+
+            // child.Bounds.X is the StackPanel-layout X (transforms do not
+            // affect Bounds). That is exactly what we want — pre-drag X.
+            var centerX = child.Bounds.X + (child.Bounds.Width / 2.0);
+            if (draggedCenterX > centerX)
+            {
+                targetIndex++;
+            }
+        }
+
+        return targetIndex;
+    }
+
+    private void InstallReorderTransitionsOnNeighbors()
+    {
+        if (_dragState?.Tab is not { } draggedTab)
+        {
+            return;
+        }
+
+        foreach (var child in _tabsPanel.Children.OfType<Border>())
+        {
+            if (ReferenceEquals(child, draggedTab))
+            {
+                continue;
+            }
+
+            child.Transitions ??= new Transitions
+            {
+                new TransformOperationsTransition
+                {
+                    Property = Visual.RenderTransformProperty,
+                    Duration = ReorderAnimationDuration,
+                    Easing = new CubicEaseOut()
+                }
+            };
+        }
+    }
+
+    private void ApplyNeighborDisplacement(int visualIndex)
+    {
+        if (_dragState is null)
+        {
+            return;
+        }
+
+        var displacement = _dragState.DraggedTabWidth + TabSpacingPixels;
+        var initial = _dragState.InitialIndex;
+
+        for (var i = 0; i < _tabsPanel.Children.Count; i++)
+        {
+            var child = _tabsPanel.Children[i] as Border;
+            if (child is null || ReferenceEquals(child, _dragState.Tab))
+            {
+                continue;
+            }
+
+            // Logic:
+            //  - If dragged moves LEFT (visualIndex < initial), tabs with
+            //    original index in [visualIndex, initial-1] shift RIGHT
+            //    by `displacement` to vacate space at visualIndex.
+            //  - If dragged moves RIGHT (visualIndex > initial), tabs in
+            //    [initial+1, visualIndex] shift LEFT by `displacement`.
+            //  - All other tabs stay put (RenderTransform = identity).
+            double delta = 0;
+            if (visualIndex < initial && i >= visualIndex && i < initial)
+            {
+                delta = displacement;
+            }
+            else if (visualIndex > initial && i > initial && i <= visualIndex)
+            {
+                delta = -displacement;
+            }
+
+            // TransformOperations is required for the transition to lerp
+            // smoothly. TranslateTransform on its own does not animate via
+            // TransformOperationsTransition.
+            child.RenderTransform = TransformOperations.Parse(
+                $"translate({delta.ToString(System.Globalization.CultureInfo.InvariantCulture)}px)");
+        }
+    }
+
+    private void ClearNeighborDisplacement()
+    {
+        if (_dragState?.Tab is not { } draggedTab)
+        {
+            return;
+        }
+
+        foreach (var child in _tabsPanel.Children.OfType<Border>())
+        {
+            if (ReferenceEquals(child, draggedTab))
+            {
+                continue;
+            }
+
+            child.RenderTransform = TransformOperations.Identity;
+        }
+    }
+
+    private void CancelDrag()
+    {
+        // Restore the dragged tab's visual to default. Rebuild() recreates
+        // the Border on a successful Move, but if the drag is cancelled
+        // (pointer capture lost, no Move, or sub-threshold release) the
+        // same Border instance keeps its transform, so we must reset.
+        if (_dragState?.Tab is { } draggedTab)
+        {
+            draggedTab.RenderTransform = null;
+            draggedTab.ZIndex = 0;
+            draggedTab.Opacity = 1.0;
+            ClearNeighborDisplacement();
+        }
+        _dragState = null;
+    }
+
+    private async System.Threading.Tasks.Task OnAddClickAsync()
+    {
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null)
+        {
+            return;
+        }
+
+        var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Open Markdown file",
+            AllowMultiple = false,
+            FileTypeFilter = PickerFilters
+        }).ConfigureAwait(true);
+
+        if (files is null || files.Count == 0)
+        {
+            return;
+        }
+
+        var path = files[0].TryGetLocalPath();
+        if (string.IsNullOrEmpty(path))
+        {
+            return;
+        }
+
+        await _openDocsService.OpenAsync(path).ConfigureAwait(true);
+    }
+
+    private sealed record DragState(
+        OpenDocument Document,
+        Border Tab,
+        Point PressedInStrip,
+        bool IsActiveDrag,
+        int InitialIndex,
+        double DraggedTabWidth,
+        int CurrentVisualIndex);
+
+    private static IBrush ResolveBrush(string resourceKey)
+    {
+        // Resolve the named SolidColorBrush from the active Avalonia theme
+        // resources at build time. The brush picks up the current theme
+        // variant (Light/Dark) when the tab is built. Theme changes during
+        // a session rebuild the tab strip via Activate/Rebuild paths, so a
+        // re-resolve happens on each Rebuild. Fallback color (#888) keeps
+        // tabs readable if the resource is missing (e.g. fork-only build
+        // running before upstream theme is loaded).
+        var app = Avalonia.Application.Current;
+        if (app is not null
+            && app.TryGetResource(resourceKey, app.ActualThemeVariant, out var value)
+            && value is IBrush brush)
+        {
+            return brush;
+        }
+
+        return new SolidColorBrush(Color.FromRgb(0x88, 0x88, 0x88));
+    }
+}

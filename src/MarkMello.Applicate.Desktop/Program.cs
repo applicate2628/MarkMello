@@ -1,6 +1,7 @@
 using Avalonia;
 using MarkMello.Application;
 using MarkMello.Application.Abstractions;
+using MarkMello.Applicate.Desktop.Editing;
 using MarkMello.Applicate.Desktop.Math;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Domain.Diagnostics;
@@ -40,6 +41,8 @@ internal static class Program
         collection.AddSingleton<ApplicateWebAssetEmbedder>();
         collection.AddSingleton<IApplicateHtmlMarkdownRenderer, ApplicateHtmlMarkdownRenderer>();
         collection.AddSingleton<IApplicateSharedWebViewHost, ApplicateSharedWebViewHost>();
+        collection.AddSingleton<IOpenDocumentsService, OpenDocumentsService>();
+        collection.AddSingleton<IApplicateSessionStore>(new JsonApplicateSessionStore());
         collection.AddApplication();
         collection.AddPresentation();
         collection.Replace(ServiceDescriptor.Singleton<MainWindow>(provider => new ApplicateMainWindow(
