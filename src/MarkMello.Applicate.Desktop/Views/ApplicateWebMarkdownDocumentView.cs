@@ -75,7 +75,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     public ApplicateWebMarkdownDocumentView(IApplicateHtmlMarkdownRenderer renderer)
     {
         _renderer = renderer;
-        _webView = new NativeWebView
+        _webView = new ApplicateNativeWebView
         {
             ClipToBounds = true,
             ContextFlyout = null,
