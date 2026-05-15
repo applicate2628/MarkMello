@@ -76,6 +76,35 @@ describe("applyLoadDocument", () => {
   });
 });
 
+describe("applyLoadDocument — chrome survival (Decision 5)", () => {
+  it("preserves minimap aside / width-handle / drop-overlay across body swap", () => {
+    document.body.innerHTML = `
+      <aside class="mm-minimap"></aside>
+      <div class="mm-width-handle" hidden></div>
+      <main class="mm-document"><p>old</p></main>
+      <div id="mm-drop-overlay" class="mm-drop-overlay"></div>
+    `;
+    const minimapBefore = document.querySelector("aside.mm-minimap");
+    const handleBefore = document.querySelector(".mm-width-handle");
+    const overlayBefore = document.querySelector("#mm-drop-overlay");
+
+    applyLoadDocument({ html: "<p>new</p>" }, {
+      runInitialRenderPipeline: () => Promise.resolve(),
+      cancelCurrentMathController: () => {},
+      resetModuleGlobals: () => {},
+      scrollWindowToTop: () => {},
+      emitMark: () => {},
+      ensureChromeNodes: () => {},
+    });
+
+    // Same element identity preserved across the swap.
+    expect(document.querySelector("aside.mm-minimap")).toBe(minimapBefore);
+    expect(document.querySelector(".mm-width-handle")).toBe(handleBefore);
+    expect(document.querySelector("#mm-drop-overlay")).toBe(overlayBefore);
+    expect(document.querySelector("main.mm-document p")?.textContent).toBe("new");
+  });
+});
+
 describe("clearDocumentState", () => {
   it("empties mm-document and resets module globals", () => {
     const deps = makeDeps();
