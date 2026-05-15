@@ -10,6 +10,8 @@ using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views.Minimap;
 using MarkMello.Domain;
+using MarkMello.Presentation;
+using Microsoft.Extensions.DependencyInjection;
 using SysMath = System.Math;
 
 namespace MarkMello.Applicate.Desktop.Views;
@@ -506,6 +508,48 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private void OnNewWindowRequested(object? sender, WebViewNewWindowRequestedEventArgs e)
     {
         e.Handled = true;
+        // The browser context menu "Open link in new window" raises this
+        // event with the requested URL. Route it through the same logic as
+        // a left-click on a link in renderer.js: local markdown files open
+        // as new tabs, external URLs launch via the system default browser.
+        var requestUri = e.Request?.ToString();
+        if (string.IsNullOrWhiteSpace(requestUri))
+        {
+            return;
+        }
+        _ = HandleNewWindowAsync(requestUri);
+    }
+
+    private async System.Threading.Tasks.Task HandleNewWindowAsync(string href)
+    {
+        if (TryResolveLocalMarkdownLink(href, out var resolvedMarkdownPath))
+        {
+            var openDocs = App.Services?.GetService<Editing.IOpenDocumentsService>();
+            if (openDocs is not null)
+            {
+                try
+                {
+                    await openDocs.OpenAsync(resolvedMarkdownPath).ConfigureAwait(true);
+                }
+                catch (System.IO.IOException)
+                {
+                    // File moved or unreadable; silently no-op.
+                }
+                return;
+            }
+        }
+
+        if (!Uri.TryCreate(href, UriKind.Absolute, out var uri)
+            || uri.Scheme is not ("http" or "https" or "mailto"))
+        {
+            return;
+        }
+
+        var launcher = TopLevel.GetTopLevel(this)?.Launcher;
+        if (launcher is not null)
+        {
+            await launcher.LaunchUriAsync(uri).ConfigureAwait(true);
+        }
     }
 
     private void OnWebMessageReceived(object? sender, WebMessageReceivedEventArgs e)
@@ -879,6 +923,27 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
+        // Relative-path links to local markdown/text files (typically inserted
+        // via fork's edit-mode drag-drop) should open as a new tab in the
+        // open-documents service instead of being launched as a web URL.
+        if (TryResolveLocalMarkdownLink(href, out var resolvedMarkdownPath))
+        {
+            var openDocs = App.Services?.GetService<Editing.IOpenDocumentsService>();
+            if (openDocs is not null)
+            {
+                try
+                {
+                    await openDocs.OpenAsync(resolvedMarkdownPath).ConfigureAwait(true);
+                }
+                catch (System.IO.IOException)
+                {
+                    // File moved or unreadable; surface nothing — user sees
+                    // the click had no effect and can investigate manually.
+                }
+                return;
+            }
+        }
+
         if (!Uri.TryCreate(href, UriKind.Absolute, out var uri)
             || uri.Scheme is not ("http" or "https" or "mailto"))
         {
@@ -890,6 +955,61 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             await launcher.LaunchUriAsync(uri).ConfigureAwait(true);
         }
+    }
+
+    private static readonly string[] MarkdownLinkExtensions =
+        { ".md", ".markdown", ".mdown", ".markdn", ".txt" };
+
+    private bool TryResolveLocalMarkdownLink(string href, out string resolvedPath)
+    {
+        resolvedPath = string.Empty;
+
+        // The renderer feeds `target.href` from the anchor element, which the
+        // browser resolves against the document's base URL. For local
+        // generated documents this yields a `file:///...` absolute URI that
+        // points into the temp folder where the renderer HTML lives — not to
+        // the user's source file. Strip the file:// prefix and re-resolve
+        // against the current Source's directory to find the actual file the
+        // user dropped a link to.
+        string candidate;
+        if (Uri.TryCreate(href, UriKind.Absolute, out var uri) && uri.IsFile)
+        {
+            candidate = uri.LocalPath;
+        }
+        else
+        {
+            candidate = href;
+        }
+
+        // Only treat .md/.markdown/.txt as openable in the tabs strip; other
+        // extensions fall through to default browser launch.
+        var ext = System.IO.Path.GetExtension(candidate).ToLowerInvariant();
+        if (!MarkdownLinkExtensions.Contains(ext))
+        {
+            return false;
+        }
+
+        // Resolve relative to the current Source's directory when needed.
+        if (!System.IO.Path.IsPathRooted(candidate))
+        {
+            var sourcePath = Source?.Path;
+            var sourceDir = string.IsNullOrWhiteSpace(sourcePath)
+                ? null
+                : System.IO.Path.GetDirectoryName(sourcePath);
+            if (string.IsNullOrWhiteSpace(sourceDir))
+            {
+                return false;
+            }
+            candidate = System.IO.Path.GetFullPath(System.IO.Path.Combine(sourceDir, candidate));
+        }
+
+        if (!System.IO.File.Exists(candidate))
+        {
+            return false;
+        }
+
+        resolvedPath = candidate;
+        return true;
     }
 
     private void ApplyReadingPreferences()

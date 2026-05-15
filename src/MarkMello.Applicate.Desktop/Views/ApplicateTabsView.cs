@@ -53,6 +53,7 @@ internal sealed class ApplicateTabsView : UserControl
     private readonly StackPanel _tabsPanel;
     private readonly Button _addButton;
     private readonly Dictionary<Control, OpenDocument> _tabToDocument = new();
+    private Border? _rootBorder;
 
     private DragState? _dragState;
 
@@ -93,14 +94,14 @@ internal sealed class ApplicateTabsView : UserControl
 
         // Bottom border separates the tabs strip from the document body
         // and gives the active tab a clear baseline to "merge" into.
-        var rootBorder = new Border
+        _rootBorder = new Border
         {
             BorderThickness = new Thickness(0, 0, 0, 1),
             BorderBrush = ResolveBrush("MmBorderBrush"),
             Background = ResolveBrush("MmSurfaceBrush"),
             Child = root
         };
-        Content = rootBorder;
+        Content = _rootBorder;
 
         AttachedToVisualTree += OnAttached;
         DetachedFromVisualTree += OnDetached;
@@ -128,6 +129,16 @@ internal sealed class ApplicateTabsView : UserControl
     {
         ((INotifyCollectionChanged)_openDocsService.OpenDocuments).CollectionChanged += OnOpenDocumentsChanged;
         _openDocsService.ActiveDocumentChanged += OnActiveDocumentChanged;
+
+        // Tab colours are resolved from the Mm* theme brushes at build time,
+        // so a theme switch leaves them frozen at the old palette (light tabs
+        // in dark mode). Listen for the application's theme variant change
+        // and rebuild the strip with fresh colours each time.
+        if (Avalonia.Application.Current is { } app)
+        {
+            app.ActualThemeVariantChanged += OnThemeVariantChanged;
+        }
+
         Rebuild();
     }
 
@@ -135,7 +146,41 @@ internal sealed class ApplicateTabsView : UserControl
     {
         ((INotifyCollectionChanged)_openDocsService.OpenDocuments).CollectionChanged -= OnOpenDocumentsChanged;
         _openDocsService.ActiveDocumentChanged -= OnActiveDocumentChanged;
+        if (Avalonia.Application.Current is { } app)
+        {
+            app.ActualThemeVariantChanged -= OnThemeVariantChanged;
+        }
         CancelDrag();
+    }
+
+    private void OnThemeVariantChanged(object? sender, EventArgs e)
+        => Dispatcher.UIThread.Post(ApplyThemeColours);
+
+    private void ApplyThemeColours()
+    {
+        // Refresh ALL theme-bound brushes in place. Rebuilding the tabs
+        // strip on theme change causes a visible chunky transition because
+        // children are recreated sequentially; updating in place re-tints
+        // every tab atomically.
+        if (_rootBorder is not null)
+        {
+            _rootBorder.BorderBrush = ResolveBrush("MmBorderBrush");
+            _rootBorder.Background = ResolveBrush("MmSurfaceBrush");
+        }
+        _addButton.Background = ResolveBrush("MmBackgroundBrush");
+        _addButton.BorderBrush = ResolveBrush("MmBorderBrush");
+
+        var borderBrush = ResolveBrush("MmBorderBrush");
+        var activeBg = ResolveBrush("MmBackgroundBrush");
+        var inactiveBg = ResolveBrush("MmSurfaceBrush");
+        foreach (var tab in _tabsPanel.Children.OfType<Border>())
+        {
+            var doc = _tabToDocument.TryGetValue(tab, out var d) ? d : null;
+            var isActive = doc is not null
+                && ReferenceEquals(doc, _openDocsService.ActiveDocument);
+            tab.BorderBrush = borderBrush;
+            tab.Background = isActive ? activeBg : inactiveBg;
+        }
     }
 
     private void OnOpenDocumentsChanged(object? sender, NotifyCollectionChangedEventArgs e)

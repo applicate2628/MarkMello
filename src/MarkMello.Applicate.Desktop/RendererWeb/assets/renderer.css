@@ -29,6 +29,25 @@ div.mm-width-handle.mm-rendered {
   opacity: 1;
 }
 
+/* Print: strip viewer chrome that has no meaning on paper or PDF.
+ * The minimap is a navigation aid for scrolling, the width handle is
+ * an interactive control — neither belongs in the printed document.
+ * Body keeps its full width so the printed page uses paper margins.
+ * Browser print margin defaults are left alone so the Headers/Footers
+ * option in the print dialog stays available; the user can toggle it
+ * on if they want a URL/date stamp printed. */
+@media print {
+  aside.mm-minimap,
+  div.mm-width-handle {
+    display: none !important;
+  }
+  body > main.mm-document {
+    max-width: none !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+}
+
 :root {
   color-scheme: light dark;
   --mm-document-font-size: 18px;

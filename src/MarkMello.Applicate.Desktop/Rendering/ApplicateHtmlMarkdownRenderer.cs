@@ -416,8 +416,22 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             return true;
         }
 
-        return Uri.TryCreate(url, UriKind.Absolute, out var uri)
-            && uri.Scheme is "http" or "https" or "mailto";
+        if (Uri.TryCreate(url, UriKind.Absolute, out var absolute))
+        {
+            // Standard remote schemes go to the browser launcher.
+            // `file:` is allowed so an absolute path to a local markdown
+            // file can be opened as a new tab via the renderer's
+            // link-clicked IPC (host resolves the path against the source
+            // document's directory and reroutes to IOpenDocumentsService).
+            return absolute.Scheme is "http" or "https" or "mailto" or "file";
+        }
+
+        // Relative path: emit verbatim so the renderer's link click handler
+        // can read the original `href` via getAttribute. Navigation is
+        // gated by ApplicateWebResourcePolicy so allowing the link in the
+        // anchor element does not expose the WebView to arbitrary
+        // navigation; the path is only used as data for IPC.
+        return true;
     }
 
     private static string GetImageMimeType(string url)

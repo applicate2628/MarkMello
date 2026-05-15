@@ -48,6 +48,11 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private bool _webPreviewFailed;
     private bool _hostEventsWired;
     private bool _syncEnabled;
+    // Tracks whether the shared WebView is between DocumentRenderInvalidated
+    // (new Navigate started) and DocumentRendered (new content ready). Hide
+    // _webSlot during that window so the user does not see the previous
+    // document's content while the new one is loading.
+    private bool _isWebRenderInFlight;
     private DateTime _ignoreEditorScrollUntil;
     private DateTime _ignorePreviewScrollUntil;
 
@@ -282,6 +287,14 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             return;
         }
 
+        // Mark handled BEFORE the await so the routed event does not bubble
+        // to the window-level OnDrop. Avalonia processes routed events
+        // synchronously, but this handler is async void — by the time the
+        // await resumes, the event has already finished routing and the
+        // window's OnDrop would have opened the dropped .md as a new tab
+        // in addition to the in-place insert.
+        e.Handled = true;
+
         try
         {
             var insertText = await BuildInsertTextAsync(path, _session.CurrentPath).ConfigureAwait(true);
@@ -290,7 +303,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
                 return;
             }
             InsertAtCaret(insertText);
-            e.Handled = true;
         }
         catch
         {
@@ -327,21 +339,68 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         return MarkdownInsertExtensions.Contains(ext) || ImageInsertExtensions.Contains(ext);
     }
 
-    private static async Task<string?> BuildInsertTextAsync(string sourcePath, string? currentDocumentPath)
+    private static Task<string?> BuildInsertTextAsync(string sourcePath, string? currentDocumentPath)
     {
         var ext = Path.GetExtension(sourcePath).ToLowerInvariant();
 
         if (ImageInsertExtensions.Contains(ext))
         {
-            return await BuildImageInsertAsync(sourcePath, currentDocumentPath, ext).ConfigureAwait(true);
+            return BuildImageInsertAsync(sourcePath, currentDocumentPath, ext)!;
         }
 
+        // Markdown (and other text-like) drops are inserted as a relative-path
+        // Markdown link, NOT as the file's content. This matches user
+        // expectation when dragging a file in: a reference appears at the
+        // caret, the file stays where it is. The link is rendered as
+        // clickable in preview and stays portable when the document and
+        // dropped file move together.
         if (MarkdownInsertExtensions.Contains(ext))
         {
-            return await File.ReadAllTextAsync(sourcePath).ConfigureAwait(true);
+            var displayName = Path.GetFileNameWithoutExtension(sourcePath);
+            var target = BuildRelativeLinkTarget(sourcePath, currentDocumentPath);
+            return Task.FromResult<string?>($"[{displayName}]({target})");
         }
 
-        return null;
+        return Task.FromResult<string?>(null);
+    }
+
+    private static string BuildRelativeLinkTarget(string sourcePath, string? currentDocumentPath)
+    {
+        // Compute a relative path from the host document's directory to the
+        // dropped file when both exist on the same drive. Fall back to the
+        // absolute path otherwise (untitled host, cross-drive, etc.) so the
+        // link still resolves when the user saves the document later.
+        var hostDir = string.IsNullOrWhiteSpace(currentDocumentPath)
+            ? null
+            : Path.GetDirectoryName(currentDocumentPath);
+
+        if (string.IsNullOrWhiteSpace(hostDir))
+        {
+            return EncodeMarkdownLinkTarget(sourcePath);
+        }
+
+        try
+        {
+            var relative = Path.GetRelativePath(hostDir, sourcePath).Replace('\\', '/');
+            return EncodeMarkdownLinkTarget(relative);
+        }
+        catch (ArgumentException)
+        {
+            return EncodeMarkdownLinkTarget(sourcePath);
+        }
+    }
+
+    private static string EncodeMarkdownLinkTarget(string target)
+    {
+        // Wrap in angle brackets when the path contains spaces or other
+        // characters that confuse the Markdown link parser. Angle-bracket
+        // form (`<path with spaces>`) is supported by CommonMark and our
+        // renderer pipeline.
+        if (target.Contains(' ') || target.Contains('(') || target.Contains(')'))
+        {
+            return "<" + target + ">";
+        }
+        return target;
     }
 
     private static async Task<string> BuildImageInsertAsync(
@@ -376,7 +435,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             }
 
             var relative = "images/" + Path.GetFileName(targetPath).Replace('\\', '/');
-            return $"![{altText}]({relative})";
+            return $"![{altText}]({EncodeMarkdownLinkTarget(relative)})";
         }
 
         // Untitled or unwritable directory: fall back to base64 so the user
@@ -443,9 +502,20 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             caret = currentText.Length;
         }
 
-        _session.SourceText = currentText.Insert(caret, insertText);
+        // Block-level inserts (image links, md file links) should be on their
+        // own line. Pad with newlines when the caret is adjacent to
+        // non-newline content so the link does not merge with surrounding
+        // text (which would yield "![alt](path)# Heading" parsed as inline
+        // text).
+        var charBefore = caret > 0 ? currentText[caret - 1] : '\n';
+        var charAfter = caret < currentText.Length ? currentText[caret] : '\n';
+        var leading = charBefore == '\n' ? string.Empty : "\n";
+        var trailing = charAfter == '\n' ? string.Empty : "\n";
+        var finalText = leading + insertText + trailing;
 
-        var newCaret = caret + insertText.Length;
+        _session.SourceText = currentText.Insert(caret, finalText);
+
+        var newCaret = caret + finalText.Length;
         Dispatcher.UIThread.Post(() =>
         {
             if (_dropTargetTextBox is null)
@@ -750,13 +820,18 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void OnSharedDocumentRendered(object? sender, EventArgs e)
     {
+        _isWebRenderInFlight = false;
         ApplyVisuals();
     }
 
     private void OnSharedDocumentInvalidated(object? sender, EventArgs e)
     {
-        // New render is starting; the WebView's current paint is no longer for
-        // our source. Reveal native as placeholder until DocumentRendered fires.
+        // New render is starting. With native preview stubbed, we cannot
+        // reveal a placeholder — instead hide the WebView slot entirely so
+        // the user does not see the previous document's content during
+        // Navigate. ApplyVisuals checks _isWebRenderInFlight when deciding
+        // _webSlot visibility.
+        _isWebRenderInFlight = true;
         ApplyVisuals();
     }
 
@@ -837,31 +912,27 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     // in the warmup panel so the user never sees a partial/loading paint.
     private void ApplyVisuals()
     {
-        var source = BuildCurrentSource();
-        var showWebView = ShouldUseWebPreview()
-                          && _sharedHost is not null
-                          && source is not null
-                          && _sharedHost.View.HasLoadedDocumentForSource(source);
+        // Native preview is stubbed out in this build (see
+        // ApplicateMainWindow.InstallNativeRendererStub) because its render
+        // flashes between Avalonia native and WebView during source change,
+        // producing visible jitter in edit mode.
+        _nativeScroll.IsVisible = false;
 
-        if (showWebView && _sharedHost is not null)
+        if (_sharedHost is not null)
         {
             if (!_isAttachedToHost)
             {
                 _sharedHost.AttachTo(_webSlot);
                 _isAttachedToHost = true;
             }
-            _webSlot.IsVisible = true;
-            _nativeScroll.IsVisible = false;
+            // Hide the WebView slot WHILE a new render is in flight so the
+            // user does not see the previous document's content during the
+            // Navigate window. Reveal again on DocumentRendered.
+            _webSlot.IsVisible = !_isWebRenderInFlight;
         }
         else
         {
-            if (_isAttachedToHost && _sharedHost is not null)
-            {
-                _sharedHost.DetachFrom(_webSlot);
-                _isAttachedToHost = false;
-            }
             _webSlot.IsVisible = false;
-            _nativeScroll.IsVisible = true;
         }
     }
 

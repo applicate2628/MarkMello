@@ -1173,8 +1173,15 @@
       }
       event.preventDefault();
       postHostMessage({
+        // `target.href` is the absolute URI the browser resolved against the
+        // generated HTML's base URL (which lives in the OS temp folder). For
+        // relative markdown links like `[doc](other.md)` this hides the
+        // actual relative path inside a temp-folder file:// URI — useless to
+        // the host because the host needs to resolve against the ORIGINAL
+        // markdown source directory. Send the raw attribute value too so
+        // the host can pick the right one for resolution.
         type: "link-clicked",
-        href: target.href,
+        href: target.getAttribute("href") ?? target.href,
         button: event.button,
         ctrlKey: event.ctrlKey,
         shiftKey: event.shiftKey,

@@ -5,10 +5,12 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Avalonia.Layout;
+using Avalonia.VisualTree;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Editing;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views;
+using MarkMello.Domain;
 using MarkMello.Presentation;
 using MarkMello.Presentation.ViewModels;
 using MarkMello.Presentation.Views;
@@ -46,7 +48,141 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallPopupZOrderFollow(viewModel);
         InstallApplicateAboutPanel();
         InstallPopupFadeIn();
+        InstallEditModeDragSuppression(viewModel);
+        InstallNativeRendererStub(viewModel);
         Opened += (_, _) => Title = $"{Title} [Applicate overlay]";
+    }
+
+    // ===========================================================
+    // TEMP-NATIVE-STUB: temporary stub for the native (Avalonia) markdown
+    // renderer until the v0.3 cross-fade-with-screenshot work lands.
+    // Native render flashes between Avalonia and WebView during source
+    // change, producing visible jitter in edit mode that the v0.2
+    // WebView opacity-fade fix does not cover. While the stub is in
+    // place: every selection is forced to WebView, and the Renderer
+    // row in the reading-settings popup shows a static note instead
+    // of the segmented Native/WebView toggle.
+    //
+    // To restore native renderer support:
+    //   1. Remove the InstallNativeRendererStub call in the constructor.
+    //   2. Delete this method and DisableNativeToggleInSettings.
+    //   3. Verify upstream segmented control rebinds correctly (the
+    //      runtime patch here mutates the popup tree at first open).
+    // ===========================================================
+    private void InstallNativeRendererStub(MainWindowViewModel viewModel)
+    {
+        // Force WebView whenever Native gets selected (via prefs restore or
+        // user click). Setting SelectedRendererBackend = WebView triggers
+        // the upstream pipeline; the property setter no-ops if already
+        // WebView, so this is also safe on startup.
+        if (viewModel.SelectedRendererBackend == MarkdownRendererBackend.Native)
+        {
+            viewModel.SelectedRendererBackend = MarkdownRendererBackend.WebView;
+        }
+        viewModel.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName != nameof(MainWindowViewModel.SelectedRendererBackend)
+                && e.PropertyName != nameof(MainWindowViewModel.IsNativeRendererSelected))
+            {
+                return;
+            }
+            if (viewModel.SelectedRendererBackend == MarkdownRendererBackend.Native)
+            {
+                viewModel.SelectedRendererBackend = MarkdownRendererBackend.WebView;
+            }
+        };
+
+        // Disable the Native toggle button inside the ReadingSettings popup
+        // visually so the user sees it greyed out. The popup materializes
+        // its content lazily on first open, so subscribe to the popup
+        // Opened event and apply IsEnabled = false then.
+        var settingsPopup = this.FindControl<Avalonia.Controls.Primitives.Popup>("SettingsPanel");
+        if (settingsPopup is not null)
+        {
+            settingsPopup.Opened += DisableNativeToggleInSettings;
+        }
+    }
+
+    private static void DisableNativeToggleInSettings(object? sender, System.EventArgs e)
+    {
+        if (sender is not Avalonia.Controls.Primitives.Popup popup || popup.Child is null)
+        {
+            return;
+        }
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            // The segmented Native/WebView toggles in ReadingSettingsPanelView
+            // sit inside a Border.mm-segmented containing two ToggleButton
+            // children: Native is declared first (axaml line 263), WebView
+            // second (line 267). Walk the popup tree, find that pair, and
+            // disable the first one. Restated every popup open in case
+            // Avalonia rebuilds the popup content lazily.
+            var segmented = popup.Child.GetVisualDescendants()
+                .OfType<Avalonia.Controls.Primitives.ToggleButton>()
+                .Where(tb => tb.Classes.Contains("mm-segmented-item"))
+                .Take(2)
+                .ToList();
+            if (segmented.Count == 0)
+            {
+                return;
+            }
+            // TEMP-NATIVE-STUB: replace the Native/WebView segmented toggle
+            // with a static label. Walk up the visual ancestors directly
+            // (`GetVisualAncestors().OfType<Border>().FirstOrDefault`
+            // missed the segmented border in some popup-open timings,
+            // possibly because the wrapper hierarchy includes additional
+            // Decorator nodes). Direct parent walk: ToggleButton -> inner
+            // StackPanel -> mm-segmented Border -> row Grid.
+            var nativeToggle = segmented[0];
+            var stackPanel = nativeToggle.Parent as Control;
+            var segmentedBorder = stackPanel?.Parent as Border;
+            var rowGrid = segmentedBorder?.Parent as Grid;
+            if (segmentedBorder is not null && rowGrid is not null)
+            {
+                segmentedBorder.IsVisible = false;
+                if (!rowGrid.Children.OfType<TextBlock>()
+                        .Any(t => t.Tag as string == "applicate-renderer-note"))
+                {
+                    var note = new TextBlock
+                    {
+                        Classes = { "mm-setting-meta" },
+                        Tag = "applicate-renderer-note",
+                        Text = "WebView (расширенный рендер)",
+                        HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
+                        VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+                    };
+                    Grid.SetColumn(note, Grid.GetColumn(segmentedBorder));
+                    rowGrid.Children.Add(note);
+                }
+            }
+            else
+            {
+                nativeToggle.IsVisible = false;
+            }
+        }, Avalonia.Threading.DispatcherPriority.Background);
+    }
+
+    private static void InstallEditModeDragSuppression(MainWindowViewModel viewModel)
+    {
+        // Upstream renders a full-window drop overlay bound to
+        // IsDragHovering (MainWindow.axaml:502, the orange-tinted Border).
+        // In edit mode the overlay covers the preview pane too, which is
+        // misleading because the drop is scoped to the editor textbox.
+        // Suppress IsDragHovering whenever we are in edit mode. The
+        // textbox keeps its own native drop cursor and our OnEditorDrop
+        // still inserts at caret; only the window-wide visual is hidden.
+        viewModel.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName != nameof(MainWindowViewModel.IsDragHovering)
+                && e.PropertyName != nameof(MainWindowViewModel.IsEditMode))
+            {
+                return;
+            }
+            if (viewModel.IsEditMode && viewModel.IsDragHovering)
+            {
+                viewModel.IsDragHovering = false;
+            }
+        };
     }
 
     private void InstallPopupFadeIn()
@@ -300,7 +436,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 // Mirror the VM clear by closing the active OpenDocument so
                 // the tabs strip matches. If the user clicked Cancel, the
                 // VM keeps its document and this branch is never entered.
-                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
                 {
                     var active = openDocs.ActiveDocument;
                     if (active is null)
@@ -315,6 +451,49 @@ public sealed class ApplicateMainWindow : MainWindow
                     finally
                     {
                         inVmMirror = false;
+                    }
+
+                    // After Close, the service may have promoted a neighbor
+                    // as the new active document. The ActiveDocumentChanged
+                    // event for that promotion fires while inVmMirror == true
+                    // (still in the close call stack), so the normal bridge
+                    // path skips it and VM.Document stays null — leaving the
+                    // user at the welcome screen instead of the neighbor.
+                    // Catch up here: if a neighbor became active, mirror it
+                    // back to the VM explicitly.
+                    var promoted = openDocs.ActiveDocument;
+                    if (promoted is null)
+                    {
+                        return;
+                    }
+
+                    // Pre-set Document + State synchronously from the open
+                    // document's cached source so the welcome view does not
+                    // render between the VM.Document = null tick and the
+                    // (async) OpenPathAsync completion below. The full async
+                    // load still runs to refresh RenderedDocument, but by
+                    // then State is already Viewing and Document is non-null,
+                    // so IsWelcome stays false and the welcome panel never
+                    // becomes visible.
+                    viewModel.Document = new MarkdownSource(
+                        promoted.FilePath,
+                        promoted.DisplayName,
+                        promoted.SourceText);
+                    viewModel.State = MarkMello.Presentation.ViewModels.ViewState.Viewing;
+
+                    inServiceLoad = true;
+                    try
+                    {
+                        await viewModel.OpenPathAsync(promoted.FilePath).ConfigureAwait(true);
+                    }
+                    catch (System.IO.IOException)
+                    {
+                        // Neighbor file became unreadable between close and
+                        // reopen; user stays at welcome.
+                    }
+                    finally
+                    {
+                        inServiceLoad = false;
                     }
                 });
                 return;
