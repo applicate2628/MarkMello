@@ -47,29 +47,17 @@ Download the latest build from [Releases](../../releases/latest).
 2. Run the installer.
 3. Launch MarkMello Applicate from the Start menu or open a `.md` file with MarkMello Applicate.
 
-### macOS
+### Other platforms
 
-1. Download `MarkMello-macos-arm64.dmg` for Apple Silicon or `MarkMello-macos-x64.dmg` for Intel Mac.
-2. Open the DMG.
-3. Drag `MarkMello.app` into `Applications`.
-4. Launch the app from `Applications`.
+MarkMello Applicate is **Windows-only**. The fork's renderer depends on WebView2 (Microsoft Edge Chromium), which has no native equivalent on macOS or Linux. There are no pre-built binaries for other platforms and none are planned in the foreseeable future.
 
-### Linux
-
-If a Linux AppImage is attached to a release, run it like this:
-
-```bash
-chmod +x MarkMello-linux-x86_64.AppImage
-./MarkMello-linux-x86_64.AppImage
-```
-
-If no Linux asset is published for the release you want, build the application from source.
+If you need the upstream MarkMello (without WebView2/Applicate additions) on other platforms — [build it from source](#build-from-source). The `MarkMello.Applicate.Desktop` fork project cannot be built on non-Windows.
 
 ## Temporary unsigned builds
 
-Current public MarkMello builds are temporarily distributed without a developer signature. Because of that, Windows or macOS may show a warning on first launch.
+Current public MarkMello Applicate builds are temporarily distributed without a developer signature. Because of that, Windows may show a warning on first launch.
 
-This is a temporary distribution pipeline limitation. Developer signing and the normal notarization/signing chain will be added in the future.
+This is a temporary distribution pipeline limitation. Developer signing will be added in the future.
 
 ### Windows: bypass SmartScreen
 
@@ -83,23 +71,6 @@ If Windows marked the downloaded file as blocked:
 1. Open the installer file properties.
 2. Enable `Unblock`, if the option is available.
 3. Apply the changes and run the installer again.
-
-### macOS: bypass Gatekeeper
-
-If macOS says the app is damaged, cannot be verified, or cannot be opened because it is from an unknown developer:
-
-1. Open `System Settings`.
-2. Go to `Privacy & Security`.
-3. Find the message about blocked `MarkMello`.
-4. Click `Open Anyway`.
-5. Confirm the launch.
-
-If you need to remove the quarantine flag manually for a one-time test:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/MarkMello.app
-open /Applications/MarkMello.app
-```
 
 ## Build from source
 
@@ -140,12 +111,12 @@ Applicate Windows installer build instructions are documented in [packaging/READ
 
 ## Keyboard shortcuts
 
-| Action | Windows / Linux | macOS |
-| --- | --- | --- |
-| Open file | `Ctrl+O` | `Cmd+O` |
-| Toggle editing mode | `Ctrl+E` | `Cmd+E` |
-| Save | `Ctrl+S` | `Cmd+S` |
-| Save as | `Ctrl+Shift+S` | `Cmd+Shift+S` |
+| Action | Shortcut |
+| --- | --- |
+| Open file | `Ctrl+O` |
+| Toggle editing mode | `Ctrl+E` |
+| Save | `Ctrl+S` |
+| Save as | `Ctrl+Shift+S` |
 
 ## License
 
