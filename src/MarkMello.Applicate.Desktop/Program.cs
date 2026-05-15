@@ -40,6 +40,7 @@ internal static class Program
         collection.Replace(ServiceDescriptor.Singleton<IMarkdownDocumentRenderer, ApplicateMarkdownDocumentRenderer>());
         collection.AddSingleton<ApplicateWebAssetEmbedder>();
         collection.AddSingleton<IApplicateHtmlMarkdownRenderer, ApplicateHtmlMarkdownRenderer>();
+        collection.AddSingleton<IApplicateShellAssetBundleFactory, ApplicateShellAssetBundleFactory>();
         collection.AddSingleton<IApplicateSharedWebViewHost, ApplicateSharedWebViewHost>();
         collection.AddSingleton<IOpenDocumentsService, OpenDocumentsService>();
         collection.AddSingleton<IApplicateSessionStore>(new JsonApplicateSessionStore());
