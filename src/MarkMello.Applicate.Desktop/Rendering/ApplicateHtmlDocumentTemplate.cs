@@ -48,6 +48,40 @@ public static class ApplicateHtmlDocumentTemplate
             """;
     }
 
+    public static string BuildShell(
+        ReadingPreferences preferences,
+        ApplicateWebBaseAssets baseAssets,
+        ApplicateWebMermaidAssets? mermaidAssets,
+        ApplicateWebHighlightAssets? hljsAssets)
+    {
+        var head = BuildHeadComponents("MarkMello", baseAssets, mermaidAssets, hljsAssets);
+        var nonce = head.Nonce;
+        var encodedTitle = head.EncodedTitle;
+        var style = head.Style;
+        var script = head.Script;
+
+        // Empty <main class="mm-document"> — content is delivered per-document via
+        // window.postMessage({ type: "load-document", html, ... }). The shell stays
+        // navigated for the lifetime of the WebView; only the main's innerHTML
+        // is swapped on each document change.
+        return $$"""
+            <!doctype html>
+            <html data-mm-chrome="off">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+              <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; connect-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'nonce-{{nonce}}';">
+              <title>{{encodedTitle}}</title>
+              <style>{{style}}</style>
+              <script nonce="{{nonce}}">{{script}}</script>
+            </head>
+            <body>
+              <main class="mm-document" data-font-size="{{preferences.FontSize}}" data-line-height="{{preferences.LineHeight}}"></main>
+            </body>
+            </html>
+            """;
+    }
+
     private static string CreateNonce()
         => Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));
 
