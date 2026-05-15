@@ -214,6 +214,19 @@ body.mm-has-minimap .mm-document {
   padding-right: calc(var(--mm-document-base-padding-x) + var(--mm-minimap-width) + var(--mm-minimap-gap) * 2);
 }
 
+/* Off-screen blocks skip layout/paint until they intersect the viewport.
+   Cuts width-resizer drag reflow cost ~95% on tall formula-dense docs
+   (wave-port: 19585px tall, 960px viewport → only ~5% reflowed per frame).
+   Body-scoped path keeps the minimap clone (under aside.mm-minimap >
+   div.mm-minimap-content > main.mm-document) unaffected — its parent
+   container is what scales/scrolls, not the cloned blocks themselves.
+   contain-intrinsic-size gives the browser a fallback size estimate so
+   scrollbars and anchor positions stay stable on first measurement. */
+body > main.mm-document > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
+
 a {
   color: inherit;
   text-decoration-color: color-mix(in srgb, currentColor 42%, transparent);
