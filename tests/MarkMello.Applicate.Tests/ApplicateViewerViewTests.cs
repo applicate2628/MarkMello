@@ -144,12 +144,21 @@ public sealed class ApplicateViewerViewTests
     }
 
     [Theory]
-    [InlineData((int)ApplicateRendererSurfaceKind.WebView, (int)ApplicateRendererSurfaceKind.Native, true, false, false)]
+    // Native surface only needs the document/prefs when it is the renderer
+    // the user will actually see. The WebView is the primary renderer, so
+    // when both requested and active are WebView the native surface stays
+    // out of the render pipeline entirely — no Avalonia layout work for a
+    // surface that will never paint. The native surface is only updated
+    // when the request explicitly targets Native (user/toolchain choice)
+    // or when it is currently active (fallback after a WebView failure).
+    [InlineData((int)ApplicateRendererSurfaceKind.WebView, (int)ApplicateRendererSurfaceKind.Native, true, false, true)]
     [InlineData((int)ApplicateRendererSurfaceKind.WebView, (int)ApplicateRendererSurfaceKind.Native, false, false, true)]
     [InlineData((int)ApplicateRendererSurfaceKind.WebView, (int)ApplicateRendererSurfaceKind.Native, true, true, true)]
     [InlineData((int)ApplicateRendererSurfaceKind.Native, (int)ApplicateRendererSurfaceKind.Native, true, false, true)]
-    [InlineData((int)ApplicateRendererSurfaceKind.WebView, (int)ApplicateRendererSurfaceKind.WebView, true, false, true)]
-    public void NativeSurfaceUpdateIsSuppressedOnlyForPendingWebSwitchOfSameRenderedDocument(
+    [InlineData((int)ApplicateRendererSurfaceKind.Native, (int)ApplicateRendererSurfaceKind.WebView, true, false, true)]
+    [InlineData((int)ApplicateRendererSurfaceKind.WebView, (int)ApplicateRendererSurfaceKind.WebView, true, false, false)]
+    [InlineData((int)ApplicateRendererSurfaceKind.WebView, (int)ApplicateRendererSurfaceKind.WebView, false, true, false)]
+    public void NativeSurfaceUpdateOnlyWhenNativeIsNeeded(
         int requestedSurface,
         int activeSurface,
         bool hasRenderedDocument,

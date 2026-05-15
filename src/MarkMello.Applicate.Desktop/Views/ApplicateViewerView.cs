@@ -55,7 +55,13 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private Size _lastMinimapViewport;
     private MarkdownSource? _lastDocumentSource;
     private MarkdownRendererBackend _lastRequestedRendererBackend = MarkdownRendererBackend.Native;
-    private ApplicateRendererSurfaceKind _activeRendererSurface = ApplicateRendererSurfaceKind.Native;
+    // WebView is the primary renderer; the native Avalonia surface is kept
+    // only as a fallback when the WebView pipeline fails. Starting the state
+    // machine at WebView prevents the native renderer from painting its
+    // progressive layout in the body of the viewer while the WebView is
+    // still loading — that painted-then-replaced flicker was visible as
+    // ~1.5s of incremental Avalonia content before the WebView took over.
+    private ApplicateRendererSurfaceKind _activeRendererSurface = ApplicateRendererSurfaceKind.WebView;
     private ApplicateRendererSurfaceKind? _pendingRendererSurface;
     private bool _pendingRendererReady;
     private long _rendererSwitchGeneration;
@@ -643,10 +649,14 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         ApplicateRendererSurfaceKind activeSurface,
         bool hasRenderedDocument,
         bool documentChanged)
-        => requestedSurface != ApplicateRendererSurfaceKind.WebView
-           || activeSurface != ApplicateRendererSurfaceKind.Native
-           || !hasRenderedDocument
-           || documentChanged;
+        // Only feed the native renderer when it is the renderer the user is
+        // about to see — either the request explicitly targets Native, or
+        // Native is currently active (fallback after a WebView failure).
+        // Otherwise we skip the Document/prefs assignments to spare the CPU
+        // work of building Avalonia-side layout (math, code blocks, images)
+        // for a surface that will never paint.
+        => requestedSurface == ApplicateRendererSurfaceKind.Native
+           || activeSurface == ApplicateRendererSurfaceKind.Native;
 
     internal static double CalculateDocumentLayerWidth(double documentColumnWidth, double hostWidth, bool useWebRenderer)
         => useWebRenderer

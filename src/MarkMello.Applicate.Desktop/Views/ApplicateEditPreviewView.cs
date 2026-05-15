@@ -648,21 +648,52 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     protected override void OnDataContextChanged(EventArgs e)
     {
         base.OnDataContextChanged(e);
-        AttachSession(DataContext as EditorSessionViewModel);
+        // Defer the heavy AttachSession work (which fires UpdateInputs, reparent
+        // of the shared WebView, and ApplyVisuals) until the preview is mounted
+        // into the visual tree. Running it directly here makes IDataTemplate.Build
+        // synchronously do ~400ms of work, during which the OLD ContentControl
+        // child (ViewerView) still owns the screen and the user sees reader-mode
+        // content while their edit-toggle press has already flipped the button —
+        // a visible parasitic frame on enter-edit. OnAttachedToVisualTree picks
+        // the session back up from DataContext below.
+        if (this.GetVisualParent() is not null)
+        {
+            AttachSession(DataContext as EditorSessionViewModel);
+        }
+        else if (DataContext is null)
+        {
+            // DataContext was cleared (e.g., a detached preview being recycled
+            // with a null context). Tear the session down so any cached state
+            // does not leak into the next mount.
+            AttachSession(null);
+        }
     }
+
+    private bool _pendingFirstAttachWithRealBounds;
 
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
-        AttachSession(DataContext as EditorSessionViewModel);
+        // Defer the session attach until Bounds.Width > 0. At first mount the
+        // preview is added to the visual tree with zero bounds; calling
+        // AttachSession in that state seeds AvailableContentWidth from the
+        // fallback (ReadingPreferences.ContentWidth + padding = 964) instead
+        // of from the real slot width. The renderer then lays out HTML at
+        // 964 in the JS message handler and re-layouts when the real width
+        // arrives ~8ms later; the user sees the 964-wide frame as a parasitic
+        // full-window paint over the chrome and tab strip. Waiting for real
+        // bounds means the first SendReadingPreferences carries the correct
+        // maxWidth and the renderer never has to re-layout.
+        if (Bounds.Width > 0)
+        {
+            AttachSession(DataContext as EditorSessionViewModel);
+        }
+        else
+        {
+            _pendingFirstAttachWithRealBounds = true;
+        }
         UpdateHostScrollMode();
         Dispatcher.UIThread.Post(EnsureEditorDropWiring, DispatcherPriority.Background);
-    }
-
-    protected override void OnSizeChanged(SizeChangedEventArgs e)
-    {
-        base.OnSizeChanged(e);
-        ApplyAvailableWidth();
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
@@ -675,6 +706,35 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         ReleaseSharedHost();
 
         base.OnDetachedFromVisualTree(e);
+    }
+
+    protected override void OnSizeChanged(SizeChangedEventArgs e)
+    {
+        base.OnSizeChanged(e);
+        if (_pendingFirstAttachWithRealBounds && e.NewSize.Width > 0)
+        {
+            _pendingFirstAttachWithRealBounds = false;
+            // Defer the actual attach to Background priority so any remaining
+            // layout passes (e.g., the MinWidth → real-column-width settle)
+            // complete first. The first SizeChanged event on a freshly mounted
+            // preview can fire with an intermediate width derived from the
+            // surrounding Grid's MinWidth constraints (logged as 144 vs final
+            // 713 in the wave_port reproduction). Triggering AttachSession
+            // synchronously at that intermediate width seeds AvailableContent
+            // Width with the wrong value and JS receives a "maxWidth=144" then
+            // "maxWidth=713" message pair across two frames — the user sees
+            // the column re-layout. Background priority runs after layout work.
+            Dispatcher.UIThread.Post(
+                () =>
+                {
+                    if (this.GetVisualParent() is not null)
+                    {
+                        AttachSession(DataContext as EditorSessionViewModel);
+                    }
+                },
+                DispatcherPriority.Background);
+        }
+        ApplyAvailableWidth();
     }
 
     private void AttachSession(EditorSessionViewModel? session)
@@ -939,11 +999,22 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         // producing visible jitter in edit mode.
         _nativeScroll.IsVisible = false;
 
-        if (_sharedHost is not null)
+        // Only mount the shared WebView into this preview's slot while the
+        // preview is actually meant to display WebView output. Without this
+        // gate, OnDetachedFromVisualTree's AttachSession(null) -> ApplySession
+        // -> ApplyRendererMode -> ReleaseSharedHost detaches the View to the
+        // warmup parent, and the immediate trailing ApplyVisuals call here
+        // would re-attach it to the slot of the preview that is being torn
+        // down — producing a visible double-reparent flicker and leaving the
+        // native HWND briefly parented under a control whose visual tree is
+        // mid-unmount.
+        var shouldShowWeb = _sharedHost is not null && ShouldUseWebPreview();
+
+        if (shouldShowWeb)
         {
             if (!_isAttachedToHost)
             {
-                _sharedHost.AttachTo(_webSlot);
+                _sharedHost!.AttachTo(_webSlot);
                 _isAttachedToHost = true;
             }
             // Keep _webSlot mounted with full layout footprint so the

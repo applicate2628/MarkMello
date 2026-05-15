@@ -306,6 +306,25 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         return new ReparentScope(this, inner);
     }
 
+    /// <summary>
+    /// Hide or show the underlying native HWND. Used by the shared-host
+    /// service to suppress the WebView's backing store during the brief
+    /// window between reparenting into a new slot and Avalonia's next
+    /// layout pass propagating the new bounds to the HWND — without this,
+    /// the HWND repaints at its previous (warmup) position and size for a
+    /// single frame and visibly leaks over the tab strip and chrome area.
+    /// </summary>
+    internal void SetNativeWebViewVisibility(bool isVisible)
+    {
+        _webView.IsVisible = isVisible;
+    }
+
+    /// <summary>Inspect the inner NativeWebView visibility for diagnostics.</summary>
+    internal bool NativeWebViewIsVisible => _webView.IsVisible;
+
+    /// <summary>Inspect the inner NativeWebView bounds for diagnostics.</summary>
+    internal Rect NativeWebViewBounds => _webView.Bounds;
+
     private sealed class ReparentScope : IDisposable
     {
         private readonly ApplicateWebMarkdownDocumentView _owner;
@@ -1016,6 +1035,22 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     {
         if (!_hasLoadedDocument)
         {
+            // Render not finished yet. Two cases:
+            // - No render in flight: a live-preference change after an
+            //   earlier source has been cleared. Kick a fresh render off.
+            // - Render IS in flight: do not cancel it. Cancelling restarts
+            //   the cycle and the canceled Navigate fires
+            //   NavigationCompleted with IsSuccess=false before
+            //   _hasReceivedDocumentReady is set, which trips
+            //   FallbackRequested → _webPreviewFailed = true and breaks the
+            //   shared preview permanently. The current in-flight render
+            //   will send the up-to-date AvailableContentWidth to the
+            //   renderer in SendReadingPreferences on document-ready, so the
+            //   user still sees content at the correct width.
+            if (_renderCancellation is not null)
+            {
+                return;
+            }
             if (Source is not null)
             {
                 QueueRender();
