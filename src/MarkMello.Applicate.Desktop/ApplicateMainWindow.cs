@@ -92,14 +92,19 @@ public sealed class ApplicateMainWindow : MainWindow
             }
         };
 
-        // Disable the Native toggle button inside the ReadingSettings popup
-        // visually so the user sees it greyed out. The popup materializes
-        // its content lazily on first open, so subscribe to the popup
-        // Opened event and apply IsEnabled = false then.
+        // Hide the Native toggle row inside the ReadingSettings popup.
+        // The popup materializes its content lazily on first open and
+        // Avalonia may re-attach the Child instance on subsequent opens,
+        // so subscribe to BOTH Opened (covers first open) and the popup
+        // child's Loaded (covers attach lifecycle) and re-apply on each.
         var settingsPopup = this.FindControl<Avalonia.Controls.Primitives.Popup>("SettingsPanel");
         if (settingsPopup is not null)
         {
             settingsPopup.Opened += DisableNativeToggleInSettings;
+            if (settingsPopup.Child is Control settingsChild)
+            {
+                settingsChild.Loaded += (_, _) => DisableNativeToggleInSettings(settingsPopup, EventArgs.Empty);
+            }
         }
     }
 
@@ -109,6 +114,11 @@ public sealed class ApplicateMainWindow : MainWindow
         {
             return;
         }
+        // Use Render priority so we run AFTER Avalonia has finished
+        // measuring/arranging the popup's contents on each open. Background
+        // priority sometimes ran before the segmented control was fully
+        // materialized, so the lookup found zero ToggleButtons and the
+        // patch silently no-oped — the user saw the row come back.
         Avalonia.Threading.Dispatcher.UIThread.Post(() =>
         {
             // The segmented Native/WebView toggles in ReadingSettingsPanelView
@@ -124,6 +134,13 @@ public sealed class ApplicateMainWindow : MainWindow
                 .ToList();
             if (segmented.Count == 0)
             {
+                // Tree not yet materialized — schedule one more tick with
+                // longer delay. Avoids the silent-noop case where Render
+                // priority still ran ahead of the segmented control's
+                // first layout pass.
+                Avalonia.Threading.Dispatcher.UIThread.Post(
+                    () => DisableNativeToggleInSettings(popup, System.EventArgs.Empty),
+                    Avalonia.Threading.DispatcherPriority.Background);
                 return;
             }
             // TEMP-NATIVE-STUB: replace the Native/WebView segmented toggle
@@ -393,9 +410,36 @@ public sealed class ApplicateMainWindow : MainWindow
                     return;
                 }
 
-                // Preserve edit mode across tab switches: upstream
-                // OpenPathAsync hard-resets to viewer; we re-toggle into
-                // edit afterwards when that was the prior state.
+                // Edit mode path: do NOT call OpenPathAsync because its
+                // internal ApplyLoadedDocument sets IsEditMode = false,
+                // unmounting the EditWorkspace and momentarily flashing
+                // reader mode before we re-toggle back to edit. Instead
+                // update Document + EditorSession directly with the
+                // service's cached source; edit-workspace UI stays mounted
+                // throughout. Reader-mode path keeps using OpenPathAsync
+                // because reader-mode preview reads RenderedDocument which
+                // OpenPathAsync refreshes.
+                if (viewModel.IsEditMode && viewModel.EditorSession is { } session)
+                {
+                    var nextSource = new MarkdownSource(
+                        args.ActiveDocument.FilePath,
+                        args.ActiveDocument.DisplayName,
+                        args.ActiveDocument.SourceText);
+                    inServiceLoad = true;
+                    try
+                    {
+                        viewModel.Document = nextSource;
+                        session.ApplyLoadedDocument(nextSource);
+                    }
+                    finally
+                    {
+                        inServiceLoad = false;
+                    }
+                    return;
+                }
+
+                // Reader-mode tab switch: full reload, preserve edit flag
+                // is a defensive no-op here because we already gated above.
                 var wasEditMode = viewModel.IsEditMode;
                 inServiceLoad = true;
                 try
@@ -481,6 +525,13 @@ public sealed class ApplicateMainWindow : MainWindow
                         promoted.SourceText);
                     viewModel.State = MarkMello.Presentation.ViewModels.ViewState.Viewing;
 
+                    // OpenPathAsync calls LoadDocumentAsync with
+                    // preserveEditModeAfterLoad: false which sets
+                    // IsEditMode = false. When the user closes a tab while
+                    // in edit mode, that boots them into reader mode.
+                    // Snapshot and restore.
+                    var wasInEditMode = viewModel.IsEditMode;
+
                     inServiceLoad = true;
                     try
                     {
@@ -494,6 +545,11 @@ public sealed class ApplicateMainWindow : MainWindow
                     finally
                     {
                         inServiceLoad = false;
+                    }
+
+                    if (wasInEditMode && !viewModel.IsEditMode)
+                    {
+                        viewModel.IsEditMode = true;
                     }
                 });
                 return;

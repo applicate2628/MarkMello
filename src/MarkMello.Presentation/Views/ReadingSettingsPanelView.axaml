@@ -239,7 +239,14 @@
                 </Border>
               </StackPanel>
 
-              <StackPanel Spacing="0">
+              <!-- TEMP-NATIVE-STUB (Applicate fork): renderer toggle row
+                   hidden because the native (Avalonia) backend has jitter
+                   during render that the v0.2 WebView fade-on-ready fix
+                   does not cover. The fork forces WebView in
+                   ApplicateMainWindow.InstallNativeRendererStub. To
+                   restore the toggle, set IsVisible back to true and
+                   undo the InstallNativeRendererStub force-WebView. -->
+              <StackPanel Spacing="0" IsVisible="False">
                 <Line Classes="mm-setting-divider"
                       StartPoint="0,0.5"
                       EndPoint="1,0.5" />

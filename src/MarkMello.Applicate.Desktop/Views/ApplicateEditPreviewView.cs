@@ -9,6 +9,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -36,6 +37,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private readonly ApplicateMarkdownDocumentView _nativePreview;
     private readonly ScrollViewer _nativeScroll;
     private readonly Panel _webSlot = new() { UseLayoutRounding = true };
+    private Border _webRenderMask = null!;
     private readonly ToggleButton _syncToggle;
     private readonly DispatcherTimer _webRenderTimer;
     private EditorSessionViewModel? _session;
@@ -80,6 +82,25 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
         _surface.Children.Add(_nativeScroll);
         _surface.Children.Add(_webSlot);
+
+        // Native HWND of WebView2 ignores Avalonia Opacity, so hiding the
+        // slot via Opacity = 0 leaves the previous document painted. Cover
+        // the WebView with an opaque mask while a new render is in flight
+        // so the user sees a clean blank tile instead of stale content.
+        // The mask is themed to MmBackgroundBrush so it matches the body
+        // background in both light and dark variants.
+        _webRenderMask = new Border
+        {
+            Background = Avalonia.Application.Current?.TryGetResource(
+                "MmBackgroundBrush",
+                Avalonia.Application.Current.ActualThemeVariant,
+                out var bg) == true && bg is IBrush bgBrush
+                ? bgBrush
+                : new SolidColorBrush(Colors.White),
+            IsHitTestVisible = false,
+            IsVisible = false
+        };
+        _surface.Children.Add(_webRenderMask);
 
         _syncToggle = BuildSyncToggle();
         var toolbar = BuildPreviewToolbar(_syncToggle);
@@ -925,14 +946,21 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
                 _sharedHost.AttachTo(_webSlot);
                 _isAttachedToHost = true;
             }
-            // Hide the WebView slot WHILE a new render is in flight so the
-            // user does not see the previous document's content during the
-            // Navigate window. Reveal again on DocumentRendered.
-            _webSlot.IsVisible = !_isWebRenderInFlight;
+            // Keep _webSlot mounted with full layout footprint so the
+            // SOURCE|PREVIEW toolbar row stays put. Cover the WebView with
+            // an opaque mask Border while a new render is in flight —
+            // Native HWND ignores Avalonia Opacity, so Opacity = 0 left
+            // the previous document visible; an overlapping Border is the
+            // only way to hide the stale paint without unmounting the
+            // WebView.
+            _webSlot.IsVisible = true;
+            _webSlot.Opacity = 1;
+            _webRenderMask.IsVisible = _isWebRenderInFlight;
         }
         else
         {
             _webSlot.IsVisible = false;
+            _webRenderMask.IsVisible = false;
         }
     }
 
