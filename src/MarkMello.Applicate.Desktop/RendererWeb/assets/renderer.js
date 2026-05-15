@@ -494,8 +494,14 @@
   }
   function schedulePhaseBRebuild(deps) {
     deps.allMathRendered.then(() => {
-      if (shouldTriggerPhaseB(deps.getCurrentDocumentHeight(), deps.getCachedDocumentHeight())) {
-        deps.refresh("B");
+      if (!shouldTriggerPhaseB(deps.getCurrentDocumentHeight(), deps.getCachedDocumentHeight())) {
+        return;
+      }
+      const win = window;
+      if (typeof win.requestIdleCallback === "function") {
+        win.requestIdleCallback(() => deps.refresh("B"), { timeout: 500 });
+      } else {
+        window.setTimeout(() => deps.refresh("B"), 50);
       }
     });
   }

@@ -123,8 +123,23 @@ export type PhaseBRebuildDeps = {
 
 export function schedulePhaseBRebuild(deps: PhaseBRebuildDeps): void {
   deps.allMathRendered.then(() => {
-    if (shouldTriggerPhaseB(deps.getCurrentDocumentHeight(), deps.getCachedDocumentHeight())) {
-      deps.refresh("B");
+    if (!shouldTriggerPhaseB(deps.getCurrentDocumentHeight(), deps.getCachedDocumentHeight())) {
+      return;
+    }
+    // Defer the actual rebuild to browser idle time. Phase B re-clones a
+    // 138-formula doc (~47ms long task in Phase A's window). The user has
+    // already seen the initial render — they're not waiting for minimap
+    // refinement. Running it during idle lets the cold-render budget
+    // breathe and keeps the minimap update OUT of any user-visible long
+    // task. requestIdleCallback timeout backstop (500ms) ensures it
+    // eventually runs even if main thread stays busy.
+    const win = window as typeof window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+    };
+    if (typeof win.requestIdleCallback === "function") {
+      win.requestIdleCallback(() => deps.refresh("B"), { timeout: 500 });
+    } else {
+      window.setTimeout(() => deps.refresh("B"), 50);
     }
   });
 }

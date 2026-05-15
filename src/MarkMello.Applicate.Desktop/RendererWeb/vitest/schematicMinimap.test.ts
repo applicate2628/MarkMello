@@ -130,7 +130,9 @@ describe("schedulePhaseBRebuild (real renderer seam)", () => {
 
     resolveMath();
     await allMathRendered;
-    await new Promise(r => setTimeout(r, 0));
+    // Phase B refresh is now deferred via requestIdleCallback (or setTimeout
+    // 50ms fallback in happy-dom which lacks requestIdleCallback).
+    await new Promise(r => setTimeout(r, 80));
     expect(refresh).toHaveBeenCalledWith("B");
   });
 
