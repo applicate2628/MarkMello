@@ -1264,6 +1264,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 fontSize = ReadingPreferences.FontSize,
                 lineHeight = ReadingPreferences.LineHeight,
                 maxWidth,
+                // Host's clamp floor — renderer uses this to limit drag preview
+                // so it doesn't go below where host will clamp on echo. Without
+                // it, drag visually pulls to renderer-local min (200) but host
+                // re-clamps to 320, document snaps wider on release.
+                minMaxWidth = ApplicateViewerView.MinManualContentWidth,
                 minimapMode = ReadingPreferences.DocumentMinimapMode.ToString().ToLowerInvariant(),
                 viewerChromeEnabled = ViewerChromeEnabled,
                 documentScrollEnabled = DocumentScrollEnabled,

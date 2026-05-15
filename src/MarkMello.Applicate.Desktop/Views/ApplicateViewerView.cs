@@ -18,7 +18,7 @@ namespace MarkMello.Applicate.Desktop.Views;
 public sealed class ApplicateViewerView : UserControl, IDisposable
 {
     private const double WheelStepMultiplier = 6.0;
-    private const double MinManualContentWidth = 320.0;
+    internal const double MinManualContentWidth = 320.0;
     private const double ViewportHorizontalGutter = 32.0;
     private const double MinimapColumnGap = 24.0;
     private const double WidthHandleHitArea = 24.0;

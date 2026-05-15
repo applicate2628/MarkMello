@@ -79,6 +79,7 @@ type HostMessage =
       fontSize: number;
       lineHeight: number;
       maxWidth: number;
+      minMaxWidth?: number;
       minimapMode: MinimapMode;
       fontFamily?: FontFamilyMode;
       viewerChromeEnabled?: boolean;
@@ -514,7 +515,10 @@ function scheduleWidthDragApply(): void {
     // Document is centered, so handle moves by deltaX implies column width
     // changes by 2*deltaX. Bypass host round-trip — renderer owns the visual
     // during drag, host gets final value on release.
-    const previewMaxWidth = Math.max(200, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
+    // Min mirrors host's clamp (sent via reading-preferences as minMaxWidth);
+    // fallback constant matches host's MinManualContentWidth in case the
+    // message hasn't arrived yet (drag started before first prefs message).
+    const previewMaxWidth = Math.max(hostMinMaxWidth, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
     document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
     // Synthetic handle position during drag: handle tracks the DOCUMENT'S
     // RIGHT EDGE, not the cursor. Column is center-aligned, so a ΔW change
@@ -563,10 +567,25 @@ function handleWidthHandlePointerUp(event: PointerEvent): void {
     // Pointer capture may already be gone after WebView focus changes.
   }
 
-  // Local preview already applied final maxWidth via the move handler.
-  // Host's reading-preferences echo (with its own clamped value) arrives after
-  // width-drag end and will overwrite the preview — small visual snap if host
-  // clamps differently, but it's a single reflow.
+  // Local preview applied --mm-document-max-width directly during drag,
+  // bypassing the reading-preferences path. lastAppliedReadingPreferences
+  // still holds the pre-drag value (or last host echo). Sync it to what's
+  // actually in the DOM so the next host echo (which compares against the
+  // tracked value) sees the true delta and re-applies the host-clamped
+  // width. Without this sync: renderer at 200, tracked at 320, host echoes
+  // 320, flushPendingReadingPreferences thinks "no change", CSS var stays
+  // at 200 while host thinks it's at 320 — handle/document desync.
+  if (lastAppliedReadingPreferences !== null) {
+    const inlineMaxWidth = parseFloat(
+      document.documentElement.style.getPropertyValue("--mm-document-max-width")
+    );
+    if (Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0) {
+      lastAppliedReadingPreferences = {
+        ...lastAppliedReadingPreferences,
+        maxWidth: inlineMaxWidth,
+      };
+    }
+  }
   updateWidthHandlePosition();
   // Cheap viewport-only update — no full re-clone. Width drag changes only
   // the document's wrap width, not its CONTENT. The minimap clone has CSS
@@ -591,8 +610,18 @@ function cancelWidthHandleDrag(): void {
 
   widthHandleDragging = false;
   widthHandleRoot?.classList.remove(WIDTH_HANDLE_DRAGGING_CLASS);
-  // Canonical re-sync (observer was gated during drag — see ResizeObserver in
-  // DOMContentLoaded). Same as handleWidthHandlePointerUp.
+  // Same state-sync rationale as handleWidthHandlePointerUp.
+  if (lastAppliedReadingPreferences !== null) {
+    const inlineMaxWidth = parseFloat(
+      document.documentElement.style.getPropertyValue("--mm-document-max-width")
+    );
+    if (Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0) {
+      lastAppliedReadingPreferences = {
+        ...lastAppliedReadingPreferences,
+        maxWidth: inlineMaxWidth,
+      };
+    }
+  }
   updateWidthHandlePosition();
   queueMinimapViewportUpdate();
   postHostMessage({ type: "width-drag", phase: "end", deltaX: pendingWidthDragDeltaX });
@@ -863,6 +892,10 @@ type AppliedReadingPreferences = {
 let lastAppliedReadingPreferences: AppliedReadingPreferences | null = null;
 let pendingReadingPreferences: AppliedReadingPreferences | null = null;
 let applyPrefsFrameRequested = false;
+// Host-provided floor for max-width during drag (mirrors host's clamp).
+// Without it, drag preview can dip below host's min and snap wider on release.
+const RENDERER_FALLBACK_MIN_MAX_WIDTH = 320;
+let hostMinMaxWidth = RENDERER_FALLBACK_MIN_MAX_WIDTH;
 let heavyLiveUpdateTimer: number | undefined;
 const HEAVY_LIVE_UPDATE_DEBOUNCE_MS = 80;
 
@@ -879,6 +912,9 @@ function normalizeFontFamilyMode(value: string | undefined): FontFamilyMode {
 // until done — so apply rate self-throttles to what the device can sustain.
 // One pipeline, one fast path, data-driven by which fields actually changed.
 function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-preferences" }>): void {
+  if (typeof message.minMaxWidth === "number" && Number.isFinite(message.minMaxWidth) && message.minMaxWidth > 0) {
+    hostMinMaxWidth = message.minMaxWidth;
+  }
   pendingReadingPreferences = {
     fontFamily: normalizeFontFamilyMode(message.fontFamily),
     fontSize: message.fontSize,

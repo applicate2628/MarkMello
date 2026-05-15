@@ -838,7 +838,7 @@
       if (!widthHandleDragging) {
         return;
       }
-      const previewMaxWidth = Math.max(200, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
+      const previewMaxWidth = Math.max(hostMinMaxWidth, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
       document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
       if (widthHandleRoot) {
         const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
@@ -866,6 +866,17 @@
       widthHandleRoot?.releasePointerCapture(event.pointerId);
     } catch {
     }
+    if (lastAppliedReadingPreferences !== null) {
+      const inlineMaxWidth = parseFloat(
+        document.documentElement.style.getPropertyValue("--mm-document-max-width")
+      );
+      if (Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0) {
+        lastAppliedReadingPreferences = {
+          ...lastAppliedReadingPreferences,
+          maxWidth: inlineMaxWidth
+        };
+      }
+    }
     updateWidthHandlePosition();
     queueMinimapViewportUpdate();
     postHostMessage({ type: "width-drag", phase: "end", deltaX });
@@ -880,6 +891,17 @@
     }
     widthHandleDragging = false;
     widthHandleRoot?.classList.remove(WIDTH_HANDLE_DRAGGING_CLASS);
+    if (lastAppliedReadingPreferences !== null) {
+      const inlineMaxWidth = parseFloat(
+        document.documentElement.style.getPropertyValue("--mm-document-max-width")
+      );
+      if (Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0) {
+        lastAppliedReadingPreferences = {
+          ...lastAppliedReadingPreferences,
+          maxWidth: inlineMaxWidth
+        };
+      }
+    }
     updateWidthHandlePosition();
     queueMinimapViewportUpdate();
     postHostMessage({ type: "width-drag", phase: "end", deltaX: pendingWidthDragDeltaX });
@@ -1079,6 +1101,8 @@
   var lastAppliedReadingPreferences = null;
   var pendingReadingPreferences = null;
   var applyPrefsFrameRequested = false;
+  var RENDERER_FALLBACK_MIN_MAX_WIDTH = 320;
+  var hostMinMaxWidth = RENDERER_FALLBACK_MIN_MAX_WIDTH;
   var heavyLiveUpdateTimer;
   var HEAVY_LIVE_UPDATE_DEBOUNCE_MS = 80;
   function normalizeFontFamilyMode(value) {
@@ -1086,6 +1110,9 @@
     return "serif";
   }
   function applyReadingPreferences(message) {
+    if (typeof message.minMaxWidth === "number" && Number.isFinite(message.minMaxWidth) && message.minMaxWidth > 0) {
+      hostMinMaxWidth = message.minMaxWidth;
+    }
     pendingReadingPreferences = {
       fontFamily: normalizeFontFamilyMode(message.fontFamily),
       fontSize: message.fontSize,
