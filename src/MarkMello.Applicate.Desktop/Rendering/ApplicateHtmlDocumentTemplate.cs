@@ -15,33 +15,11 @@ public static class ApplicateHtmlDocumentTemplate
         ApplicateWebMermaidAssets? mermaidAssets,
         ApplicateWebHighlightAssets? hljsAssets)
     {
-        ArgumentNullException.ThrowIfNull(baseAssets);
-
-        var nonce = CreateNonce();
-        var encodedTitle = HtmlEncoder.Default.Encode(title);
-
-        var style = new StringBuilder();
-        style.Append(baseAssets.RendererCss).Append('\n').Append(baseAssets.KatexCss);
-        if (hljsAssets is not null)
-        {
-            // CSS Nesting wraps full theme stylesheet under [data-theme="X"] parent
-            // selector. WebView2 (Edge Chromium 120+) supports CSS Nesting natively.
-            // Cleaner than per-selector regex prefixing and handles all hljs CSS shapes uniformly.
-            style.Append("\n[data-theme=\"light\"] { ").Append(hljsAssets.LightCss).Append(" }");
-            style.Append("\n[data-theme=\"dark\"] { ").Append(hljsAssets.DarkCss).Append(" }");
-        }
-
-        var script = new StringBuilder();
-        script.Append(baseAssets.KatexScript);
-        if (mermaidAssets is not null)
-        {
-            script.Append('\n').Append(mermaidAssets.Script);
-        }
-        if (hljsAssets is not null)
-        {
-            script.Append('\n').Append(hljsAssets.Script);
-        }
-        script.Append('\n').Append(baseAssets.RendererScript);
+        var head = BuildHeadComponents(title, baseAssets, mermaidAssets, hljsAssets);
+        var nonce = head.Nonce;
+        var encodedTitle = head.EncodedTitle;
+        var style = head.Style;
+        var script = head.Script;
 
         // Style CSP relaxed (no nonce, 'unsafe-inline' only) — Mermaid SVG output
         // contains inline <style> tags and style= attributes без nonce; with CSP3
@@ -72,4 +50,43 @@ public static class ApplicateHtmlDocumentTemplate
 
     private static string CreateNonce()
         => Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));
+
+    internal record HeadComponents(string EncodedTitle, string Style, string Script, string Nonce);
+
+    internal static HeadComponents BuildHeadComponents(
+        string title,
+        ApplicateWebBaseAssets baseAssets,
+        ApplicateWebMermaidAssets? mermaidAssets,
+        ApplicateWebHighlightAssets? hljsAssets)
+    {
+        ArgumentNullException.ThrowIfNull(baseAssets);
+
+        var nonce = CreateNonce();
+        var encodedTitle = HtmlEncoder.Default.Encode(title);
+
+        var style = new StringBuilder();
+        style.Append(baseAssets.RendererCss).Append('\n').Append(baseAssets.KatexCss);
+        if (hljsAssets is not null)
+        {
+            // CSS Nesting wraps full theme stylesheet under [data-theme="X"] parent
+            // selector. WebView2 (Edge Chromium 120+) supports CSS Nesting natively.
+            // Cleaner than per-selector regex prefixing and handles all hljs CSS shapes uniformly.
+            style.Append("\n[data-theme=\"light\"] { ").Append(hljsAssets.LightCss).Append(" }");
+            style.Append("\n[data-theme=\"dark\"] { ").Append(hljsAssets.DarkCss).Append(" }");
+        }
+
+        var script = new StringBuilder();
+        script.Append(baseAssets.KatexScript);
+        if (mermaidAssets is not null)
+        {
+            script.Append('\n').Append(mermaidAssets.Script);
+        }
+        if (hljsAssets is not null)
+        {
+            script.Append('\n').Append(hljsAssets.Script);
+        }
+        script.Append('\n').Append(baseAssets.RendererScript);
+
+        return new HeadComponents(encodedTitle, style.ToString(), script.ToString(), nonce);
+    }
 }
