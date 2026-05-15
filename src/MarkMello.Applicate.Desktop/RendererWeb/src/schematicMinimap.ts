@@ -97,10 +97,21 @@ export function renderSchematicSvg(blocks: DocumentBlock[], documentWidth: numbe
   return svg;
 }
 
+// Tolerance threshold for Phase B re-clone. With content-visibility:auto on
+// document blocks (renderer.css), off-screen math stays at intrinsic size
+// until intersected → total scrollHeight is stable between Phase A
+// (visible-first math done) and allMathRendered. Small drifts (rounding,
+// scrollbar appearance, sub-pixel layout) used to trigger a 70ms+ full
+// cloneNode of a 138-formula doc for no visible gain.
+//
+// 100px = roughly 1 paragraph or 1 math block worth of "real height shift".
+// Below this, Phase A's clone is "close enough"; above this, content
+// genuinely changed and re-cloning the minimap matters.
+const PHASE_B_HEIGHT_DELTA_THRESHOLD_PX = 100;
+
 export function shouldTriggerPhaseB(currentHeight: number, cachedHeight: number): boolean {
   if (cachedHeight <= 0) return false;
-  // Tolerance: >=1px change triggers Phase B; sub-pixel drift (<1px) is ignored.
-  return Math.abs(currentHeight - cachedHeight) >= 1;
+  return Math.abs(currentHeight - cachedHeight) >= PHASE_B_HEIGHT_DELTA_THRESHOLD_PX;
 }
 
 export type PhaseBRebuildDeps = {

@@ -487,9 +487,10 @@
   }
 
   // RendererWeb/src/schematicMinimap.ts
+  var PHASE_B_HEIGHT_DELTA_THRESHOLD_PX = 100;
   function shouldTriggerPhaseB(currentHeight, cachedHeight) {
     if (cachedHeight <= 0) return false;
-    return Math.abs(currentHeight - cachedHeight) >= 1;
+    return Math.abs(currentHeight - cachedHeight) >= PHASE_B_HEIGHT_DELTA_THRESHOLD_PX;
   }
   function schedulePhaseBRebuild(deps) {
     deps.allMathRendered.then(() => {

@@ -94,13 +94,17 @@ describe("integration", () => {
 });
 
 describe("Phase B trigger", () => {
-  it("returns true if document height changed >1px after allMathRendered", () => {
+  it("returns true if document height changed >=100px after allMathRendered", () => {
+    // 100px threshold = roughly 1 paragraph/math block worth. Smaller drifts
+    // (rounding, scrollbar appearance) don't trigger 70ms+ full reclone.
     expect(shouldTriggerPhaseB(1100, 1000)).toBe(true);
-    expect(shouldTriggerPhaseB(999, 1000)).toBe(true);
+    expect(shouldTriggerPhaseB(900, 1000)).toBe(true);
   });
 
-  it("returns false if document height is stable (within 1px)", () => {
+  it("returns false if document height drift is below threshold", () => {
     expect(shouldTriggerPhaseB(1000, 1000)).toBe(false);
+    expect(shouldTriggerPhaseB(1099, 1000)).toBe(false);
+    expect(shouldTriggerPhaseB(999, 1000)).toBe(false);
     expect(shouldTriggerPhaseB(1000.5, 1000)).toBe(false);
   });
 
