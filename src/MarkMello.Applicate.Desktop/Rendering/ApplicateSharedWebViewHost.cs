@@ -9,9 +9,11 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
     private Panel? _warmupParent;
     private Panel? _currentParent;
 
-    public ApplicateSharedWebViewHost(IApplicateHtmlMarkdownRenderer renderer)
+    public ApplicateSharedWebViewHost(
+        IApplicateHtmlMarkdownRenderer renderer,
+        IApplicateShellAssetBundleFactory shellAssetFactory)
     {
-        View = new ApplicateWebMarkdownDocumentView(renderer);
+        View = new ApplicateWebMarkdownDocumentView(renderer, shellAssetFactory);
     }
 
     public ApplicateWebMarkdownDocumentView View { get; }

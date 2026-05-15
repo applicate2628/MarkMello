@@ -33,6 +33,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private readonly Grid _documentLayer;
     private readonly ApplicateMarkdownDocumentView _documentView;
     private readonly IApplicateHtmlMarkdownRenderer? _htmlRenderer;
+    private readonly IApplicateShellAssetBundleFactory? _shellAssetFactory;
     private readonly Border _widthHandle;
     private readonly Border _widthHandleTrack;
     private readonly ContentControl _minimapHost;
@@ -68,9 +69,12 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private bool _webRendererFailedForCurrentDocument;
     private ApplicateWidthHandleVisualState? _lastWidthHandleVisualState;
 
-    public ApplicateViewerView(IApplicateHtmlMarkdownRenderer? htmlRenderer = null)
+    public ApplicateViewerView(
+        IApplicateHtmlMarkdownRenderer? htmlRenderer = null,
+        IApplicateShellAssetBundleFactory? shellAssetFactory = null)
     {
         _htmlRenderer = htmlRenderer;
+        _shellAssetFactory = shellAssetFactory;
         _documentView = new ApplicateMarkdownDocumentView
         {
             DocumentPadding = new Thickness(72, 96, 72, 160),
@@ -971,7 +975,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         ApplicateWebMarkdownDocumentView view;
         try
         {
-            view = new ApplicateWebMarkdownDocumentView(_htmlRenderer)
+            view = new ApplicateWebMarkdownDocumentView(_htmlRenderer, _shellAssetFactory)
             {
                 IsVisible = false,
                 MinHeight = 1,

@@ -60,6 +60,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _hasReceivedDocumentReady;
     private int _intentionalReparentDepth;
     private MarkMello.Presentation.ViewModels.MainWindowViewModel? _mainWindowViewModel;
+    private readonly bool _shellMode;
+    private readonly IApplicateShellAssetBundleFactory? _shellAssetFactory;
+    private bool _shellNavigated;
+    private bool _shellDocumentReadyConsumed;
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -73,8 +77,19 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     }
 
     public ApplicateWebMarkdownDocumentView(IApplicateHtmlMarkdownRenderer renderer)
+        : this(renderer, shellAssetFactory: null)
+    {
+    }
+
+    public ApplicateWebMarkdownDocumentView(
+        IApplicateHtmlMarkdownRenderer renderer,
+        IApplicateShellAssetBundleFactory? shellAssetFactory)
     {
         _renderer = renderer;
+        _shellAssetFactory = shellAssetFactory;
+        // Shell mode requires both the env-var flag AND the factory injection.
+        // Missing either falls back to legacy per-document Navigate.
+        _shellMode = ApplicateRendererShellMode.IsEnabled && shellAssetFactory is not null;
         _webView = new ApplicateNativeWebView
         {
             ClipToBounds = true,
@@ -421,6 +436,13 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         CancelRender();
 
         var source = Source;
+        if (_shellMode)
+        {
+            _renderCancellation = new CancellationTokenSource();
+            _ = QueueRenderShellAsync(source, _renderCancellation.Token);
+            return;
+        }
+
         if (source is null)
         {
             DeleteCurrentGeneratedDocument();
@@ -430,6 +452,71 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         _renderCancellation = new CancellationTokenSource();
         _ = RenderAsync(source, _renderCancellation.Token);
+    }
+
+    private async Task QueueRenderShellAsync(MarkdownSource? source, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!_shellNavigated)
+            {
+                await NavigateToShellAsync(cancellationToken).ConfigureAwait(true);
+                _shellNavigated = true;
+            }
+
+            if (source is null)
+            {
+                PostRendererMessage(new { type = "clear-document" });
+                return;
+            }
+
+            var body = await _renderer
+                .RenderBodyAsync(source, ReadingPreferences, ImageSourceResolver, cancellationToken)
+                .ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            PostRendererMessage(new
+            {
+                type = "load-document",
+                html = body.BodyHtml,
+                documentName = source.FileName,
+                hasMermaid = body.HasMermaidBlock,
+                hasHljs = body.HasCodeBlockWithSyntax,
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            // Superseded render; later QueueRender owns state.
+        }
+        catch
+        {
+            FallbackRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    private async Task NavigateToShellAsync(CancellationToken cancellationToken)
+    {
+        if (_shellAssetFactory is null)
+        {
+            throw new InvalidOperationException("Shell mode requires IApplicateShellAssetBundleFactory.");
+        }
+
+        var bundle = await _shellAssetFactory.GetAsync(cancellationToken).ConfigureAwait(true);
+        var html = ApplicateHtmlDocumentTemplate.BuildShell(
+            ReadingPreferences,
+            bundle.Base,
+            bundle.Mermaid,
+            bundle.Highlight);
+        html = ApplyInitialTheme(html, GetThemeName());
+
+        var folder = GetGeneratedDocumentFolder();
+        Directory.CreateDirectory(folder);
+        var shellPath = Path.Combine(folder, "renderer-shell.html");
+        await File.WriteAllTextAsync(shellPath, html, Encoding.UTF8, cancellationToken).ConfigureAwait(true);
+
+        _currentGeneratedDocumentPath = shellPath;
+        _isLoadingGeneratedDocument = true;
+        _webView.Navigate(new Uri(shellPath));
     }
 
     private async Task RenderAsync(MarkdownSource source, CancellationToken cancellationToken)
@@ -589,8 +676,22 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             var type = typeProperty.GetString();
             if (type == "document-ready")
             {
-                _hasLoadedDocument = true;
                 _hasReceivedDocumentReady = true;
+                if (_shellMode && !_shellDocumentReadyConsumed)
+                {
+                    // First document-ready in shell mode = empty shell page loaded.
+                    // Not a user document yet — do NOT fire DocumentRendered.
+                    // SendReadingPreferences below triggers the renderer's
+                    // applyReadingPreferences path; the actual user-document
+                    // document-ready arrives later via load-document's
+                    // scheduleLayoutReady wrapper.
+                    _shellDocumentReadyConsumed = true;
+                    SendTheme();
+                    SendMinimapPolicy();
+                    SendReadingPreferences();
+                    return;
+                }
+                _hasLoadedDocument = true;
                 BeginAwaitingLayoutReady();
                 SendTheme();
                 SendMinimapPolicy();
