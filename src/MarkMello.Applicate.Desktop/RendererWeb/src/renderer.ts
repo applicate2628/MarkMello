@@ -1137,6 +1137,34 @@ function wireFileDrop(): void {
   });
 }
 
+// Right-click → "Save Page As" snapshots the live DOM and writes it to
+// disk. `@media print` does not apply, so the minimap and width handle
+// (built by JS as direct children of <body>) leak into the saved HTML.
+// We do NOT want to hide chrome on every context menu open — the user
+// often invokes other items (Copy, Inspect Image, etc.) and the visual
+// blink is unwelcome. Pattern that almost always means a save/inspect
+// dialog opened: a `contextmenu` was just raised AND the window then
+// loses focus. Hide chrome at that moment so Edge's DOM snapshot at
+// save-confirm time does not include it; restore on focus return.
+// No timers — the contextMenuPending flag is reset on focus along
+// with the class, so false positives self-correct as soon as the user
+// returns to the window.
+let contextMenuPending = false;
+function wireSaveAsPageChromeSuppress(): void {
+  document.addEventListener("contextmenu", () => {
+    contextMenuPending = true;
+  });
+  window.addEventListener("blur", () => {
+    if (contextMenuPending) {
+      document.body.classList.add("mm-saving");
+    }
+  });
+  window.addEventListener("focus", () => {
+    contextMenuPending = false;
+    document.body.classList.remove("mm-saving");
+  });
+}
+
 document.addEventListener("securitypolicyviolation", (e) => {
   postHostMessage({
     type: "csp-violation",
@@ -1160,6 +1188,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireViewerInteraction();
   wireWheelProxy();
   wireFileDrop();
+  wireSaveAsPageChromeSuppress();
   postHostMessage({
     type: "document-ready",
     mathCount: document.querySelectorAll("[data-tex]").length

@@ -1294,6 +1294,21 @@
       }
     });
   }
+  var contextMenuPending = false;
+  function wireSaveAsPageChromeSuppress() {
+    document.addEventListener("contextmenu", () => {
+      contextMenuPending = true;
+    });
+    window.addEventListener("blur", () => {
+      if (contextMenuPending) {
+        document.body.classList.add("mm-saving");
+      }
+    });
+    window.addEventListener("focus", () => {
+      contextMenuPending = false;
+      document.body.classList.remove("mm-saving");
+    });
+  }
   document.addEventListener("securitypolicyviolation", (e) => {
     postHostMessage({
       type: "csp-violation",
@@ -1314,6 +1329,7 @@
     wireViewerInteraction();
     wireWheelProxy();
     wireFileDrop();
+    wireSaveAsPageChromeSuppress();
     postHostMessage({
       type: "document-ready",
       mathCount: document.querySelectorAll("[data-tex]").length

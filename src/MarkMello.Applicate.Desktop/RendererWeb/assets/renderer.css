@@ -48,6 +48,20 @@ div.mm-width-handle.mm-rendered {
   }
 }
 
+/* Right-click → Save page as: snapshots the live DOM and ignores
+ * `@media print`, so minimap and width handle leak into the saved HTML.
+ * `renderer.ts` adds `mm-saving` to <body> on `contextmenu` and removes
+ * it on the next left mousedown (or after a safety timeout). While the
+ * class is active, hide the chrome elements at `display: none` so they
+ * are absent from the serialised DOM that Edge writes to disk. The
+ * brief visual blink while the context menu is open is acceptable for
+ * a hot fix; a clean "Export HTML" command in the app menu is the v0.3
+ * follow-up. */
+body.mm-saving aside.mm-minimap,
+body.mm-saving div.mm-width-handle {
+  display: none !important;
+}
+
 :root {
   color-scheme: light dark;
   --mm-document-font-size: 18px;
