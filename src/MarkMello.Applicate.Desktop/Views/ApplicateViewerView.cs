@@ -31,6 +31,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private readonly Border _column;
     private readonly Grid _documentShell;
     private readonly Grid _documentLayer;
+    private readonly Border _webRenderMask;
     private readonly ApplicateMarkdownDocumentView _documentView;
     private readonly IApplicateHtmlMarkdownRenderer? _htmlRenderer;
     private readonly IApplicateShellAssetBundleFactory? _shellAssetFactory;
@@ -127,6 +128,28 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
         _documentLayer = new Grid { UseLayoutRounding = true };
         _documentLayer.Children.Add(_documentView);
+
+        // Theme-matching mask overlay shown between DocumentRenderInvalidated
+        // and DocumentRendered. Native WebView2 HWND ignores Avalonia Opacity,
+        // so on tab switch the old document's content stays painted while
+        // RenderAsync builds the new HTML — observed as ~200-400ms of stale
+        // content under the new tab's title. The mask sits z-above the
+        // WebView, opaque, and is toggled by render events so the user sees
+        // a clean theme-colored tile during the render gap.
+        // Mirrors ApplicateEditPreviewView's _webRenderMask pattern (proven
+        // for edit-preview transitions since v0.2.0).
+        _webRenderMask = new Border
+        {
+            Background = Avalonia.Application.Current?.TryGetResource(
+                "MmBackgroundBrush",
+                Avalonia.Application.Current.ActualThemeVariant,
+                out var bg) == true && bg is IBrush bgBrush
+                ? bgBrush
+                : new SolidColorBrush(Colors.White),
+            IsHitTestVisible = false,
+            IsVisible = false
+        };
+        _documentLayer.Children.Add(_webRenderMask);
 
         _documentShell = new Grid { UseLayoutRounding = true };
         _documentShell.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));
@@ -379,6 +402,22 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
     private void OnDocumentRendered(object? sender, EventArgs e)
     {
+        // Hide mask conditions:
+        //   (1) WebView Rendered — the normal happy path, WebView committed new content
+        //   (2) Native Rendered AND pending=Native — WebView gave up via fallback
+        //       and Native committed. WebView surface is no longer the active path,
+        //       so the mask's purpose (hide stale WebView) is moot.
+        // Native renderer's parallel Rendered (no fallback) runs ~70ms after
+        // Invalidated, faster than WebView. If we react to that we'd unmask
+        // while WebView is still loading and re-expose stale content.
+        var isWebRendered = ReferenceEquals(sender, _webDocumentView);
+        var isNativeFallbackCommit = ReferenceEquals(sender, _documentView)
+            && _pendingRendererSurface == ApplicateRendererSurfaceKind.Native;
+        if (isWebRendered || isNativeFallbackCommit)
+        {
+            _webRenderMask.IsVisible = false;
+        }
+
         if (ReferenceEquals(sender, _webDocumentView)
             && _pendingRendererSurface == ApplicateRendererSurfaceKind.WebView)
         {
@@ -409,6 +448,12 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         {
             return;
         }
+
+        // Show mask BEFORE the WebView's async render gap to hide stale
+        // content (the old document stays painted by WebView2 HWND until
+        // the new Navigate commits ~200-400ms later). DocumentRendered
+        // hides it. See _webRenderMask init for full rationale.
+        _webRenderMask.IsVisible = true;
 
         _hasRenderedDocument = false;
         _lastMinimapExtent = default;
