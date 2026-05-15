@@ -64,6 +64,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private readonly IApplicateShellAssetBundleFactory? _shellAssetFactory;
     private bool _shellNavigated;
     private bool _shellDocumentReadyConsumed;
+    private TaskCompletionSource<bool>? _shellReady;
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -460,8 +461,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             if (!_shellNavigated)
             {
+                _shellReady ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 await NavigateToShellAsync(cancellationToken).ConfigureAwait(true);
                 _shellNavigated = true;
+            }
+
+            // Wait for shell's first document-ready before posting load-document.
+            // Without this gate, PostRendererMessage races with the renderer-shell
+            // page load — the renderer's message listener doesn't exist yet.
+            if (_shellReady is not null)
+            {
+                using var registration = cancellationToken.Register(() => _shellReady.TrySetCanceled(cancellationToken));
+                await _shellReady.Task.ConfigureAwait(true);
             }
 
             if (source is null)
@@ -686,6 +697,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                     // document-ready arrives later via load-document's
                     // scheduleLayoutReady wrapper.
                     _shellDocumentReadyConsumed = true;
+                    _shellReady?.TrySetResult(true);
                     SendTheme();
                     SendMinimapPolicy();
                     SendReadingPreferences();
