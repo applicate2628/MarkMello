@@ -173,6 +173,7 @@ internal sealed class ApplicateTabsView : UserControl
         var borderBrush = ResolveBrush("MmBorderBrush");
         var activeBg = ResolveBrush("MmBackgroundBrush");
         var inactiveBg = ResolveBrush("MmSurfaceBrush");
+        var textBrush = ResolveBrush("MmTextBrush");
         foreach (var tab in _tabsPanel.Children.OfType<Border>())
         {
             var doc = _tabToDocument.TryGetValue(tab, out var d) ? d : null;
@@ -180,6 +181,20 @@ internal sealed class ApplicateTabsView : UserControl
                 && ReferenceEquals(doc, _openDocsService.ActiveDocument);
             tab.BorderBrush = borderBrush;
             tab.Background = isActive ? activeBg : inactiveBg;
+            // Update the tab label's Foreground too. Without this, the
+            // captured brush from BuildTab stays at the previous theme
+            // palette (e.g. dark text on dark surface after a Light->Dark
+            // switch) and the tab title becomes near-invisible.
+            if (tab.Child is Grid grid)
+            {
+                foreach (var child in grid.Children)
+                {
+                    if (child is TextBlock label)
+                    {
+                        label.Foreground = textBrush;
+                    }
+                }
+            }
         }
     }
 

@@ -696,7 +696,11 @@ public sealed class ApplicateMainWindow : MainWindow
             }
 
             // Pick the document to activate. Argv wins over the saved active
-            // because the user just explicitly asked for it.
+            // because the user just explicitly asked for it. If the preferred
+            // path no longer exists in the restored set (file deleted, argv
+            // pointed at a missing file, etc.) fall back to the first open
+            // doc so the user is never left with an "active tab does not
+            // match displayed file" state.
             var preferredPath = !string.IsNullOrWhiteSpace(argvPath) ? argvPath : saved.ActivePath;
             OpenDocument? toActivate = null;
             if (!string.IsNullOrWhiteSpace(preferredPath))
@@ -710,32 +714,51 @@ public sealed class ApplicateMainWindow : MainWindow
                     }
                 }
             }
-
-            if (toActivate is not null && !ReferenceEquals(toActivate, openDocs.ActiveDocument))
+            if (toActivate is null && openDocs.OpenDocuments.Count > 0)
             {
-                openDocs.Activate(toActivate);
+                toActivate = openDocs.OpenDocuments[0];
             }
-            else if (toActivate is not null
-                && string.IsNullOrEmpty(viewModel.Document?.Path))
+
+            if (toActivate is not null)
             {
-                // Restore opened the docs under inVmMirror, so the bridge's
-                // ActiveDocumentChanged handler skipped each Add and the VM
-                // was never told what document to load. If the preferred doc
-                // is already the active OpenDocument (set as a side effect of
-                // the last OpenAsync) the Activate() above is a no-op, so we
-                // must explicitly drive the VM to that path here.
-                inServiceLoad = true;
-                try
+                // Force-sync both sides. The restore loop ran under
+                // inVmMirror=true so every OpenAsync's ActiveDocumentChanged
+                // was dropped by the bridge — the service's ActiveDocument
+                // ended up at whichever doc was opened last (= last entry in
+                // saved.OpenPaths, or argvPath if supplied), and the VM was
+                // never told to load any of them. Either side may now be
+                // out of sync with `toActivate`; touch both explicitly so
+                // they cannot drift.
+                if (!ReferenceEquals(toActivate, openDocs.ActiveDocument))
                 {
-                    await viewModel.OpenPathAsync(toActivate.FilePath).ConfigureAwait(true);
+                    // Suppress the bridge while we set ActiveDocument so its
+                    // async OpenPathAsync does not race with our own
+                    // explicit OpenPathAsync below.
+                    inVmMirror = true;
+                    try
+                    {
+                        openDocs.Activate(toActivate);
+                    }
+                    finally
+                    {
+                        inVmMirror = false;
+                    }
                 }
-                catch (System.IO.IOException)
+                if (!string.Equals(viewModel.Document?.Path, toActivate.FilePath, System.StringComparison.OrdinalIgnoreCase))
                 {
-                    // File may have moved between restore and the VM load.
-                }
-                finally
-                {
-                    inServiceLoad = false;
+                    inServiceLoad = true;
+                    try
+                    {
+                        await viewModel.OpenPathAsync(toActivate.FilePath).ConfigureAwait(true);
+                    }
+                    catch (System.IO.IOException)
+                    {
+                        // File may have moved between restore and the VM load.
+                    }
+                    finally
+                    {
+                        inServiceLoad = false;
+                    }
                 }
             }
 
