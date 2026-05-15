@@ -8,6 +8,7 @@ import {
 import { renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
 import { normalizeHljsLanguage } from "./hljsLanguage";
 import { runInitialRenderPipeline, type MathReadinessController } from "./initialRenderPipeline";
+import { applyLoadDocument, clearDocumentState } from "./loadDocument";
 import { renderMath as renderMathInit } from "./mathRenderInit";
 import { schedulePhaseBRebuild } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
@@ -88,7 +89,9 @@ type HostMessage =
   | { type: "scroll-by"; deltaY: number }
   | { type: "scroll-to-block"; blockIndex: number }
   | { type: "scroll-to"; anchor: string }
-  | { type: "scroll-to-progress"; progressPercent: number };
+  | { type: "scroll-to-progress"; progressPercent: number }
+  | { type: "load-document"; html: string; documentName?: string; hasMermaid?: boolean; hasHljs?: boolean }
+  | { type: "clear-document" };
 
 const hostWindow = window as RendererWindow;
 const MINIMAP_CLASS = "mm-minimap";
@@ -973,7 +976,75 @@ function handleHostMessage(raw: unknown): void {
     if (target) {
       target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
     }
+    return;
   }
+
+  if (message.type === "load-document") {
+    const loadMessage: import("./loadDocument").LoadDocumentMessage = { html: message.html };
+    if (message.documentName !== undefined) {
+      loadMessage.documentName = message.documentName;
+    }
+    applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+    return;
+  }
+
+  if (message.type === "clear-document") {
+    clearDocumentState(buildLoadDocumentDeps());
+    return;
+  }
+}
+
+function resetModuleGlobalsForLoadDocument(): void {
+  initialRenderPipelineCompleted = false;
+  currentController?.cancel();
+  currentController = null;
+  // INCREMENT, not reset-to-0 — invalidates in-flight mermaid render callbacks
+  // that compare against the old generation token. Resetting to 0 would let a
+  // stale callback whose generation === 0 pass the check, painting an
+  // old-document diagram onto the new document. (Codex review 2026-05-15.)
+  ++mermaidRenderGeneration;
+  minimapDocumentHeight = 0;
+  lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
+  minimapSourceReady = false;
+}
+
+function ensureChromeNodes(): void {
+  ensureMinimap();
+  ensureWidthHandle();
+  ensureDropOverlay();
+  // Width-handle X depends on the new .mm-document bounding rect after innerHTML
+  // swap; ensureWidthHandle only ensures the node exists.
+  updateWidthHandlePosition();
+}
+
+function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
+  return {
+    runInitialRenderPipeline: () => runInitialRenderPipeline({
+      getCurrentTheme,
+      applyTheme,
+      initMermaidWithTheme,
+      renderMath,
+      renderMermaid,
+      renderCodeBlocks,
+      scheduleLayoutReady: () => {
+        initialRenderPipelineCompleted = true;
+        scheduleLayoutReady();
+        // Re-emit document-ready so the host's _hasReceivedDocumentReady /
+        // _hasLoadedDocument state machine restarts for the new document.
+        // DOMContentLoaded's document-ready only fires once per shell
+        // navigation; load-document is the per-document analog.
+        postHostMessage({
+          type: "document-ready",
+          mathCount: document.querySelectorAll("[data-tex]").length
+        });
+      }
+    }),
+    cancelCurrentMathController: () => { currentController?.cancel(); },
+    resetModuleGlobals: resetModuleGlobalsForLoadDocument,
+    scrollWindowToTop: () => { window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior }); },
+    emitMark,
+    ensureChromeNodes,
+  };
 }
 
 function wireLinks(): void {
@@ -1232,3 +1303,8 @@ window.addEventListener("resize", () => {
   get initialVisibleReady() { return currentController?.initialVisibleReady ?? Promise.resolve(); },
   get allMathRendered() { return currentController?.allMathRendered ?? Promise.resolve(); },
 };
+
+// Test-only seam — lets vitest exercise load-document/clear-document against
+// the real renderer module-globals via the same dispatcher the WebView uses.
+(window as unknown as { __mmRendererLoad: (msg: unknown) => void }).__mmRendererLoad =
+  (msg) => handleHostMessage(msg);

@@ -112,6 +112,33 @@
     deps.scheduleLayoutReady();
   }
 
+  // RendererWeb/src/loadDocument.ts
+  function applyLoadDocument(message, deps) {
+    const main = document.querySelector("main.mm-document");
+    if (!main) {
+      return;
+    }
+    deps.emitMark("mm-load-document", {
+      documentName: message.documentName ?? "",
+      htmlLength: message.html.length
+    });
+    deps.cancelCurrentMathController();
+    deps.resetModuleGlobals();
+    main.innerHTML = message.html;
+    deps.ensureChromeNodes();
+    deps.scrollWindowToTop();
+    void deps.runInitialRenderPipeline();
+  }
+  function clearDocumentState(deps) {
+    const main = document.querySelector("main.mm-document");
+    deps.emitMark("mm-clear-document");
+    deps.cancelCurrentMathController();
+    deps.resetModuleGlobals();
+    if (main) {
+      main.innerHTML = "";
+    }
+  }
+
   // RendererWeb/src/performanceMarks.ts
   var state = {
     marks: [],
@@ -1163,7 +1190,64 @@
       if (target) {
         target.scrollIntoView({ block: "start", behavior: "instant" });
       }
+      return;
     }
+    if (message.type === "load-document") {
+      const loadMessage = { html: message.html };
+      if (message.documentName !== void 0) {
+        loadMessage.documentName = message.documentName;
+      }
+      applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+      return;
+    }
+    if (message.type === "clear-document") {
+      clearDocumentState(buildLoadDocumentDeps());
+      return;
+    }
+  }
+  function resetModuleGlobalsForLoadDocument() {
+    initialRenderPipelineCompleted = false;
+    currentController?.cancel();
+    currentController = null;
+    ++mermaidRenderGeneration;
+    minimapDocumentHeight = 0;
+    lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
+    minimapSourceReady = false;
+  }
+  function ensureChromeNodes() {
+    ensureMinimap();
+    ensureWidthHandle();
+    ensureDropOverlay();
+    updateWidthHandlePosition();
+  }
+  function buildLoadDocumentDeps() {
+    return {
+      runInitialRenderPipeline: () => runInitialRenderPipeline({
+        getCurrentTheme,
+        applyTheme,
+        initMermaidWithTheme,
+        renderMath: renderMath2,
+        renderMermaid,
+        renderCodeBlocks,
+        scheduleLayoutReady: () => {
+          initialRenderPipelineCompleted = true;
+          scheduleLayoutReady();
+          postHostMessage({
+            type: "document-ready",
+            mathCount: document.querySelectorAll("[data-tex]").length
+          });
+        }
+      }),
+      cancelCurrentMathController: () => {
+        currentController?.cancel();
+      },
+      resetModuleGlobals: resetModuleGlobalsForLoadDocument,
+      scrollWindowToTop: () => {
+        window.scrollTo({ left: 0, top: 0, behavior: "instant" });
+      },
+      emitMark,
+      ensureChromeNodes
+    };
   }
   function wireLinks() {
     document.addEventListener("click", (event) => {
@@ -1373,4 +1457,5 @@
       return currentController?.allMathRendered ?? Promise.resolve();
     }
   };
+  window.__mmRendererLoad = (msg) => handleHostMessage(msg);
 })();
