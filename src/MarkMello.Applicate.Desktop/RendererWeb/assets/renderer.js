@@ -782,8 +782,10 @@
     const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
     const minimapReservedWidth = getCurrentMinimapReservedWidth();
     const documentRect = documentElement.getBoundingClientRect();
+    const documentStyle = getComputedStyle(documentElement);
+    const documentPaddingRight = Number.parseFloat(documentStyle.paddingRight) || 0;
     const trackGraceRight = 4;
-    const idealHandleLeft = documentRect.right + trackGraceRight;
+    const idealHandleLeft = documentRect.right - documentPaddingRight + trackGraceRight;
     const minimapLeftEdge = window.innerWidth - minimapReservedWidth;
     const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
     const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
@@ -845,10 +847,12 @@
         const minimapReserved = minimapRoot && !minimapRoot.hidden ? Math.max(0, minimapWidth + minimapGap * 2) : 0;
         const minimapLeftEdge = window.innerWidth - minimapReserved;
         const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
-        const idealHandleLeft = widthHandleStartLeft + pendingWidthDragDeltaX;
+        const columnWidthDelta = previewMaxWidth - widthHandleStartMaxWidth;
+        const idealHandleLeft = widthHandleStartLeft + columnWidthDelta / 2;
         const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
         widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
       }
+      queueMinimapViewportUpdate();
     });
   }
   function handleWidthHandlePointerUp(event) {
@@ -863,7 +867,7 @@
     } catch {
     }
     updateWidthHandlePosition();
-    scheduleMinimapContentRefreshIdle();
+    queueMinimapViewportUpdate();
     postHostMessage({ type: "width-drag", phase: "end", deltaX });
     event.preventDefault();
   }
@@ -876,7 +880,8 @@
     }
     widthHandleDragging = false;
     widthHandleRoot?.classList.remove(WIDTH_HANDLE_DRAGGING_CLASS);
-    refreshMinimapContent("A");
+    updateWidthHandlePosition();
+    queueMinimapViewportUpdate();
     postHostMessage({ type: "width-drag", phase: "end", deltaX: pendingWidthDragDeltaX });
   }
   function ensureMinimap() {
@@ -918,14 +923,6 @@
       }
     });
     return clone;
-  }
-  function scheduleMinimapContentRefreshIdle() {
-    const win = window;
-    if (typeof win.requestIdleCallback === "function") {
-      win.requestIdleCallback(() => refreshMinimapContent("A"), { timeout: 200 });
-      return;
-    }
-    window.setTimeout(() => refreshMinimapContent("A"), 50);
   }
   function refreshMinimapContent(phase = "A") {
     emitMark("mm-minimap-refresh-start", { phase });
@@ -970,7 +967,6 @@
     minimapRoot.hidden = !visible;
     document.body.classList.toggle(MINIMAP_VISIBLE_CLASS, visible);
     postMinimapState(visible, forcePostState);
-    updateWidthHandlePosition();
   }
   function getCurrentMinimapReservedWidth() {
     if (!minimapRoot || minimapRoot.hidden) {
@@ -1067,9 +1063,6 @@
     if (minimapViewportFrameRequested) {
       return;
     }
-    if (widthHandleDragging) {
-      return;
-    }
     minimapViewportFrameRequested = true;
     window.requestAnimationFrame(() => {
       minimapViewportFrameRequested = false;
@@ -1150,9 +1143,6 @@
     const hadHostPreferences = hasReceivedHostPreferences;
     hasReceivedHostPreferences = true;
     lastAppliedReadingPreferences = next;
-    if (maxWidthChanged || viewerChromeChanged || widthResizerVisibilityChanged) {
-      updateWidthHandlePosition();
-    }
     const layoutAffectingChange = fontFamilyChanged || fontSizeChanged || lineHeightChanged || maxWidthChanged || minimapModeChanged || viewerChromeChanged;
     if (layoutAffectingChange) {
       scheduleHeavyLiveUpdate();
@@ -1459,6 +1449,7 @@
         window.requestAnimationFrame(postScroll);
       });
       resizeObserver.observe(documentElement);
+      resizeObserver.observe(document.body);
     }
     document.fonts?.ready.then(() => queueMinimapRefreshAfterLayoutSettles()).catch(() => void 0);
   });

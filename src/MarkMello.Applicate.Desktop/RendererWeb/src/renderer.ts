@@ -428,13 +428,16 @@ function updateWidthHandlePosition(): void {
   const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
   const minimapReservedWidth = getCurrentMinimapReservedWidth();
   const documentRect = documentElement.getBoundingClientRect();
-  // documentRect already includes the 72px padding around the text. Push the
-  // hit area further right by a small grace so the visible track sits in
-  // the gap between the document container and the minimap (or the viewport
-  // edge when minimap is hidden) instead of biting into the right padding
-  // band that occasionally surfaces wide characters at narrow widths.
+  // Position handle at the right edge of the VISIBLE TEXT COLUMN, not at the
+  // .mm-document box.right. With minimap visible, body.mm-has-minimap adds
+  // ~152px to padding-right (reserves space for the fixed minimap aside) so
+  // box.right is far past where the user sees the readable column end. The
+  // handle should sit just past the text — otherwise it floats in dead space
+  // mid-document, making the column resize feel disconnected.
+  const documentStyle = getComputedStyle(documentElement);
+  const documentPaddingRight = Number.parseFloat(documentStyle.paddingRight) || 0;
   const trackGraceRight = 4;
-  const idealHandleLeft = documentRect.right + trackGraceRight;
+  const idealHandleLeft = documentRect.right - documentPaddingRight + trackGraceRight;
   const minimapLeftEdge = window.innerWidth - minimapReservedWidth;
   const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
   const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
@@ -513,13 +516,15 @@ function scheduleWidthDragApply(): void {
     // during drag, host gets final value on release.
     const previewMaxWidth = Math.max(200, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
     document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
-    // Synthetic handle position during drag: handle tracks cursor 1:1 from
-    // its starting position, clamped against the minimap edge using CSS
-    // variables (no layout read). This avoids calling
-    // updateWidthHandlePosition() which would do getBoundingClientRect() and
-    // force a sync layout flush right after the setProperty above — the
-    // dominant per-frame cost on heavy formula documents. Pointer-up does
-    // one canonical updateWidthHandlePosition() for re-sync.
+    // Synthetic handle position during drag: handle tracks the DOCUMENT'S
+    // RIGHT EDGE, not the cursor. Column is center-aligned, so a ΔW change
+    // in column width moves each edge by ΔW/2. Cursor delta is unconstrained
+    // but `previewMaxWidth` IS clamped (min 200) → driving handle from the
+    // clamped column-width delta means the handle stops moving when the
+    // column hits its minimum, even if the cursor keeps going. Avoids
+    // calling updateWidthHandlePosition() which would do getBoundingClientRect()
+    // and force sync layout right after the setProperty above. Pointer-up
+    // does one canonical updateWidthHandlePosition() for re-sync.
     if (widthHandleRoot) {
       const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
       const minimapWidth = readRootPixelVariable("--mm-minimap-width", 0);
@@ -529,10 +534,18 @@ function scheduleWidthDragApply(): void {
         : 0;
       const minimapLeftEdge = window.innerWidth - minimapReserved;
       const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
-      const idealHandleLeft = widthHandleStartLeft + pendingWidthDragDeltaX;
+      const columnWidthDelta = previewMaxWidth - widthHandleStartMaxWidth;
+      const idealHandleLeft = widthHandleStartLeft + columnWidthDelta / 2;
       const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
       widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
     }
+    // Live minimap update — track the source's new wrap during drag. Cost
+    // is one updateMinimapViewport per rAF (sync layout on source +
+    // minimap clone). With content-visibility on source blocks the source
+    // side is ~5%-cost; clone is not c-v-covered so reflow cost depends on
+    // clone block count. If perf regresses on heavy docs, throttle to
+    // every Nth frame here.
+    queueMinimapViewportUpdate();
   });
 }
 
@@ -555,14 +568,13 @@ function handleWidthHandlePointerUp(event: PointerEvent): void {
   // width-drag end and will overwrite the preview — small visual snap if host
   // clamps differently, but it's a single reflow.
   updateWidthHandlePosition();
-  // Refresh minimap CONTENT (not just viewport) with the new document layout.
-  // Width change means text wraps differently → document scrollHeight + line
-  // positions are all different from the pre-drag clone. queueMinimapViewportUpdate
-  // alone would just rescale the stale clone; we need a full re-clone of the
-  // now-stable document state to match what the user sees. Defer via idle
-  // callback so pointer-up feels instant: handle release is responsive, the
-  // minimap content snaps in ~50ms later.
-  scheduleMinimapContentRefreshIdle();
+  // Cheap viewport-only update — no full re-clone. Width drag changes only
+  // the document's wrap width, not its CONTENT. The minimap clone has CSS
+  // max-width:none and padding:0; its wrap follows minimapContent.style.width
+  // which updateMinimapViewport sets to the now-current source.clientWidth.
+  // So the clone re-wraps to match the new source layout automatically — no
+  // cloneNode needed. Saves ~50-100ms per drag-end on heavy formula docs.
+  queueMinimapViewportUpdate();
 
   postHostMessage({ type: "width-drag", phase: "end", deltaX });
   event.preventDefault();
@@ -579,10 +591,10 @@ function cancelWidthHandleDrag(): void {
 
   widthHandleDragging = false;
   widthHandleRoot?.classList.remove(WIDTH_HANDLE_DRAGGING_CLASS);
-  // See handleWidthHandlePointerUp — full content re-clone, not just viewport
-  // recompute. Pointer-cancel still leaves the document at a width different
-  // from the pre-drag state, so the minimap clone is stale either way.
-  refreshMinimapContent("A");
+  // Canonical re-sync (observer was gated during drag — see ResizeObserver in
+  // DOMContentLoaded). Same as handleWidthHandlePointerUp.
+  updateWidthHandlePosition();
+  queueMinimapViewportUpdate();
   postHostMessage({ type: "width-drag", phase: "end", deltaX: pendingWidthDragDeltaX });
 }
 
@@ -637,20 +649,6 @@ function cloneDocumentForMinimap(): HTMLElement | null {
     }
   });
   return clone;
-}
-
-function scheduleMinimapContentRefreshIdle(): void {
-  const win = window as typeof window & {
-    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
-  };
-  if (typeof win.requestIdleCallback === "function") {
-    win.requestIdleCallback(() => refreshMinimapContent("A"), { timeout: 200 });
-    return;
-  }
-  // WebView2's Chromium may or may not have requestIdleCallback depending on
-  // Edge version. Fallback gives pointer-up a chance to settle visually before
-  // the heavy clone runs.
-  window.setTimeout(() => refreshMinimapContent("A"), 50);
 }
 
 function refreshMinimapContent(phase: "A" | "B" = "A"): void {
@@ -708,7 +706,8 @@ function updateMinimapVisibility(forcePostState = false): void {
   minimapRoot.hidden = !visible;
   document.body.classList.toggle(MINIMAP_VISIBLE_CLASS, visible);
   postMinimapState(visible, forcePostState);
-  updateWidthHandlePosition();
+  // Body class toggle changes .mm-document max-width + padding → ResizeObserver
+  // fires → updateWidthHandlePosition runs. One source of truth.
 }
 
 function getCurrentMinimapReservedWidth(): number {
@@ -831,14 +830,6 @@ function queueMinimapViewportUpdate(): void {
   if (minimapViewportFrameRequested) {
     return;
   }
-  // Skip during width-handle drag: the minimap content clone is from the
-  // pre-drag document state and a viewport-only recompute against the live
-  // (narrower/wider) document produces a visibly jarring scale animation
-  // that does not match the document the user is editing. Drag-end posts a
-  // fresh recompute (handleWidthHandlePointerUp → finalizeWidthDrag).
-  if (widthHandleDragging) {
-    return;
-  }
 
   minimapViewportFrameRequested = true;
   window.requestAnimationFrame(() => {
@@ -953,11 +944,10 @@ function flushPendingReadingPreferences(): void {
   hasReceivedHostPreferences = true;
   lastAppliedReadingPreferences = next;
 
-  // Width handle anchor depends on max-width / chrome / resizer-visibility;
-  // recompute when any of those changed.
-  if (maxWidthChanged || viewerChromeChanged || widthResizerVisibilityChanged) {
-    updateWidthHandlePosition();
-  }
+  // Width handle anchor depends purely on .mm-document size + body size →
+  // observed by the canonical ResizeObserver wired in DOMContentLoaded. The
+  // explicit per-pref-change call here was redundant defensive code from
+  // an earlier era when there was no observer; removed for one-path clarity.
 
   // Phase B — heavy work (minimap viewport recompute). Only schedule when a
   // layout-affecting field actually changed; debounce so rapid slider drags
@@ -1341,12 +1331,20 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   postScroll();
 
+  // SINGLE canonical observer for handle + minimap repositioning. Observes:
+  //   .mm-document — catches max-width / padding changes (host reading-prefs,
+  //     body.mm-has-minimap class toggle, theme/font changes)
+  //   document.body — catches body content-area changes (html scrollbar
+  //     appearing/disappearing as content-visibility blocks settle their real
+  //     heights → shifts .mm-document's centered position without changing
+  //     its own size, invisible to the .mm-document observer)
+  // All other paths that updated handle position have been removed; this
+  // observer is the source of truth except during drag (synthetic, in
+  // scheduleWidthDragApply) and on drag-end (canonical re-sync in
+  // handleWidthHandlePointerUp where the observer was gated).
   const documentElement = document.querySelector<HTMLElement>(".mm-document");
   if (documentElement) {
     const resizeObserver = new ResizeObserver(() => {
-      // During width-handle drag the apply rAF (scheduleWidthDragApply) already
-      // owns handle position + content layout. The observer's per-reflow callback
-      // duplicates work and adds IPC chatter for no user-visible benefit.
       if (widthHandleDragging) {
         return;
       }
@@ -1355,6 +1353,7 @@ document.addEventListener("DOMContentLoaded", () => {
       window.requestAnimationFrame(postScroll);
     });
     resizeObserver.observe(documentElement);
+    resizeObserver.observe(document.body);
   }
 
   document.fonts?.ready.then(() => queueMinimapRefreshAfterLayoutSettles()).catch(() => undefined);
