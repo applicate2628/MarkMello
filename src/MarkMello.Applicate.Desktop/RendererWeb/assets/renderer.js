@@ -16,7 +16,7 @@
       return null;
     }
     const minimumThumbHeight = input.minimumThumbHeight ?? DEFAULT_MINIMUM_THUMB_HEIGHT;
-    const scale = input.minimapWidth / input.documentWidth;
+    const scale = Math.min(1, input.minimapWidth / input.documentWidth);
     const projectedDocumentHeight = input.documentHeight * scale;
     const maximumScrollTop = Math.max(0, input.documentHeight - input.viewportHeight);
     const scrollProgress = maximumScrollTop > 0 ? Math.max(0, Math.min(1, input.scrollTop / maximumScrollTop)) : 0;
@@ -545,8 +545,10 @@
   var widthHandleDragging = false;
   var widthHandleStartClientX = 0;
   var widthHandleStartMaxWidth = 0;
+  var widthHandleStartLeft = 0;
   var pendingWidthDragDeltaX = 0;
   var widthDragFrameRequested = false;
+  var widthDragApplyFrameRequested = false;
   var layoutReadyGeneration = 0;
   var layoutReadyTimer;
   var lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
@@ -804,6 +806,8 @@
     widthHandleDragging = true;
     widthHandleStartClientX = event.clientX;
     pendingWidthDragDeltaX = 0;
+    const startLeftFromStyle = parseFloat(widthHandleRoot.style.left);
+    widthHandleStartLeft = Number.isFinite(startLeftFromStyle) ? startLeftFromStyle : widthHandleRoot.getBoundingClientRect().left;
     const inlineMaxWidth = parseFloat(
       document.documentElement.style.getPropertyValue("--mm-document-max-width")
     );
@@ -818,11 +822,34 @@
       return;
     }
     pendingWidthDragDeltaX = event.clientX - widthHandleStartClientX;
-    const previewMaxWidth = Math.max(200, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
-    document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
-    updateWidthHandlePosition();
+    scheduleWidthDragApply();
     postWidthDragMove();
     event.preventDefault();
+  }
+  function scheduleWidthDragApply() {
+    if (widthDragApplyFrameRequested) {
+      return;
+    }
+    widthDragApplyFrameRequested = true;
+    window.requestAnimationFrame(() => {
+      widthDragApplyFrameRequested = false;
+      if (!widthHandleDragging) {
+        return;
+      }
+      const previewMaxWidth = Math.max(200, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
+      document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
+      if (widthHandleRoot) {
+        const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
+        const minimapWidth = readRootPixelVariable("--mm-minimap-width", 0);
+        const minimapGap = readRootPixelVariable("--mm-minimap-gap", 0);
+        const minimapReserved = minimapRoot && !minimapRoot.hidden ? Math.max(0, minimapWidth + minimapGap * 2) : 0;
+        const minimapLeftEdge = window.innerWidth - minimapReserved;
+        const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
+        const idealHandleLeft = widthHandleStartLeft + pendingWidthDragDeltaX;
+        const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
+        widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
+      }
+    });
   }
   function handleWidthHandlePointerUp(event) {
     if (!widthHandleDragging) {
@@ -836,6 +863,7 @@
     } catch {
     }
     updateWidthHandlePosition();
+    scheduleMinimapContentRefreshIdle();
     postHostMessage({ type: "width-drag", phase: "end", deltaX });
     event.preventDefault();
   }
@@ -848,6 +876,7 @@
     }
     widthHandleDragging = false;
     widthHandleRoot?.classList.remove(WIDTH_HANDLE_DRAGGING_CLASS);
+    refreshMinimapContent("A");
     postHostMessage({ type: "width-drag", phase: "end", deltaX: pendingWidthDragDeltaX });
   }
   function ensureMinimap() {
@@ -880,19 +909,23 @@
     clone.removeAttribute("id");
     clone.setAttribute("aria-hidden", "true");
     clone.inert = true;
-    clone.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
     clone.querySelectorAll("*").forEach((node) => {
-      for (const attribute of Array.from(node.attributes)) {
-        if (attribute.name === "role" || attribute.name === "name" || attribute.name === "for" || attribute.name.startsWith("aria-") && attribute.name !== "aria-hidden") {
-          node.removeAttribute(attribute.name);
-        }
+      if (node.hasAttribute("id")) node.removeAttribute("id");
+      const tag = node.tagName;
+      if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+        node.setAttribute("tabindex", "-1");
+        node.removeAttribute("href");
       }
     });
-    clone.querySelectorAll("a, button, input, textarea, select").forEach((node) => {
-      node.setAttribute("tabindex", "-1");
-      node.removeAttribute("href");
-    });
     return clone;
+  }
+  function scheduleMinimapContentRefreshIdle() {
+    const win = window;
+    if (typeof win.requestIdleCallback === "function") {
+      win.requestIdleCallback(() => refreshMinimapContent("A"), { timeout: 200 });
+      return;
+    }
+    window.setTimeout(() => refreshMinimapContent("A"), 50);
   }
   function refreshMinimapContent(phase = "A") {
     emitMark("mm-minimap-refresh-start", { phase });
@@ -966,17 +999,10 @@
     if (!source) {
       return;
     }
-    const sourceStyle = getComputedStyle(source);
-    const sourcePaddingLeft = Number.parseFloat(sourceStyle.paddingLeft) || 0;
-    const sourcePaddingRight = Number.parseFloat(sourceStyle.paddingRight) || 0;
     const minimapHeight = minimapRoot.clientHeight;
     const minimapWidth = minimapRoot.clientWidth;
     const documentHeight = root.scrollHeight;
-    const documentWidth = Math.max(
-      source.scrollWidth - sourcePaddingLeft - sourcePaddingRight,
-      source.clientWidth - sourcePaddingLeft - sourcePaddingRight,
-      1
-    );
+    const documentWidth = Math.max(source.scrollWidth, source.clientWidth, 1);
     const viewportHeight = root.clientHeight;
     if (minimapHeight <= 0 || minimapWidth <= 0 || documentHeight <= 0 || viewportHeight <= 0) {
       return;
@@ -1039,6 +1065,9 @@
   }
   function queueMinimapViewportUpdate() {
     if (minimapViewportFrameRequested) {
+      return;
+    }
+    if (widthHandleDragging) {
       return;
     }
     minimapViewportFrameRequested = true;
@@ -1422,6 +1451,9 @@
     const documentElement = document.querySelector(".mm-document");
     if (documentElement) {
       const resizeObserver = new ResizeObserver(() => {
+        if (widthHandleDragging) {
+          return;
+        }
         queueMinimapRefreshAfterLayoutSettles();
         updateWidthHandlePosition();
         window.requestAnimationFrame(postScroll);

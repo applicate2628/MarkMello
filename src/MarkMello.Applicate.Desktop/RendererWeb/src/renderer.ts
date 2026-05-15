@@ -126,8 +126,10 @@ let widthHandleRoot: HTMLElement | null = null;
 let widthHandleDragging = false;
 let widthHandleStartClientX = 0;
 let widthHandleStartMaxWidth = 0;
+let widthHandleStartLeft = 0;
 let pendingWidthDragDeltaX = 0;
 let widthDragFrameRequested = false;
+let widthDragApplyFrameRequested = false;
 let layoutReadyGeneration = 0;
 let layoutReadyTimer: number | undefined;
 let lastPostedMinimapState: PostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
@@ -459,6 +461,12 @@ function handleWidthHandlePointerDown(event: PointerEvent): void {
   widthHandleDragging = true;
   widthHandleStartClientX = event.clientX;
   pendingWidthDragDeltaX = 0;
+  // Snapshot handle left for synthetic positioning during drag (avoids
+  // per-frame getBoundingClientRect → forced sync layout on heavy docs).
+  const startLeftFromStyle = parseFloat(widthHandleRoot.style.left);
+  widthHandleStartLeft = Number.isFinite(startLeftFromStyle)
+    ? startLeftFromStyle
+    : widthHandleRoot.getBoundingClientRect().left;
   // Snapshot current maxWidth for local live-preview during drag. Read from
   // the inline style if set, else fall back to last applied prefs.
   const inlineMaxWidth = parseFloat(
@@ -478,19 +486,54 @@ function handleWidthHandlePointerMove(event: PointerEvent): void {
     return;
   }
 
+  // Hot path: pointermove fires at native rate (often 120-1000Hz). Calling
+  // style.setProperty + getBoundingClientRect synchronously here causes
+  // forced sync layout per event, which on heavy formula-dense documents
+  // becomes layout-thrashing. Coalesce into a single rAF flush — at most
+  // one reflow per animation frame, regardless of pointermove rate.
   pendingWidthDragDeltaX = event.clientX - widthHandleStartClientX;
-  // Live local preview: compute new maxWidth from deltaX and apply directly.
-  // Document is centered, so handle moves by deltaX implies column width
-  // changes by 2*deltaX. Bypass host round-trip — renderer owns the visual
-  // during drag, host gets final value on release.
-  const previewMaxWidth = Math.max(200, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
-  document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
-  // Position handle from real document layout (after maxWidth reflow). This
-  // matches the steady-state logic and inherits the minimap-clamping baked
-  // into updateWidthHandlePosition — no overlap with the minimap area.
-  updateWidthHandlePosition();
+  scheduleWidthDragApply();
   postWidthDragMove();
   event.preventDefault();
+}
+
+function scheduleWidthDragApply(): void {
+  if (widthDragApplyFrameRequested) {
+    return;
+  }
+  widthDragApplyFrameRequested = true;
+  window.requestAnimationFrame(() => {
+    widthDragApplyFrameRequested = false;
+    if (!widthHandleDragging) {
+      return;
+    }
+    // Live local preview: compute new maxWidth from deltaX and apply directly.
+    // Document is centered, so handle moves by deltaX implies column width
+    // changes by 2*deltaX. Bypass host round-trip — renderer owns the visual
+    // during drag, host gets final value on release.
+    const previewMaxWidth = Math.max(200, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
+    document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
+    // Synthetic handle position during drag: handle tracks cursor 1:1 from
+    // its starting position, clamped against the minimap edge using CSS
+    // variables (no layout read). This avoids calling
+    // updateWidthHandlePosition() which would do getBoundingClientRect() and
+    // force a sync layout flush right after the setProperty above — the
+    // dominant per-frame cost on heavy formula documents. Pointer-up does
+    // one canonical updateWidthHandlePosition() for re-sync.
+    if (widthHandleRoot) {
+      const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
+      const minimapWidth = readRootPixelVariable("--mm-minimap-width", 0);
+      const minimapGap = readRootPixelVariable("--mm-minimap-gap", 0);
+      const minimapReserved = (minimapRoot && !minimapRoot.hidden)
+        ? Math.max(0, minimapWidth + minimapGap * 2)
+        : 0;
+      const minimapLeftEdge = window.innerWidth - minimapReserved;
+      const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
+      const idealHandleLeft = widthHandleStartLeft + pendingWidthDragDeltaX;
+      const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
+      widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
+    }
+  });
 }
 
 function handleWidthHandlePointerUp(event: PointerEvent): void {
@@ -512,6 +555,14 @@ function handleWidthHandlePointerUp(event: PointerEvent): void {
   // width-drag end and will overwrite the preview — small visual snap if host
   // clamps differently, but it's a single reflow.
   updateWidthHandlePosition();
+  // Refresh minimap CONTENT (not just viewport) with the new document layout.
+  // Width change means text wraps differently → document scrollHeight + line
+  // positions are all different from the pre-drag clone. queueMinimapViewportUpdate
+  // alone would just rescale the stale clone; we need a full re-clone of the
+  // now-stable document state to match what the user sees. Defer via idle
+  // callback so pointer-up feels instant: handle release is responsive, the
+  // minimap content snaps in ~50ms later.
+  scheduleMinimapContentRefreshIdle();
 
   postHostMessage({ type: "width-drag", phase: "end", deltaX });
   event.preventDefault();
@@ -528,6 +579,10 @@ function cancelWidthHandleDrag(): void {
 
   widthHandleDragging = false;
   widthHandleRoot?.classList.remove(WIDTH_HANDLE_DRAGGING_CLASS);
+  // See handleWidthHandlePointerUp — full content re-clone, not just viewport
+  // recompute. Pointer-cancel still leaves the document at a width different
+  // from the pre-drag state, so the minimap clone is stale either way.
+  refreshMinimapContent("A");
   postHostMessage({ type: "width-drag", phase: "end", deltaX: pendingWidthDragDeltaX });
 }
 
@@ -568,22 +623,34 @@ function cloneDocumentForMinimap(): HTMLElement | null {
   clone.removeAttribute("id");
   clone.setAttribute("aria-hidden", "true");
   clone.inert = true;
-  clone.querySelectorAll<HTMLElement>("[id]").forEach((node) => node.removeAttribute("id"));
+  // Single tree walk: id-strip + interactive-disable per node. Aria/role/name/for
+  // scrubbing dropped — the clone is already inert + aria-hidden, so per-node
+  // aria attributes have no a11y effect. On a 138-formula doc KaTeX produces
+  // many aria-hidden spans; skipping per-node attribute iteration is a
+  // measurable refresh-clone cost reduction.
   clone.querySelectorAll<HTMLElement>("*").forEach((node) => {
-    for (const attribute of Array.from(node.attributes)) {
-      if (attribute.name === "role"
-        || attribute.name === "name"
-        || attribute.name === "for"
-        || (attribute.name.startsWith("aria-") && attribute.name !== "aria-hidden")) {
-        node.removeAttribute(attribute.name);
-      }
+    if (node.hasAttribute("id")) node.removeAttribute("id");
+    const tag = node.tagName;
+    if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+      node.setAttribute("tabindex", "-1");
+      node.removeAttribute("href");
     }
   });
-  clone.querySelectorAll<HTMLElement>("a, button, input, textarea, select").forEach((node) => {
-    node.setAttribute("tabindex", "-1");
-    node.removeAttribute("href");
-  });
   return clone;
+}
+
+function scheduleMinimapContentRefreshIdle(): void {
+  const win = window as typeof window & {
+    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+  };
+  if (typeof win.requestIdleCallback === "function") {
+    win.requestIdleCallback(() => refreshMinimapContent("A"), { timeout: 200 });
+    return;
+  }
+  // WebView2's Chromium may or may not have requestIdleCallback depending on
+  // Edge version. Fallback gives pointer-up a chance to settle visually before
+  // the heavy clone runs.
+  window.setTimeout(() => refreshMinimapContent("A"), 50);
 }
 
 function refreshMinimapContent(phase: "A" | "B" = "A"): void {
@@ -677,16 +744,16 @@ function updateMinimapViewport(): void {
     return;
   }
 
-  const sourceStyle = getComputedStyle(source);
-  const sourcePaddingLeft = Number.parseFloat(sourceStyle.paddingLeft) || 0;
-  const sourcePaddingRight = Number.parseFloat(sourceStyle.paddingRight) || 0;
   const minimapHeight = minimapRoot.clientHeight;
   const minimapWidth = minimapRoot.clientWidth;
   const documentHeight = root.scrollHeight;
-  const documentWidth = Math.max(
-    source.scrollWidth - sourcePaddingLeft - sourcePaddingRight,
-    source.clientWidth - sourcePaddingLeft - sourcePaddingRight,
-    1);
+  // Compare like with like: the minimap clone strips its own padding and
+  // max-width (renderer.css .mm-minimap-content .mm-document), so feeding the
+  // text-column width (post-padding) into the scale math causes the clone to
+  // wrap into a sliver while the source flows at full clientWidth. Use the
+  // source's full box width — the clone is then a faithfully scaled view of
+  // the same box. Math.min(1, …) cap below remains as defense.
+  const documentWidth = Math.max(source.scrollWidth, source.clientWidth, 1);
   const viewportHeight = root.clientHeight;
   if (minimapHeight <= 0 || minimapWidth <= 0 || documentHeight <= 0 || viewportHeight <= 0) {
     return;
@@ -762,6 +829,14 @@ function handleMinimapPointerUp(event: PointerEvent): void {
 
 function queueMinimapViewportUpdate(): void {
   if (minimapViewportFrameRequested) {
+    return;
+  }
+  // Skip during width-handle drag: the minimap content clone is from the
+  // pre-drag document state and a viewport-only recompute against the live
+  // (narrower/wider) document produces a visibly jarring scale animation
+  // that does not match the document the user is editing. Drag-end posts a
+  // fresh recompute (handleWidthHandlePointerUp → finalizeWidthDrag).
+  if (widthHandleDragging) {
     return;
   }
 
@@ -1269,6 +1344,12 @@ document.addEventListener("DOMContentLoaded", () => {
   const documentElement = document.querySelector<HTMLElement>(".mm-document");
   if (documentElement) {
     const resizeObserver = new ResizeObserver(() => {
+      // During width-handle drag the apply rAF (scheduleWidthDragApply) already
+      // owns handle position + content layout. The observer's per-reflow callback
+      // duplicates work and adds IPC chatter for no user-visible benefit.
+      if (widthHandleDragging) {
+        return;
+      }
       queueMinimapRefreshAfterLayoutSettles();
       updateWidthHandlePosition();
       window.requestAnimationFrame(postScroll);

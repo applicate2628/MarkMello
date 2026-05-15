@@ -29,7 +29,11 @@ export function calculateMinimapViewportLayout(input: MinimapViewportLayoutInput
   }
 
   const minimumThumbHeight = input.minimumThumbHeight ?? DEFAULT_MINIMUM_THUMB_HEIGHT;
-  const scale = input.minimapWidth / input.documentWidth;
+  // Cap scale at 1.0 — the minimap is an OVERVIEW, never magnified.
+  // When the document is narrower than the minimap area (user dragged the
+  // width-handle far left), a raw ratio would scale content UP, making
+  // minimap text larger than the source — the opposite of a minimap's purpose.
+  const scale = Math.min(1, input.minimapWidth / input.documentWidth);
   const projectedDocumentHeight = input.documentHeight * scale;
   const maximumScrollTop = Math.max(0, input.documentHeight - input.viewportHeight);
   const scrollProgress = maximumScrollTop > 0

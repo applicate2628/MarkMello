@@ -65,6 +65,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _shellNavigated;
     private bool _shellDocumentReadyConsumed;
     private TaskCompletionSource<bool>? _shellReady;
+    private bool _isWebWidthDragging;
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -1000,7 +1001,27 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
+        // Gate host→renderer reading-preferences echo while a web-side width
+        // drag is in flight. Renderer owns the visual preview locally; an echo
+        // at ~60Hz per move costs an Avalonia layout + InvokeScript IPC + JSON
+        // parse on every frame, observable as drag lag on heavy formula docs.
+        // Phase End triggers one fresh SendReadingPreferences with the final
+        // host-clamped maxWidth so the renderer reconciles.
+        if (phase == ApplicateWebWidthDragPhase.Start)
+        {
+            _isWebWidthDragging = true;
+        }
+        else if (phase == ApplicateWebWidthDragPhase.End)
+        {
+            _isWebWidthDragging = false;
+        }
+
         WidthDragRequested?.Invoke(this, new ApplicateWebWidthDragEventArgs(phase, deltaX));
+
+        if (phase == ApplicateWebWidthDragPhase.End && _hasLoadedDocument)
+        {
+            SendReadingPreferences();
+        }
     }
 
     private void HandleWheelMessage(JsonElement root)
@@ -1146,6 +1167,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void ApplyReadingPreferences()
     {
+        // While a web-side width drag is active, the renderer owns the visual
+        // preview locally (see widthHandleDragging guard at renderer.ts:856).
+        // Echoing reading-preferences per drag move costs ~60Hz of host work
+        // (Avalonia layout + InvokeScript + JSON parse). The End message
+        // triggers a fresh SendReadingPreferences in HandleWidthDragMessage.
+        if (_isWebWidthDragging && _hasLoadedDocument)
+        {
+            return;
+        }
         if (!_hasLoadedDocument)
         {
             // Render not finished yet. Two cases:
