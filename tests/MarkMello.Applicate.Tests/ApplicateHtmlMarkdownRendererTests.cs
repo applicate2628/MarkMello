@@ -389,4 +389,43 @@ public sealed class ApplicateHtmlMarkdownRendererTests
             return Task.FromResult<Stream?>(new MemoryStream(bytes));
         }
     }
+
+    [Fact]
+    public async Task RenderBodyAsyncReturnsBodyOnlyNoHtmlOrHead()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        var source = new MarkdownSource("test.md", "test.md", "# Hello\n\nSome **bold** text.");
+
+        var result = await renderer.RenderBodyAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.BodyHtml));
+        Assert.DoesNotContain("<!doctype", result.BodyHtml, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("<html", result.BodyHtml, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("<head", result.BodyHtml, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("<script", result.BodyHtml, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("<h1", result.BodyHtml, StringComparison.Ordinal);
+        Assert.False(result.HasMermaidBlock);
+        Assert.False(result.HasCodeBlockWithSyntax);
+    }
+
+    [Fact]
+    public async Task RenderBodyAsyncFlagsMermaidAndHljs()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        var content = "```mermaid\ngraph TD;A-->B;\n```\n\n```typescript\nconst x = 1;\n```";
+        var source = new MarkdownSource("test.md", "test.md", content);
+
+        var result = await renderer.RenderBodyAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        Assert.True(result.HasMermaidBlock);
+        Assert.True(result.HasCodeBlockWithSyntax);
+    }
 }

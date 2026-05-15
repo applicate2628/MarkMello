@@ -44,15 +44,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         IImageSourceResolver? imageSourceResolver,
         CancellationToken cancellationToken)
     {
-        var baseDirectory = ResolveBaseDirectory(source.Path);
-        var rendered = _markdownRenderer.Render(source.Content, baseDirectory);
-        var context = new RenderContext(imageSourceResolver, baseDirectory, cancellationToken);
-
-        foreach (var block in rendered.Blocks)
-        {
-            await RenderBlockAsync(context, block).ConfigureAwait(false);
-        }
-
+        var context = await RenderMarkdownToContextAsync(source, imageSourceResolver, cancellationToken).ConfigureAwait(false);
         var body = context.Html.ToString();
 
         var baseAssets = _assetEmbedder is null
@@ -78,6 +70,39 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             context.PlainText.ToString(),
             context.Headings,
             context.Blocks);
+    }
+
+    public async Task<ApplicateRenderedBody> RenderBodyAsync(
+        MarkdownSource source,
+        ReadingPreferences preferences,
+        IImageSourceResolver? imageSourceResolver,
+        CancellationToken cancellationToken)
+    {
+        var context = await RenderMarkdownToContextAsync(source, imageSourceResolver, cancellationToken).ConfigureAwait(false);
+        return new ApplicateRenderedBody(
+            BodyHtml: context.Html.ToString(),
+            PlainText: context.PlainText.ToString(),
+            Headings: context.Headings,
+            Blocks: context.Blocks,
+            HasMermaidBlock: context.HasMermaidBlock,
+            HasCodeBlockWithSyntax: context.HasCodeBlockWithSyntax);
+    }
+
+    private async Task<RenderContext> RenderMarkdownToContextAsync(
+        MarkdownSource source,
+        IImageSourceResolver? imageSourceResolver,
+        CancellationToken cancellationToken)
+    {
+        var baseDirectory = ResolveBaseDirectory(source.Path);
+        var rendered = _markdownRenderer.Render(source.Content, baseDirectory);
+        var context = new RenderContext(imageSourceResolver, baseDirectory, cancellationToken);
+
+        foreach (var block in rendered.Blocks)
+        {
+            await RenderBlockAsync(context, block).ConfigureAwait(false);
+        }
+
+        return context;
     }
 
     private static string? ResolveBaseDirectory(string? path)

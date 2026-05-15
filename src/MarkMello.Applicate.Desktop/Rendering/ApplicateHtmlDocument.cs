@@ -16,3 +16,11 @@ public sealed record ApplicateHtmlBlockMarker(
     int BlockIndex,
     string Kind,
     string PlainText);
+
+public sealed record ApplicateRenderedBody(
+    string BodyHtml,
+    string PlainText,
+    IReadOnlyList<ApplicateHtmlHeading> Headings,
+    IReadOnlyList<ApplicateHtmlBlockMarker> Blocks,
+    bool HasMermaidBlock,
+    bool HasCodeBlockWithSyntax);

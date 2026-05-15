@@ -10,4 +10,10 @@ public interface IApplicateHtmlMarkdownRenderer
         ReadingPreferences preferences,
         IImageSourceResolver? imageSourceResolver,
         CancellationToken cancellationToken);
+
+    Task<ApplicateRenderedBody> RenderBodyAsync(
+        MarkdownSource source,
+        ReadingPreferences preferences,
+        IImageSourceResolver? imageSourceResolver,
+        CancellationToken cancellationToken);
 }
