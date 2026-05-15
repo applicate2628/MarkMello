@@ -15,10 +15,27 @@ public sealed class ApplicateWebResourcePolicyTests
     [Theory]
     [InlineData("about:blank")]
     [InlineData("data:text/html;charset=utf-8;base64,PGh0bWw+PC9odG1sPg==")]
-    [InlineData("applicate-renderer://document/index.html")]
     public void AllowsInitialGeneratedDocumentNavigation(string url)
     {
         Assert.True(ApplicateWebResourcePolicy.IsAllowedInitialDocumentNavigation(url));
+    }
+
+    [Fact]
+    public void RejectsApplicateRendererVirtualScheme()
+    {
+        // Decision 3 (Phase 2 plan): the unused applicate-renderer:// virtual
+        // host scheme is dropped to shrink the attack surface. The shell page
+        // for Phase 2 lives under file:// in the generated-document folder.
+        Assert.False(ApplicateWebResourcePolicy.IsAllowedInitialDocumentNavigation(
+            "applicate-renderer://document/index.html"));
+    }
+
+    [Fact]
+    public void AcceptsRendererShellFileInGeneratedFolder()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "markmello-shell-test");
+        var shellPath = new Uri(Path.Combine(folder, "renderer-shell.html")).AbsoluteUri;
+        Assert.True(ApplicateWebResourcePolicy.IsAllowedInitialDocumentNavigation(shellPath, folder));
     }
 
     [Fact]

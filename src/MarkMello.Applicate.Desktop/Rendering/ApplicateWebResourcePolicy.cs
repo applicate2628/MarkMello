@@ -21,7 +21,6 @@ public static class ApplicateWebResourcePolicy
 
         return IsAboutBlank(uri)
             || IsGeneratedHtmlDataDocument(uri)
-            || IsGeneratedDocumentBase(uri)
             || IsGeneratedDocumentFile(uri, generatedDocumentRoot);
     }
 
@@ -50,11 +49,11 @@ public static class ApplicateWebResourcePolicy
         => uri.Scheme.Equals("data", StringComparison.OrdinalIgnoreCase)
             && uri.AbsoluteUri.StartsWith("data:text/html", StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsGeneratedDocumentBase(Uri uri)
-        => uri.Scheme.Equals("applicate-renderer", StringComparison.OrdinalIgnoreCase)
-            && uri.Host.Equals("document", StringComparison.OrdinalIgnoreCase)
-            && uri.AbsolutePath.Equals("/index.html", StringComparison.OrdinalIgnoreCase);
-
+    // Decision 3 (Phase 2 plan, 2026-05-15): removed `IsGeneratedDocumentBase`
+    // for the `applicate-renderer://` virtual scheme. The scheme had no callers
+    // in the v0.2.3 code path; dropping it shrinks the attack surface. The
+    // renderer-shell.html for Phase 2 shell mode lives in the generated-document
+    // folder and is matched by IsGeneratedDocumentFile below.
     private static bool IsGeneratedDocumentFile(Uri uri, string? generatedDocumentRoot)
     {
         if (!uri.IsFile || string.IsNullOrWhiteSpace(generatedDocumentRoot))
