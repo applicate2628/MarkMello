@@ -537,6 +537,10 @@
   var minimapViewport = null;
   var currentMinimapLayout = null;
   var minimapDragging = false;
+  var minimapDragStartClientY = null;
+  var minimapDragStartScrollTop = 0;
+  var minimapDragMode = "tentative";
+  var MINIMAP_DRAG_THRESHOLD_PX = 4;
   var minimapSourceReady = false;
   var mermaidRenderGeneration = 0;
   var initialRenderPipelineCompleted = false;
@@ -1057,10 +1061,13 @@
     const root = document.scrollingElement ?? document.documentElement;
     const rect = minimapRoot.getBoundingClientRect();
     const minimapY = Math.max(0, Math.min(rect.height, clientY - rect.top));
-    const documentY = currentMinimapLayout ? (minimapY - currentMinimapLayout.contentTranslateY) / currentMinimapLayout.scale : minimapY / Math.max(1, rect.height) * root.scrollHeight;
-    const target = documentY - root.clientHeight / 2;
-    const maximum = Math.max(0, root.scrollHeight - root.clientHeight);
-    window.scrollTo({ top: Math.max(0, Math.min(maximum, target)), behavior: "instant" });
+    const minimapHeight = minimapRoot.clientHeight;
+    const thumbHeight = currentMinimapLayout?.thumbHeight ?? 22;
+    const maxThumbTop = Math.max(1, minimapHeight - thumbHeight);
+    const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+    const targetScrollTop = Math.min(minimapY, maxThumbTop) / maxThumbTop * maxScrollTop;
+    const clamped = Math.max(0, Math.min(maxScrollTop, targetScrollTop));
+    window.scrollTo({ top: clamped, behavior: "instant" });
   }
   function scrollToProgress(progressPercent) {
     const root = document.scrollingElement ?? document.documentElement;
@@ -1070,22 +1077,47 @@
   }
   function handleMinimapPointerDown(event) {
     minimapDragging = true;
+    minimapDragStartClientY = event.clientY;
+    const root = document.scrollingElement ?? document.documentElement;
+    minimapDragStartScrollTop = root.scrollTop;
+    minimapDragMode = "tentative";
     minimapRoot?.setPointerCapture(event.pointerId);
-    scrollFromMinimapClientY(event.clientY);
     event.preventDefault();
   }
   function handleMinimapPointerMove(event) {
-    if (!minimapDragging) {
+    if (!minimapDragging || minimapDragStartClientY === null) {
       return;
     }
-    scrollFromMinimapClientY(event.clientY);
+    const delta = event.clientY - minimapDragStartClientY;
+    if (minimapDragMode === "tentative" && Math.abs(delta) < MINIMAP_DRAG_THRESHOLD_PX) {
+      return;
+    }
+    minimapDragMode = "panning";
+    const root = document.scrollingElement ?? document.documentElement;
+    const minimapHeight = minimapRoot?.clientHeight ?? 0;
+    const thumbHeight = currentMinimapLayout?.thumbHeight ?? 22;
+    const maxThumbTop = Math.max(1, minimapHeight - thumbHeight);
+    const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+    const scrollDelta = delta * (maxScrollTop / maxThumbTop);
+    const newScrollTop = minimapDragStartScrollTop + scrollDelta;
+    const clampedScrollTop = Math.max(0, Math.min(maxScrollTop, newScrollTop));
+    window.scrollTo({ top: clampedScrollTop, behavior: "instant" });
     event.preventDefault();
   }
   function handleMinimapPointerUp(event) {
+    if (!minimapDragging) {
+      return;
+    }
+    const wasTap = minimapDragMode === "tentative";
     minimapDragging = false;
+    minimapDragStartClientY = null;
+    minimapDragMode = "tentative";
     try {
       minimapRoot?.releasePointerCapture(event.pointerId);
     } catch {
+    }
+    if (wasTap) {
+      scrollFromMinimapClientY(event.clientY);
     }
   }
   function queueMinimapViewportUpdate() {

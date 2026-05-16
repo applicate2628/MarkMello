@@ -788,6 +788,19 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                         HostShortcutHandler?.Invoke(combo);
                     }
                 }
+                return;
+            }
+
+            if (type == "debug-log")
+            {
+                if (document.RootElement.TryGetProperty("message", out var messageElement))
+                {
+                    var message = messageElement.GetString();
+                    if (!string.IsNullOrEmpty(message))
+                    {
+                        Console.Error.WriteLine(message);
+                    }
+                }
             }
         }
         catch (JsonException)

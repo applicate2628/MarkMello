@@ -60,6 +60,7 @@ type RendererMessage =
   | { type: "drag-hover"; hovering: boolean }
   | { type: "drop-file"; name: string; text: string }
   | { type: "host-shortcut"; combo: string }
+  | { type: "debug-log"; message: string }
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number };
 
 type MinimapMode = "auto" | "on" | "off";
@@ -113,6 +114,10 @@ let minimapContent: HTMLElement | null = null;
 let minimapViewport: HTMLElement | null = null;
 let currentMinimapLayout: MinimapViewportLayout | null = null;
 let minimapDragging = false;
+let minimapDragStartClientY: number | null = null;
+let minimapDragStartScrollTop = 0;
+let minimapDragMode: "tentative" | "panning" = "tentative";
+const MINIMAP_DRAG_THRESHOLD_PX = 4;
 let minimapSourceReady = false;
 let mermaidRenderGeneration = 0;
 let initialRenderPipelineCompleted = false;
@@ -775,13 +780,18 @@ function updateMinimapViewport(): void {
 
   const minimapHeight = minimapRoot.clientHeight;
   const minimapWidth = minimapRoot.clientWidth;
+  // Simple scroll-progress math: thumb position and height are computed
+  // from source scrollTop / scrollHeight / clientHeight ratios. This
+  // gives a reliable "where am I in the document" indicator that matches
+  // scrollbar semantics. It does NOT promise line-by-line alignment
+  // between the indicator and the cloned content visible in the minimap —
+  // the clone wraps lines differently (width/padding mismatch) and its
+  // height keeps drifting as content-visibility:auto math blocks render
+  // their real sizes, so an exact content-aligned indicator is fragile
+  // on heavy-formula docs. Drag/click already use range-based mapping
+  // (cursor → scrollTop via minimap travel range), so interaction stays
+  // consistent regardless of clone drift.
   const documentHeight = root.scrollHeight;
-  // Compare like with like: the minimap clone strips its own padding and
-  // max-width (renderer.css .mm-minimap-content .mm-document), so feeding the
-  // text-column width (post-padding) into the scale math causes the clone to
-  // wrap into a sliver while the source flows at full clientWidth. Use the
-  // source's full box width — the clone is then a faithfully scaled view of
-  // the same box. Math.min(1, …) cap below remains as defense.
   const documentWidth = Math.max(source.scrollWidth, source.clientWidth, 1);
   const viewportHeight = root.clientHeight;
   if (minimapHeight <= 0 || minimapWidth <= 0 || documentHeight <= 0 || viewportHeight <= 0) {
@@ -806,6 +816,7 @@ function updateMinimapViewport(): void {
   minimapContent.style.width = `${layout.contentWidth}px`;
   minimapViewport.style.transform = `translateY(${layout.thumbTop}px)`;
   minimapViewport.style.height = `${layout.thumbHeight}px`;
+
 }
 
 function scrollFromMinimapClientY(clientY: number): void {
@@ -816,12 +827,19 @@ function scrollFromMinimapClientY(clientY: number): void {
   const root = document.scrollingElement ?? document.documentElement;
   const rect = minimapRoot.getBoundingClientRect();
   const minimapY = Math.max(0, Math.min(rect.height, clientY - rect.top));
-  const documentY = currentMinimapLayout
-    ? (minimapY - currentMinimapLayout.contentTranslateY) / currentMinimapLayout.scale
-    : (minimapY / Math.max(1, rect.height)) * root.scrollHeight;
-  const target = documentY - root.clientHeight / 2;
-  const maximum = Math.max(0, root.scrollHeight - root.clientHeight);
-  window.scrollTo({ top: Math.max(0, Math.min(maximum, target)), behavior: "instant" as ScrollBehavior });
+  // Range-based click-jump: cursor at minimap_y maps to scrollTop such that
+  // the viewport indicator's TOP ends up at minimap_y. Consistent with the
+  // pan/grab drag math: pointer position on the thumb-travel range maps
+  // linearly to scrollTop on its scrollable range. Clicking at top of
+  // minimap = top of document; clicking at the max-thumb-top position =
+  // bottom of document.
+  const minimapHeight = minimapRoot.clientHeight;
+  const thumbHeight = currentMinimapLayout?.thumbHeight ?? 22;
+  const maxThumbTop = Math.max(1, minimapHeight - thumbHeight);
+  const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+  const targetScrollTop = (Math.min(minimapY, maxThumbTop) / maxThumbTop) * maxScrollTop;
+  const clamped = Math.max(0, Math.min(maxScrollTop, targetScrollTop));
+  window.scrollTo({ top: clamped, behavior: "instant" as ScrollBehavior });
 }
 
 function scrollToProgress(progressPercent: number): void {
@@ -831,28 +849,68 @@ function scrollToProgress(progressPercent: number): void {
   window.scrollTo({ top: maximum * (progress / 100), behavior: "instant" as ScrollBehavior });
 }
 
+// Pointer-down records start state but does NOT scroll yet. Tap-vs-drag is
+// distinguished on the first pointer-move that exceeds MINIMAP_DRAG_THRESHOLD_PX.
+// - Below threshold (and on pointer-up while still tentative): treat as a
+//   tap → centered click-jump (existing scrollbar-trough-click behavior).
+// - At/above threshold: switch to "panning" mode — drag DOWN on the minimap
+//   pulls the document content DOWN (i.e., scrolls scrollTop UP), so the
+//   point under the cursor stays anchored. Pan/grab UX, like dragging a
+//   paper map under a fixed crosshair. Opposite direction from a scrollbar.
 function handleMinimapPointerDown(event: PointerEvent): void {
   minimapDragging = true;
+  minimapDragStartClientY = event.clientY;
+  const root = document.scrollingElement ?? document.documentElement;
+  minimapDragStartScrollTop = root.scrollTop;
+  minimapDragMode = "tentative";
   minimapRoot?.setPointerCapture(event.pointerId);
-  scrollFromMinimapClientY(event.clientY);
   event.preventDefault();
 }
 
 function handleMinimapPointerMove(event: PointerEvent): void {
-  if (!minimapDragging) {
+  if (!minimapDragging || minimapDragStartClientY === null) {
     return;
   }
 
-  scrollFromMinimapClientY(event.clientY);
+  const delta = event.clientY - minimapDragStartClientY;
+  if (minimapDragMode === "tentative" && Math.abs(delta) < MINIMAP_DRAG_THRESHOLD_PX) {
+    return;
+  }
+  minimapDragMode = "panning";
+
+  // Range-based mapping: cursor traversing the full thumb-travel range
+  // (minimapHeight - thumbHeight) scrolls the document across its full
+  // scrollable range (scrollHeight - clientHeight). The indicator's top
+  // follows the cursor 1:1 in minimap pixels — feels like "grabbing the
+  // viewport indicator and dragging it from start to end".
+  const root = document.scrollingElement ?? document.documentElement;
+  const minimapHeight = minimapRoot?.clientHeight ?? 0;
+  const thumbHeight = currentMinimapLayout?.thumbHeight ?? 22;
+  const maxThumbTop = Math.max(1, minimapHeight - thumbHeight);
+  const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+  const scrollDelta = delta * (maxScrollTop / maxThumbTop);
+  const newScrollTop = minimapDragStartScrollTop + scrollDelta;
+  const clampedScrollTop = Math.max(0, Math.min(maxScrollTop, newScrollTop));
+  window.scrollTo({ top: clampedScrollTop, behavior: "instant" as ScrollBehavior });
   event.preventDefault();
 }
 
 function handleMinimapPointerUp(event: PointerEvent): void {
+  if (!minimapDragging) {
+    return;
+  }
+  const wasTap = minimapDragMode === "tentative";
   minimapDragging = false;
+  minimapDragStartClientY = null;
+  minimapDragMode = "tentative";
   try {
     minimapRoot?.releasePointerCapture(event.pointerId);
   } catch {
     // Pointer capture may already be gone after WebView focus changes.
+  }
+  if (wasTap) {
+    // Below drag threshold — treat as click → centered jump.
+    scrollFromMinimapClientY(event.clientY);
   }
 }
 
