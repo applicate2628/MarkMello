@@ -713,10 +713,21 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     {
         base.OnAttachedToVisualTree(e);
         Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} EditPreview.OnAttachedToVisualTree Bounds={Bounds} _webSlot.Bounds={_webSlot.Bounds}");
-        // Under sibling-mount (v0.3.0+), the edit-preview is permanently mounted
-        // from app startup and OnAttachedToVisualTree fires once with real bounds.
-        // The prior zero-bounds deferral (and its OnSizeChanged latch) is no
-        // longer reachable.
+
+        // Permanent mount: reparent the shared WebView2 into _webSlot ONCE on
+        // first tree attach, regardless of whether DataContext is a session
+        // yet. This is the ONLY SetParent operation in the WebView's lifetime
+        // — subsequent mode toggles flip editSlot.IsVisible, which cascades
+        // to SetWindowPos(SWP_HIDEWINDOW) on the HWND via NativeControlHost
+        // (verified by pre-flight probe at 15:24:17). Because editSlot is
+        // IsVisible=false at the moment this attach runs (reader is the
+        // initial mode), the HWND geometry-lag is invisible to the user.
+        if (_sharedHost is not null && !_isAttachedToHost)
+        {
+            _sharedHost.AttachTo(_webSlot);
+            _isAttachedToHost = true;
+        }
+
         AttachSession(DataContext as EditorSessionViewModel);
         UpdateHostScrollMode();
         Dispatcher.UIThread.Post(EnsureEditorDropWiring, DispatcherPriority.Background);
@@ -862,20 +873,15 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void ReleaseSharedHost()
     {
-        if (_sharedHost is null)
-        {
-            UnwireSharedHostEvents();
-            return;
-        }
-
-        if (_isAttachedToHost)
-        {
-            // DetachFrom returns the view to the warmup parent so it stays
-            // warm for the next consumer; we just stop showing it.
-            _sharedHost.DetachFrom(_webSlot);
-            _isAttachedToHost = false;
-        }
-
+        // Permanent mount: never call _sharedHost.DetachFrom from here. The
+        // shared WebView lives in _webSlot for the lifetime of this control
+        // (which is permanent in editSlot since v0.3.x sibling-mount). On
+        // session=null (mode toggle to reader, or document close), only the
+        // event subscriptions need to come down — the HWND stays in place
+        // and gets hidden by the cascade from editSlot.IsVisible=false. The
+        // OLD DetachFrom path returned the View to the warmup parent and
+        // forced a Win32 SetParent on the next enter-edit, which produced
+        // the 154ms HWND geometry-lag bug (verified [hwnd-probe] evidence).
         UnwireSharedHostEvents();
     }
 

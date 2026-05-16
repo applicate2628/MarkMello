@@ -1,51 +1,19 @@
-using Avalonia.Controls;
-using Avalonia.Controls.Templates;
-using Avalonia.Layout;
-using MarkMello.Applicate.Desktop.Rendering;
-using MarkMello.Applicate.Desktop.Views;
-using MarkMello.Presentation;
-using MarkMello.Presentation.Views;
-using MarkMello.Presentation.ViewModels;
-using Microsoft.Extensions.DependencyInjection;
+// REMOVED in 2026-05-16 permanent-mount refactor.
+//
+// Previously matched on `EditorSessionViewModel` and built EditWorkspaceView
+// + ApplicateEditPreviewView per-session — every Ctrl+E recreated the pair
+// and forced a Win32 SetParent on the shared WebView2 HWND, producing the
+// 154ms HWND-geometry-lag class of bug (verified [hwnd-probe] at 15:24:17).
+//
+// The build path now lives directly in ApplicateMainWindow.InstallSibling-
+// MountedViews — one pre-built instance, DataContext-driven session swap,
+// no template re-materialization, no reparent on toggle.
+//
+// File kept as an empty stub for git history continuity; remove on next
+// merge sweep.
 
 namespace MarkMello.Applicate.Desktop;
 
-internal sealed class ApplicateEditWorkspaceTemplate : IDataTemplate
+internal static class ApplicateEditWorkspaceTemplate
 {
-    public Control Build(object? param)
-    {
-        var view = new EditWorkspaceView
-        {
-            DataContext = param
-        };
-        var preview = new ApplicateEditPreviewView(App.Services?.GetService<IApplicateSharedWebViewHost>())
-        {
-            DataContext = param
-        };
-        if (!view.TryReplacePreviewDocumentView(preview))
-        {
-            // Upstream merge (d902a7f) removed the `PreviewDocumentFrame` Border
-            // name that TryReplacePreviewDocumentView relies on. Locate the
-            // upstream MarkdownDocumentView and swap its anonymous Border child.
-            var nativeDocView = view.FindControl<MarkdownDocumentView>("PreviewDocumentView");
-            if (nativeDocView?.Parent is Border parentBorder)
-            {
-                // Upstream renders the markdown document inside a centred
-                // Border (HorizontalAlignment="Center" MaxWidth=
-                // DocumentColumnMaxWidth). The centring is for the native
-                // Avalonia document surface that doesn't manage its own
-                // column width; our ApplicateEditPreviewView's WebView
-                // handles document column width via SendReadingPreferences
-                // (the JS limits content to AvailableContentWidth in CSS).
-                // Without stretching the Border, it sizes to the toolbar's
-                // desired width (~144 px) and visibly shifts to the left
-                // edge of the pane once the shared View attaches.
-                parentBorder.HorizontalAlignment = HorizontalAlignment.Stretch;
-                parentBorder.Child = preview;
-            }
-        }
-        return view;
-    }
-
-    public bool Match(object? data) => data is EditorSessionViewModel;
 }

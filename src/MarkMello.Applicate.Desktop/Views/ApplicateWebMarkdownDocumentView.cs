@@ -185,21 +185,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         bool documentScrollEnabled = true,
         bool wheelProxyEnabled = false)
     {
-        var sourceChanged = !Equals(Source, source);
-        var imageSourceResolverChanged = !ReferenceEquals(ImageSourceResolver, imageSourceResolver);
         var action = DetermineInputUpdateAction(
-            sourceChanged: sourceChanged,
-            imageSourceResolverChanged: imageSourceResolverChanged,
+            sourceChanged: !Equals(Source, source),
+            imageSourceResolverChanged: !ReferenceEquals(ImageSourceResolver, imageSourceResolver),
             hasLoadedDocument: _hasLoadedDocument,
             readingPreferencesChanged: ReadingPreferences != readingPreferences,
             availableContentWidthChanged: !AreEqual(AvailableContentWidth, availableContentWidth),
             viewerChromeEnabledChanged: ViewerChromeEnabled != viewerChromeEnabled,
             documentScrollEnabledChanged: DocumentScrollEnabled != documentScrollEnabled,
             wheelProxyEnabledChanged: WheelProxyEnabled != wheelProxyEnabled);
-        var oldLen = Source?.Content?.Length ?? -1;
-        var newLen = source?.Content?.Length ?? -1;
-        Console.Error.WriteLine(
-            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} UpdateInputs viewId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this):X8} chrome={viewerChromeEnabled} sourceCh={sourceChanged} (lenOld={oldLen} lenNew={newLen} path={source?.Path}) resolverCh={imageSourceResolverChanged} hasLoaded={_hasLoadedDocument} action={action}");
 
         _isUpdatingInputs = true;
         try
@@ -342,6 +336,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} SetNativeWebViewVisibility({isVisible}) viewId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this):X8} wrapper.Bounds={_webView.Bounds}");
         _webView.IsVisible = isVisible;
     }
+
 
     /// <summary>Inspect the inner NativeWebView visibility for diagnostics.</summary>
     internal bool NativeWebViewIsVisible => _webView.IsVisible;

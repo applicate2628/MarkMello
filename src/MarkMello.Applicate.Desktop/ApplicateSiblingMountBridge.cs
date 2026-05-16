@@ -12,7 +12,8 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
 {
     private readonly INotifyPropertyChanged _vm;
     private readonly ContentControl _viewerSlot;
-    private readonly ContentControl _editSlot;
+    private readonly Panel _editSlot;
+    private readonly Control _editContent;
     private readonly Func<bool> _getIsViewer;
     private readonly Func<bool> _getIsEditMode;
     private readonly Func<object?> _getEditorSession;
@@ -23,7 +24,8 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
     public ApplicateSiblingMountBridge(
         INotifyPropertyChanged vm,
         ContentControl viewerSlot,
-        ContentControl editSlot,
+        Panel editSlot,
+        Control editContent,
         Func<bool> getIsViewer,
         Func<bool> getIsEditMode,
         Func<object?> getEditorSession,
@@ -33,11 +35,19 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         _vm = vm;
         _viewerSlot = viewerSlot;
         _editSlot = editSlot;
+        _editContent = editContent;
         _getIsViewer = getIsViewer;
         _getIsEditMode = getIsEditMode;
         _getEditorSession = getEditorSession;
         _getDocument = getDocument;
         _viewerSlot.Content = viewerContent;
+
+        // editContent is the pre-built EditWorkspaceView + EditPreviewView
+        // already added to editSlot.Children by the caller (Panel children
+        // realize eagerly so EditPreview.OnAttachedToVisualTree fires at
+        // startup with editSlot.IsVisible=false — HWND geometry-lag invisible
+        // to the user). Reconcile only updates DataContext to drive the
+        // EditPreview.AttachSession lifecycle on mode toggle.
 
         _viewerSlot.PropertyChanged += OnSlotPropertyChanged;
         _editSlot.PropertyChanged += OnSlotPropertyChanged;
@@ -130,21 +140,16 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         Console.Error.WriteLine(
             $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} Bridge slots: viewerSlot.Bounds={_viewerSlot.Bounds} editSlot.Bounds={_editSlot.Bounds}");
 
-        // Sticky session: clear edit slot Content only when EditorSession
-        // becomes null (document closed). Mode-toggle from edit→reader keeps
-        // Content pointing at the last session, so the inner ApplicateEdit-
-        // PreviewView never sees a DataContext=null event and never tears
-        // down its shared-host attachment across visibility flips.
-        var sessionChanged = false;
-        if (session is null)
+        // Permanent mount: editSlot.Content is the pre-built EditWorkspaceView
+        // (set once in ctor). On session change we only update DataContext —
+        // the EditWorkspaceView + ApplicateEditPreviewView pair stays mounted,
+        // the shared WebView2 HWND stays in _webSlot, no SetParent operation
+        // ever fires beyond the single startup attach. ApplicateEditPreviewView
+        // observes DataContext via OnDataContextChanged → AttachSession.
+        var sessionChanged = !ReferenceEquals(_editContent.DataContext, session);
+        if (sessionChanged)
         {
-            sessionChanged = _editSlot.Content is not null;
-            _editSlot.Content = null;
-        }
-        else if (!ReferenceEquals(_editSlot.Content, session))
-        {
-            sessionChanged = true;
-            _editSlot.Content = session;
+            _editContent.DataContext = session;
         }
         var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         Console.Error.WriteLine(

@@ -45,8 +45,6 @@ public sealed class ApplicateMainWindow : MainWindow
         : base(viewModel, startupSmokeTestOptions, settings)
     {
         var viewerTemplate = new ApplicateViewerTemplate();
-        var editWorkspaceTemplate = new ApplicateEditWorkspaceTemplate();
-        DataTemplates.Insert(0, editWorkspaceTemplate);
         DataTemplates.Insert(0, viewerTemplate);
         InstallViewerHostTemplate(viewerTemplate);
         InstallSharedWebViewWarmupPanel();
@@ -320,17 +318,22 @@ public sealed class ApplicateMainWindow : MainWindow
         // Bridge never changes this — it only flips visibility/enabled/etc.
         var viewerSlot = new ContentControl();
 
-        // Edit slot: Content set by bridge on EditorSession changes (sticky).
-        // The fork-side ApplicateEditWorkspaceTemplate runs once per
-        // materialization, applying the parentBorder.HorizontalAlignment =
-        // Stretch patch at template time.
-        var editSlot = new ContentControl
+        // Edit slot is a Panel (NOT ContentControl) so its Children are added
+        // to the visual tree eagerly at app startup, regardless of the slot's
+        // IsVisible state. ContentControl uses ContentPresenter which DELAYS
+        // realization of Content visuals until the first measure pass with
+        // IsVisible=true — meaning EditPreview.OnAttachedToVisualTree (and
+        // therefore the one-time SharedHost.AttachTo reparent) would fire at
+        // the moment the user presses Ctrl+E, NOT at app startup. That left
+        // the 154ms HWND geometry-lag visible on the first toggle even with
+        // permanent mount. Panel.Children.Add realizes the visual subtree
+        // immediately, so the reparent runs while editSlot.IsVisible=false
+        // (reader is initial state) — HWND geometry lag is invisible.
+        var editSlot = new Panel
         {
             IsVisible = false,
-            IsEnabled = false,
             IsHitTestVisible = false,
-            IsTabStop = false,
-            Focusable = false
+            UseLayoutRounding = true
         };
 
         var siblingPanel = new Panel { UseLayoutRounding = true };
@@ -341,10 +344,67 @@ public sealed class ApplicateMainWindow : MainWindow
         contentPanel.Children.Remove(viewerHost);
         contentPanel.Children.Insert(slotIndex, siblingPanel);
 
+        // Pre-build the EditWorkspaceView + ApplicateEditPreviewView pair ONCE
+        // at app startup, with DataContext=null (dormant state). The bridge
+        // updates the editWorkspace's DataContext on session changes — no
+        // per-toggle template materialization, no reparent.
+        var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
+        var editPreview = new ApplicateEditPreviewView(sharedHost);
+        var editWorkspace = new EditWorkspaceView
+        {
+            DataContext = null
+        };
+        if (!editWorkspace.TryReplacePreviewDocumentView(editPreview))
+        {
+            // Upstream merge (d902a7f) removed the `PreviewDocumentFrame` Border
+            // name that TryReplacePreviewDocumentView relies on. Locate the
+            // upstream MarkdownDocumentView and swap its anonymous Border child.
+            var nativeDocView = editWorkspace.FindControl<MarkdownDocumentView>("PreviewDocumentView");
+            if (nativeDocView?.Parent is Border parentBorder)
+            {
+                parentBorder.HorizontalAlignment = HorizontalAlignment.Stretch;
+                parentBorder.Child = editPreview;
+            }
+        }
+
+        // Add the pre-built workspace to editSlot.Children NOW. Panel.Children
+        // is eager for LogicalChildren but UserControl-templated descendants
+        // (EditWorkspaceView wraps its content via XAML template) only realize
+        // their full visual subtree on first MEASURE pass — which Avalonia
+        // skips for IsVisible=false ancestors. The probe at 16:31:35.018
+        // showed EditPreview.OnAttachedToVisualTree firing 100ms AFTER first
+        // editSlot.IsVisible=true, confirming this lazy-realize behaviour.
+        //
+        // Workaround: temporarily flip editSlot.IsVisible=true, force a
+        // measure+arrange pass synchronously to realize the templated
+        // hierarchy AND fire OnAttachedToVisualTree on EditPreview (which
+        // triggers the one-time SharedHost.AttachTo reparent), then flip
+        // back to IsVisible=false. The brief visible window during this
+        // synchronous code path does not produce a render frame (Avalonia
+        // batches invalidations until next dispatcher tick), so the user
+        // never sees edit-mode chrome flashing at startup.
+        editSlot.Children.Add(editWorkspace);
+        // Force template + measure + arrange synchronously while editSlot is
+        // briefly IsVisible=true. This realizes the EditWorkspaceView's
+        // templated content tree (which UserControl + ContentPresenter
+        // otherwise defers until first visible measure pass), fires
+        // OnAttachedToVisualTree on EditPreview, and triggers the one-time
+        // SharedHost.AttachTo reparent — all while no render frame is
+        // produced (Avalonia batches invalidations until next dispatcher
+        // tick, so the brief IsVisible=true does not flash on screen).
+        editSlot.IsVisible = true;
+        editSlot.ApplyTemplate();
+        editWorkspace.ApplyTemplate();
+        editPreview.ApplyTemplate();
+        editSlot.Measure(new Avalonia.Size(double.PositiveInfinity, double.PositiveInfinity));
+        editSlot.Arrange(new Avalonia.Rect(0, 0, editSlot.DesiredSize.Width, editSlot.DesiredSize.Height));
+        editSlot.IsVisible = false;
+
         _siblingMountBridge = new ApplicateSiblingMountBridge(
             viewModel,
             viewerSlot,
             editSlot,
+            editWorkspace,
             () => viewModel.IsViewer,
             () => viewModel.IsEditMode,
             () => viewModel.EditorSession,
