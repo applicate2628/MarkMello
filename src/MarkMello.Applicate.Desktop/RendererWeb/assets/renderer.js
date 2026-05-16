@@ -1384,6 +1384,32 @@
       node.removeAttribute("data-visible");
     }
   }
+  function wireHostShortcuts() {
+    const hostShortcuts = /* @__PURE__ */ new Set([
+      "ctrl+e",
+      "ctrl+o",
+      "ctrl+s",
+      "ctrl+shift+s",
+      "ctrl+n",
+      "ctrl+r",
+      "f5",
+      "escape"
+    ]);
+    window.addEventListener(
+      "keydown",
+      (event) => {
+        const key = event.key.toLowerCase();
+        const combo = (event.ctrlKey || event.metaKey ? "ctrl+" : "") + (event.shiftKey ? "shift+" : "") + (event.altKey ? "alt+" : "") + key;
+        if (!hostShortcuts.has(combo)) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        postHostMessage({ type: "host-shortcut", combo });
+      },
+      { capture: true }
+    );
+  }
   function wireFileDrop() {
     document.addEventListener("dragenter", (event) => {
       if (!isFileDrag(event)) return;
@@ -1466,6 +1492,7 @@
     wireViewerInteraction();
     wireWheelProxy();
     wireFileDrop();
+    wireHostShortcuts();
     wireSaveAsPageChromeSuppress();
     postHostMessage({
       type: "document-ready",

@@ -74,6 +74,53 @@ public sealed class OpenDocumentsServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task OpenWithActivateFalseAddsDocumentButDoesNotChangeActive()
+    {
+        var a = WriteTemp("a.md", "A");
+        var b = WriteTemp("b.md", "B");
+        var service = new OpenDocumentsService();
+        var docA = await service.OpenAsync(a);
+
+        var docB = await service.OpenAsync(b, activate: false);
+
+        Assert.Equal(2, service.OpenDocuments.Count);
+        Assert.Same(docA, service.ActiveDocument);
+        Assert.NotSame(docB, service.ActiveDocument);
+    }
+
+    [Fact]
+    public async Task OpenWithActivateFalseDoesNotFireActiveDocumentChanged()
+    {
+        var a = WriteTemp("a.md", "A");
+        var b = WriteTemp("b.md", "B");
+        var service = new OpenDocumentsService();
+        await service.OpenAsync(a);
+
+        var events = 0;
+        service.ActiveDocumentChanged += (_, _) => events++;
+
+        await service.OpenAsync(b, activate: false);
+
+        Assert.Equal(0, events);
+    }
+
+    [Fact]
+    public async Task OpenExistingPathWithActivateFalseDoesNotChangeActive()
+    {
+        var a = WriteTemp("a.md", "A");
+        var b = WriteTemp("b.md", "B");
+        var service = new OpenDocumentsService();
+        var docA = await service.OpenAsync(a);
+        await service.OpenAsync(b);
+        service.Activate(docA);
+
+        var reopened = await service.OpenAsync(b, activate: false);
+
+        Assert.Same(docA, service.ActiveDocument);
+        Assert.NotSame(reopened, service.ActiveDocument);
+    }
+
+    [Fact]
     public async Task OpenDifferentPathsKeepsBothActivatesLast()
     {
         var a = WriteTemp("a.md", "A");

@@ -25,7 +25,13 @@ public interface IOpenDocumentsService
 
     event EventHandler<ActiveDocumentChangedEventArgs>? ActiveDocumentChanged;
 
-    Task<OpenDocument> OpenAsync(string filePath);
+    /// <summary>
+    /// Open a markdown file and add it to <see cref="OpenDocuments"/>. By
+    /// default the newly opened document also becomes <see cref="ActiveDocument"/>.
+    /// Pass <paramref name="activate"/> = false for batch restore scenarios where
+    /// the caller will pick the final active document explicitly after the loop.
+    /// </summary>
+    Task<OpenDocument> OpenAsync(string filePath, bool activate = true);
 
     void Activate(OpenDocument document);
 

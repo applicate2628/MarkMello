@@ -59,6 +59,7 @@ type RendererMessage =
   | { type: "width-drag"; phase: "start" | "move" | "end"; deltaX: number }
   | { type: "drag-hover"; hovering: boolean }
   | { type: "drop-file"; name: string; text: string }
+  | { type: "host-shortcut"; combo: string }
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number };
 
 type MinimapMode = "auto" | "on" | "off";
@@ -1256,6 +1257,47 @@ function setDropOverlayVisible(visible: boolean): void {
   }
 }
 
+// Forward window-level KeyBindings (declared in MainWindow.axaml) from inside
+// the WebView2 native HWND to the Avalonia host. When the user clicks inside
+// the rendered document, focus moves to the WebView2 child window and the OS
+// delivers WM_KEYDOWN directly to it — bypassing Avalonia's keyboard routing,
+// so window-level KeyBindings stop firing until focus returns to the
+// host-side tab strip or title bar. This handler captures the accelerator
+// combos the host cares about, posts them to the host, and preventDefault's
+// the in-WebView behavior so the user can use shortcuts without first
+// clicking back into the title bar.
+function wireHostShortcuts(): void {
+  const hostShortcuts = new Set<string>([
+    "ctrl+e",
+    "ctrl+o",
+    "ctrl+s",
+    "ctrl+shift+s",
+    "ctrl+n",
+    "ctrl+r",
+    "f5",
+    "escape"
+  ]);
+
+  window.addEventListener(
+    "keydown",
+    (event) => {
+      const key = event.key.toLowerCase();
+      const combo =
+        (event.ctrlKey || event.metaKey ? "ctrl+" : "") +
+        (event.shiftKey ? "shift+" : "") +
+        (event.altKey ? "alt+" : "") +
+        key;
+      if (!hostShortcuts.has(combo)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      postHostMessage({ type: "host-shortcut", combo });
+    },
+    { capture: true }
+  );
+}
+
 function wireFileDrop(): void {
   document.addEventListener("dragenter", (event) => {
     if (!isFileDrag(event)) return;
@@ -1360,6 +1402,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireViewerInteraction();
   wireWheelProxy();
   wireFileDrop();
+  wireHostShortcuts();
   wireSaveAsPageChromeSuppress();
   postHostMessage({
     type: "document-ready",

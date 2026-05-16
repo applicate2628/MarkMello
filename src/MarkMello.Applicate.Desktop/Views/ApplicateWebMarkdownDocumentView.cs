@@ -775,6 +775,19 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (type == "drop-file")
             {
                 _ = HandleDropFileMessageAsync(document.RootElement);
+                return;
+            }
+
+            if (type == "host-shortcut")
+            {
+                if (document.RootElement.TryGetProperty("combo", out var comboElement))
+                {
+                    var combo = comboElement.GetString();
+                    if (!string.IsNullOrEmpty(combo))
+                    {
+                        HostShortcutHandler?.Invoke(combo);
+                    }
+                }
             }
         }
         catch (JsonException)
@@ -782,6 +795,17 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             // Ignore malformed renderer messages; the WebView cannot drive shell state through them.
         }
     }
+
+    // Window-level KeyBindings (Ctrl+E, Ctrl+O, etc.) declared in
+    // MainWindow.axaml stop firing when keyboard focus lives inside the
+    // WebView2 native HWND. The renderer's wireHostShortcuts captures the
+    // host's accelerator combos in JS and posts them via the host-shortcut
+    // message. This static delegate is set by ApplicateMainWindow at
+    // construction and forwards combos to MainWindowViewModel commands.
+    // Static because the routing is window-level and the wiring should be
+    // identical for both the viewer's WebView and the shared edit-preview
+    // WebView; one delegate covers both.
+    internal static Action<string>? HostShortcutHandler;
 
     private void HandleDragHoverMessage(JsonElement root)
     {

@@ -52,6 +52,7 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallSharedWebViewWarmupPanel();
         InstallTabsAndWelcome();
         InstallSiblingMountedViews(viewModel);
+        InstallHostShortcutBridge(viewModel);
         InstallActiveDocumentBridge(viewModel);
         InstallPopupZOrderFollow(viewModel);
         InstallApplicateAboutPanel();
@@ -432,7 +433,42 @@ public sealed class ApplicateMainWindow : MainWindow
     {
         _siblingMountBridge?.Dispose();
         _siblingMountBridge = null;
+        ApplicateWebMarkdownDocumentView.HostShortcutHandler = null;
         Closed -= OnApplicateMainWindowClosed;
+    }
+
+    // Bridge JS keyhandler ↔ MainWindowViewModel commands. WebView2 captures
+    // keyboard focus when the user clicks inside the rendered document, which
+    // blocks window-level KeyBindings declared in MainWindow.axaml. The
+    // renderer's wireHostShortcuts posts a host-shortcut message; this maps
+    // the combo string to the matching command on MainWindowViewModel.
+    private void InstallHostShortcutBridge(MainWindowViewModel viewModel)
+    {
+        ApplicateWebMarkdownDocumentView.HostShortcutHandler = combo =>
+        {
+            var command = combo switch
+            {
+                "ctrl+e" => viewModel.ToggleEditModeCommand,
+                "ctrl+o" => viewModel.OpenFileCommand,
+                "ctrl+s" => viewModel.SaveCommand,
+                "ctrl+shift+s" => viewModel.SaveAsCommand,
+                "ctrl+n" => viewModel.CreateNewDocumentCommand,
+                "ctrl+r" => viewModel.ReloadCommand,
+                "f5" => viewModel.ReloadCommand,
+                "escape" => viewModel.ClearErrorCommand,
+                _ => null
+            };
+            if (command is not null && command.CanExecute(null))
+            {
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    if (command.CanExecute(null))
+                    {
+                        command.Execute(null);
+                    }
+                });
+            }
+        };
     }
 
     private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)
@@ -725,6 +761,14 @@ public sealed class ApplicateMainWindow : MainWindow
 
             var argvPath = viewModel.Document?.Path;
 
+            // Open all saved + argv paths WITHOUT auto-activating each. The
+            // service's OpenAsync(activate: false) overload skips the
+            // SetActive side-effect so the loop does not bounce
+            // ActiveDocument between every restored file. After the loop,
+            // we Activate the chosen one exactly once. This eliminates the
+            // earlier "v0.2.x костыль" force-sync race where ActiveDocument
+            // ended up at whatever was opened last and the tabs UI drifted
+            // out of sync with VM.Document on subsequent activations.
             inVmMirror = true;
             try
             {
@@ -736,7 +780,7 @@ public sealed class ApplicateMainWindow : MainWindow
                     }
                     try
                     {
-                        await openDocs.OpenAsync(path).ConfigureAwait(true);
+                        await openDocs.OpenAsync(path, activate: false).ConfigureAwait(true);
                     }
                     catch (System.IO.IOException)
                     {
@@ -752,7 +796,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 {
                     try
                     {
-                        await openDocs.OpenAsync(argvPath).ConfigureAwait(true);
+                        await openDocs.OpenAsync(argvPath, activate: false).ConfigureAwait(true);
                     }
                     catch (System.IO.IOException)
                     {
@@ -792,29 +836,24 @@ public sealed class ApplicateMainWindow : MainWindow
 
             if (toActivate is not null)
             {
-                // Force-sync both sides. The restore loop ran under
-                // inVmMirror=true so every OpenAsync's ActiveDocumentChanged
-                // was dropped by the bridge — the service's ActiveDocument
-                // ended up at whichever doc was opened last (= last entry in
-                // saved.OpenPaths, or argvPath if supplied), and the VM was
-                // never told to load any of them. Either side may now be
-                // out of sync with `toActivate`; touch both explicitly so
-                // they cannot drift.
-                if (!ReferenceEquals(toActivate, openDocs.ActiveDocument))
+                // Single canonical Activate — no ReferenceEquals dance because
+                // the restore loop above intentionally left ActiveDocument
+                // unchanged (likely null, unless upstream's argv-load fired
+                // PropertyChanged on Document before this lambda ran and the
+                // bridge's mirror set it to argvPath's OpenDocument). Either
+                // way, an explicit Activate here is correct: either it
+                // promotes from null to toActivate, or it confirms toActivate
+                // (which the existing SetActive-no-op guard handles silently).
+                inVmMirror = true;
+                try
                 {
-                    // Suppress the bridge while we set ActiveDocument so its
-                    // async OpenPathAsync does not race with our own
-                    // explicit OpenPathAsync below.
-                    inVmMirror = true;
-                    try
-                    {
-                        openDocs.Activate(toActivate);
-                    }
-                    finally
-                    {
-                        inVmMirror = false;
-                    }
+                    openDocs.Activate(toActivate);
                 }
+                finally
+                {
+                    inVmMirror = false;
+                }
+
                 if (!string.Equals(viewModel.Document?.Path, toActivate.FilePath, System.StringComparison.OrdinalIgnoreCase))
                 {
                     inServiceLoad = true;

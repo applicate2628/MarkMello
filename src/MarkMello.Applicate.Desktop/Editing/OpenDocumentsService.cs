@@ -24,7 +24,7 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
 
     public event EventHandler<ActiveDocumentChangedEventArgs>? ActiveDocumentChanged;
 
-    public async Task<OpenDocument> OpenAsync(string filePath)
+    public async Task<OpenDocument> OpenAsync(string filePath, bool activate = true)
     {
         if (string.IsNullOrWhiteSpace(filePath))
         {
@@ -49,7 +49,10 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
             var existing = FindByPath(normalized);
             if (existing is not null)
             {
-                SetActive(existing);
+                if (activate)
+                {
+                    SetActive(existing);
+                }
                 return existing;
             }
 
@@ -58,7 +61,10 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
             var document = new OpenDocument(normalized, displayName, sourceText);
 
             _openDocuments.Add(document);
-            SetActive(document);
+            if (activate)
+            {
+                SetActive(document);
+            }
             return document;
         }
         finally
