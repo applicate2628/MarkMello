@@ -18,6 +18,10 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace MarkMello.Applicate.Desktop;
 
+[System.Diagnostics.CodeAnalysis.SuppressMessage(
+    "Design",
+    "CA1001:Types that own disposable fields should be disposable",
+    Justification = "_siblingMountBridge is disposed via the Window.Closed event handler — Avalonia Windows have a deterministic close lifecycle and IDisposable on Window is not the appropriate pattern.")]
 public sealed class ApplicateMainWindow : MainWindow
 {
     // Real bounds so WebView2 initialises correctly; Margin pushes the HWND
@@ -30,6 +34,9 @@ public sealed class ApplicateMainWindow : MainWindow
     private const double WarmupPanelWidth = 1024;
     private const double WarmupPanelHeight = 768;
     private static readonly Thickness WarmupPanelMargin = new(-5000, 0, 0, 0);
+
+    private Panel? _tabsContentPanel;
+    private ApplicateSiblingMountBridge? _siblingMountBridge;
 
     public ApplicateMainWindow(
         MainWindowViewModel viewModel,
@@ -44,6 +51,7 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallViewerHostTemplate(viewerTemplate);
         InstallSharedWebViewWarmupPanel();
         InstallTabsAndWelcome();
+        InstallSiblingMountedViews(viewModel);
         InstallActiveDocumentBridge(viewModel);
         InstallPopupZOrderFollow(viewModel);
         InstallApplicateAboutPanel();
@@ -342,6 +350,7 @@ public sealed class ApplicateMainWindow : MainWindow
         bodyPanel.Children.Clear();
 
         var contentPanel = new Panel();
+        _tabsContentPanel = contentPanel;
         foreach (var control in existing)
         {
             contentPanel.Children.Add(control);
@@ -362,6 +371,68 @@ public sealed class ApplicateMainWindow : MainWindow
         grid.Children.Add(contentPanel);
 
         bodyPanel.Children.Add(grid);
+    }
+
+    private void InstallSiblingMountedViews(MainWindowViewModel viewModel)
+    {
+        var contentPanel = _tabsContentPanel;
+        if (contentPanel is null)
+        {
+            return;
+        }
+
+        var viewerHost = contentPanel.Children
+            .OfType<ContentControl>()
+            .FirstOrDefault(cc => cc.GetType() == typeof(ContentControl) && cc.Name is null);
+        if (viewerHost is null)
+        {
+            return;
+        }
+
+        // Viewer slot: Content set once at install to viewModel; resolves to
+        // ViewerView via the global ApplicateViewerTemplate registered above.
+        // Bridge never changes this — it only flips visibility/enabled/etc.
+        var viewerSlot = new ContentControl();
+
+        // Edit slot: Content set by bridge on EditorSession changes (sticky).
+        // The fork-side ApplicateEditWorkspaceTemplate runs once per
+        // materialization, applying the parentBorder.HorizontalAlignment =
+        // Stretch patch at template time.
+        var editSlot = new ContentControl
+        {
+            IsVisible = false,
+            IsEnabled = false,
+            IsHitTestVisible = false,
+            IsTabStop = false,
+            Focusable = false
+        };
+
+        var siblingPanel = new Panel { UseLayoutRounding = true };
+        siblingPanel.Children.Add(viewerSlot);
+        siblingPanel.Children.Add(editSlot);
+
+        var slotIndex = contentPanel.Children.IndexOf(viewerHost);
+        contentPanel.Children.Remove(viewerHost);
+        contentPanel.Children.Insert(slotIndex, siblingPanel);
+
+        _siblingMountBridge = new ApplicateSiblingMountBridge(
+            viewModel,
+            viewerSlot,
+            editSlot,
+            () => viewModel.IsViewer,
+            () => viewModel.IsEditMode,
+            () => viewModel.EditorSession,
+            () => viewModel.Document,
+            viewerContent: viewModel);
+
+        Closed += OnApplicateMainWindowClosed;
+    }
+
+    private void OnApplicateMainWindowClosed(object? sender, EventArgs e)
+    {
+        _siblingMountBridge?.Dispose();
+        _siblingMountBridge = null;
+        Closed -= OnApplicateMainWindowClosed;
     }
 
     private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)
