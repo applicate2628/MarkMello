@@ -52,6 +52,7 @@ internal sealed class ApplicateTabsView : UserControl
     private readonly IOpenDocumentsService _openDocsService;
     private readonly StackPanel _tabsPanel;
     private readonly Button _addButton;
+    private readonly Avalonia.Controls.Shapes.Path _addButtonIcon;
     private readonly Dictionary<Control, OpenDocument> _tabToDocument = new();
     private Border? _rootBorder;
 
@@ -79,7 +80,8 @@ internal sealed class ApplicateTabsView : UserControl
             Content = _tabsPanel
         };
 
-        _addButton = BuildAddButton();
+        _addButtonIcon = BuildPlusIcon(ResolveBrush("MmTextSoftBrush"));
+        _addButton = BuildAddButton(_addButtonIcon);
         ToolTip.SetTip(_addButton, "Open file");
         _addButton.Click += async (_, _) => await OnAddClickAsync().ConfigureAwait(true);
 
@@ -107,21 +109,41 @@ internal sealed class ApplicateTabsView : UserControl
         DetachedFromVisualTree += OnDetached;
     }
 
-    private static Button BuildAddButton()
+    // Ghost icon "+" button (browser-style new-tab). Transparent bg, no
+    // border, vector + icon. Avalonia's default Button styles provide a
+    // subtle hover highlight on the transparent surface. Icon stroke uses
+    // MmTextSoftBrush — refreshed on theme change via _addButtonIcon.
+    private static Button BuildAddButton(Avalonia.Controls.Shapes.Path icon)
     {
         return new Button
         {
-            Content = "+",
-            Padding = new Thickness(10, 4, 10, 4),
-            Margin = new Thickness(0, 4, 6, 4),
+            Width = 28,
+            Height = 28,
+            Padding = new Thickness(0),
+            Margin = new Thickness(0, 0, 6, 0),
             VerticalAlignment = VerticalAlignment.Center,
-            FontSize = 14,
-            FontWeight = FontWeight.Bold,
-            Background = ResolveBrush("MmBackgroundBrush"),
-            BorderBrush = ResolveBrush("MmBorderBrush"),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(4),
-            Cursor = new Cursor(StandardCursorType.Hand)
+            Background = new SolidColorBrush(Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(6),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Content = icon
+        };
+    }
+
+    private static Avalonia.Controls.Shapes.Path BuildPlusIcon(IBrush stroke)
+    {
+        return new Avalonia.Controls.Shapes.Path
+        {
+            Data = Avalonia.Media.Geometry.Parse("M6,0 L6,12 M0,6 L12,6"),
+            Stroke = stroke,
+            StrokeThickness = 1.5,
+            StrokeLineCap = Avalonia.Media.PenLineCap.Round,
+            Width = 12,
+            Height = 12,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
         };
     }
 
@@ -167,8 +189,10 @@ internal sealed class ApplicateTabsView : UserControl
             _rootBorder.BorderBrush = ResolveBrush("MmBorderBrush");
             _rootBorder.Background = ResolveBrush("MmSurfaceBrush");
         }
-        _addButton.Background = ResolveBrush("MmBackgroundBrush");
-        _addButton.BorderBrush = ResolveBrush("MmBorderBrush");
+        // Ghost "+" button has transparent bg + no border, only the icon
+        // stroke is theme-dependent. Refresh in place so theme switch
+        // re-tints the + without recreating the button.
+        _addButtonIcon.Stroke = ResolveBrush("MmTextSoftBrush");
 
         var borderBrush = ResolveBrush("MmBorderBrush");
         var activeBg = ResolveBrush("MmBackgroundBrush");

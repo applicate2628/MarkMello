@@ -101,91 +101,15 @@ public sealed class ApplicateMainWindow : MainWindow
             }
         };
 
-        // Hide the Native toggle row inside the ReadingSettings popup.
-        // The popup materializes its content lazily on first open and
-        // Avalonia may re-attach the Child instance on subsequent opens,
-        // so subscribe to BOTH Opened (covers first open) and the popup
-        // child's Loaded (covers attach lifecycle) and re-apply on each.
-        var settingsPopup = this.FindControl<Avalonia.Controls.Primitives.Popup>("SettingsPanel");
-        if (settingsPopup is not null)
-        {
-            settingsPopup.Opened += DisableNativeToggleInSettings;
-            if (settingsPopup.Child is Control settingsChild)
-            {
-                settingsChild.Loaded += (_, _) => DisableNativeToggleInSettings(settingsPopup, EventArgs.Empty);
-            }
-        }
-    }
-
-    private static void DisableNativeToggleInSettings(object? sender, System.EventArgs e)
-    {
-        if (sender is not Avalonia.Controls.Primitives.Popup popup || popup.Child is null)
-        {
-            return;
-        }
-        // Use Render priority so we run AFTER Avalonia has finished
-        // measuring/arranging the popup's contents on each open. Background
-        // priority sometimes ran before the segmented control was fully
-        // materialized, so the lookup found zero ToggleButtons and the
-        // patch silently no-oped — the user saw the row come back.
-        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-        {
-            // The segmented Native/WebView toggles in ReadingSettingsPanelView
-            // sit inside a Border.mm-segmented containing two ToggleButton
-            // children: Native is declared first (axaml line 263), WebView
-            // second (line 267). Walk the popup tree, find that pair, and
-            // disable the first one. Restated every popup open in case
-            // Avalonia rebuilds the popup content lazily.
-            var segmented = popup.Child.GetVisualDescendants()
-                .OfType<Avalonia.Controls.Primitives.ToggleButton>()
-                .Where(tb => tb.Classes.Contains("mm-segmented-item"))
-                .Take(2)
-                .ToList();
-            if (segmented.Count == 0)
-            {
-                // Tree not yet materialized — schedule one more tick with
-                // longer delay. Avoids the silent-noop case where Render
-                // priority still ran ahead of the segmented control's
-                // first layout pass.
-                Avalonia.Threading.Dispatcher.UIThread.Post(
-                    () => DisableNativeToggleInSettings(popup, System.EventArgs.Empty),
-                    Avalonia.Threading.DispatcherPriority.Background);
-                return;
-            }
-            // TEMP-NATIVE-STUB: replace the Native/WebView segmented toggle
-            // with a static label. Walk up the visual ancestors directly
-            // (`GetVisualAncestors().OfType<Border>().FirstOrDefault`
-            // missed the segmented border in some popup-open timings,
-            // possibly because the wrapper hierarchy includes additional
-            // Decorator nodes). Direct parent walk: ToggleButton -> inner
-            // StackPanel -> mm-segmented Border -> row Grid.
-            var nativeToggle = segmented[0];
-            var stackPanel = nativeToggle.Parent as Control;
-            var segmentedBorder = stackPanel?.Parent as Border;
-            var rowGrid = segmentedBorder?.Parent as Grid;
-            if (segmentedBorder is not null && rowGrid is not null)
-            {
-                segmentedBorder.IsVisible = false;
-                if (!rowGrid.Children.OfType<TextBlock>()
-                        .Any(t => t.Tag as string == "applicate-renderer-note"))
-                {
-                    var note = new TextBlock
-                    {
-                        Classes = { "mm-setting-meta" },
-                        Tag = "applicate-renderer-note",
-                        Text = "WebView (расширенный рендер)",
-                        HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right,
-                        VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
-                    };
-                    Grid.SetColumn(note, Grid.GetColumn(segmentedBorder));
-                    rowGrid.Children.Add(note);
-                }
-            }
-            else
-            {
-                nativeToggle.IsVisible = false;
-            }
-        }, Avalonia.Threading.DispatcherPriority.Background);
+        // Upstream ReadingSettingsPanelView.axaml line 249 already wraps
+        // the renderer row in <StackPanel IsVisible="False"> (see comment
+        // at axaml lines 242-248), so the row is hidden at upstream level.
+        // The previous fork-side DisableNativeToggleInSettings runtime
+        // mutation became a hazard after upstream added a Fonts segmented
+        // control above Renderer — the "first 2 mm-segmented-item toggles"
+        // heuristic ended up hijacking the Fonts row instead, replacing
+        // the font picker with a "WebView (расширенный рендер)" note.
+        // Removed entirely; force-WebView above is sufficient.
     }
 
     private static void InstallEditModeDragSuppression(MainWindowViewModel viewModel)
