@@ -669,29 +669,14 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         }
     }
 
-    private bool _pendingFirstAttachWithRealBounds;
-
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
-        // Defer the session attach until Bounds.Width > 0. At first mount the
-        // preview is added to the visual tree with zero bounds; calling
-        // AttachSession in that state seeds AvailableContentWidth from the
-        // fallback (ReadingPreferences.ContentWidth + padding = 964) instead
-        // of from the real slot width. The renderer then lays out HTML at
-        // 964 in the JS message handler and re-layouts when the real width
-        // arrives ~8ms later; the user sees the 964-wide frame as a parasitic
-        // full-window paint over the chrome and tab strip. Waiting for real
-        // bounds means the first SendReadingPreferences carries the correct
-        // maxWidth and the renderer never has to re-layout.
-        if (Bounds.Width > 0)
-        {
-            AttachSession(DataContext as EditorSessionViewModel);
-        }
-        else
-        {
-            _pendingFirstAttachWithRealBounds = true;
-        }
+        // Under sibling-mount (v0.3.0+), the edit-preview is permanently mounted
+        // from app startup and OnAttachedToVisualTree fires once with real bounds.
+        // The prior zero-bounds deferral (and its OnSizeChanged latch) is no
+        // longer reachable.
+        AttachSession(DataContext as EditorSessionViewModel);
         UpdateHostScrollMode();
         Dispatcher.UIThread.Post(EnsureEditorDropWiring, DispatcherPriority.Background);
     }
@@ -711,29 +696,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     protected override void OnSizeChanged(SizeChangedEventArgs e)
     {
         base.OnSizeChanged(e);
-        if (_pendingFirstAttachWithRealBounds && e.NewSize.Width > 0)
-        {
-            _pendingFirstAttachWithRealBounds = false;
-            // Defer the actual attach to Background priority so any remaining
-            // layout passes (e.g., the MinWidth → real-column-width settle)
-            // complete first. The first SizeChanged event on a freshly mounted
-            // preview can fire with an intermediate width derived from the
-            // surrounding Grid's MinWidth constraints (logged as 144 vs final
-            // 713 in the wave_port reproduction). Triggering AttachSession
-            // synchronously at that intermediate width seeds AvailableContent
-            // Width with the wrong value and JS receives a "maxWidth=144" then
-            // "maxWidth=713" message pair across two frames — the user sees
-            // the column re-layout. Background priority runs after layout work.
-            Dispatcher.UIThread.Post(
-                () =>
-                {
-                    if (this.GetVisualParent() is not null)
-                    {
-                        AttachSession(DataContext as EditorSessionViewModel);
-                    }
-                },
-                DispatcherPriority.Background);
-        }
         ApplyAvailableWidth();
     }
 
