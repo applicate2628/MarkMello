@@ -445,13 +445,17 @@ public sealed class ApplicateMainWindow : MainWindow
                 // Edit mode path: do NOT call OpenPathAsync because its
                 // internal ApplyLoadedDocument sets IsEditMode = false,
                 // unmounting the EditWorkspace and momentarily flashing
-                // reader mode before we re-toggle back to edit. Instead
-                // update Document + EditorSession directly with the
-                // service's cached source; edit-workspace UI stays mounted
-                // throughout. Reader-mode path keeps using OpenPathAsync
-                // because reader-mode preview reads RenderedDocument which
-                // OpenPathAsync refreshes.
-                if (viewModel.IsEditMode && viewModel.EditorSession is { } session)
+                // reader mode before we re-toggle back to edit. Use the
+                // in-place variant instead — it updates Document AND
+                // RenderedDocument AND _currentPath AND State AND
+                // EditorSession in one pass, keeping IsEditMode=true so
+                // the edit workspace stays mounted throughout. The
+                // previous code only set Document + session.ApplyLoaded,
+                // leaving RenderedDocument stale. On leave-edit Bridge
+                // would show the viewer at the new tab's title but with
+                // the OLD tab's RenderedDocument painted — visible as
+                // "tabs and file don't match" desync (user-reported).
+                if (viewModel.IsEditMode && viewModel.EditorSession is not null)
                 {
                     var nextSource = new MarkdownSource(
                         args.ActiveDocument.FilePath,
@@ -460,8 +464,7 @@ public sealed class ApplicateMainWindow : MainWindow
                     inServiceLoad = true;
                     try
                     {
-                        viewModel.Document = nextSource;
-                        session.ApplyLoadedDocument(nextSource);
+                        viewModel.ApplyOpenedDocumentInPlace(nextSource);
                     }
                     finally
                     {

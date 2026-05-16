@@ -196,8 +196,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             viewerChromeEnabledChanged: ViewerChromeEnabled != viewerChromeEnabled,
             documentScrollEnabledChanged: DocumentScrollEnabled != documentScrollEnabled,
             wheelProxyEnabledChanged: WheelProxyEnabled != wheelProxyEnabled);
+        var oldLen = Source?.Content?.Length ?? -1;
+        var newLen = source?.Content?.Length ?? -1;
         Console.Error.WriteLine(
-            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} UpdateInputs viewId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this):X8} chrome={viewerChromeEnabled} sourceCh={sourceChanged} resolverCh={imageSourceResolverChanged} hasLoaded={_hasLoadedDocument} action={action}");
+            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} UpdateInputs viewId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this):X8} chrome={viewerChromeEnabled} sourceCh={sourceChanged} (lenOld={oldLen} lenNew={newLen} path={source?.Path}) resolverCh={imageSourceResolverChanged} hasLoaded={_hasLoadedDocument} action={action}");
 
         _isUpdatingInputs = true;
         try

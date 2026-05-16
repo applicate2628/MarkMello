@@ -1301,6 +1301,23 @@ public partial class MainWindowViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Apply an already-loaded markdown source in place without going through
+    /// the async file read pipeline. Use for tab-switch flows where the open-
+    /// documents service already cached the source text and we want to refresh
+    /// every downstream consumer (Document, RenderedDocument, viewer surface,
+    /// edit session) without taking the user out of their current edit-mode
+    /// state. Without this entry point the only public path was OpenPathAsync,
+    /// which re-reads the file from disk AND forces IsEditMode=false (line
+    /// 1335) — that flash dropped the user back into reader mode for one
+    /// dispatcher tick before the caller could re-toggle.
+    /// </summary>
+    public void ApplyOpenedDocumentInPlace(MarkdownSource source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ApplyLoadedDocument(source, preserveEditModeAfterLoad: IsEditMode);
+    }
+
     private void ApplyLoadedDocument(MarkdownSource source, bool preserveEditModeAfterLoad)
     {
         Document = source;
