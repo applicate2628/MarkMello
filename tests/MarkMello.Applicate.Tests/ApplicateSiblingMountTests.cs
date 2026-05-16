@@ -100,7 +100,7 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void CloseFileFromEditMode_FourTickSequence_ViewerHidesAtDocumentNullNotIsViewerFalse()
+    public void CloseFileFromEditModeHidesViewerWhenDocumentClearsBeforeIsViewerFalse()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
         session.Dispatch(() =>
@@ -142,28 +142,24 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public async Task PropertyChangedFromBackgroundThreadReconcilesOnUIThread()
+    public async Task PropertyChangedFromBackgroundThreadDoesNotThrow()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
         Exception? capturedException = null;
-        bool reconcileObservedOnUIThread = false;
 
         await session.Dispatch(async () =>
         {
             try
             {
-                var vm = new FakeMainWindowVm();
+                var vm = new FakeMainWindowVm { Document = new object() };
                 var viewerSlot = new ContentControl();
                 var editSlot = new ContentControl();
                 using var bridge = MakeBridge(vm, viewerSlot, editSlot);
 
-                vm.Document = new object();
                 await vm.FireFromBackgroundThreadAsync(nameof(FakeMainWindowVm.IsViewer));
-
-                await Dispatcher.UIThread.InvokeAsync(() =>
-                {
-                    reconcileObservedOnUIThread = Dispatcher.UIThread.CheckAccess();
-                });
+                await Task.Delay(100);
+                await vm.FireFromBackgroundThreadAsync(nameof(FakeMainWindowVm.Document));
+                await Task.Delay(100);
             }
             catch (Exception ex)
             {
@@ -172,7 +168,6 @@ public sealed class ApplicateSiblingMountTests
         }, CancellationToken.None);
 
         Assert.Null(capturedException);
-        Assert.True(reconcileObservedOnUIThread);
     }
 
     [Fact]
