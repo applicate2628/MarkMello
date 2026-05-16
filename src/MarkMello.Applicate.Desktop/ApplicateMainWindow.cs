@@ -50,6 +50,7 @@ public sealed class ApplicateMainWindow : MainWindow
         DataTemplates.Insert(0, viewerTemplate);
         InstallViewerHostTemplate(viewerTemplate);
         InstallSharedWebViewWarmupPanel();
+        InstallSharedHostPrewarm(viewModel);
         InstallTabsAndWelcome();
         InstallSiblingMountedViews(viewModel);
         InstallHostShortcutBridge(viewModel);
@@ -799,6 +800,83 @@ public sealed class ApplicateMainWindow : MainWindow
             // Flush a consolidated save now that the restored set is final.
             SaveSession();
         });
+    }
+
+    // Push the active document into the singleton shared WebView while it is
+    // still parented to the offscreen warmup panel — so the renderer's heavy
+    // first paint (~530ms RenderAsync + shell-load + JS messaging) happens
+    // before the user ever presses Ctrl+E. Without this, the first enter-edit
+    // pays the full WebView render synchronously inside the toggle window
+    // (verified at 532ms in .scratch/mode-toggle.log 07:40:12.771→13.303).
+    // Subsequent UpdateInputs from EditPreviewView.ApplyWebPreviewSource hit
+    // a hot WebView with Source/ImageSourceResolver already matching → action
+    // degrades to None/ApplyLivePreferences, no full re-render.
+    private void InstallSharedHostPrewarm(MainWindowViewModel viewModel)
+    {
+        var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
+        if (sharedHost is null)
+        {
+            return;
+        }
+
+        var pumpScheduled = false;
+
+        void Push()
+        {
+            pumpScheduled = false;
+            var doc = viewModel.Document;
+            if (doc is null)
+            {
+                return;
+            }
+
+            try
+            {
+                var prefs = ApplicateEditPreviewView.CreateWebPreviewPreferences(viewModel.DocumentReadingPreferences);
+                var width = ApplicateEditPreviewView.CalculatePreWarmColumnWidth(viewModel.DocumentReadingPreferences);
+                sharedHost.View.UpdateInputs(
+                    source: doc,
+                    readingPreferences: prefs,
+                    imageSourceResolver: viewModel.ImageSourceResolver,
+                    availableContentWidth: width,
+                    viewerChromeEnabled: false,
+                    documentScrollEnabled: true,
+                    wheelProxyEnabled: false);
+                System.Console.Error.WriteLine(
+                    $"[mode-toggle] {System.DateTime.Now:HH:mm:ss.fff} SharedHost prewarm pushed: path={doc.Path} width={width:F1}");
+            }
+            catch (System.Exception ex)
+            {
+                System.Console.Error.WriteLine(
+                    $"[mode-toggle] SharedHost prewarm FAILED: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        void Schedule()
+        {
+            if (pumpScheduled)
+            {
+                return;
+            }
+            pumpScheduled = true;
+            Avalonia.Threading.Dispatcher.UIThread.Post(
+                Push,
+                Avalonia.Threading.DispatcherPriority.Background);
+        }
+
+        viewModel.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(MainWindowViewModel.Document)
+                || e.PropertyName == nameof(MainWindowViewModel.DocumentReadingPreferences)
+                || e.PropertyName == nameof(MainWindowViewModel.ImageSourceResolver))
+            {
+                Schedule();
+            }
+        };
+
+        // Initial push covers command-line activation, restore-session,
+        // and any synchronous load completed before the constructor finished.
+        Schedule();
     }
 
     private void InstallSharedWebViewWarmupPanel()

@@ -116,6 +116,46 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
         _webRenderTimer = new DispatcherTimer { Interval = WebPreviewDebounce };
         _webRenderTimer.Tick += OnWebRenderTimerTick;
+
+        _webSlot.PropertyChanged += OnWebSlotPropertyChanged;
+        _webRenderMask.PropertyChanged += OnWebMaskPropertyChanged;
+    }
+
+    private void OnWebSlotPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property != Visual.BoundsProperty && e.Property != Visual.IsVisibleProperty)
+        {
+            return;
+        }
+        Console.Error.WriteLine(
+            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} _webSlot.{e.Property.Name}: {e.OldValue} -> {e.NewValue}");
+        // Retry the deferred AttachTo when the slot finally lays out. In the
+        // pre-warm hot path the shared WebView is already rendered, so the
+        // first ApplyVisuals runs while _webSlot.Bounds is still 0×0 and the
+        // bounds-gate short-circuits the attach. Once Avalonia commits the
+        // layout pass and Bounds become non-zero, we retry — the pre-resize
+        // block in SharedHost.AttachTo can now see real target bounds and
+        // resize the warmup-parent to match BEFORE the reparent.
+        if (e.Property == Visual.BoundsProperty
+            && _sharedHost is not null
+            && !_isAttachedToHost
+            && !_isWebRenderInFlight
+            && _webSlot.Bounds.Width > 0
+            && _webSlot.Bounds.Height > 0
+            && ShouldUseWebPreview())
+        {
+            ApplyVisuals();
+        }
+    }
+
+    private void OnWebMaskPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property != Visual.IsVisibleProperty)
+        {
+            return;
+        }
+        Console.Error.WriteLine(
+            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} _webRenderMask.IsVisible: {e.OldValue} -> {e.NewValue}");
     }
 
     private static Border BuildPreviewToolbar(ToggleButton syncToggle)
@@ -672,6 +712,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
+        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} EditPreview.OnAttachedToVisualTree Bounds={Bounds} _webSlot.Bounds={_webSlot.Bounds}");
         // Under sibling-mount (v0.3.0+), the edit-preview is permanently mounted
         // from app startup and OnAttachedToVisualTree fires once with real bounds.
         // The prior zero-bounds deferral (and its OnSizeChanged latch) is no
@@ -703,8 +744,10 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     {
         if (ReferenceEquals(_session, session))
         {
+            Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} EditPreview.AttachSession noop (same ref)");
             return;
         }
+        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} EditPreview.AttachSession from={(_session is not null)} to={(session is not null)}");
 
         if (_session is not null)
         {
@@ -751,9 +794,16 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void ApplySession()
     {
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         ApplyNativePreview();
+        var t1 = System.Diagnostics.Stopwatch.GetTimestamp();
         ApplyRendererMode();
+        var t2 = System.Diagnostics.Stopwatch.GetTimestamp();
         ApplyAvailableWidth();
+        var t3 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var freq = System.Diagnostics.Stopwatch.Frequency / 1000.0;
+        Console.Error.WriteLine(
+            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} ApplySession timing: native={(t1 - t0) / freq:F1}ms renderer={(t2 - t1) / freq:F1}ms width={(t3 - t2) / freq:F1}ms");
     }
 
     private void ApplyNativePreview()
@@ -763,6 +813,21 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             _nativePreview.Document = RenderedMarkdownDocument.Empty;
             _nativePreview.ImageSourceResolver = null;
             _nativePreview.ReadingPreferences = ReadingPreferences.Default;
+            return;
+        }
+
+        // Skip native-side render work whenever WebView is the active
+        // preview. _nativeScroll is hardcoded to IsVisible=false in
+        // ApplyVisuals (the native surface is stubbed out in this build
+        // because it flashed between Avalonia native and WebView during
+        // source change), so feeding the heavy RenderedPreview document
+        // into _nativePreview only pays the synchronous Avalonia layout
+        // cost (measured 814ms on the wave_ports heavy-MathType file)
+        // for no visible result. The fallback path explicitly re-applies
+        // the document via OnSharedFallbackRequested so the native
+        // surface still has fresh content when WebView actually fails.
+        if (ShouldUseWebPreview())
+        {
             return;
         }
 
@@ -863,17 +928,25 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void OnSharedDocumentRendered(object? sender, EventArgs e)
     {
+        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} SharedView Rendered → renderInFlight=false");
         _isWebRenderInFlight = false;
+        // Deferred-attach path: if we held off on AttachTo while the new
+        // document was loading (see ApplyVisuals), do the reparent now —
+        // content is committed in the WebView and visible-stale window is
+        // closed. ApplyVisuals would also do the attach on its next call,
+        // but doing it here lets us avoid the extra ApplyVisuals re-entry
+        // and keeps the mask→content swap in one tick.
+        if (_sharedHost is not null && !_isAttachedToHost && ShouldUseWebPreview())
+        {
+            _sharedHost.AttachTo(_webSlot);
+            _isAttachedToHost = true;
+        }
         ApplyVisuals();
     }
 
     private void OnSharedDocumentInvalidated(object? sender, EventArgs e)
     {
-        // New render is starting. With native preview stubbed, we cannot
-        // reveal a placeholder — instead hide the WebView slot entirely so
-        // the user does not see the previous document's content during
-        // Navigate. ApplyVisuals checks _isWebRenderInFlight when deciding
-        // _webSlot visibility.
+        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} SharedView Invalidated → renderInFlight=true");
         _isWebRenderInFlight = true;
         ApplyVisuals();
     }
@@ -882,6 +955,10 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     {
         _webPreviewFailed = true;
         ReleaseSharedHost();
+        // Web failed → native surface becomes the active renderer. Feed
+        // its Document now; ApplyNativePreview's WebView-gate would have
+        // skipped this assignment during normal flow.
+        ApplyNativePreview();
         ApplyVisuals();
     }
 
@@ -974,26 +1051,44 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
         if (shouldShowWeb)
         {
-            if (!_isAttachedToHost)
+            // Defer AttachTo while either (a) a new render is in flight
+            // OR (b) the target slot has not laid out yet. Both cases
+            // would leak a stale frame: (a) the WebView would reparent
+            // its previous DOM into _webSlot for the 250-450ms before
+            // the new HTML commits, and the Avalonia mask Border CANNOT
+            // cover a native HWND (Win32 z-order — native child windows
+            // always sit above their Avalonia siblings); (b) AttachTo
+            // with target.Bounds=0×0 makes SharedHost skip the pre-resize
+            // block, so the View keeps its warmup-parent size (1024×768)
+            // for the 20-40ms until Avalonia's next layout pass propagates
+            // the real slot bounds — visible as a brief CSS reflow when
+            // AvailableContentWidth then changes from the pre-warm value
+            // to the actual slot width. Retry path: OnWebSlotPropertyChanged
+            // triggers ApplyVisuals when _webSlot.Bounds become non-zero.
+            var canAttach = !_isWebRenderInFlight
+                && _webSlot.Bounds.Width > 0
+                && _webSlot.Bounds.Height > 0;
+            if (!_isAttachedToHost && canAttach)
             {
                 _sharedHost!.AttachTo(_webSlot);
                 _isAttachedToHost = true;
             }
             // Keep _webSlot mounted with full layout footprint so the
-            // SOURCE|PREVIEW toolbar row stays put. Cover the WebView with
-            // an opaque mask Border while a new render is in flight —
-            // Native HWND ignores Avalonia Opacity, so Opacity = 0 left
-            // the previous document visible; an overlapping Border is the
-            // only way to hide the stale paint without unmounting the
-            // WebView.
+            // SOURCE|PREVIEW toolbar row stays put. Mask covers _webSlot
+            // when (a) a render is in flight or (b) we're still waiting
+            // to attach (deferred). Once attached AND render committed,
+            // the mask goes off and content shows immediately.
             _webSlot.IsVisible = true;
             _webSlot.Opacity = 1;
-            _webRenderMask.IsVisible = _isWebRenderInFlight;
+            var maskVisible = _isWebRenderInFlight || !_isAttachedToHost;
+            _webRenderMask.IsVisible = maskVisible;
+            Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} ApplyVisuals: webSlot.IsVis=true mask.IsVis={maskVisible} attached={_isAttachedToHost} inFlight={_isWebRenderInFlight} webSlot.Bounds={_webSlot.Bounds}");
         }
         else
         {
             _webSlot.IsVisible = false;
             _webRenderMask.IsVisible = false;
+            Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} ApplyVisuals: webSlot.IsVis=false mask.IsVis=false");
         }
     }
 
@@ -1050,8 +1145,22 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             ? SysMath.Max(480, hostHeight)
             : 1;
 
-    private static ReadingPreferences CreateWebPreviewPreferences(ReadingPreferences preferences)
+    internal static ReadingPreferences CreateWebPreviewPreferences(ReadingPreferences preferences)
         => ReadingPreferences.Normalize(preferences) with { DocumentMinimapMode = DocumentMinimapMode.Off };
+
+    internal static double CalculatePreWarmColumnWidth(ReadingPreferences preferences)
+    {
+        // Match CalculatePreviewWidths' unconstrained-host path (hostWidth <= 0):
+        // returns ContentWidth + horizontal PreviewDocumentPadding so the
+        // pre-warm column matches the natural column width edit-mode would
+        // pick on a wide host. On narrower hosts the edit-mode width-update
+        // arrives via AvailableContentWidth setter → OnLiveInputChanged →
+        // ApplyReadingPreferences (CSS-only, no DOM re-render).
+        var normalized = ReadingPreferences.Normalize(preferences);
+        return normalized.ContentWidth
+            + PreviewDocumentPadding.Left
+            + PreviewDocumentPadding.Right;
+    }
 
     private void UpdateHostScrollMode()
     {

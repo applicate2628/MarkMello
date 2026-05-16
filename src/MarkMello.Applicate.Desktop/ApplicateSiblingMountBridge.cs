@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using System.Threading;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Threading;
 using MarkMello.Presentation.ViewModels;
@@ -38,8 +39,21 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         _getDocument = getDocument;
         _viewerSlot.Content = viewerContent;
 
+        _viewerSlot.PropertyChanged += OnSlotPropertyChanged;
+        _editSlot.PropertyChanged += OnSlotPropertyChanged;
         _vm.PropertyChanged += OnVmPropertyChanged;
         Reconcile();
+    }
+
+    private void OnSlotPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property != Visual.BoundsProperty && e.Property != Visual.IsVisibleProperty)
+        {
+            return;
+        }
+        var slotName = ReferenceEquals(sender, _viewerSlot) ? "viewerSlot" : "editSlot";
+        Console.Error.WriteLine(
+            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} {slotName}.{e.Property.Name}: {e.OldValue} -> {e.NewValue}");
     }
 
     internal void ForceReconcile() => MarshalReconcile();
@@ -92,6 +106,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         {
             return;
         }
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var isViewer = _getIsViewer();
         var isEdit = _getIsEditMode();
         var session = _getEditorSession();
@@ -106,22 +121,34 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         var viewerVisible = isViewer && !isEdit && document is not null;
         var editVisible = isViewer && isEdit && session is not null;
 
+        Console.Error.WriteLine(
+            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} Reconcile in: isViewer={isViewer} isEdit={isEdit} session={(session is not null)} document={(document is not null)} -> viewerVis={viewerVisible} editVis={editVisible}");
+
         ApplySlotState(_viewerSlot, viewerVisible);
         ApplySlotState(_editSlot, editVisible);
+
+        Console.Error.WriteLine(
+            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} Bridge slots: viewerSlot.Bounds={_viewerSlot.Bounds} editSlot.Bounds={_editSlot.Bounds}");
 
         // Sticky session: clear edit slot Content only when EditorSession
         // becomes null (document closed). Mode-toggle from edit→reader keeps
         // Content pointing at the last session, so the inner ApplicateEdit-
         // PreviewView never sees a DataContext=null event and never tears
         // down its shared-host attachment across visibility flips.
+        var sessionChanged = false;
         if (session is null)
         {
+            sessionChanged = _editSlot.Content is not null;
             _editSlot.Content = null;
         }
         else if (!ReferenceEquals(_editSlot.Content, session))
         {
+            sessionChanged = true;
             _editSlot.Content = session;
         }
+        var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        Console.Error.WriteLine(
+            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} Reconcile out: elapsed={elapsedMs:F2}ms sessionChanged={sessionChanged}");
     }
 
     // IsHitTestVisible gates click/wheel/drag-drop independently of IsEnabled.
@@ -143,6 +170,8 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
             return;
         }
         _disposed = true;
+        _viewerSlot.PropertyChanged -= OnSlotPropertyChanged;
+        _editSlot.PropertyChanged -= OnSlotPropertyChanged;
         _vm.PropertyChanged -= OnVmPropertyChanged;
     }
 }

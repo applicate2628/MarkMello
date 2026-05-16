@@ -185,15 +185,19 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         bool documentScrollEnabled = true,
         bool wheelProxyEnabled = false)
     {
+        var sourceChanged = !Equals(Source, source);
+        var imageSourceResolverChanged = !ReferenceEquals(ImageSourceResolver, imageSourceResolver);
         var action = DetermineInputUpdateAction(
-            sourceChanged: !Equals(Source, source),
-            imageSourceResolverChanged: !ReferenceEquals(ImageSourceResolver, imageSourceResolver),
+            sourceChanged: sourceChanged,
+            imageSourceResolverChanged: imageSourceResolverChanged,
             hasLoadedDocument: _hasLoadedDocument,
             readingPreferencesChanged: ReadingPreferences != readingPreferences,
             availableContentWidthChanged: !AreEqual(AvailableContentWidth, availableContentWidth),
             viewerChromeEnabledChanged: ViewerChromeEnabled != viewerChromeEnabled,
             documentScrollEnabledChanged: DocumentScrollEnabled != documentScrollEnabled,
             wheelProxyEnabledChanged: WheelProxyEnabled != wheelProxyEnabled);
+        Console.Error.WriteLine(
+            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} UpdateInputs viewId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this):X8} chrome={viewerChromeEnabled} sourceCh={sourceChanged} resolverCh={imageSourceResolverChanged} hasLoaded={_hasLoadedDocument} action={action}");
 
         _isUpdatingInputs = true;
         try
@@ -333,6 +337,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     /// </summary>
     internal void SetNativeWebViewVisibility(bool isVisible)
     {
+        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} SetNativeWebViewVisibility({isVisible}) viewId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this):X8} wrapper.Bounds={_webView.Bounds}");
         _webView.IsVisible = isVisible;
     }
 
