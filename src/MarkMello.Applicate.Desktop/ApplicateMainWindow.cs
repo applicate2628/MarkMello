@@ -3,8 +3,10 @@ using System.Collections.Specialized;
 using System.Linq;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
 using Avalonia.Layout;
+using Avalonia.Styling;
 using Avalonia.VisualTree;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Editing;
@@ -56,6 +58,7 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallPopupZOrderFollow(viewModel);
         InstallApplicateAboutPanel();
         InstallPopupFadeIn();
+        InstallUnifiedScrollBarStyle();
         InstallEditModeDragSuppression(viewModel);
         InstallNativeRendererStub(viewModel);
         Opened += (_, _) => Title = $"{Title} [Applicate overlay]";
@@ -195,6 +198,68 @@ public sealed class ApplicateMainWindow : MainWindow
                 viewModel.IsDragHovering = false;
             }
         };
+    }
+
+    private void InstallUnifiedScrollBarStyle()
+    {
+        // Every Avalonia ScrollBar across the app — source-pane TextBox in
+        // edit mode, popup ScrollViewers, native preview, and any future
+        // scrolling surface — should look like the WebViewHostScrollBarOverlay
+        // that replaced the WebKit scrollbar in commit feat(scrollbar).
+        //
+        // Three behaviours need unifying:
+        //   1. AllowAutoHide=false — bar stays visible (no fade-out idle).
+        //   2. Thickness pinned to the Fluent "expanded" width (12 px) — the
+        //      Fluent template otherwise collapses to a ~5 px hairline when
+        //      the pointer is not over the ScrollBar, so two scrollbars in
+        //      the same window can look 2× different widths just because
+        //      the user's mouse is over one and not the other.
+        //   3. Opacity=1 + template-part Opacity=1 — the per-part
+        //      DoubleTransition on TrackRect / PART_LineUpButton /
+        //      PART_LineDownButton cannot fade them in/out independently.
+        //
+        // Fork-overlay-safe: runtime Style on Window.Styles; no upstream
+        // Themes/Controls.axaml edit.
+        const double ExpandedThickness = 12d;
+
+        Styles.Add(new Style(s => s.OfType<ScrollBar>())
+        {
+            Setters =
+            {
+                new Setter(ScrollBar.AllowAutoHideProperty, false),
+                new Setter(Visual.OpacityProperty, 1d)
+            }
+        });
+
+        Styles.Add(new Style(s => s.OfType<ScrollBar>().Class(":vertical"))
+        {
+            Setters =
+            {
+                new Setter(Layoutable.WidthProperty, ExpandedThickness),
+                new Setter(Layoutable.MinWidthProperty, ExpandedThickness)
+            }
+        });
+
+        Styles.Add(new Style(s => s.OfType<ScrollBar>().Class(":horizontal"))
+        {
+            Setters =
+            {
+                new Setter(Layoutable.HeightProperty, ExpandedThickness),
+                new Setter(Layoutable.MinHeightProperty, ExpandedThickness)
+            }
+        });
+
+        foreach (var partName in new[] { "TrackRect", "PART_LineUpButton", "PART_LineDownButton" })
+        {
+            Styles.Add(new Style(s => s.OfType<ScrollBar>()
+                                         .Template().OfType<Control>().Name(partName))
+            {
+                Setters =
+                {
+                    new Setter(Visual.OpacityProperty, 1d)
+                }
+            });
+        }
     }
 
     private void InstallPopupFadeIn()
