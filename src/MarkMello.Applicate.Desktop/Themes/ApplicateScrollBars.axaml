@@ -1,0 +1,65 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- Single source of truth for every Avalonia ScrollBar in the app.
+       Bar track 10 px, thumb 7 px centred inside, 7 px corner radius.
+       Always visible, faint track, gray theme thumb, arrows kept. -->
+
+  <Style Selector="ScrollBar">
+    <Setter Property="AllowAutoHide" Value="False" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Opacity" Value="1" />
+  </Style>
+
+  <Style Selector="ScrollBar:vertical">
+    <Setter Property="Width" Value="10" />
+    <Setter Property="MinWidth" Value="10" />
+  </Style>
+  <Style Selector="ScrollBar:horizontal">
+    <Setter Property="Height" Value="10" />
+    <Setter Property="MinHeight" Value="10" />
+  </Style>
+
+  <!-- Track: faint visible strip behind the thumb (Chrome paints one). -->
+  <Style Selector="ScrollBar /template/ Border#TrackRect">
+    <Setter Property="Background" Value="{DynamicResource MmBorderBrush}" />
+    <Setter Property="Opacity" Value="0.55" />
+  </Style>
+
+  <!-- Thumb shared state. Per-orientation templates below give the visual
+       a 7 px short-axis dimension centred inside the 10 px track, so the
+       full 10 px stays clickable (hit-test on Thumb) while the painted
+       pill reads as a narrower rounded bar. -->
+  <Style Selector="ScrollBar /template/ Thumb">
+    <Setter Property="Background" Value="{DynamicResource MmTextSoftBrush}" />
+  </Style>
+  <Style Selector="ScrollBar:vertical /template/ Thumb">
+    <Setter Property="MinHeight" Value="60" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Background="{TemplateBinding Background}"
+                Width="7"
+                HorizontalAlignment="Center"
+                CornerRadius="7" />
+      </ControlTemplate>
+    </Setter>
+  </Style>
+  <Style Selector="ScrollBar:horizontal /template/ Thumb">
+    <Setter Property="MinWidth" Value="60" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border Background="{TemplateBinding Background}"
+                Height="7"
+                VerticalAlignment="Center"
+                CornerRadius="7" />
+      </ControlTemplate>
+    </Setter>
+  </Style>
+  <Style Selector="ScrollBar /template/ Thumb:pointerover">
+    <Setter Property="Background" Value="{DynamicResource MmTextBrush}" />
+  </Style>
+  <Style Selector="ScrollBar /template/ Thumb:pressed">
+    <Setter Property="Background" Value="{DynamicResource MmTextBrush}" />
+  </Style>
+
+</Styles>

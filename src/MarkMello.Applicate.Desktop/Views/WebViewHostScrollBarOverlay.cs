@@ -65,23 +65,12 @@ internal sealed class WebViewHostScrollBarOverlay : IDisposable
             Orientation = Orientation.Vertical,
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Stretch,
-            // AllowAutoHide=false disables Avalonia's default pointer-over
-            // expansion / out-of-area collapse, matching the always-visible
-            // behavior of the source-pane TextBox scrollbar so the two
-            // panes look symmetric in edit mode.
-            AllowAutoHide = false,
-            // Permanent mount — never hide. See comment in
-            // OnViewScrollStateChanged about tab-switch flash.
-            IsVisible = true,
             IsHitTestVisible = true,
             Focusable = false,
-            // Explicitly clear inherited Transitions so Avalonia's default
-            // ScrollBar theme can't animate Opacity / Width on hover or
-            // visibility change. User reports scrollbar fade-out during
-            // tab switch in edit mode — likely Avalonia theme transition.
-            Transitions = null,
-            Opacity = 1,
             Margin = new Thickness(0, 0, 0, 0)
+            // AllowAutoHide / Opacity / Transitions intentionally NOT set
+            // here — the unified ScrollBar style in Themes/ApplicateScroll
+            // Bars.axaml is the single source of truth.
         };
 
         _scrollBar.Scroll += OnScrollBarScroll;

@@ -77,7 +77,12 @@ internal sealed class ApplicateTabsView : UserControl
 
         var scroll = new ScrollViewer
         {
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            // Hidden, not Auto: the tab strip scrolls via wheel/keyboard
+            // when tabs overflow, but a visible horizontal scrollbar would
+            // sit under the strip in the same row as the tabs and overlap
+            // them visually. Tab overflow is rare and the wheel-scroll
+            // affordance is enough.
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
             VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
             Content = _tabsPanel
         };

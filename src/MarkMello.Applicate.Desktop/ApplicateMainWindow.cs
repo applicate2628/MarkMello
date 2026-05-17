@@ -202,63 +202,26 @@ public sealed class ApplicateMainWindow : MainWindow
 
     private void InstallUnifiedScrollBarStyle()
     {
-        // Every Avalonia ScrollBar across the app — source-pane TextBox in
-        // edit mode, popup ScrollViewers, native preview, and any future
-        // scrolling surface — should look like the WebViewHostScrollBarOverlay
-        // that replaced the WebKit scrollbar in commit feat(scrollbar).
+        // Single source of truth for ScrollBar styling across the whole app
+        // (source-pane TextBox in edit mode, preview overlay, native preview,
+        // popup ScrollViewers, future surfaces) lives in
+        // Themes/ApplicateScrollBars.axaml. Loaded into Application.Styles
+        // so the styles propagate everywhere — Window.Styles can miss inner
+        // ScrollBars when Fluent's ControlTheme intermediates win, but the
+        // application-level scope keeps the rules above ControlTheme defaults.
         //
-        // Three behaviours need unifying:
-        //   1. AllowAutoHide=false — bar stays visible (no fade-out idle).
-        //   2. Thickness pinned to the Fluent "expanded" width (12 px) — the
-        //      Fluent template otherwise collapses to a ~5 px hairline when
-        //      the pointer is not over the ScrollBar, so two scrollbars in
-        //      the same window can look 2× different widths just because
-        //      the user's mouse is over one and not the other.
-        //   3. Opacity=1 + template-part Opacity=1 — the per-part
-        //      DoubleTransition on TrackRect / PART_LineUpButton /
-        //      PART_LineDownButton cannot fade them in/out independently.
+        // XAML rather than C# Style fluent API because Avalonia's template-
+        // part selector resolution (`/template/ Thumb#thumb` and template-
+        // replacement Setters on Thumb.Template) is most reliable from the
+        // XAML parser.
         //
-        // Fork-overlay-safe: runtime Style on Window.Styles; no upstream
-        // Themes/Controls.axaml edit.
-        const double ExpandedThickness = 12d;
-
-        Styles.Add(new Style(s => s.OfType<ScrollBar>())
+        // Fork-overlay-safe: the .axaml lives under MarkMello.Applicate
+        // .Desktop's avares root; no upstream Themes/Controls.axaml edit.
+        var uri = new Uri("avares://MarkMello.Applicate/Themes/ApplicateScrollBars.axaml");
+        var loaded = Avalonia.Markup.Xaml.AvaloniaXamlLoader.Load(uri);
+        if (loaded is Styles styles)
         {
-            Setters =
-            {
-                new Setter(ScrollBar.AllowAutoHideProperty, false),
-                new Setter(Visual.OpacityProperty, 1d)
-            }
-        });
-
-        Styles.Add(new Style(s => s.OfType<ScrollBar>().Class(":vertical"))
-        {
-            Setters =
-            {
-                new Setter(Layoutable.WidthProperty, ExpandedThickness),
-                new Setter(Layoutable.MinWidthProperty, ExpandedThickness)
-            }
-        });
-
-        Styles.Add(new Style(s => s.OfType<ScrollBar>().Class(":horizontal"))
-        {
-            Setters =
-            {
-                new Setter(Layoutable.HeightProperty, ExpandedThickness),
-                new Setter(Layoutable.MinHeightProperty, ExpandedThickness)
-            }
-        });
-
-        foreach (var partName in new[] { "TrackRect", "PART_LineUpButton", "PART_LineDownButton" })
-        {
-            Styles.Add(new Style(s => s.OfType<ScrollBar>()
-                                         .Template().OfType<Control>().Name(partName))
-            {
-                Setters =
-                {
-                    new Setter(Visual.OpacityProperty, 1d)
-                }
-            });
+            Avalonia.Application.Current?.Styles.Add(styles);
         }
     }
 
