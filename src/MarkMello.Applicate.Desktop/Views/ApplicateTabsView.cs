@@ -45,9 +45,11 @@ internal sealed class ApplicateTabsView : UserControl
     // (DraggedTabWidth + TabSpacingPixels) to fill the gap.
     private const double TabSpacingPixels = 4.0;
 
-    // Animation timing for non-dragged tabs sliding into a new slot.
-    // Short enough to feel responsive, long enough to read as motion.
-    private static readonly TimeSpan ReorderAnimationDuration = TimeSpan.FromMilliseconds(160);
+    // Animation timing for non-dragged tabs sliding into a new slot is
+    // sourced from the app's motion tokens (Themes/Motion.axaml) so it
+    // matches popup fades, hover transitions, and the rest of the UI's
+    // pacing in one place.
+    private static TimeSpan ReorderAnimationDuration => ApplicateMotion.Standard;
 
     private readonly IOpenDocumentsService _openDocsService;
     private readonly StackPanel _tabsPanel;

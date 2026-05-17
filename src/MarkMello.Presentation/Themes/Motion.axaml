@@ -1,0 +1,24 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=netstandard"
+                    xmlns:anim="clr-namespace:Avalonia.Animation.Easings;assembly=Avalonia.Base">
+
+  <!--
+    Single source of truth for animation timing across the app.
+    Semantic tokens (not literal ms) so callers express INTENT, not numbers:
+      MmDurationFast     — hover/press/quick feedback
+      MmDurationStandard — popup fade, mode toggle, opacity transitions
+      MmDurationSlow     — large panel transitions (settings, about)
+    To retune the overall feel of the UI, change one number here.
+
+    Easing: a single shared CubicEaseOut for decelerating "appearing" content.
+    If we add accelerated exit easing later, name it MmEasingExit and reuse.
+  -->
+
+  <sys:TimeSpan x:Key="MmDurationFast">0:0:0.120</sys:TimeSpan>
+  <sys:TimeSpan x:Key="MmDurationStandard">0:0:0.180</sys:TimeSpan>
+  <sys:TimeSpan x:Key="MmDurationSlow">0:0:0.280</sys:TimeSpan>
+
+  <anim:CubicEaseOut x:Key="MmEasingStandard" />
+
+</ResourceDictionary>

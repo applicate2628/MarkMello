@@ -238,8 +238,10 @@
     <Setter Property="RenderTransform" Value="translate(0px,-6px) scale(0.96)" />
     <Setter Property="Transitions">
       <Transitions>
-        <DoubleTransition Property="Opacity" Duration="0:0:0.22" />
-        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.22" />
+        <DoubleTransition Property="Opacity" Duration="{DynamicResource MmDurationSlow}"
+                          Easing="{DynamicResource MmEasingStandard}" />
+        <TransformOperationsTransition Property="RenderTransform" Duration="{DynamicResource MmDurationSlow}"
+                          Easing="{DynamicResource MmEasingStandard}" />
       </Transitions>
     </Setter>
   </Style>
@@ -401,7 +403,8 @@
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="Foreground"
-                         Duration="0:0:0.12" />
+                         Duration="{DynamicResource MmDurationFast}"
+                         Easing="{DynamicResource MmEasingStandard}" />
       </Transitions>
     </Setter>
   </Style>
@@ -410,9 +413,11 @@
     <Setter Property="Transitions">
       <Transitions>
         <BrushTransition Property="Background"
-                         Duration="0:0:0.12" />
+                         Duration="{DynamicResource MmDurationFast}"
+                         Easing="{DynamicResource MmEasingStandard}" />
         <BoxShadowsTransition Property="BoxShadow"
-                              Duration="0:0:0.12" />
+                              Duration="{DynamicResource MmDurationFast}"
+                         Easing="{DynamicResource MmEasingStandard}" />
       </Transitions>
     </Setter>
   </Style>
@@ -541,7 +546,8 @@
     <Setter Property="Transitions">
       <Transitions>
         <TransformOperationsTransition Property="RenderTransform"
-                                       Duration="0:0:0.12" />
+                                       Duration="{DynamicResource MmDurationFast}"
+                         Easing="{DynamicResource MmEasingStandard}" />
       </Transitions>
     </Setter>
     <Setter Property="Template">
