@@ -137,6 +137,13 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         ApplySlotState(_viewerSlot, viewerVisible);
         ApplySlotState(_editSlot, editVisible);
 
+        // Drive editContent.Opacity together with editSlot.IsVisible so the
+        // Avalonia chrome (source pane, toolbar) fades in/out at the same
+        // pace as the native WebView2 HWND's NativeControlHost cascade.
+        // The opacity transition is configured on editWorkspace at
+        // construction time (Duration=MmDurationStandard, EasingStandard).
+        _editContent.Opacity = editVisible ? 1.0 : 0.0;
+
         Console.Error.WriteLine(
             $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} Bridge slots: viewerSlot.Bounds={_viewerSlot.Bounds} editSlot.Bounds={_editSlot.Bounds}");
 

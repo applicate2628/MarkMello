@@ -59,6 +59,69 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallEditModeDragSuppression(viewModel);
         InstallNativeRendererStub(viewModel);
         Opened += (_, _) => Title = $"{Title} [Applicate overlay]";
+        Opened += (_, _) => Avalonia.Threading.Dispatcher.UIThread.Post(
+            InstallStatusHintAboveWebView,
+            Avalonia.Threading.DispatcherPriority.Loaded);
+    }
+
+    // Status-hint Border (Ctrl+O / Ctrl+E / Ctrl+, hotkeys at bottom-right
+    // in MainWindow.axaml line 416-500) lives in MainWindow's own visual
+    // tree, so the native WebView2 child HWND covers it via Win32 airspace
+    // — invisible to the user in both reader and edit mode. Fix: after the
+    // window is opened (visual tree fully realized), reparent the Border
+    // into a Popup with ShouldUseOverlayLayer="False". Avalonia renders
+    // such a popup as a separate transient top-level window on Win32, and
+    // top-level windows always stack above their owner's child HWNDs.
+    private Avalonia.Controls.Primitives.Popup? _statusHintPopup;
+
+    private void InstallStatusHintAboveWebView()
+    {
+        if (_statusHintPopup is not null)
+        {
+            return;
+        }
+
+        var bodyPanel = this.FindControl<Panel>("BodyPanel");
+        if (bodyPanel is null)
+        {
+            return;
+        }
+
+        var statusBorder = bodyPanel.GetVisualDescendants()
+            .OfType<Border>()
+            .FirstOrDefault(b => b.Classes.Contains("mm-status"));
+        if (statusBorder is null)
+        {
+            return;
+        }
+
+        // Detach from current parent so we can re-host inside the Popup.
+        // The Border was placed as a sibling overlay over BodyPanel with
+        // ZIndex=300 — ineffective against WebView2's Win32 airspace.
+        if (statusBorder.Parent is Panel currentParent)
+        {
+            currentParent.Children.Remove(statusBorder);
+        }
+
+        _statusHintPopup = new Avalonia.Controls.Primitives.Popup
+        {
+            PlacementTarget = bodyPanel,
+            Placement = Avalonia.Controls.PlacementMode.AnchorAndGravity,
+            PlacementAnchor = Avalonia.Controls.Primitives.PopupPositioning.PopupAnchor.BottomRight,
+            PlacementGravity = Avalonia.Controls.Primitives.PopupPositioning.PopupGravity.TopLeft,
+            ShouldUseOverlayLayer = false,
+            IsLightDismissEnabled = false,
+            OverlayDismissEventPassThrough = true,
+            Topmost = false,
+            Focusable = false,
+            Child = statusBorder
+        };
+
+        // Append the Popup itself as a child of bodyPanel so Avalonia keeps
+        // it in the logical tree (DataContext inheritance for bindings on
+        // the inner Border still works through PlacementTarget anchor).
+        bodyPanel.Children.Add(_statusHintPopup);
+        _statusHintPopup.IsOpen = true;
     }
 
     // ===========================================================
@@ -356,13 +419,33 @@ public sealed class ApplicateMainWindow : MainWindow
         };
         if (!editWorkspace.TryReplacePreviewDocumentView(editPreview))
         {
-            // Upstream merge (d902a7f) removed the `PreviewDocumentFrame` Border
-            // name that TryReplacePreviewDocumentView relies on. Locate the
-            // upstream MarkdownDocumentView and swap its anonymous Border child.
+            // Upstream merge (5c329d8 "sync source and preview scrolling")
+            // dropped the `Name="PreviewDocumentFrame"` from the wrapper Border
+            // in EditWorkspaceView.axaml:189, so TryReplacePreviewDocumentView
+            // (which depends on that name) now always returns false. Locate
+            // the wrapper by walking from the still-named MarkdownDocumentView.
             var nativeDocView = editWorkspace.FindControl<MarkdownDocumentView>("PreviewDocumentView");
             if (nativeDocView?.Parent is Border parentBorder)
             {
+                // The upstream Border holds the readable-column cap for the
+                // native MarkdownDocumentView path: MaxWidth bound to
+                // DocumentColumnMaxWidth (constant 964px) + HorizontalAlignment
+                // =Center. For the WebView path, that cap is wrong — renderer.js
+                // already owns the readable column via AvailableContentWidth,
+                // so the outer cap leaves the WebView wrapper stuck at 964px
+                // and centered in any wider pane, pushing the WebView2's
+                // internal scrollbar 50+ DIPs inward from the pane right edge.
+                //
+                // Fix: dispose the binding expression first so the LocalValue
+                // write below isn't overwritten when the Bridge later sets
+                // DataContext = session and the binding re-fires. Avalonia 11
+                // has no public ClearBinding; BindingExpressionBase implements
+                // IDisposable and disposing tears down the OneWay subscription.
+                Avalonia.Data.BindingOperations
+                    .GetBindingExpressionBase(parentBorder, Border.MaxWidthProperty)
+                    ?.Dispose();
                 parentBorder.HorizontalAlignment = HorizontalAlignment.Stretch;
+                parentBorder.MaxWidth = double.PositiveInfinity;
                 parentBorder.Child = editPreview;
             }
         }
