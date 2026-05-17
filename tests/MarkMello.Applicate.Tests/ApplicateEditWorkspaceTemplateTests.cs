@@ -1,14 +1,11 @@
-using System.Linq;
 using System.Reflection;
 using System.Threading;
 using Avalonia;
 using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
-using Avalonia.VisualTree;
 using MarkMello.Applicate.Desktop;
 using MarkMello.Applicate.Desktop.Views;
 using MarkMello.Domain;
-using MarkMello.Presentation.Views;
 using Xunit;
 
 namespace MarkMello.Applicate.Tests;
@@ -16,20 +13,10 @@ namespace MarkMello.Applicate.Tests;
 public sealed class ApplicateEditWorkspaceTemplateTests
 {
     [Fact]
-    public void ApplicateTemplateReplacesEditPreviewWithApplicateRenderer()
+    public void ApplicateTemplateTypeRemainsStaticCompatibilityStub()
     {
-        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
-        {
-            var view = Assert.IsType<EditWorkspaceView>(new ApplicateEditWorkspaceTemplate().Build(null));
-
-            var previewHost = view.GetVisualDescendants().OfType<ApplicateEditPreviewView>().SingleOrDefault();
-            var preview = view.GetVisualDescendants().OfType<ApplicateMarkdownDocumentView>().SingleOrDefault();
-
-            Assert.NotNull(previewHost);
-            Assert.NotNull(preview);
-            Assert.DoesNotContain(view.GetVisualDescendants(), static visual => visual is MarkdownDocumentView);
-        }, CancellationToken.None);
+        Assert.True(typeof(ApplicateEditWorkspaceTemplate).IsAbstract);
+        Assert.True(typeof(ApplicateEditWorkspaceTemplate).IsSealed);
     }
 
     [Fact]
@@ -58,7 +45,7 @@ public sealed class ApplicateEditWorkspaceTemplateTests
 
     [Theory]
     [InlineData(0, 1)]
-    [InlineData(120, 480)]
+    [InlineData(120, 120)]
     [InlineData(720, 720)]
     public void WebPreviewMinHeightKeepsNativeWebViewMeasurable(double hostHeight, double expected)
     {

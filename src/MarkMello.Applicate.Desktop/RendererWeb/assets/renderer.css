@@ -293,6 +293,41 @@ img {
   height: auto;
 }
 
+.mm-document table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 20px 0 24px;
+  font-family: var(--mm-document-font-family-sans);
+  font-size: calc(var(--mm-document-font-size) * 0.86);
+  line-height: 1.45;
+}
+
+.mm-document th,
+.mm-document td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--mm-document-rule);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.mm-document th {
+  font-weight: 650;
+  color: var(--mm-document-text);
+  border-bottom-width: 2px;
+}
+
+.mm-document td {
+  color: color-mix(in srgb, var(--mm-document-text) 88%, var(--mm-document-muted));
+}
+
+.mm-document table code {
+  white-space: nowrap;
+}
+
 .math-inline {
   overflow-wrap: anywhere;
 }
@@ -453,4 +488,3 @@ pre.mm-mermaid.is-rendered {
   --mm-minimap-quote: rgba(170, 130, 200, 0.35);
   --mm-minimap-hr: rgba(140, 140, 140, 0.3);
 }
-

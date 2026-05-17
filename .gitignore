@@ -14,6 +14,7 @@ packaging/macos/dist/
 *.user
 *.suo
 *.userprefs
+*.lscache
 
 # OS
 .DS_Store
@@ -33,11 +34,11 @@ node_modules/
 # Logs
 *.log
 .scratch/
-.reports/**/*.png
-.reports/**/*.jpg
-.reports/**/*.jpeg
-.reports/**/*.webp
-.reports/**/*.gif
+.plans/
+.reports/
+.agents/
+.claude/
+docs/superpowers/
 
 # Other
 .editorconfig

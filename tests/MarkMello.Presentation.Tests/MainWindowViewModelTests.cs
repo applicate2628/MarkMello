@@ -291,7 +291,12 @@ public sealed class MainWindowViewModelTests
 
         await harness.ViewModel.OpenPathAsync(path);
         await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+
+        Assert.False(harness.ViewModel.ShowsDirtySaveButton);
+
         harness.ViewModel.EditorSession!.SourceText = "first updated";
+
+        Assert.True(harness.ViewModel.ShowsDirtySaveButton);
 
         await harness.ViewModel.SaveCommand.ExecuteAsync(null);
 
@@ -299,6 +304,7 @@ public sealed class MainWindowViewModelTests
         Assert.Equal(path, save.Path);
         Assert.Equal("first updated", save.Content);
         Assert.False(harness.ViewModel.IsDirty);
+        Assert.False(harness.ViewModel.ShowsDirtySaveButton);
         Assert.Equal("first updated", harness.ViewModel.Document!.Content);
         Assert.Equal("one.md", harness.ViewModel.TitleFileDisplayName);
     }

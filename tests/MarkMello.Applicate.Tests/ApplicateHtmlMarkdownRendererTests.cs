@@ -102,6 +102,30 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
+    public async Task RenderResolvesRelativeLinkHrefAgainstSourceDirectory()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        using var temp = new TempDirectory();
+        var sourcePath = Path.Combine(temp.Path, "source.md");
+        var targetPath = Path.Combine(temp.Path, "docs", "target.md");
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        File.WriteAllText(sourcePath, "[target](docs/target.md#section)");
+
+        var source = new MarkdownSource(sourcePath, "source.md", File.ReadAllText(sourcePath));
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        var expectedHref = new Uri(targetPath).AbsoluteUri + "#section";
+        Assert.Contains($"href=\"{expectedHref}\"", document.Html, StringComparison.Ordinal);
+        Assert.Contains("data-mm-href=\"docs/target.md#section\"", document.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain("GeneratedWebDocuments/docs/target.md", document.Html, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task RenderCreatesHeadingMap()
     {
         var renderer = new ApplicateHtmlMarkdownRenderer();
@@ -235,7 +259,7 @@ public sealed class ApplicateHtmlMarkdownRendererTests
         var css = await new ApplicateWebAssetEmbedder()
             .ReadTextAssetAsync("renderer.css", CancellationToken.None);
 
-        Assert.Contains(":root[data-mm-chrome=\"off\"]", css, StringComparison.Ordinal);
+        Assert.Contains(":root[data-mm-host-scrollbar=\"on\"]", css, StringComparison.Ordinal);
         Assert.Contains("overflow: hidden;", css, StringComparison.Ordinal);
         Assert.Contains("scrollbar-width: none;", css, StringComparison.Ordinal);
     }
@@ -263,6 +287,18 @@ public sealed class ApplicateHtmlMarkdownRendererTests
 
         Assert.Contains("--mm-document-background: #fcfaf6;", css, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("--mm-document-background: #14110e;", css, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task BundledRendererCssStylesMarkdownTables()
+    {
+        var css = await new ApplicateWebAssetEmbedder()
+            .ReadTextAssetAsync("renderer.css", CancellationToken.None);
+
+        Assert.Contains(".mm-document table", css, StringComparison.Ordinal);
+        Assert.Contains("border-collapse: collapse;", css, StringComparison.Ordinal);
+        Assert.Contains(".mm-document th", css, StringComparison.Ordinal);
+        Assert.Contains(".mm-document td", css, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -382,11 +418,30 @@ public sealed class ApplicateHtmlMarkdownRendererTests
         public Task<Stream?> TryOpenAsync(
             string url,
             string? baseDirectory,
-            CancellationToken cancellationToken = default)
+            CancellationToken ct = default)
         {
             CallCount++;
             var bytes = "not a real image"u8.ToArray();
             return Task.FromResult<Stream?>(new MemoryStream(bytes));
+        }
+    }
+
+    private sealed class TempDirectory : IDisposable
+    {
+        public TempDirectory()
+        {
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "MarkMello.Applicate.Tests.Renderer", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Path))
+            {
+                Directory.Delete(Path, recursive: true);
+            }
         }
     }
 

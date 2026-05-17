@@ -138,11 +138,13 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(AppMenuOverlayContent))]
     [NotifyPropertyChangedFor(nameof(AppSettingsOverlayContent))]
     [NotifyPropertyChangedFor(nameof(AppAboutOverlayContent))]
+    [NotifyPropertyChangedFor(nameof(ShowsDirtySaveButton))]
     private bool _isEditMode;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ActiveDocumentContent))]
     [NotifyPropertyChangedFor(nameof(IsDirty))]
+    [NotifyPropertyChangedFor(nameof(ShowsDirtySaveButton))]
     private EditorSessionViewModel? _editorSession;
 
     [ObservableProperty]
@@ -196,6 +198,8 @@ public partial class MainWindowViewModel : ObservableObject
     public bool IsError => State == ViewState.LoadError;
 
     public bool IsDirty => EditorSession?.IsDirty == true;
+
+    public bool ShowsDirtySaveButton => IsEditMode && IsDirty;
 
     public bool ShowCustomTitleBar => _showCustomTitleBar;
 
@@ -1585,6 +1589,7 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(WordCountStatusLabel));
         OnPropertyChanged(nameof(ReadTimeStatusLabel));
         OnPropertyChanged(nameof(IsDirty));
+        OnPropertyChanged(nameof(ShowsDirtySaveButton));
     }
 
     private void RefreshWindowTitle()

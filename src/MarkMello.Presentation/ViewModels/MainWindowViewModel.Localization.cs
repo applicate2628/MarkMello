@@ -70,6 +70,8 @@ public partial class MainWindowViewModel
         nameof(DirtyPromptSave),
         nameof(DragDropHint),
         nameof(EditToggleTooltip),
+        nameof(SaveAsTooltip),
+        nameof(SaveTooltip),
         nameof(LanguageHint),
         nameof(LanguageLabel),
         nameof(LoadErrorOpenAnotherFile),
@@ -149,6 +151,8 @@ public partial class MainWindowViewModel
     public string DirtyPromptSave => _localization["DirtyPromptSave"];
     public string DragDropHint => _localization["DragDropHint"];
     public string EditToggleTooltip => _localization["EditToggleTooltip"];
+    public string SaveAsTooltip => _localization["SaveAsTooltip"];
+    public string SaveTooltip => _localization["SaveTooltip"];
     public string LanguageHint => _localization["LanguageHint"];
     public string LanguageLabel => _localization["LanguageLabel"];
     public string LoadErrorOpenAnotherFile => _localization["LoadErrorOpenAnotherFile"];

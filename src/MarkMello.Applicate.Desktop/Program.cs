@@ -1,6 +1,7 @@
 using Avalonia;
 using MarkMello.Application;
 using MarkMello.Application.Abstractions;
+using MarkMello.Applicate.Desktop.Activation;
 using MarkMello.Applicate.Desktop.Editing;
 using MarkMello.Applicate.Desktop.Math;
 using MarkMello.Applicate.Desktop.Rendering;
@@ -19,13 +20,26 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        if (!ApplicateSingleInstanceService.TryCreatePrimary(out var singleInstance))
+        {
+            return ApplicateSingleInstanceService.ForwardActivation(args) ? 0 : 1;
+        }
+
         var metrics = new StopwatchStartupMetrics();
         metrics.Mark(StartupStage.AppBootstrap);
 
-        var services = ConfigureServices(metrics, args);
-        App.RegisterServices(services);
+        try
+        {
+            var services = ConfigureServices(metrics, args, singleInstance);
+            App.RegisterServices(services);
+            singleInstance!.StartListening();
 
-        return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+            return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        }
+        finally
+        {
+            singleInstance!.Dispose();
+        }
     }
 
     public static AppBuilder BuildAvaloniaApp() =>
@@ -33,10 +47,17 @@ internal static class Program
             .UsePlatformDetect()
             .LogToTrace();
 
-    private static ServiceProvider ConfigureServices(IStartupMetrics metrics, string[] args)
+    private static ServiceProvider ConfigureServices(
+        IStartupMetrics metrics,
+        string[] args,
+        ApplicateSingleInstanceService? singleInstance)
     {
         var collection = new ServiceCollection();
         collection.AddInfrastructure(metrics, args);
+        if (singleInstance is not null)
+        {
+            collection.AddSingleton(singleInstance);
+        }
         collection.Replace(ServiceDescriptor.Singleton<IMarkdownDocumentRenderer, ApplicateMarkdownDocumentRenderer>());
         collection.AddSingleton<ApplicateWebAssetEmbedder>();
         collection.AddSingleton<IApplicateHtmlMarkdownRenderer, ApplicateHtmlMarkdownRenderer>();
@@ -49,7 +70,8 @@ internal static class Program
         collection.Replace(ServiceDescriptor.Singleton<MainWindow>(provider => new ApplicateMainWindow(
             provider.GetRequiredService<MarkMello.Presentation.ViewModels.MainWindowViewModel>(),
             provider.GetRequiredService<StartupSmokeTestOptions>(),
-            provider.GetRequiredService<ISettingsStore>())));
+            provider.GetRequiredService<ISettingsStore>(),
+            provider.GetService<ApplicateSingleInstanceService>())));
 
         return collection.BuildServiceProvider();
     }

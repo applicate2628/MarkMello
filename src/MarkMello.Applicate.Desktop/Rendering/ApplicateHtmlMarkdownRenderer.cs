@@ -201,10 +201,10 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
     {
         context.PlainText.AppendLine(code.Code);
 
-        var infoToken = (code.Info ?? string.Empty).Trim().Split(' ')[0].ToLowerInvariant();
+        var infoHead = (code.Info ?? string.Empty).Trim().Split(' ')[0].ToLowerInvariant();
         var blockAttrs = BlockDataAttributes(blockIndex, kind);
 
-        if (string.Equals(infoToken, "mermaid", StringComparison.Ordinal))
+        if (string.Equals(infoHead, "mermaid", StringComparison.Ordinal))
         {
             context.HasMermaidBlock = true;
             context.Html.Append("<pre class=\"mm-mermaid\"").Append(blockAttrs).Append("><code class=\"language-mermaid\" data-mm-mermaid>")
@@ -214,9 +214,9 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         }
 
         context.HasCodeBlockWithSyntax = true;
-        var langClass = string.IsNullOrEmpty(infoToken)
+        var langClass = string.IsNullOrEmpty(infoHead)
             ? "language-plaintext"
-            : $"language-{HtmlAttribute(infoToken)}";
+            : $"language-{HtmlAttribute(infoHead)}";
         context.Html.Append("<pre").Append(blockAttrs).Append("><code data-mm-code class=\"").Append(langClass).Append("\">")
                     .Append(HtmlText(code.Code))
                     .AppendLine("</code></pre>");
@@ -360,8 +360,12 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
 
     private static async Task RenderLinkAsync(RenderContext context, MarkdownLinkInline link)
     {
-        var safeHref = IsSafeLinkTarget(link.Url) ? link.Url : string.Empty;
+        var safeHref = CreateDisplayHref(context, link.Url);
         context.Html.Append("<a href=\"").Append(HtmlAttribute(safeHref)).Append('"');
+        if (!string.Equals(safeHref, link.Url, StringComparison.Ordinal))
+        {
+            context.Html.Append(" data-mm-href=\"").Append(HtmlAttribute(link.Url)).Append('"');
+        }
         if (!string.IsNullOrWhiteSpace(link.Title))
         {
             context.Html.Append(" title=\"").Append(HtmlAttribute(link.Title)).Append('"');
@@ -429,34 +433,70 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             .Append(HtmlText(altText ?? "image"))
             .AppendLine("</figcaption></figure>");
 
-    private static bool IsSafeLinkTarget(string url)
+    private static string CreateDisplayHref(RenderContext context, string url)
     {
         if (string.IsNullOrWhiteSpace(url))
         {
-            return false;
+            return string.Empty;
         }
 
-        if (url.StartsWith('#'))
+        var trimmed = url.Trim();
+        if (trimmed.StartsWith('#'))
         {
-            return true;
+            return trimmed;
         }
 
-        if (Uri.TryCreate(url, UriKind.Absolute, out var absolute))
+        if (Uri.TryCreate(trimmed, UriKind.Absolute, out var absolute))
         {
             // Standard remote schemes go to the browser launcher.
-            // `file:` is allowed so an absolute path to a local markdown
-            // file can be opened as a new tab via the renderer's
-            // link-clicked IPC (host resolves the path against the source
-            // document's directory and reroutes to IOpenDocumentsService).
-            return absolute.Scheme is "http" or "https" or "mailto" or "file";
+            // `file:` is allowed so context-menu opens of local markdown
+            // links route through the same host resolver as ordinary clicks.
+            return absolute.Scheme is "http" or "https" or "mailto" or "file"
+                ? trimmed
+                : string.Empty;
         }
 
-        // Relative path: emit verbatim so the renderer's link click handler
-        // can read the original `href` via getAttribute. Navigation is
-        // gated by ApplicateWebResourcePolicy so allowing the link in the
-        // anchor element does not expose the WebView to arbitrary
-        // navigation; the path is only used as data for IPC.
-        return true;
+        var decoration = SplitLocalLinkDecoration(trimmed, out var pathPart);
+        if (string.IsNullOrWhiteSpace(pathPart) || string.IsNullOrWhiteSpace(context.BaseDirectory))
+        {
+            return trimmed;
+        }
+
+        try
+        {
+            var resolved = Path.GetFullPath(Path.Combine(context.BaseDirectory, pathPart));
+            return new Uri(resolved).AbsoluteUri + decoration;
+        }
+        catch (ArgumentException)
+        {
+            return trimmed;
+        }
+        catch (UriFormatException)
+        {
+            return trimmed;
+        }
+        catch (NotSupportedException)
+        {
+            return trimmed;
+        }
+    }
+
+    private static string SplitLocalLinkDecoration(string target, out string pathPart)
+    {
+        var fragmentIndex = target.IndexOf('#', StringComparison.Ordinal);
+        var queryIndex = target.IndexOf('?', StringComparison.Ordinal);
+        var cutIndex = fragmentIndex >= 0 && queryIndex >= 0
+            ? System.Math.Min(fragmentIndex, queryIndex)
+            : System.Math.Max(fragmentIndex, queryIndex);
+
+        if (cutIndex < 0)
+        {
+            pathPart = target;
+            return string.Empty;
+        }
+
+        pathPart = target[..cutIndex];
+        return target[cutIndex..];
     }
 
     private static string GetImageMimeType(string url)

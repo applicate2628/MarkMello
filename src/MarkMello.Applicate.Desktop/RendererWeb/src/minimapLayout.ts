@@ -15,9 +15,21 @@ export type MinimapViewportLayout = {
   transform: string;
   thumbTop: number;
   thumbHeight: number;
+  thumbTravel: number;
 };
 
 const DEFAULT_MINIMUM_THUMB_HEIGHT = 22;
+
+export type MinimapDocumentWidthInput = {
+  borderBoxWidth: number;
+  paddingLeft: number;
+  paddingRight: number;
+};
+
+export function calculateMinimapDocumentWidth(input: MinimapDocumentWidthInput): number {
+  const width = input.borderBoxWidth - input.paddingLeft - input.paddingRight;
+  return Number.isFinite(width) && width > 0 ? width : 1;
+}
 
 export function calculateMinimapViewportLayout(input: MinimapViewportLayoutInput): MinimapViewportLayout | null {
   if (input.minimapWidth <= 0
@@ -45,7 +57,10 @@ export function calculateMinimapViewportLayout(input: MinimapViewportLayoutInput
     input.minimapHeight,
     Math.max(minimumThumbHeight, input.viewportHeight * scale));
   const rawThumbTop = input.scrollTop * scale + contentTranslateY;
-  const thumbTop = Math.max(0, Math.min(input.minimapHeight - thumbHeight, rawThumbTop));
+  const maximumRawThumbTop = Math.max(0, maximumScrollTop * scale - overflowHeight);
+  const maximumClampedThumbTop = Math.max(0, input.minimapHeight - thumbHeight);
+  const thumbTravel = Math.min(maximumClampedThumbTop, maximumRawThumbTop);
+  const thumbTop = Math.max(0, Math.min(thumbTravel, rawThumbTop));
 
   return {
     contentWidth: input.documentWidth,
@@ -53,6 +68,7 @@ export function calculateMinimapViewportLayout(input: MinimapViewportLayoutInput
     contentTranslateY,
     transform: `translateY(${contentTranslateY}px) scale(${scale})`,
     thumbTop,
-    thumbHeight
+    thumbHeight,
+    thumbTravel
   };
 }

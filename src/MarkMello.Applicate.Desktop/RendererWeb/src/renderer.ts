@@ -1,5 +1,9 @@
 import { shouldPostMinimapState, type PostedMinimapState } from "./minimapState";
-import { calculateMinimapViewportLayout, type MinimapViewportLayout } from "./minimapLayout";
+import {
+  calculateMinimapDocumentWidth,
+  calculateMinimapViewportLayout,
+  type MinimapViewportLayout
+} from "./minimapLayout";
 import {
   getWidthResizerVisibilityClasses,
   normalizeWidthResizerVisibility,
@@ -392,6 +396,11 @@ function readRootPixelVariable(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function readPixelValue(value: string | null | undefined): number {
+  const parsed = Number.parseFloat(value ?? "");
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
 function ensureWidthHandle(): void {
   if (widthHandleRoot) {
     return;
@@ -667,11 +676,16 @@ function cloneDocumentForMinimap(): HTMLElement | null {
     minimapSourceReady = false;
     return null;
   }
+  const sourceStyle = getComputedStyle(source);
   const clone = source.cloneNode(true) as HTMLElement;
   minimapSourceReady = true;
   clone.removeAttribute("id");
   clone.setAttribute("aria-hidden", "true");
   clone.inert = true;
+  clone.style.paddingTop = sourceStyle.paddingTop;
+  clone.style.paddingRight = "0";
+  clone.style.paddingBottom = sourceStyle.paddingBottom;
+  clone.style.paddingLeft = "0";
   // Single tree walk: id-strip + interactive-disable per node. Aria/role/name/for
   // scrubbing dropped — the clone is already inert + aria-hidden, so per-node
   // aria attributes have no a11y effect. On a 138-formula doc KaTeX produces
@@ -791,7 +805,12 @@ function updateMinimapViewport(): void {
   // > 1 at the bottom of the document. Stick with root coords — the documented
   // line-by-line drift is acceptable; thumb correctness is not negotiable.
   const documentHeight = root.scrollHeight;
-  const documentWidth = Math.max(source.scrollWidth, source.clientWidth, 1);
+  const sourceStyle = getComputedStyle(source);
+  const documentWidth = calculateMinimapDocumentWidth({
+    borderBoxWidth: source.clientWidth || source.getBoundingClientRect().width,
+    paddingLeft: readPixelValue(sourceStyle.paddingLeft),
+    paddingRight: readPixelValue(sourceStyle.paddingRight),
+  });
   const viewportHeight = root.clientHeight;
   if (minimapHeight <= 0 || minimapWidth <= 0 || documentHeight <= 0 || viewportHeight <= 0) {
     return;
@@ -817,6 +836,15 @@ function updateMinimapViewport(): void {
   minimapViewport.style.height = `${layout.thumbHeight}px`;
 }
 
+function getCurrentMinimapThumbTravel(): number {
+  if (currentMinimapLayout) {
+    return Math.max(1, currentMinimapLayout.thumbTravel);
+  }
+
+  const minimapHeight = minimapRoot?.clientHeight ?? 0;
+  return Math.max(1, minimapHeight - 22);
+}
+
 function scrollFromMinimapClientY(clientY: number): void {
   if (!minimapRoot) {
     return;
@@ -831,11 +859,9 @@ function scrollFromMinimapClientY(clientY: number): void {
   // linearly to scrollTop on its scrollable range. Clicking at top of
   // minimap = top of document; clicking at the max-thumb-top position =
   // bottom of document.
-  const minimapHeight = minimapRoot.clientHeight;
-  const thumbHeight = currentMinimapLayout?.thumbHeight ?? 22;
-  const maxThumbTop = Math.max(1, minimapHeight - thumbHeight);
+  const thumbTravel = getCurrentMinimapThumbTravel();
   const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
-  const targetScrollTop = (Math.min(minimapY, maxThumbTop) / maxThumbTop) * maxScrollTop;
+  const targetScrollTop = (Math.min(minimapY, thumbTravel) / thumbTravel) * maxScrollTop;
   const clamped = Math.max(0, Math.min(maxScrollTop, targetScrollTop));
   window.scrollTo({ top: clamped, behavior: "instant" as ScrollBehavior });
 }
@@ -876,17 +902,15 @@ function handleMinimapPointerMove(event: PointerEvent): void {
   }
   minimapDragMode = "panning";
 
-  // Range-based mapping: cursor traversing the full thumb-travel range
-  // (minimapHeight - thumbHeight) scrolls the document across its full
+  // Range-based mapping: cursor traversing the rendered thumb-travel range
+  // scrolls the document across its full
   // scrollable range (scrollHeight - clientHeight). The indicator's top
   // follows the cursor 1:1 in minimap pixels — feels like "grabbing the
   // viewport indicator and dragging it from start to end".
   const root = document.scrollingElement ?? document.documentElement;
-  const minimapHeight = minimapRoot?.clientHeight ?? 0;
-  const thumbHeight = currentMinimapLayout?.thumbHeight ?? 22;
-  const maxThumbTop = Math.max(1, minimapHeight - thumbHeight);
+  const thumbTravel = getCurrentMinimapThumbTravel();
   const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
-  const scrollDelta = delta * (maxScrollTop / maxThumbTop);
+  const scrollDelta = delta * (maxScrollTop / thumbTravel);
   const newScrollTop = minimapDragStartScrollTop + scrollDelta;
   const clampedScrollTop = Math.max(0, Math.min(maxScrollTop, newScrollTop));
   window.scrollTo({ top: clampedScrollTop, behavior: "instant" as ScrollBehavior });
@@ -1234,7 +1258,7 @@ function wireLinks(): void {
       // markdown source directory. Send the raw attribute value too so
       // the host can pick the right one for resolution.
       type: "link-clicked",
-      href: target.getAttribute("href") ?? target.href,
+      href: target.dataset.mmHref ?? target.getAttribute("href") ?? target.href,
       button: event.button,
       ctrlKey: event.ctrlKey,
       shiftKey: event.shiftKey,

@@ -46,4 +46,6 @@ public interface IOpenDocumentsService
     void Move(OpenDocument document, int newIndex);
 
     void UpdateState(OpenDocument document, int caret, double scrollProgressPercent);
+
+    void UpdateSourceText(OpenDocument document, string sourceText);
 }

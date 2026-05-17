@@ -111,4 +111,26 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("private void OnTopChromePointerExited", codeBehind, StringComparison.Ordinal);
         Assert.Contains("Classes.Set(\"mm-top-chrome-hover\", _isTopChromeHovering)", codeBehind, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void EditModeTopbarExposesSaveCommands()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "MainWindow.axaml"));
+
+        Assert.Contains("Command=\"{Binding SaveCommand}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding SaveAsCommand}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("IsVisible=\"{Binding ShowsDirtySaveButton}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip.Tip=\"{Binding SaveTooltip}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip.Tip=\"{Binding SaveAsTooltip}\"", xaml, StringComparison.Ordinal);
+    }
 }

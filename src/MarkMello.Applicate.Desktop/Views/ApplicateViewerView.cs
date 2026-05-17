@@ -7,6 +7,7 @@ using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views.Minimap;
 using MarkMello.Domain;
@@ -406,7 +407,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private void OnDocumentRendered(object? sender, EventArgs e)
     {
         var senderKind = ReferenceEquals(sender, _webDocumentView) ? "web" : ReferenceEquals(sender, _documentView) ? "native" : "?";
-        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} Viewer.OnDocumentRendered sender={senderKind} pending={_pendingRendererSurface}");
+        ApplicateTrace.ModeToggle($"Viewer.OnDocumentRendered sender={senderKind} pending={_pendingRendererSurface}");
         // Hide mask conditions:
         //   (1) WebView Rendered — the normal happy path, WebView committed new content
         //   (2) Native Rendered AND pending=Native — WebView gave up via fallback
@@ -450,7 +451,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private void OnDocumentRenderInvalidated(object? sender, EventArgs e)
     {
         var senderKind = ReferenceEquals(sender, _webDocumentView) ? "web" : ReferenceEquals(sender, _documentView) ? "native" : "?";
-        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} Viewer.OnDocumentRenderInvalidated sender={senderKind}");
+        ApplicateTrace.ModeToggle($"Viewer.OnDocumentRenderInvalidated sender={senderKind}");
         if (!IsRenderedSurfaceActive(sender))
         {
             return;

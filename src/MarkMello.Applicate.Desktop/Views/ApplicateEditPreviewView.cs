@@ -13,6 +13,7 @@ using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Domain;
 using MarkMello.Presentation.ViewModels;
@@ -165,8 +166,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         {
             return;
         }
-        Console.Error.WriteLine(
-            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} _webSlot.{e.Property.Name}: {e.OldValue} -> {e.NewValue}");
+        ApplicateTrace.ModeToggle($"_webSlot.{e.Property.Name}: {e.OldValue} -> {e.NewValue}");
         // Retry the deferred AttachTo when the slot finally lays out. In the
         // pre-warm hot path the shared WebView is already rendered, so the
         // first ApplyVisuals runs while _webSlot.Bounds is still 0×0 and the
@@ -212,8 +212,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         {
             return;
         }
-        Console.Error.WriteLine(
-            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} _webRenderMask.IsVisible: {e.OldValue} -> {e.NewValue}");
+        ApplicateTrace.ModeToggle($"_webRenderMask.IsVisible: {e.OldValue} -> {e.NewValue}");
     }
 
     private static Border BuildPreviewToolbar(ToggleButton syncToggle)
@@ -765,7 +764,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
-        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} EditPreview.OnAttachedToVisualTree Bounds={Bounds} _webSlot.Bounds={_webSlot.Bounds}");
+        ApplicateTrace.ModeToggle($"EditPreview.OnAttachedToVisualTree Bounds={Bounds} _webSlot.Bounds={_webSlot.Bounds}");
 
         // Permanent mount: reparent the shared WebView2 into _webSlot ONCE on
         // first tree attach, regardless of whether DataContext is a session
@@ -808,10 +807,10 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     {
         if (ReferenceEquals(_session, session))
         {
-            Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} EditPreview.AttachSession noop (same ref)");
+            ApplicateTrace.ModeToggle("EditPreview.AttachSession noop (same ref)");
             return;
         }
-        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} EditPreview.AttachSession from={(_session is not null)} to={(session is not null)}");
+        ApplicateTrace.ModeToggle($"EditPreview.AttachSession from={(_session is not null)} to={(session is not null)}");
 
         if (_session is not null)
         {
@@ -866,8 +865,8 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         ApplyAvailableWidth();
         var t3 = System.Diagnostics.Stopwatch.GetTimestamp();
         var freq = System.Diagnostics.Stopwatch.Frequency / 1000.0;
-        Console.Error.WriteLine(
-            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} ApplySession timing: native={(t1 - t0) / freq:F1}ms renderer={(t2 - t1) / freq:F1}ms width={(t3 - t2) / freq:F1}ms");
+        ApplicateTrace.ModeToggle(
+            $"ApplySession timing: native={(t1 - t0) / freq:F1}ms renderer={(t2 - t1) / freq:F1}ms width={(t3 - t2) / freq:F1}ms");
     }
 
     private void ApplyNativePreview()
@@ -985,7 +984,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void OnSharedDocumentRendered(object? sender, EventArgs e)
     {
-        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} SharedView Rendered → renderInFlight=false");
+        ApplicateTrace.ModeToggle("SharedView Rendered -> renderInFlight=false");
         _isWebRenderInFlight = false;
         // Deferred-attach path: if we held off on AttachTo while the new
         // document was loading (see ApplyVisuals), do the reparent now —
@@ -1003,7 +1002,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void OnSharedDocumentInvalidated(object? sender, EventArgs e)
     {
-        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} SharedView Invalidated → renderInFlight=true");
+        ApplicateTrace.ModeToggle("SharedView Invalidated -> renderInFlight=true");
         _isWebRenderInFlight = true;
         ApplyVisuals();
     }

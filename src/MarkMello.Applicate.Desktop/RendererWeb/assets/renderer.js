@@ -11,6 +11,10 @@
 
   // RendererWeb/src/minimapLayout.ts
   var DEFAULT_MINIMUM_THUMB_HEIGHT = 22;
+  function calculateMinimapDocumentWidth(input) {
+    const width = input.borderBoxWidth - input.paddingLeft - input.paddingRight;
+    return Number.isFinite(width) && width > 0 ? width : 1;
+  }
   function calculateMinimapViewportLayout(input) {
     if (input.minimapWidth <= 0 || input.minimapHeight <= 0 || input.documentWidth <= 0 || input.documentHeight <= 0 || input.viewportHeight <= 0) {
       return null;
@@ -27,14 +31,18 @@
       Math.max(minimumThumbHeight, input.viewportHeight * scale)
     );
     const rawThumbTop = input.scrollTop * scale + contentTranslateY;
-    const thumbTop = Math.max(0, Math.min(input.minimapHeight - thumbHeight, rawThumbTop));
+    const maximumRawThumbTop = Math.max(0, maximumScrollTop * scale - overflowHeight);
+    const maximumClampedThumbTop = Math.max(0, input.minimapHeight - thumbHeight);
+    const thumbTravel = Math.min(maximumClampedThumbTop, maximumRawThumbTop);
+    const thumbTop = Math.max(0, Math.min(thumbTravel, rawThumbTop));
     return {
       contentWidth: input.documentWidth,
       scale,
       contentTranslateY,
       transform: `translateY(${contentTranslateY}px) scale(${scale})`,
       thumbTop,
-      thumbHeight
+      thumbHeight,
+      thumbTravel
     };
   }
 
@@ -755,6 +763,10 @@
     const parsed = Number.parseFloat(raw);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
   }
+  function readPixelValue(value) {
+    const parsed = Number.parseFloat(value ?? "");
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
   function ensureWidthHandle() {
     if (widthHandleRoot) {
       return;
@@ -942,11 +954,16 @@
       minimapSourceReady = false;
       return null;
     }
+    const sourceStyle = getComputedStyle(source);
     const clone = source.cloneNode(true);
     minimapSourceReady = true;
     clone.removeAttribute("id");
     clone.setAttribute("aria-hidden", "true");
     clone.inert = true;
+    clone.style.paddingTop = sourceStyle.paddingTop;
+    clone.style.paddingRight = "0";
+    clone.style.paddingBottom = sourceStyle.paddingBottom;
+    clone.style.paddingLeft = "0";
     clone.querySelectorAll("*").forEach((node) => {
       if (node.hasAttribute("id")) node.removeAttribute("id");
       const tag = node.tagName;
@@ -1031,7 +1048,12 @@
     const minimapHeight = minimapRoot.clientHeight;
     const minimapWidth = minimapRoot.clientWidth;
     const documentHeight = root.scrollHeight;
-    const documentWidth = Math.max(source.scrollWidth, source.clientWidth, 1);
+    const sourceStyle = getComputedStyle(source);
+    const documentWidth = calculateMinimapDocumentWidth({
+      borderBoxWidth: source.clientWidth || source.getBoundingClientRect().width,
+      paddingLeft: readPixelValue(sourceStyle.paddingLeft),
+      paddingRight: readPixelValue(sourceStyle.paddingRight)
+    });
     const viewportHeight = root.clientHeight;
     if (minimapHeight <= 0 || minimapWidth <= 0 || documentHeight <= 0 || viewportHeight <= 0) {
       return;
@@ -1054,6 +1076,13 @@
     minimapViewport.style.transform = `translateY(${layout.thumbTop}px)`;
     minimapViewport.style.height = `${layout.thumbHeight}px`;
   }
+  function getCurrentMinimapThumbTravel() {
+    if (currentMinimapLayout) {
+      return Math.max(1, currentMinimapLayout.thumbTravel);
+    }
+    const minimapHeight = minimapRoot?.clientHeight ?? 0;
+    return Math.max(1, minimapHeight - 22);
+  }
   function scrollFromMinimapClientY(clientY) {
     if (!minimapRoot) {
       return;
@@ -1061,11 +1090,9 @@
     const root = document.scrollingElement ?? document.documentElement;
     const rect = minimapRoot.getBoundingClientRect();
     const minimapY = Math.max(0, Math.min(rect.height, clientY - rect.top));
-    const minimapHeight = minimapRoot.clientHeight;
-    const thumbHeight = currentMinimapLayout?.thumbHeight ?? 22;
-    const maxThumbTop = Math.max(1, minimapHeight - thumbHeight);
+    const thumbTravel = getCurrentMinimapThumbTravel();
     const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
-    const targetScrollTop = Math.min(minimapY, maxThumbTop) / maxThumbTop * maxScrollTop;
+    const targetScrollTop = Math.min(minimapY, thumbTravel) / thumbTravel * maxScrollTop;
     const clamped = Math.max(0, Math.min(maxScrollTop, targetScrollTop));
     window.scrollTo({ top: clamped, behavior: "instant" });
   }
@@ -1094,11 +1121,9 @@
     }
     minimapDragMode = "panning";
     const root = document.scrollingElement ?? document.documentElement;
-    const minimapHeight = minimapRoot?.clientHeight ?? 0;
-    const thumbHeight = currentMinimapLayout?.thumbHeight ?? 22;
-    const maxThumbTop = Math.max(1, minimapHeight - thumbHeight);
+    const thumbTravel = getCurrentMinimapThumbTravel();
     const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
-    const scrollDelta = delta * (maxScrollTop / maxThumbTop);
+    const scrollDelta = delta * (maxScrollTop / thumbTravel);
     const newScrollTop = minimapDragStartScrollTop + scrollDelta;
     const clampedScrollTop = Math.max(0, Math.min(maxScrollTop, newScrollTop));
     window.scrollTo({ top: clampedScrollTop, behavior: "instant" });
@@ -1354,7 +1379,7 @@
         // markdown source directory. Send the raw attribute value too so
         // the host can pick the right one for resolution.
         type: "link-clicked",
-        href: target.getAttribute("href") ?? target.href,
+        href: target.dataset.mmHref ?? target.getAttribute("href") ?? target.href,
         button: event.button,
         ctrlKey: event.ctrlKey,
         shiftKey: event.shiftKey,

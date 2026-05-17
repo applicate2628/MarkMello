@@ -4,6 +4,7 @@ using System.Threading;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Threading;
+using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Presentation.ViewModels;
 
 namespace MarkMello.Applicate.Desktop;
@@ -62,8 +63,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
             return;
         }
         var slotName = ReferenceEquals(sender, _viewerSlot) ? "viewerSlot" : "editSlot";
-        Console.Error.WriteLine(
-            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} {slotName}.{e.Property.Name}: {e.OldValue} -> {e.NewValue}");
+        ApplicateTrace.ModeToggle($"{slotName}.{e.Property.Name}: {e.OldValue} -> {e.NewValue}");
     }
 
     internal void ForceReconcile() => MarshalReconcile();
@@ -131,8 +131,8 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         var viewerVisible = isViewer && !isEdit && document is not null;
         var editVisible = isViewer && isEdit && session is not null;
 
-        Console.Error.WriteLine(
-            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} Reconcile in: isViewer={isViewer} isEdit={isEdit} session={(session is not null)} document={(document is not null)} -> viewerVis={viewerVisible} editVis={editVisible}");
+        ApplicateTrace.ModeToggle(
+            $"Reconcile in: isViewer={isViewer} isEdit={isEdit} session={(session is not null)} document={(document is not null)} -> viewerVis={viewerVisible} editVis={editVisible}");
 
         ApplySlotState(_viewerSlot, viewerVisible);
         ApplySlotState(_editSlot, editVisible);
@@ -144,8 +144,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         // construction time (Duration=MmDurationStandard, EasingStandard).
         _editContent.Opacity = editVisible ? 1.0 : 0.0;
 
-        Console.Error.WriteLine(
-            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} Bridge slots: viewerSlot.Bounds={_viewerSlot.Bounds} editSlot.Bounds={_editSlot.Bounds}");
+        ApplicateTrace.ModeToggle($"Bridge slots: viewerSlot.Bounds={_viewerSlot.Bounds} editSlot.Bounds={_editSlot.Bounds}");
 
         // Permanent mount: editSlot.Content is the pre-built EditWorkspaceView
         // (set once in ctor). On session change we only update DataContext —
@@ -159,8 +158,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
             _editContent.DataContext = session;
         }
         var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-        Console.Error.WriteLine(
-            $"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} Reconcile out: elapsed={elapsedMs:F2}ms sessionChanged={sessionChanged}");
+        ApplicateTrace.ModeToggle($"Reconcile out: elapsed={elapsedMs:F2}ms sessionChanged={sessionChanged}");
     }
 
     // IsHitTestVisible gates click/wheel/drag-drop independently of IsEnabled.

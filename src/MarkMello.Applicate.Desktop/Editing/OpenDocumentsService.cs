@@ -138,6 +138,18 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
         document.ScrollProgressPercent = scrollProgressPercent;
     }
 
+    public void UpdateSourceText(OpenDocument document, string sourceText)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        if (!_openDocuments.Contains(document))
+        {
+            throw new InvalidOperationException("Document is not in the open list.");
+        }
+
+        document.SourceText = sourceText ?? throw new ArgumentNullException(nameof(sourceText));
+        document.IsModified = false;
+    }
+
     private OpenDocument? FindByPath(string normalizedPath)
     {
         foreach (var doc in _openDocuments)

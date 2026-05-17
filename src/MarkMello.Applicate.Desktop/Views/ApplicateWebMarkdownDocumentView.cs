@@ -7,6 +7,7 @@ using Avalonia.Input;
 using Avalonia.Platform;
 using Avalonia.Styling;
 using MarkMello.Application.Abstractions;
+using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views.Minimap;
 using MarkMello.Domain;
@@ -333,7 +334,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     /// </summary>
     internal void SetNativeWebViewVisibility(bool isVisible)
     {
-        Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} SetNativeWebViewVisibility({isVisible}) viewId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this):X8} wrapper.Bounds={_webView.Bounds}");
+        ApplicateTrace.ModeToggle($"SetNativeWebViewVisibility({isVisible}) viewId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this):X8} wrapper.Bounds={_webView.Bounds}");
         _webView.IsVisible = isVisible;
     }
 
@@ -1165,56 +1166,119 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private static readonly string[] MarkdownLinkExtensions =
         { ".md", ".markdown", ".mdown", ".markdn", ".txt" };
 
+    internal static bool TryResolveLocalMarkdownLinkForTesting(
+        string href,
+        string? sourcePath,
+        out string resolvedPath)
+        => TryResolveLocalMarkdownLink(href, sourcePath, File.Exists, out resolvedPath);
+
     private bool TryResolveLocalMarkdownLink(string href, out string resolvedPath)
+        => TryResolveLocalMarkdownLink(href, Source?.Path, File.Exists, out resolvedPath);
+
+    private static bool TryResolveLocalMarkdownLink(
+        string href,
+        string? sourcePath,
+        Func<string, bool> fileExists,
+        out string resolvedPath)
     {
         resolvedPath = string.Empty;
-
-        // The renderer feeds `target.href` from the anchor element, which the
-        // browser resolves against the document's base URL. For local
-        // generated documents this yields a `file:///...` absolute URI that
-        // points into the temp folder where the renderer HTML lives — not to
-        // the user's source file. Strip the file:// prefix and re-resolve
-        // against the current Source's directory to find the actual file the
-        // user dropped a link to.
-        string candidate;
-        if (Uri.TryCreate(href, UriKind.Absolute, out var uri) && uri.IsFile)
-        {
-            candidate = uri.LocalPath;
-        }
-        else
-        {
-            candidate = href;
-        }
-
-        // Only treat .md/.markdown/.txt as openable in the tabs strip; other
-        // extensions fall through to default browser launch.
-        var ext = System.IO.Path.GetExtension(candidate).ToLowerInvariant();
-        if (!MarkdownLinkExtensions.Contains(ext))
+        if (string.IsNullOrWhiteSpace(href))
         {
             return false;
         }
 
-        // Resolve relative to the current Source's directory when needed.
-        if (!System.IO.Path.IsPathRooted(candidate))
+        // The renderer feeds the raw href attribute for ordinary clicks and
+        // WebView may feed an absolute request URI for context-menu opens.
+        // Keep non-file absolute URI schemes on the browser-launch path.
+        string candidate;
+        var trimmed = href.Trim();
+        if (Uri.TryCreate(trimmed, UriKind.Absolute, out var uri))
         {
-            var sourcePath = Source?.Path;
-            var sourceDir = string.IsNullOrWhiteSpace(sourcePath)
-                ? null
-                : System.IO.Path.GetDirectoryName(sourcePath);
-            if (string.IsNullOrWhiteSpace(sourceDir))
+            if (!uri.IsFile)
             {
                 return false;
             }
-            candidate = System.IO.Path.GetFullPath(System.IO.Path.Combine(sourceDir, candidate));
+
+            candidate = uri.LocalPath;
+        }
+        else
+        {
+            candidate = trimmed;
         }
 
-        if (!System.IO.File.Exists(candidate))
+        candidate = StripLocalLinkDecoration(candidate);
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return false;
+        }
+
+        try
+        {
+            candidate = Uri.UnescapeDataString(candidate);
+        }
+        catch (UriFormatException)
+        {
+            return false;
+        }
+
+        try
+        {
+            // Only treat .md/.markdown/.txt as openable in the tabs strip; other
+            // extensions fall through to default browser launch.
+            var ext = System.IO.Path.GetExtension(candidate).ToLowerInvariant();
+            if (!MarkdownLinkExtensions.Contains(ext))
+            {
+                return false;
+            }
+
+            // Resolve relative to the current Source's directory when needed.
+            if (!System.IO.Path.IsPathRooted(candidate))
+            {
+                var sourceDir = string.IsNullOrWhiteSpace(sourcePath)
+                    ? null
+                    : System.IO.Path.GetDirectoryName(sourcePath);
+                if (string.IsNullOrWhiteSpace(sourceDir))
+                {
+                    return false;
+                }
+                candidate = System.IO.Path.GetFullPath(System.IO.Path.Combine(sourceDir, candidate));
+            }
+            else
+            {
+                candidate = System.IO.Path.GetFullPath(candidate);
+            }
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+        catch (System.IO.PathTooLongException)
+        {
+            return false;
+        }
+
+        if (!fileExists(candidate))
         {
             return false;
         }
 
         resolvedPath = candidate;
         return true;
+    }
+
+    private static string StripLocalLinkDecoration(string candidate)
+    {
+        var fragmentIndex = candidate.IndexOf('#', StringComparison.Ordinal);
+        var queryIndex = candidate.IndexOf('?', StringComparison.Ordinal);
+        var cutIndex = fragmentIndex >= 0 && queryIndex >= 0
+            ? System.Math.Min(fragmentIndex, queryIndex)
+            : System.Math.Max(fragmentIndex, queryIndex);
+
+        return cutIndex >= 0 ? candidate[..cutIndex] : candidate;
     }
 
     private void ApplyReadingPreferences()

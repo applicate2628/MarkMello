@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Views;
 
 namespace MarkMello.Applicate.Desktop.Rendering;
@@ -24,8 +25,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         {
             return;
         }
-        System.Console.Error.WriteLine(
-            $"[mode-toggle] {System.DateTime.Now:HH:mm:ss.fff} SharedHost.View.{e.Property.Name}: {e.OldValue} -> {e.NewValue}");
+        ApplicateTrace.ModeToggle($"SharedHost.View.{e.Property.Name}: {e.OldValue} -> {e.NewValue}");
     }
 
     public ApplicateWebMarkdownDocumentView View { get; }
@@ -56,7 +56,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         {
             target.Children.Add(View);
             _currentParent = target;
-            System.Console.Error.WriteLine($"[mode-toggle] {System.DateTime.Now:HH:mm:ss.fff} SharedHost.AttachTo first-attach");
+            ApplicateTrace.ModeToggle("SharedHost.AttachTo first-attach");
             return;
         }
 
@@ -68,7 +68,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         // SetWindowPos(SWP_HIDEWINDOW) on the WebView2 HWND has already run.
         // BeginIntentionalReparent keeps the WebView2 controller, DOM, scroll
         // and viewport state alive across Children.Remove + Children.Add.
-        System.Console.Error.WriteLine($"[mode-toggle] {System.DateTime.Now:HH:mm:ss.fff} SharedHost.AttachTo (one-time): warmup.Bounds={(_warmupParent is null ? "(null)" : _warmupParent.Bounds.ToString())} target.Bounds={target.Bounds}");
+        ApplicateTrace.ModeToggle($"SharedHost.AttachTo (one-time): warmup.Bounds={(_warmupParent is null ? "(null)" : _warmupParent.Bounds.ToString())} target.Bounds={target.Bounds}");
         var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         using (View.BeginIntentionalReparent())
         {
@@ -77,7 +77,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
             _currentParent = target;
         }
         var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-        System.Console.Error.WriteLine($"[mode-toggle] {System.DateTime.Now:HH:mm:ss.fff} SharedHost.AttachTo done elapsed={elapsedMs:F2}ms");
+        ApplicateTrace.ModeToggle($"SharedHost.AttachTo done elapsed={elapsedMs:F2}ms");
     }
 
     public void DetachFrom(Panel from)

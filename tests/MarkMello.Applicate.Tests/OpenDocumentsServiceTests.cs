@@ -216,6 +216,19 @@ public sealed class OpenDocumentsServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateSourceTextRefreshesCachedDocumentTextWithoutChangingActiveTab()
+    {
+        var path = WriteTemp("a.md", "old");
+        var service = new OpenDocumentsService();
+        var doc = await service.OpenAsync(path);
+
+        service.UpdateSourceText(doc, "new");
+
+        Assert.Same(doc, service.ActiveDocument);
+        Assert.Equal("new", doc.SourceText);
+    }
+
+    [Fact]
     public async Task OpenAsyncNonExistentPathThrows()
     {
         var service = new OpenDocumentsService();

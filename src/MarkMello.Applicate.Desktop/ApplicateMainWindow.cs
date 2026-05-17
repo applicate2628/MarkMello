@@ -9,6 +9,8 @@ using Avalonia.Layout;
 using Avalonia.Styling;
 using Avalonia.VisualTree;
 using MarkMello.Application.Abstractions;
+using MarkMello.Applicate.Desktop.Activation;
+using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Editing;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views;
@@ -43,7 +45,8 @@ public sealed class ApplicateMainWindow : MainWindow
     public ApplicateMainWindow(
         MainWindowViewModel viewModel,
         StartupSmokeTestOptions startupSmokeTestOptions,
-        ISettingsStore settings)
+        ISettingsStore settings,
+        ApplicateSingleInstanceService? singleInstance = null)
         : base(viewModel, startupSmokeTestOptions, settings)
     {
         var viewerTemplate = new ApplicateViewerTemplate();
@@ -55,6 +58,7 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallSiblingMountedViews(viewModel);
         InstallHostShortcutBridge(viewModel);
         InstallActiveDocumentBridge(viewModel);
+        InstallSingleInstanceActivationBridge(viewModel, singleInstance);
         InstallPopupZOrderFollow(viewModel);
         InstallApplicateAboutPanel();
         InstallPopupFadeIn();
@@ -567,6 +571,64 @@ public sealed class ApplicateMainWindow : MainWindow
         };
     }
 
+    private void InstallSingleInstanceActivationBridge(
+        MainWindowViewModel viewModel,
+        ApplicateSingleInstanceService? singleInstance)
+    {
+        if (singleInstance is null)
+        {
+            return;
+        }
+
+        singleInstance.ActivationRequested += (_, args) =>
+        {
+            Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
+            {
+                if (WindowState == WindowState.Minimized)
+                {
+                    WindowState = WindowState.Normal;
+                }
+                Activate();
+
+                if (args.FilePaths.Count == 0)
+                {
+                    return;
+                }
+
+                var openDocs = App.Services?.GetService<IOpenDocumentsService>();
+                if (openDocs is not null)
+                {
+                    foreach (var path in args.FilePaths)
+                    {
+                        try
+                        {
+                            await openDocs.OpenAsync(path).ConfigureAwait(true);
+                        }
+                        catch (System.IO.IOException)
+                        {
+                            // File disappeared between secondary-process probe and primary open.
+                        }
+                        catch (UnauthorizedAccessException)
+                        {
+                            // Keep the existing window alive; the activation just fails closed.
+                        }
+                    }
+                    return;
+                }
+
+                var lastPath = args.FilePaths[^1];
+                try
+                {
+                    await viewModel.OpenPathAsync(lastPath).ConfigureAwait(true);
+                }
+                catch (System.IO.IOException)
+                {
+                    // Same failure mode as normal open; no extra surface in the activation path.
+                }
+            });
+        };
+    }
+
     private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)
     {
         var openDocs = App.Services?.GetService<IOpenDocumentsService>();
@@ -810,6 +872,12 @@ public sealed class ApplicateMainWindow : MainWindow
                     {
                         openDocs.Activate(known);
                     }
+
+                    if (known is not null
+                        && !string.Equals(known.SourceText, content, System.StringComparison.Ordinal))
+                    {
+                        openDocs.UpdateSourceText(known, content);
+                    }
                 }
                 finally
                 {
@@ -1016,13 +1084,11 @@ public sealed class ApplicateMainWindow : MainWindow
                     viewerChromeEnabled: false,
                     documentScrollEnabled: true,
                     wheelProxyEnabled: false);
-                System.Console.Error.WriteLine(
-                    $"[mode-toggle] {System.DateTime.Now:HH:mm:ss.fff} SharedHost prewarm pushed: path={doc.Path} width={width:F1}");
+                ApplicateTrace.ModeToggle($"SharedHost prewarm pushed: path={doc.Path} width={width:F1}");
             }
             catch (System.Exception ex)
             {
-                System.Console.Error.WriteLine(
-                    $"[mode-toggle] SharedHost prewarm FAILED: {ex.GetType().Name}: {ex.Message}");
+                ApplicateTrace.ModeToggle($"SharedHost prewarm FAILED: {ex.GetType().Name}: {ex.Message}");
             }
         }
 

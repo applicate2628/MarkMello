@@ -2,86 +2,86 @@
 
 # MarkMello Applicate
 
-[English](README.en.md)
+[Russian](README.ru.md)
 
-**MarkMello Applicate — форк MarkMello для быстрого чтения Markdown-файлов с улучшенным отображением технических документов и TeX-формул.**
+**MarkMello Applicate is a MarkMello fork for quickly reading Markdown files, with improved rendering for technical documents and TeX formulas.**
 
-Этот репозиторий является форком [upstream MarkMello](https://github.com/dartdavros/MarkMello).
-Оригинальный проект принадлежит MarkMello contributors. Applicate-добавления
-поддерживаются отдельно: Copyright (C) 2026 Dmitry Denisenko (@applicate2628).
-Подробности см. в [NOTICE.md](NOTICE.md) и [FORK_CHANGES.md](FORK_CHANGES.md).
+This repository is a fork of [upstream MarkMello](https://github.com/dartdavros/MarkMello).
+The original project belongs to MarkMello contributors. Applicate additions are
+maintained separately: Copyright (C) 2026 Dmitry Denisenko (@applicate2628).
+See [NOTICE.md](NOTICE.md) and [FORK_CHANGES.md](FORK_CHANGES.md) for details.
 
-## Что умеет MarkMello
+## What MarkMello can do
 
-MarkMello Applicate сохраняет базовые возможности MarkMello:
+MarkMello Applicate keeps the baseline MarkMello features:
 
-- быстро открывать Markdown-файлы в режиме просмотра;
-- настраивать удобный режим чтения: тему, размер шрифта, высоту строки и ширину области документа;
-- при необходимости переходить в режим редактирования и вносить правки в файл.
+- quickly open Markdown files in reading mode;
+- adjust the reading experience: theme, font size, line height, and document width;
+- switch to editing mode when needed and make changes to the file.
 
-Applicate-добавления:
+Applicate additions:
 
-- добавляют опциональный WebView/KaTeX renderer для inline- и display-формул TeX в Markdown;
-- рендерят Markdown локально: документы, HTML, KaTeX assets и временные WebView-файлы остаются на машине пользователя, а remote image links в WebView заменяются placeholder-ами;
-- сохраняют native renderer как fallback и как режим совместимости;
-- добавляют гибкое изменение ширины чтения перетаскиванием края, сохраняя исходные пресеты Narrow, Medium и Wide;
-- добавляют minimap для WebView renderer и сохраняют native minimap для native renderer;
-- синхронизируют чтение, resize, theme, edit preview и переключение Native/WebView без пустого кадра;
-- добавляют полосу вкладок над документом и multi-document модель: одновременно открыто несколько `.md` файлов, переключение кликом, закрытие крестиком, перетаскивание вкладок для смены порядка;
-- запоминают список открытых документов и активную вкладку между запусками (`%AppData%/MarkMello/applicate-session.json`);
-- принимают drag-and-drop файлов в окно: в режиме чтения — открытие как новой вкладки, в режиме редактирования — вставка в позицию каретки (изображения сохраняются рядом с документом и вставляются как относительная ссылка вида `![](images/name.png)`).
+- add an optional WebView/KaTeX renderer for inline and display TeX formulas in Markdown;
+- render Markdown locally: documents, generated HTML, KaTeX assets, and temporary WebView files stay on the user's machine, while remote image links in WebView render as placeholders;
+- keep the native renderer as a fallback and compatibility mode;
+- add flexible reader-width resizing by dragging the content edge while preserving the original Narrow, Medium, and Wide presets;
+- add a WebView minimap while preserving the native minimap for the native renderer;
+- keep reading, resize, theme, edit preview, and Native/WebView switching synchronized without a blank frame;
+- add a tab strip above the document and a multi-document model: several `.md` files can be open at once, click a tab to switch, click `×` to close, drag a tab horizontally to reorder it within the strip;
+- remember the open document list and the active tab across launches (`%AppData%/MarkMello/applicate-session.json`);
+- accept file drag-and-drop in the window: in reading mode the dropped file opens as a new tab, in editing mode it is inserted at the caret position (images are saved next to the document and inserted as a relative link in the form `![](images/name.png)`).
 
-## Чем отличается от обычных Markdown-редакторов
+## How it differs from regular Markdown editors
 
-MarkMello сначала открывает файл для чтения.
+MarkMello opens the file for reading first.
 
-Редактирование не является основным режимом запуска: оно включается вручную, когда нужно внести правки.
+Editing is not the primary startup mode: it is enabled manually when you need to make changes.
 
-## Установка
+## Installation
 
-Скачайте актуальную сборку из раздела [Releases](../../releases/latest).
+Download the latest build from [Releases](../../releases/latest).
 
 ### Windows
 
-1. Скачайте `MarkMello.Applicate-setup-win-x64.exe` или `MarkMello.Applicate-setup-win-arm64.exe`, в зависимости от архитектуры компьютера.
-2. Запустите установщик.
-3. Откройте MarkMello Applicate из меню Start или откройте `.md` файл через MarkMello Applicate.
+1. Download `MarkMello.Applicate-setup-win-x64.exe` or `MarkMello.Applicate-setup-win-arm64.exe`, depending on your computer architecture.
+2. Run the installer.
+3. Launch MarkMello Applicate from the Start menu or open a `.md` file with MarkMello Applicate.
 
-### Другие платформы
+### Other platforms
 
-MarkMello Applicate распространяется **только под Windows**. Renderer форка завязан на WebView2 (Microsoft Edge Chromium), у которого нет нативного аналога на macOS или Linux. Pre-built бинарей для других платформ нет и не планируется в обозримом будущем.
+MarkMello Applicate is **Windows-only**. The fork's renderer depends on WebView2 (Microsoft Edge Chromium), which has no native equivalent on macOS or Linux. There are no pre-built binaries for other platforms and none are planned in the foreseeable future.
 
-Если нужна upstream-версия MarkMello (без WebView2/Applicate-добавок) на других платформах — [соберите из исходников](#сборка-из-исходников). Сборка форка `MarkMello.Applicate.Desktop` на не-Windows не получится.
+If you need the upstream MarkMello (without WebView2/Applicate additions) on other platforms, [build it from source](#build-from-source). The `MarkMello.Applicate.Desktop` fork project cannot be built on non-Windows.
 
-## Временные сборки без подписи разработчика
+## Temporary unsigned builds
 
-Текущие публичные сборки MarkMello Applicate временно распространяются без подписи разработчика. Из-за этого Windows может показать предупреждение при первом запуске.
+Current public MarkMello Applicate builds are temporarily distributed without a developer signature. Because of that, Windows may show a warning on first launch.
 
-Это временное ограничение distribution pipeline. Подпись разработчика будет добавлена в будущем.
+This is a temporary distribution pipeline limitation. Developer signing will be added in the future.
 
-### Windows: обход SmartScreen
+### Windows: bypass SmartScreen
 
-Если Windows показывает предупреждение SmartScreen:
+If Windows shows a SmartScreen warning:
 
-1. Нажмите `Подробнее`.
-2. Нажмите `Выполнить в любом случае`.
+1. Click `More info`.
+2. Click `Run anyway`.
 
-Если Windows пометила скачанный файл как заблокированный:
+If Windows marked the downloaded file as blocked:
 
-1. Откройте свойства установочного файла.
-2. Включите `Разблокировать`, если такой пункт доступен.
-3. Примените изменения и запустите установщик снова.
+1. Open the installer file properties.
+2. Enable `Unblock`, if the option is available.
+3. Apply the changes and run the installer again.
 
-## Сборка из исходников
+## Build from source
 
-Требуется .NET SDK 10. Для пересборки WebView renderer assets также нужен Node.js/npm.
+.NET SDK 10 is required. Node.js/npm is also required when rebuilding the WebView renderer assets.
 
 ```bash
 dotnet restore ./MarkMello.sln
 dotnet build ./MarkMello.sln
 ```
 
-Если менялся TypeScript renderer:
+If the TypeScript renderer changed:
 
 ```bash
 npm --prefix ./src/MarkMello.Applicate.Desktop install
@@ -89,47 +89,47 @@ npm --prefix ./src/MarkMello.Applicate.Desktop run check:renderer
 npm --prefix ./src/MarkMello.Applicate.Desktop run build:renderer
 ```
 
-Запуск upstream-проекта:
+Run the upstream project:
 
 ```bash
 dotnet run --project ./src/MarkMello.Desktop/MarkMello.Desktop.csproj
 ```
 
-Запуск Applicate-форка:
+Run the Applicate fork:
 
 ```bash
 dotnet run --project ./src/MarkMello.Applicate.Desktop/MarkMello.Applicate.Desktop.csproj
 ```
 
-Открытие файла из командной строки:
+Open a file from the command line:
 
 ```bash
 dotnet run --project ./src/MarkMello.Applicate.Desktop/MarkMello.Applicate.Desktop.csproj -- ./sample.md
 ```
 
-Сборка Windows-инсталлятора Applicate-форка описана в [packaging/README.md](packaging/README.md).
+Applicate Windows installer build instructions are documented in [packaging/README.md](packaging/README.md).
 
-## Горячие клавиши
+## Keyboard shortcuts
 
-| Действие | Сочетание |
+| Action | Shortcut |
 | --- | --- |
-| Открыть файл | `Ctrl+O` |
-| Переключить режим редактирования | `Ctrl+E` |
-| Сохранить | `Ctrl+S` |
-| Сохранить как | `Ctrl+Shift+S` |
+| Open file | `Ctrl+O` |
+| Toggle editing mode | `Ctrl+E` |
+| Save | `Ctrl+S` |
+| Save as | `Ctrl+Shift+S` |
 
-## Лицензия
+## License
 
-Проект распространяется по лицензии GPL-3.0.
+The project is distributed under the GPL-3.0 license.
 
-См. файл [LICENSE](LICENSE).
+See [LICENSE](LICENSE).
 
-## Термины и сокращения
+## Terms and Abbreviations
 
-- `Applicate`: fork-specific overlay с дополнительной поддержкой формул и reader-улучшениями.
+- `Applicate`: fork-specific overlay with formula support and reader improvements.
 - `GPL-3.0`: GNU General Public License version 3.
-- `Markdown`: lightweight markup format для текстовой документации.
-- `minimap`: боковая миниатюра документа для быстрой навигации.
-- `renderer path`: путь обработки Markdown от parser model до UI-рендера.
-- `TeX`: синтаксис математических формул, используемый Markdown math renderers.
-- `upstream`: оригинальный репозиторий MarkMello, от которого сделан форк.
+- `Markdown`: lightweight markup format for text documentation.
+- `minimap`: side miniature of the document used for quick navigation.
+- `renderer path`: Markdown processing path from parser model to UI rendering.
+- `TeX`: math notation syntax used by Markdown math renderers.
+- `upstream`: the original MarkMello repository this fork is based on.

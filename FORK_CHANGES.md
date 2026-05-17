@@ -67,6 +67,16 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - The WebView renderer hides the document body, minimap, and width-resizer handle until the bootstrap pipeline finishes math + mermaid + code-block rendering and posts `layout-ready`. Without this gate the user briefly sees a fallback state on tab switch and fresh launch (web fonts not yet swapped, `\[ ... \]` math placeholders, raw mermaid source, width handle at a stale X coordinate). The reveal uses a 120ms CSS opacity transition shared by all three surfaces.
 - The hide-rule is scoped to `body > main.mm-document` (and the minimap aside, and the width-handle div) so that the minimap's cloned `.mm-document` subtree is not affected; the clone always renders at full opacity inside the minimap container.
 
+## Bugfix Release Scope (v0.3.1-applicate)
+
+- Markdown links rendered by the WebView path now keep their authored target in `data-mm-href` and resolve display links against the source document directory instead of the generated temporary HTML directory.
+- WebView minimap drag now maps through document/content coordinates and clamps short-document drags so the pointer stays anchored to the minimap thumb.
+- Secondary process launches with supported Markdown file paths now forward those paths to the running Applicate instance and open them as tabs instead of creating another app instance.
+- Edit saves now refresh the open-document cache, and the top-bar `Save` button is visible only when the edit buffer is dirty. `Save As` remains available throughout edit mode.
+- WebView-rendered Markdown tables now have explicit table, header, and cell styling in the bundled renderer CSS.
+- GitHub-facing repository text now uses English as the default README language, with the Russian README kept separately.
+- Agent working directories (`.agents/`, `.claude/`, `.reports/`, `.plans/`, and `docs/superpowers/`) are kept out of the published repository state.
+
 ## Sibling-Mount of ViewerView and EditWorkspaceView (v0.3.0)
 
 - `ApplicateMainWindow.InstallSiblingMountedViews` replaces the unnamed `<ContentControl Content="{Binding ActiveDocumentContent}">` in upstream `MainWindow.axaml` line 356-358 at runtime, swapping it for a `Panel` that holds both `ViewerView` and `EditWorkspaceView` as permanent siblings. Each sibling is a `ContentControl`; visibility, enabled-state, focus, tab-stop, and hit-test are driven by `ApplicateSiblingMountBridge` subscribing to `MainWindowViewModel.PropertyChanged` for `IsViewer` / `IsEditMode` / `EditorSession` / `Document`.
