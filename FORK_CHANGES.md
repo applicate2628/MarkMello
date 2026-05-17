@@ -96,9 +96,23 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 
 Do not modify existing upstream files for fork features. Add new overlay files instead. If a future feature cannot be implemented additively, document the missing extension seam before changing upstream-owned files.
 
+## Scroll-rendering Architecture
+
+### Avalonia ScrollBar overlay (replaces WebKit scrollbar)
+
+Both edit-preview and reader-mode WebView surfaces use an Avalonia `ScrollBar` overlay parented as a sibling of the WebView slot instead of the native `::-webkit-scrollbar` rendered by Chromium. The overlay runs on the Avalonia layout pass and is the visible scrollbar; Chromium retains the native scroll model (`overflow-y: auto` on the renderer body) so wheel / touch / keyboard / programmatic scrolling continues at native latency. Renderer-side `ScrollStateChanged` events (rAF-coalesced) mirror `scrollTop` / `scrollHeight` / `clientHeight` into the overlay's `Value` / `Maximum` / `ViewportSize`; thumb drag posts `ScrollToProgress` back through the bridge with a drag-gate state machine that suppresses inbound echoes during active drag plus a 200ms grace window after `EndScroll`.
+
+Outcomes: thumb drag tracks the mouse without the Win32 → IPC → Chromium round-trip lag of the native scrollbar; no sideways release-zone artifact when the cursor drifts off the thumb mid-drag (Avalonia pointer capture follows the document body, not a native HWND child); the scrollbar stays anchored to the pane's right edge through splitter drag, tab switch, and document swap because the overlay's position is decided by Avalonia layout rather than by HWND geometry and Chromium reflow. See [WebViewHostScrollBarOverlay.cs](src/MarkMello.Applicate.Desktop/Views/WebViewHostScrollBarOverlay.cs).
+
 ## Terms and Abbreviations
 
+- `Avalonia ScrollBar overlay`: the fork-side ScrollBar that mirrors WebView scroll state and replaces the native WebKit scrollbar as the visible thumb.
+- `Chromium reflow`: HTML/CSS re-layout triggered when the WebView2 viewport resizes.
+- `CSS scrollbar`: the `::-webkit-scrollbar` pseudo-element rendered by Chromium inside the WebView2 HWND — hidden in the fork via `display:none` + `width:0` + `height:0`.
+- `IPC`: inter-process communication between the host process and the WebView2 renderer process.
+- `NCH`: `Avalonia.Controls.NativeControlHost`; the Avalonia control wrapping a native Win32 HWND.
 - `overlay`: fork-specific code added beside upstream code instead of editing upstream files.
 - `ProgId`: Windows file-association program identifier.
 - `TeX`: math notation syntax commonly used in Markdown formula renderers.
 - `upstream`: the original MarkMello repository used as the update source.
+- `WebView2`: Microsoft Edge Chromium-based WebView control hosted via Avalonia.Controls.WebView.
