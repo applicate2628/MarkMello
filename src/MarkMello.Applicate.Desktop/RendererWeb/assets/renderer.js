@@ -1260,6 +1260,10 @@
       document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
       return;
     }
+    if (message.type === "host-scrollbar") {
+      document.documentElement.dataset.mmHostScrollbar = message.active ? "on" : "off";
+      return;
+    }
     if (message.type === "scroll-to-progress") {
       scrollToProgress(message.progressPercent);
       return;

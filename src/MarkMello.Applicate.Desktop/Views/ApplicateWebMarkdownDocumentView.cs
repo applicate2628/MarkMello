@@ -337,7 +337,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _webView.IsVisible = isVisible;
     }
 
-
     /// <summary>Inspect the inner NativeWebView visibility for diagnostics.</summary>
     internal bool NativeWebViewIsVisible => _webView.IsVisible;
 
@@ -725,6 +724,20 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (type == "scroll")
             {
                 HandleScrollMessage(document.RootElement);
+                return;
+            }
+
+            if (type == "debug-log")
+            {
+                if (document.RootElement.TryGetProperty("text", out var textProp))
+                {
+                    var text = textProp.GetString();
+                    if (text is null)
+                    {
+                        return;
+                    }
+                    System.Console.Error.WriteLine($"[renderer-debug] {text}");
+                }
                 return;
             }
 
@@ -1344,6 +1357,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private void SendScrollTo(string anchor)
     {
         PostRendererMessage(new { type = "scroll-to", anchor });
+    }
+
+    public void SetHostScrollbarMode(bool active)
+    {
+        PostRendererMessage(new { type = "host-scrollbar", active });
     }
 
     public void ScrollToProgress(double progressPercent)

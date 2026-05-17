@@ -130,13 +130,30 @@ body {
 html {
   scrollbar-color: var(--mm-scrollbar-thumb) transparent;
   scrollbar-gutter: stable;
-  scrollbar-width: thin;
+  /* WebKit / Chromium scrollbar is permanently hidden — Avalonia host
+   * installs its own ScrollBar overlay (WebViewHostScrollBarOverlay) and
+   * owns the visible scrollbar UI in both viewer and edit-preview modes.
+   * Native wheel / touch / keyboard input continues to scroll the body
+   * via overflow-y: auto. Firefox/Mozilla path uses scrollbar-width:
+   * none; WebKit/Chromium path uses ::-webkit-scrollbar { display: none }
+   * below. Removed the prior `thin` / `:hover { width: 12px }` rules:
+   * they made the WebKit scrollbar visible and competed with the host
+   * overlay, producing a "two scrollbars side by side" visual where one
+   * was Avalonia-rendered and one was Chromium-rendered. */
+  scrollbar-width: none;
 }
 
-:root[data-mm-chrome="off"],
-:root[data-mm-chrome="off"] body {
-  scrollbar-gutter: auto;
-}
+/* Removed `scrollbar-gutter: auto` override for `data-mm-chrome="off"`.
+ * Diagnosis confirmed (.scratch/codex-prompts/edit-preview-vs-viewer-
+ * webview-decision-3.md + runtime DOM probe): this rule was the only
+ * scroll-relevant CSS delta between viewer (chrome=on → stable from
+ * html rule) and edit-preview (chrome=off → auto from this override).
+ * `scrollbar-gutter: auto` + `scrollbar-width: thin` triggered
+ * Chromium's overlay-auto-hide rendering with different thumb-drag
+ * input handling than the classic `stable` reserved-gutter mode.
+ * Both modes now use the html-level `stable` default — Chromium's
+ * thumb drag tracks mouse identically. Verified by user A/B against
+ * edit-preview drag vs viewer drag after this change. */
 
 :root[data-mm-document-scroll="off"],
 :root[data-mm-document-scroll="off"] body {
@@ -151,17 +168,31 @@ html {
   height: 0;
 }
 
-html::-webkit-scrollbar,
-body::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-  background: transparent;
+/* Host-managed scrollbar: when the Avalonia host installs its own overlay
+ * ScrollBar (edit mode preview pane), hide the Chromium scrollbar so only
+ * the host control is visible. Native wheel/touch/keyboard input still
+ * scrolls the document via overflow-y: auto. */
+:root[data-mm-host-scrollbar="on"]::-webkit-scrollbar,
+:root[data-mm-host-scrollbar="on"] body::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+:root[data-mm-host-scrollbar="on"],
+:root[data-mm-host-scrollbar="on"] body {
+  scrollbar-width: none;
 }
 
-html:hover::-webkit-scrollbar,
-body:hover::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
+/* Global hide of WebKit / Chromium scrollbar. Avalonia host overlay
+ * (WebViewHostScrollBarOverlay) provides the visible scrollbar in both
+ * viewer and edit-preview modes; the native one is permanently
+ * suppressed. Native wheel / touch / keyboard scrolling still works
+ * because body.overflow-y stays auto. */
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 html::-webkit-scrollbar-track,

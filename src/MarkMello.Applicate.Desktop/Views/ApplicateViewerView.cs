@@ -39,6 +39,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private readonly Border _widthHandleTrack;
     private readonly ContentControl _minimapHost;
     private ApplicateWebMarkdownDocumentView? _webDocumentView;
+    private WebViewHostScrollBarOverlay? _webDocumentScrollBarOverlay;
     private MainWindowViewModel? _viewModel;
     private bool _isDraggingWidth;
     private bool _isWidthHandleHovering;
@@ -100,12 +101,14 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
                 new DoubleTransition
                 {
                     Property = Visual.OpacityProperty,
-                    Duration = TimeSpan.FromMilliseconds(160)
+                    Duration = ApplicateMotion.Standard,
+                    Easing = ApplicateMotion.Easing
                 },
                 new DoubleTransition
                 {
                     Property = Layoutable.WidthProperty,
-                    Duration = TimeSpan.FromMilliseconds(160)
+                    Duration = ApplicateMotion.Standard,
+                    Easing = ApplicateMotion.Easing
                 }
             ]
         };
@@ -1044,7 +1047,21 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         view.FallbackRequested += OnWebFallbackRequested;
         _webDocumentView = view;
 
+        // Reserve a 12px right strip for the Avalonia ScrollBar overlay so
+        // the WebView2 HWND doesn't paint into the scrollbar's Avalonia
+        // airspace via Win32 z-order. Symmetric with edit-preview overlay
+        // setup in ApplicateEditPreviewView._webSlot.Margin.
+        view.Margin = new Thickness(0, 0, 12, 0);
         _documentLayer.Children.Add(view);
+
+        // Avalonia ScrollBar overlay — see WebViewHostScrollBarOverlay class
+        // doc and the consultant blueprint at .scratch/codex-prompts/option-
+        // a-avalonia-scrollbar-overlay-blueprint.md. Replaces WebKit
+        // ::-webkit-scrollbar so drag tracks mouse perfectly (Avalonia
+        // pointer capture, no IPC lag, no sideways release-zone).
+        _webDocumentScrollBarOverlay = new WebViewHostScrollBarOverlay(view);
+        _documentLayer.Children.Add(_webDocumentScrollBarOverlay.Control);
+
         return view;
     }
 
@@ -1063,6 +1080,12 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         _webDocumentView.WheelRequested -= OnWebWheelRequested;
         _webDocumentView.ViewerInteractionRequested -= OnWebViewerInteractionRequested;
         _webDocumentView.FallbackRequested -= OnWebFallbackRequested;
+        if (_webDocumentScrollBarOverlay is not null)
+        {
+            _documentLayer.Children.Remove(_webDocumentScrollBarOverlay.Control);
+            _webDocumentScrollBarOverlay.Dispose();
+            _webDocumentScrollBarOverlay = null;
+        }
         _documentLayer.Children.Remove(_webDocumentView);
         _webDocumentView.Dispose();
         _webDocumentView = null;

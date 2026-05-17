@@ -36,7 +36,11 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private readonly Grid _surface = new() { UseLayoutRounding = true };
     private readonly ApplicateMarkdownDocumentView _nativePreview;
     private readonly ScrollViewer _nativeScroll;
-    private readonly Panel _webSlot = new() { UseLayoutRounding = true };
+    // Reserve a 12px right strip for the Avalonia ScrollBar overlay. WebView2
+    // HWND fills _webSlot via NativeControlHost — without this margin the HWND
+    // would paint into the scrollbar's Avalonia airspace via Win32 z-order.
+    private readonly Panel _webSlot = new() { UseLayoutRounding = true, Margin = new Thickness(0, 0, 12, 0) };
+    private WebViewHostScrollBarOverlay? _scrollBarOverlay;
     private Border _webRenderMask = null!;
     private readonly ToggleButton _syncToggle;
     private readonly DispatcherTimer _webRenderTimer;
@@ -89,6 +93,16 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         // so the user sees a clean blank tile instead of stale content.
         // The mask is themed to MmBackgroundBrush so it matches the body
         // background in both light and dark variants.
+        //
+        // Z-order: mask is added BEFORE the scrollbar overlay so the
+        // scrollbar stays visible on top of the mask. Otherwise the mask
+        // (sized to fill the _surface) covers the right-edge scrollbar
+        // strip too, producing the "scrollbar flicks on every tab change"
+        // artifact — the user sees both the preview content AND the
+        // scrollbar blink to background-color for the ~130ms render-in-
+        // flight window. With the scrollbar above the mask, only the
+        // WebView content is hidden; the scrollbar stays permanently
+        // visible through the swap.
         _webRenderMask = new Border
         {
             Background = Avalonia.Application.Current?.TryGetResource(
@@ -98,9 +112,33 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
                 ? bgBrush
                 : new SolidColorBrush(Colors.White),
             IsHitTestVisible = false,
-            IsVisible = false
+            IsVisible = false,
+            // Reserve the right-edge gutter for the scrollbar overlay so
+            // the mask only covers the WebView body area (which is itself
+            // inset by _webSlot.Margin = 12px right). The scrollbar strip
+            // is a 12px column on the right edge; masking it would defeat
+            // the permanent-visible scrollbar invariant.
+            Margin = new Thickness(0, 0, 12, 0)
         };
         _surface.Children.Add(_webRenderMask);
+
+        // Avalonia ScrollBar overlay (Option A — Chromium-authority +
+        // Avalonia-mirror per consultant blueprint .scratch/codex-prompts/
+        // option-a-avalonia-scrollbar-overlay-blueprint.md). Replaces the
+        // WebKit ::-webkit-scrollbar so thumb-drag uses Avalonia pointer
+        // capture (no sideways release-zone) and runs in the same layout
+        // pass as the rest of the visual tree (no IPC mouse-thumb lag).
+        // Native wheel/touch/keyboard scrolling continues to work in
+        // Chromium because body.overflow-y stays auto. Only the visible
+        // scrollbar element is swapped.
+        //
+        // Added LAST so it sits on top of _webRenderMask in z-order. See
+        // the mask construction above for why this order matters.
+        if (_sharedHost is not null)
+        {
+            _scrollBarOverlay = new WebViewHostScrollBarOverlay(_sharedHost.View);
+            _surface.Children.Add(_scrollBarOverlay.Control);
+        }
 
         _syncToggle = BuildSyncToggle();
         var toolbar = BuildPreviewToolbar(_syncToggle);
@@ -145,6 +183,26 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             && ShouldUseWebPreview())
         {
             ApplyVisuals();
+        }
+
+        // After permanent attach is complete, slot resize events (window
+        // resize, splitter drag, sidebar toggle) still need to flow into the
+        // WebView's MinHeight + AvailableContentWidth so the Chromium HWND
+        // viewport matches the visible slot. Without this, the HWND retains
+        // the size set at attach time and Chromium's scrollbar drag math
+        // operates against a viewport that no longer matches the visible
+        // track length — user sees "mouse outpaces thumb".
+        //
+        // Codex consultant fork-side fix (gpt-5.5 xhigh, .scratch/codex-
+        // prompts/webview-scrollbar-drag-asymmetry-residual-2026-05-16).
+        if (e.Property == Visual.BoundsProperty
+            && _sharedHost is not null
+            && _isAttachedToHost
+            && !_isWebRenderInFlight
+            && _webSlot.Bounds.Width > 0
+            && _webSlot.Bounds.Height > 0)
+        {
+            ApplyAvailableWidth();
         }
     }
 
@@ -597,14 +655,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
         if (DateTime.UtcNow < _ignoreEditorScrollUntil)
         {
-            // Preview-origin scroll just propagated through editor; suppress
-            // this echo to break the ping-pong loop.
             return;
         }
 
-        // ForwardEditorScrollToPreview branches between WebView (IPC) and
-        // native (_nativeScroll.Offset) internally, so this handler does
-        // not need to know which surface is currently active.
         ForwardEditorScrollToPreview();
     }
 
@@ -924,8 +977,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
         if (DateTime.UtcNow < _ignorePreviewScrollUntil)
         {
-            // Editor-origin scroll just propagated to preview; suppress this
-            // echo to break the ping-pong loop.
             return;
         }
 
@@ -1055,7 +1106,29 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         // mid-unmount.
         var shouldShowWeb = _sharedHost is not null && ShouldUseWebPreview();
 
-        if (shouldShowWeb)
+        // Tab-switch sequence inside Avalonia's ContentControl rebinding fires
+        // AttachSession(null) followed ~1.4s later by AttachSession(newSession).
+        // During that null window, _session is null, so ShouldUseWebPreview()
+        // returns false even though the shared WebView is still mounted in
+        // _webSlot (_isAttachedToHost==True throughout). Hiding _webSlot here
+        // would (a) make the WebView content vanish for the duration of the
+        // gap, (b) take the sibling-mounted ScrollBar overlay with it (they
+        // share _webSlot as parent), and (c) — if the second AttachSession
+        // never arrives due to a race — leave the slot permanently invisible.
+        // Both visible bugs ("scrollbar flickers with text on tab switch" and
+        // "render disappears after several tab switches") come from this one
+        // path.
+        //
+        // The else branch's original purpose was to prevent re-attach-into-
+        // tearing-down-control during OnDetachedFromVisualTree. But that path
+        // takes _isAttachedToHost down explicitly via ReleaseSharedHost (and
+        // the visual tree detach itself hides everything cascading from the
+        // parent's IsVisible=false). So gating on _isAttachedToHost is the
+        // correct signal: while the WebView is mounted in our slot, the slot
+        // must remain visible regardless of transient session-null states.
+        var keepSlotVisibleAttached = _isAttachedToHost && _sharedHost is not null;
+
+        if (shouldShowWeb || keepSlotVisibleAttached)
         {
             // Defer AttachTo while either (a) a new render is in flight
             // OR (b) the target slot has not laid out yet. Both cases
@@ -1088,13 +1161,16 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             _webSlot.Opacity = 1;
             var maskVisible = _isWebRenderInFlight || !_isAttachedToHost;
             _webRenderMask.IsVisible = maskVisible;
-            Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} ApplyVisuals: webSlot.IsVis=true mask.IsVis={maskVisible} attached={_isAttachedToHost} inFlight={_isWebRenderInFlight} webSlot.Bounds={_webSlot.Bounds}");
+            // ScrollBar overlay stays permanently visible — its template-part
+            // Transitions are cleared in WebViewHostScrollBarOverlay so it
+            // never fades in/out independently. The mask above already
+            // covers the WebView content during render-in-flight; the
+            // scrollbar staying put through that is the desired UX.
         }
         else
         {
             _webSlot.IsVisible = false;
             _webRenderMask.IsVisible = false;
-            Console.Error.WriteLine($"[mode-toggle] {DateTime.Now:HH:mm:ss.fff} ApplyVisuals: webSlot.IsVis=false mask.IsVis=false");
         }
     }
 
@@ -1119,13 +1195,30 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         if (_sharedHost is not null && _isAttachedToHost)
         {
             _sharedHost.View.AvailableContentWidth = widths.WebColumnWidth;
-            // Use the surface (Row 1) height, not the whole preview pane.
-            // Bounds.Height includes the toolbar (Row 0) above _surface; if we
-            // size the WebView2 wrapper to the full pane height its native HWND
-            // overflows into the toolbar area (Avalonia layout positions the
-            // wrapper inside _surface, but the HWND respects MinHeight first).
-            var surfaceHeight = _surface.Bounds.Height > 0 ? _surface.Bounds.Height : Bounds.Height;
-            _sharedHost.View.MinHeight = CalculateWebPreviewMinHeight(surfaceHeight);
+            // The WebView wrapper is added to `_webSlot` (the Border directly
+            // containing the WebView2 NativeControlHost). Sizing MinHeight from
+            // `_webSlot.Bounds.Height` keeps the HWND viewport in lock-step with
+            // the slot the wrapper actually lives in — Chromium maps thumb-drag
+            // delta against that viewport.
+            //
+            // Previously this used `_surface.Bounds.Height` (Row 1 of the outer
+            // grid), which is taller than `_webSlot` (the slot lives one Border
+            // deeper) and can drift during layout. The mismatch made the HWND
+            // height-sample inconsistent with the visible track length, so the
+            // thumb visually lagged the mouse during fast drag. Per Codex
+            // consultant diagnosis (gpt-5.5 xhigh, .scratch/codex-prompts/
+            // webview-scrollbar-drag-asymmetry-residual-2026-05-16).
+            //
+            // Fall through `_webSlot → _surface → Bounds` so the pre-warm path
+            // (slot not yet measured) still resolves to a usable hostHeight,
+            // and `CalculateWebPreviewMinHeight`'s `> 0` guard handles the
+            // zero-bounds edge with the `1` sentinel.
+            var slotHeight = _webSlot.Bounds.Height;
+            var surfaceHeight = _surface.Bounds.Height;
+            var hostHeight = slotHeight > 0
+                ? slotHeight
+                : (surfaceHeight > 0 ? surfaceHeight : Bounds.Height);
+            _sharedHost.View.MinHeight = CalculateWebPreviewMinHeight(hostHeight);
         }
     }
 
@@ -1147,9 +1240,25 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     }
 
     internal static double CalculateWebPreviewMinHeight(double hostHeight)
-        => double.IsFinite(hostHeight) && hostHeight > 0
-            ? SysMath.Max(480, hostHeight)
-            : 1;
+        // Use the actual measured surface (Row 1) height — no 480px floor.
+        // The previous `max(480, hostHeight)` forced the WebView2 HWND to be
+        // at least 480 px tall regardless of the visible preview surface
+        // height; on smaller windows or split-pane layouts the HWND then
+        // overflowed into the toolbar area and Avalonia's surface clipping
+        // hid part of the Chromium scrollbar track. Result: dragging the
+        // thumb top-to-bottom in one mouse motion only covered a fraction
+        // of the actual scroll range because the visible track length was
+        // less than the HWND-internal track length. Codex consultant
+        // diagnosis (gpt-5.5 xhigh, .scratch/codex-prompts/webview-drag-
+        // quality-asymmetry-20260516-214356.md) verified by user.
+        //
+        // The `> 0` guard already handles the "host not yet measured" case,
+        // falling through to the `: 1` minimal sentinel that lets the
+        // WebView2 controller initialise. The 480 floor was defensive
+        // overkill — viewer mode's `max(480, Bounds.Height)` at
+        // ApplicateViewerView.cs:674 is harmless because window content
+        // height is essentially always ≥ 480.
+        => double.IsFinite(hostHeight) && hostHeight > 0 ? hostHeight : 1;
 
     internal static ReadingPreferences CreateWebPreviewPreferences(ReadingPreferences preferences)
         => ReadingPreferences.Normalize(preferences) with { DocumentMinimapMode = DocumentMinimapMode.Off };
@@ -1233,6 +1342,8 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         AttachSession(null);
         ReleaseSharedHost();
         _webRenderTimer.Tick -= OnWebRenderTimerTick;
+        _scrollBarOverlay?.Dispose();
+        _scrollBarOverlay = null;
     }
 }
 

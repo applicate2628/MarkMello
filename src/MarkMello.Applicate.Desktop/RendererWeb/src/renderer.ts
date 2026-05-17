@@ -60,6 +60,7 @@ type RendererMessage =
   | { type: "drag-hover"; hovering: boolean }
   | { type: "drop-file"; name: string; text: string }
   | { type: "host-shortcut"; combo: string }
+  | { type: "debug-log"; text: string }
   | { type: "debug-log"; message: string }
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number };
 
@@ -94,7 +95,8 @@ type HostMessage =
   | { type: "scroll-to"; anchor: string }
   | { type: "scroll-to-progress"; progressPercent: number }
   | { type: "load-document"; html: string; documentName?: string; hasMermaid?: boolean; hasHljs?: boolean }
-  | { type: "clear-document" };
+  | { type: "clear-document" }
+  | { type: "host-scrollbar"; active: boolean };
 
 const hostWindow = window as RendererWindow;
 const MINIMAP_CLASS = "mm-minimap";
@@ -780,17 +782,14 @@ function updateMinimapViewport(): void {
 
   const minimapHeight = minimapRoot.clientHeight;
   const minimapWidth = minimapRoot.clientWidth;
-  // Simple scroll-progress math: thumb position and height are computed
-  // from source scrollTop / scrollHeight / clientHeight ratios. This
-  // gives a reliable "where am I in the document" indicator that matches
-  // scrollbar semantics. It does NOT promise line-by-line alignment
-  // between the indicator and the cloned content visible in the minimap —
-  // the clone wraps lines differently (width/padding mismatch) and its
-  // height keeps drifting as content-visibility:auto math blocks render
-  // their real sizes, so an exact content-aligned indicator is fragile
-  // on heavy-formula docs. Drag/click already use range-based mapping
-  // (cursor → scrollTop via minimap travel range), so interaction stays
-  // consistent regardless of clone drift.
+  // Use root coordinates (root.scrollHeight, root.scrollTop) so the scrollbar
+  // thumb and minimap viewport always agree with the actual user scroll state.
+  // Previous attempt to switch to .mm-document basis for "precision" caused a
+  // misalignment in viewer mode: when body has top/bottom padding, source.
+  // scrollHeight < root.scrollHeight, but the user's root.scrollTop can reach
+  // values beyond (source.scrollHeight - viewportHeight), making scrollProgress
+  // > 1 at the bottom of the document. Stick with root coords — the documented
+  // line-by-line drift is acceptable; thumb correctness is not negotiable.
   const documentHeight = root.scrollHeight;
   const documentWidth = Math.max(source.scrollWidth, source.clientWidth, 1);
   const viewportHeight = root.clientHeight;
@@ -816,7 +815,6 @@ function updateMinimapViewport(): void {
   minimapContent.style.width = `${layout.contentWidth}px`;
   minimapViewport.style.transform = `translateY(${layout.thumbTop}px)`;
   minimapViewport.style.height = `${layout.thumbHeight}px`;
-
 }
 
 function scrollFromMinimapClientY(clientY: number): void {
@@ -1116,6 +1114,16 @@ function handleHostMessage(raw: unknown): void {
 
   if (message.type === "scroll-to") {
     document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
+    return;
+  }
+
+  if (message.type === "host-scrollbar") {
+    // When the Avalonia host installs its own overlay ScrollBar (edit mode
+    // preview pane), hide the Chromium ::-webkit-scrollbar so the two
+    // scrollbars don't compete visually and the host control is the only
+    // visible scroll affordance. Wheel/touch/keyboard scrolling continues
+    // to work natively because overflow-y stays auto.
+    document.documentElement.dataset.mmHostScrollbar = message.active ? "on" : "off";
     return;
   }
 
