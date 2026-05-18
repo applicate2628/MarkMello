@@ -13,6 +13,7 @@ using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views.Minimap;
 using MarkMello.Domain;
 using MarkMello.Presentation;
+using MarkMello.Presentation.Services;
 using MarkMello.Presentation.Views.Markdown;
 using Microsoft.Extensions.DependencyInjection;
 using SysMath = System.Math;
@@ -1276,16 +1277,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     }
 
     private string GetThemeName()
-        => ActualThemeVariant == ThemeVariant.Dark ? "dark" : "light";
+        => ActualThemeVariant == ThemeVariant.Dark
+            ? "dark"
+            : Equals(ActualThemeVariant?.Key, AvaloniaThemeService.ClassicWhiteThemeVariantKey)
+                ? "classic-white"
+                : "light";
 
     internal static string ApplyInitialThemeForTesting(string html, string theme)
         => ApplyInitialTheme(html, theme);
 
     private static string ApplyInitialTheme(string html, string theme)
     {
-        var normalizedTheme = string.Equals(theme, "dark", StringComparison.OrdinalIgnoreCase)
-            ? "dark"
-            : "light";
+        var normalizedTheme = NormalizeRendererThemeName(theme);
         if (html.Contains("data-theme=", StringComparison.Ordinal))
         {
             return html;
@@ -1300,6 +1303,13 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         return html.Insert(htmlTagIndex + htmlTag.Length, $" data-theme=\"{normalizedTheme}\"");
     }
+
+    private static string NormalizeRendererThemeName(string theme)
+        => theme.Equals("dark", StringComparison.OrdinalIgnoreCase)
+            ? "dark"
+            : theme.Equals("classic-white", StringComparison.OrdinalIgnoreCase)
+                ? "classic-white"
+                : "light";
 
     private void SendReadingPreferences()
     {

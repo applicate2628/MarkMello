@@ -8,9 +8,11 @@
              x:DataType="vm:MainWindowViewModel">
       <Border
               Classes="mm-settings-panel mm-popover-left mm-app-updates-panel"
-              Width="320">
-        <StackPanel>
-          <Border Classes="mm-settings-head-shell">
+              Width="320"
+              MinHeight="216">
+        <Grid RowDefinitions="Auto,*">
+          <Border Grid.Row="0"
+                  Classes="mm-settings-head-shell">
             <Grid ColumnDefinitions="Auto,*,Auto"
                   ColumnSpacing="12">
               <Button Grid.Column="0"
@@ -40,11 +42,16 @@
             </Grid>
           </Border>
 
-          <Border Classes="mm-settings-body-shell">
-            <StackPanel Spacing="0">
-              <Border Classes="mm-setting-row">
+          <Border Grid.Row="1"
+                  Classes="mm-settings-body-shell">
+            <Grid RowDefinitions="Auto,Auto,Auto">
+              <Border Grid.Row="0"
+                      Classes="mm-setting-row"
+                      MinHeight="104"
+                      ClipToBounds="True">
                 <Grid ColumnDefinitions="*,Auto"
-                      ColumnSpacing="12">
+                      ColumnSpacing="12"
+                      VerticalAlignment="Top">
                   <StackPanel Grid.Column="0"
                               Spacing="4">
                     <TextBlock Classes="mm-setting-label"
@@ -61,30 +68,57 @@
                 </Grid>
               </Border>
 
-              <Line Classes="mm-setting-divider"
+              <Line Grid.Row="1"
+                    Classes="mm-setting-divider"
                     StartPoint="0,0.5"
                     EndPoint="1,0.5" />
 
-              <Border Classes="mm-setting-row">
-                <StackPanel Spacing="8">
+              <Border Grid.Row="2"
+                      Classes="mm-setting-row">
+                <Grid ColumnDefinitions="Auto,156"
+                      ColumnSpacing="8"
+                      VerticalAlignment="Center"
+                      HorizontalAlignment="Left">
                   <Button Classes="mm-dialog-secondary"
+                          Grid.Column="0"
                           HorizontalAlignment="Left"
+                          MinWidth="112"
                           Content="{Binding CheckForUpdatesLabel}"
                           Command="{Binding CheckForUpdatesCommand}" />
                   <Button Classes="mm-dialog-primary"
-                          HorizontalAlignment="Left"
+                          Grid.Column="1"
+                          HorizontalAlignment="Stretch"
                           Content="{Binding DownloadUpdateLabel}"
                           Command="{Binding DownloadUpdateCommand}"
-                          IsVisible="{Binding CanDownloadAvailableUpdate}" />
+                          IsEnabled="{Binding CanDownloadAvailableUpdate}"
+                          Opacity="{Binding DownloadUpdateActionOpacity}">
+                    <Button.Transitions>
+                      <Transitions>
+                        <DoubleTransition Property="Opacity"
+                                          Duration="{DynamicResource MmDurationStandard}"
+                                          Easing="{DynamicResource MmEasingStandard}" />
+                      </Transitions>
+                    </Button.Transitions>
+                  </Button>
                   <Button Classes="mm-dialog-secondary"
-                          HorizontalAlignment="Left"
+                          Grid.Column="1"
+                          HorizontalAlignment="Stretch"
                           Content="{Binding DownloadedUpdateActionLabel}"
                           Command="{Binding OpenDownloadedUpdateCommand}"
-                          IsVisible="{Binding CanOpenDownloadedUpdate}" />
-                </StackPanel>
+                          IsEnabled="{Binding CanOpenDownloadedUpdate}"
+                          Opacity="{Binding OpenDownloadedUpdateActionOpacity}">
+                    <Button.Transitions>
+                      <Transitions>
+                        <DoubleTransition Property="Opacity"
+                                          Duration="{DynamicResource MmDurationStandard}"
+                                          Easing="{DynamicResource MmEasingStandard}" />
+                      </Transitions>
+                    </Button.Transitions>
+                  </Button>
+                </Grid>
               </Border>
-            </StackPanel>
+            </Grid>
           </Border>
-        </StackPanel>
+        </Grid>
       </Border>
 </UserControl>

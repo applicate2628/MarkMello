@@ -10,6 +10,7 @@ public sealed class ApplicateWebMinimapStateTests
     [Theory]
     [InlineData("dark", "<html data-theme=\"dark\">")]
     [InlineData("light", "<html data-theme=\"light\">")]
+    [InlineData("classic-white", "<html data-theme=\"classic-white\">")]
     [InlineData("unknown", "<html data-theme=\"light\">")]
     public void InitialThemeIsEmbeddedBeforeNavigation(string theme, string expectedHtmlTag)
     {

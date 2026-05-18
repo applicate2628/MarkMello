@@ -13,6 +13,7 @@ public sealed class ReadingPreferencesTests
         Assert.Equal(DocumentMinimapMode.Auto, normalized.DocumentMinimapMode);
         Assert.Equal(MarkdownRendererBackend.WebView, normalized.RendererBackend);
         Assert.Equal(WidthResizerVisibility.OnHover, normalized.WidthResizerVisibility);
+        Assert.Equal(LightPaletteMode.Original, normalized.LightPalette);
     }
 
     [Fact]
@@ -23,7 +24,8 @@ public sealed class ReadingPreferencesTests
             FontSize: 200,
             LineHeight: 0.2,
             ContentWidth: 517,
-            DocumentMinimapMode: (DocumentMinimapMode)42);
+            DocumentMinimapMode: (DocumentMinimapMode)42,
+            LightPalette: (LightPaletteMode)42);
 
         var normalized = ReadingPreferences.Normalize(candidate);
 
@@ -33,6 +35,7 @@ public sealed class ReadingPreferencesTests
         Assert.Equal(ReadingPreferences.MinContentWidth, normalized.ContentWidth);
         Assert.Equal(DocumentMinimapMode.Auto, normalized.DocumentMinimapMode);
         Assert.Equal(WidthResizerVisibility.OnHover, normalized.WidthResizerVisibility);
+        Assert.Equal(LightPaletteMode.Original, normalized.LightPalette);
     }
 
     [Theory]
@@ -93,5 +96,17 @@ public sealed class ReadingPreferencesTests
         var normalized = ReadingPreferences.Normalize(candidate);
 
         Assert.Equal(WidthResizerVisibility.OnHover, normalized.WidthResizerVisibility);
+    }
+
+    [Theory]
+    [InlineData(LightPaletteMode.Original)]
+    [InlineData(LightPaletteMode.White)]
+    public void NormalizePreservesSupportedLightPaletteModes(LightPaletteMode mode)
+    {
+        var candidate = ReadingPreferences.Default with { LightPalette = mode };
+
+        var normalized = ReadingPreferences.Normalize(candidate);
+
+        Assert.Equal(mode, normalized.LightPalette);
     }
 }

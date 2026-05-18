@@ -11,10 +11,12 @@ export type MathReadinessController = {
   isCancelled(): boolean;
 };
 
+export type RendererTheme = "light" | "dark" | "classic-white";
+
 export type InitialRenderPipelineDeps = {
-  getCurrentTheme: () => "light" | "dark";
-  applyTheme: (theme: "light" | "dark") => void;
-  initMermaidWithTheme: (theme: "light" | "dark") => void;
+  getCurrentTheme: () => RendererTheme;
+  applyTheme: (theme: RendererTheme) => void;
+  initMermaidWithTheme: (theme: RendererTheme) => void;
   renderMath: () => MathReadinessController;
   renderMermaid: () => Promise<void>;
   renderCodeBlocks: () => void;

@@ -58,6 +58,14 @@
       <_Parameter1>MarkMelloReleaseAssetPrefix</_Parameter1>
       <_Parameter2>MarkMello.Applicate</_Parameter2>
     </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>MarkMelloForkAuthor</_Parameter1>
+      <_Parameter2>Dmitry Denisenko (@applicate2628)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>MarkMelloRepositoryUrl</_Parameter1>
+      <_Parameter2>https://github.com/applicate2628/MarkMello</_Parameter2>
+    </AssemblyAttribute>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
       <_Parameter1>MarkMello.Applicate.Tests</_Parameter1>
     </AssemblyAttribute>

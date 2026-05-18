@@ -75,28 +75,6 @@
                     EndPoint="1,0.5" />
 
               <Button Classes="mm-menu-item"
-                      Command="{Binding OpenAppUpdatesCommand}">
-                <Grid ColumnDefinitions="*,Auto"
-                      ColumnSpacing="12">
-                  <StackPanel Grid.Column="0"
-                              Spacing="2"
-                              HorizontalAlignment="Left">
-                    <TextBlock Classes="mm-setting-label"
-                               Text="{Binding UpdatesLabel}" />
-                    <TextBlock Classes="mm-setting-hint"
-                               Text="{Binding UpdatesHint}" />
-                  </StackPanel>
-                  <TextBlock Grid.Column="1"
-                             Classes="mm-setting-meta"
-                             Text="{Binding UpdateStateBadge}" />
-                </Grid>
-              </Button>
-
-              <Line Classes="mm-setting-divider"
-                    StartPoint="0,0.5"
-                    EndPoint="1,0.5" />
-
-              <Button Classes="mm-menu-item"
                       Command="{Binding OpenAppSettingsCommand}">
                 <Grid ColumnDefinitions="*,Auto"
                       ColumnSpacing="12">
@@ -111,6 +89,28 @@
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
                              Text="{Binding MetaOpen}" />
+                </Grid>
+              </Button>
+
+              <Line Classes="mm-setting-divider"
+                    StartPoint="0,0.5"
+                    EndPoint="1,0.5" />
+
+              <Button Classes="mm-menu-item"
+                      Command="{Binding OpenAppUpdatesCommand}">
+                <Grid ColumnDefinitions="*,Auto"
+                      ColumnSpacing="12">
+                  <StackPanel Grid.Column="0"
+                              Spacing="2"
+                              HorizontalAlignment="Left">
+                    <TextBlock Classes="mm-setting-label"
+                               Text="{Binding UpdatesLabel}" />
+                    <TextBlock Classes="mm-setting-hint"
+                               Text="{Binding UpdatesHint}" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1"
+                             Classes="mm-setting-meta"
+                             Text="{Binding UpdateStateBadge}" />
                 </Grid>
               </Button>
             </StackPanel>

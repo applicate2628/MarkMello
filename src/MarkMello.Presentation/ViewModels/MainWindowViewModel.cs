@@ -38,8 +38,11 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly bool _showCustomTitleBar = OperatingSystem.IsWindows();
     private readonly string _aboutVersion;
     private readonly string _aboutLicense = "GPLv3";
+    private readonly string _aboutForkAuthor;
+    private readonly string _aboutRepositoryUrl;
     private AppUpdatePackage? _availableUpdatePackage;
     private bool _isUpdateNotificationDismissed;
+    private ThemeMode _selectedLightPalette = ThemeMode.Light;
     private ReadingPreferences _documentReadingPreferences = GetDocumentRenderingPreferences(ReadingPreferences.Default);
     private ReadingPreferences _lastNotifiedReadingPreferences = ReadingPreferences.Default;
 
@@ -70,6 +73,8 @@ public partial class MainWindowViewModel : ObservableObject
         _updateService = updateService;
         _imageSourceResolver = imageSourceResolver;
         _aboutVersion = GetProductVersion();
+        _aboutForkAuthor = GetAssemblyMetadata("MarkMelloForkAuthor") ?? string.Empty;
+        _aboutRepositoryUrl = GetRepositoryUrl();
         _localization.PropertyChanged += OnLocalizationChanged;
         RefreshUpdateStatusTexts();
     }
@@ -241,9 +246,39 @@ public partial class MainWindowViewModel : ObservableObject
 
     public bool ShowsReadingStatus => IsViewer && !IsEditMode;
 
-    public bool ShowsMoonThemeIcon => EffectiveTheme == ThemeMode.Light;
+    public bool ShowsMoonThemeIcon => EffectiveTheme != ThemeMode.Dark;
 
     public bool ShowsSunThemeIcon => EffectiveTheme == ThemeMode.Dark;
+
+    public bool IsOriginalPaletteSelected
+    {
+        get => _selectedLightPalette != ThemeMode.ClassicWhite;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsOriginalPaletteSelected));
+                return;
+            }
+
+            ApplyLightPalette(LightPaletteMode.Original);
+        }
+    }
+
+    public bool IsWhitePaletteSelected
+    {
+        get => _selectedLightPalette == ThemeMode.ClassicWhite;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsWhitePaletteSelected));
+                return;
+            }
+
+            ApplyLightPalette(LightPaletteMode.White);
+        }
+    }
 
     public ReadingPreferences DocumentReadingPreferences => _documentReadingPreferences;
 
@@ -261,6 +296,12 @@ public partial class MainWindowViewModel : ObservableObject
 
     public string AboutLicense => _aboutLicense;
 
+    public bool HasAboutForkInfo => !string.IsNullOrWhiteSpace(AboutForkAuthor);
+
+    public string AboutForkAuthor => _aboutForkAuthor;
+
+    public string AboutRepositoryUrl => _aboutRepositoryUrl;
+
     public bool HasDirtyPromptError => !string.IsNullOrWhiteSpace(DirtyPromptErrorMessage);
 
     public bool CanCheckForUpdates => !IsCheckingForUpdates && !IsDownloadingUpdate;
@@ -276,6 +317,10 @@ public partial class MainWindowViewModel : ObservableObject
            && !string.IsNullOrWhiteSpace(DownloadedUpdatePath)
            && !IsCheckingForUpdates
            && !IsDownloadingUpdate;
+
+    public double DownloadUpdateActionOpacity => CanDownloadAvailableUpdate ? 1.0 : 0.0;
+
+    public double OpenDownloadedUpdateActionOpacity => CanOpenDownloadedUpdate ? 1.0 : 0.0;
 
     public bool IsUpdateNotificationVisible
         => !_isUpdateNotificationDismissed
@@ -618,13 +663,14 @@ public partial class MainWindowViewModel : ObservableObject
 
     public int ReadTimeMinutes => Math.Max(1, (int)Math.Round(WordCount / 220.0));
 
-    public string NextThemeHint => EffectiveTheme == ThemeMode.Light
+    public string NextThemeHint => EffectiveTheme != ThemeMode.Dark
         ? _localization["ThemeSwitchToDark"]
         : _localization["ThemeSwitchToLight"];
 
     public async Task InitializeAsync()
     {
         ReadingPreferences = await _settings.LoadPreferencesAsync().ConfigureAwait(true);
+        _selectedLightPalette = GetThemeModeForLightPalette(ReadingPreferences.LightPalette);
 
         var savedLanguage = await _settings.LoadLanguageAsync().ConfigureAwait(true);
         ApplyLanguageSelection(savedLanguage, persist: false);
@@ -785,14 +831,13 @@ public partial class MainWindowViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private async Task CycleThemeAsync()
+    private void CycleTheme()
     {
-        var next = EffectiveTheme == ThemeMode.Light
+        var next = EffectiveTheme != ThemeMode.Dark
             ? ThemeMode.Dark
-            : ThemeMode.Light;
+            : _selectedLightPalette;
 
-        ApplyTheme(next);
-        await _settings.SaveThemeAsync(next).ConfigureAwait(true);
+        ApplyThemeSelection(next);
     }
 
     [RelayCommand]
@@ -1243,6 +1288,13 @@ public partial class MainWindowViewModel : ObservableObject
             OnPropertyChanged(nameof(IsNativeRendererSelected));
             OnPropertyChanged(nameof(IsWebViewRendererSelected));
         }
+
+        if (oldValue.LightPalette != value.LightPalette)
+        {
+            _selectedLightPalette = GetThemeModeForLightPalette(value.LightPalette);
+            OnPropertyChanged(nameof(IsOriginalPaletteSelected));
+            OnPropertyChanged(nameof(IsWhitePaletteSelected));
+        }
     }
 
     private async Task OpenFileCoreAsync()
@@ -1583,9 +1635,31 @@ public partial class MainWindowViewModel : ObservableObject
 
     private void ApplyTheme(ThemeMode mode)
     {
+        if (mode is ThemeMode.Light or ThemeMode.ClassicWhite)
+        {
+            _selectedLightPalette = mode;
+        }
+
         Theme = mode;
         _themeService.Apply(mode);
         EffectiveTheme = _themeService.GetEffectiveTheme();
+    }
+
+    private void ApplyLightPalette(LightPaletteMode palette)
+    {
+        var nextLightTheme = GetThemeModeForLightPalette(palette);
+        _selectedLightPalette = nextLightTheme;
+        ApplyReadingPreferences(ReadingPreferences with { LightPalette = palette });
+
+        if (EffectiveTheme != ThemeMode.Dark)
+        {
+            ApplyThemeSelection(nextLightTheme);
+        }
+        else
+        {
+            OnPropertyChanged(nameof(IsOriginalPaletteSelected));
+            OnPropertyChanged(nameof(IsWhitePaletteSelected));
+        }
     }
 
     private static ReadingPreferences GetDocumentRenderingPreferences(ReadingPreferences preferences)
@@ -1593,6 +1667,9 @@ public partial class MainWindowViewModel : ObservableObject
         var normalized = ReadingPreferences.Normalize(preferences);
         return normalized with { DocumentMinimapMode = ReadingPreferences.Default.DocumentMinimapMode };
     }
+
+    private static ThemeMode GetThemeModeForLightPalette(LightPaletteMode palette)
+        => palette == LightPaletteMode.White ? ThemeMode.ClassicWhite : ThemeMode.Light;
 
     private void ApplyReadingPreferences(ReadingPreferences preferences)
     {
@@ -1685,6 +1762,8 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(CanCheckForUpdates));
         OnPropertyChanged(nameof(CanDownloadAvailableUpdate));
         OnPropertyChanged(nameof(CanOpenDownloadedUpdate));
+        OnPropertyChanged(nameof(DownloadUpdateActionOpacity));
+        OnPropertyChanged(nameof(OpenDownloadedUpdateActionOpacity));
         OnPropertyChanged(nameof(CheckForUpdatesLabel));
         OnPropertyChanged(nameof(DownloadUpdateLabel));
         OnPropertyChanged(nameof(DownloadedUpdateActionLabel));
@@ -1693,7 +1772,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     private static string GetProductVersion()
     {
-        var assembly = Assembly.GetEntryAssembly() ?? typeof(MainWindowViewModel).Assembly;
+        var assembly = GetProductAssembly();
 
         var informationalVersion = assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
@@ -1712,6 +1791,30 @@ public partial class MainWindowViewModel : ObservableObject
             ? "1.0.0"
             : $"{version.Major}.{Math.Max(version.Minor, 0)}.{Math.Max(version.Build, 0)}";
     }
+
+    private static string GetRepositoryUrl()
+    {
+        var explicitUrl = GetAssemblyMetadata("MarkMelloRepositoryUrl");
+        if (!string.IsNullOrWhiteSpace(explicitUrl))
+        {
+            return explicitUrl;
+        }
+
+        var owner = GetAssemblyMetadata("MarkMelloReleaseOwner");
+        var repo = GetAssemblyMetadata("MarkMelloReleaseRepo");
+        return string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repo)
+            ? "https://github.com/applicate2628/MarkMello"
+            : $"https://github.com/{owner}/{repo}";
+    }
+
+    private static string? GetAssemblyMetadata(string key)
+        => GetProductAssembly()
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(attribute => attribute.Key.Equals(key, StringComparison.Ordinal))
+            ?.Value;
+
+    private static Assembly GetProductAssembly()
+        => Assembly.GetEntryAssembly() ?? typeof(MainWindowViewModel).Assembly;
 
     private void CloseOverlayCore()
     {

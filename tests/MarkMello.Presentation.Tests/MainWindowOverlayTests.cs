@@ -160,6 +160,17 @@ public sealed class MainWindowOverlayTests
             "MarkMello.Presentation",
             "Views",
             "AppSettingsPanelView.axaml"));
+        var readingSettings = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "ReadingSettingsPanelView.axaml"));
         var appUpdates = File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,
             "..",
@@ -176,10 +187,23 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("Command=\"{Binding OpenAppUpdatesCommand}\"", appMenu, StringComparison.Ordinal);
         Assert.DoesNotContain("<Expander", appMenu, StringComparison.Ordinal);
         Assert.DoesNotContain("Command=\"{Binding CheckForUpdatesCommand}\"", appMenu, StringComparison.Ordinal);
+        var appSettingsIndex = appMenu.IndexOf("Command=\"{Binding OpenAppSettingsCommand}\"", StringComparison.Ordinal);
+        var appUpdatesIndex = appMenu.IndexOf("Command=\"{Binding OpenAppUpdatesCommand}\"", StringComparison.Ordinal);
+        Assert.True(appSettingsIndex >= 0, "Settings should stay in the app menu.");
+        Assert.True(appUpdatesIndex > appSettingsIndex, "Updates should be the last app menu item after Settings.");
+        Assert.Contains("Text=\"{Binding ReadingPaletteLabel}\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("IsChecked=\"{Binding IsOriginalPaletteSelected}\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("IsChecked=\"{Binding IsWhitePaletteSelected}\"", readingSettings, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding CheckForUpdatesCommand}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding DownloadUpdateCommand}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding OpenDownloadedUpdateCommand}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding UpdatesHeader}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("MinHeight=\"216\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("RowDefinitions=\"Auto,Auto,Auto\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("ColumnDefinitions=\"Auto,156\"", appUpdates, StringComparison.Ordinal);
+        Assert.DoesNotContain("Height=\"300\"", appUpdates, StringComparison.Ordinal);
+        Assert.DoesNotContain("RowDefinitions=\"*,Auto,104\"", appUpdates, StringComparison.Ordinal);
+        Assert.DoesNotContain("ItemsSource=\"{Binding ThemeOptions}\"", appSettings, StringComparison.Ordinal);
         Assert.DoesNotContain("Text=\"{Binding UpdatesLabel}\"", appSettings, StringComparison.Ordinal);
         Assert.DoesNotContain("Command=\"{Binding CheckForUpdatesCommand}\"", appSettings, StringComparison.Ordinal);
     }
@@ -248,10 +272,26 @@ public sealed class MainWindowOverlayTests
             "src",
             "MarkMello.Applicate.Desktop",
             "ApplicateMainWindow.cs"));
+        var applicateProject = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "MarkMello.Applicate.Desktop.csproj"));
 
         Assert.DoesNotContain("Andrey Ermolaev", aboutXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("ermolaev.tech", aboutXaml, StringComparison.Ordinal);
         Assert.DoesNotContain("ApplicateAppAboutPanelView", applicateWindowCode, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding AboutForkLabel}\"", aboutXaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding AboutForkAuthor}\"", aboutXaml, StringComparison.Ordinal);
+        Assert.Contains("Tag=\"{Binding AboutRepositoryUrl}\"", aboutXaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"OnAboutLinkClick\"", aboutXaml, StringComparison.Ordinal);
+        Assert.Contains("MarkMelloForkAuthor", applicateProject, StringComparison.Ordinal);
+        Assert.Contains("MarkMelloRepositoryUrl", applicateProject, StringComparison.Ordinal);
         Assert.Contains("AboutNoticeLabel", aboutXaml, StringComparison.Ordinal);
     }
 }

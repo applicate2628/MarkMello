@@ -19,7 +19,8 @@ public sealed class JsonSettingsStoreTests
                 ReadingPreferences.WideContentWidth,
                 DocumentMinimapMode.On,
                 MarkdownRendererBackend.WebView,
-                WidthResizerVisibility.Always);
+                WidthResizerVisibility.Always,
+                LightPaletteMode.White);
 
             await store.SavePreferencesAsync(expectedPreferences);
             await store.SaveThemeAsync(ThemeMode.Dark);
@@ -36,6 +37,27 @@ public sealed class JsonSettingsStoreTests
             Assert.Equal(ThemeMode.Dark, actualTheme);
             Assert.Equal(AppLanguage.Russian, actualLanguage);
             Assert.Equal(new WindowPlacement(120, 80, 900, 700, IsMaximized: true), actualWindowPlacement);
+        }
+        finally
+        {
+            DeleteDirectory(rootDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task SaveAndLoadRoundTripsClassicWhiteTheme()
+    {
+        var rootDirectory = CreateTempDirectory();
+        try
+        {
+            var store = new JsonSettingsStore(rootDirectory);
+
+            await store.SaveThemeAsync(ThemeMode.ClassicWhite);
+
+            var reloadedStore = new JsonSettingsStore(rootDirectory);
+            var theme = await reloadedStore.LoadThemeAsync();
+
+            Assert.Equal(ThemeMode.ClassicWhite, theme);
         }
         finally
         {

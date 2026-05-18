@@ -450,8 +450,7 @@
     <Setter Property="Foreground" Value="{DynamicResource MmTextBrush}" />
   </Style>
 
-  <Style Selector="ComboBox.mm-language-select">
-    <Setter Property="Width" Value="132" />
+  <Style Selector="ComboBox.mm-settings-select">
     <Setter Property="Height" Value="32" />
     <Setter Property="MinHeight" Value="32" />
     <Setter Property="Padding" Value="10,4" />
@@ -465,13 +464,16 @@
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="Cursor" Value="Hand" />
   </Style>
-  <Style Selector="ComboBox.mm-language-select:pointerover">
+  <Style Selector="ComboBox.mm-language-select">
+    <Setter Property="Width" Value="132" />
+  </Style>
+  <Style Selector="ComboBox.mm-settings-select:pointerover">
     <Setter Property="BorderBrush" Value="{DynamicResource MmBorderBrush}" />
   </Style>
-  <Style Selector="ComboBox.mm-language-select:focus">
+  <Style Selector="ComboBox.mm-settings-select:focus">
     <Setter Property="BorderBrush" Value="{DynamicResource MmAccentBrush}" />
   </Style>
-  <Style Selector="ComboBox.mm-language-select TextBlock">
+  <Style Selector="ComboBox.mm-settings-select TextBlock">
     <Setter Property="Foreground" Value="{DynamicResource MmTextBrush}" />
     <Setter Property="FontSize" Value="12" />
   </Style>

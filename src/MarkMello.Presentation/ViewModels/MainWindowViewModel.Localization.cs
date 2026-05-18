@@ -49,6 +49,7 @@ public partial class MainWindowViewModel
         nameof(AboutCreatedByPrefix),
         nameof(AboutCreditsLabel),
         nameof(AboutCreditsPeriod),
+        nameof(AboutForkLabel),
         nameof(AboutHeader),
         nameof(AboutHint),
         nameof(AboutLabel),
@@ -56,6 +57,7 @@ public partial class MainWindowViewModel
         nameof(AboutLicenseLabel),
         nameof(AboutNoticeHint),
         nameof(AboutNoticeLabel),
+        nameof(AboutRepositoryLabel),
         nameof(AboutVersionHint),
         nameof(AboutVersionLabel),
         nameof(AppMenuCloseFileHint),
@@ -101,6 +103,10 @@ public partial class MainWindowViewModel
         nameof(ReadingMinimapLabel),
         nameof(ReadingMinimapOff),
         nameof(ReadingMinimapOn),
+        nameof(ReadingPaletteHint),
+        nameof(ReadingPaletteLabel),
+        nameof(ReadingPaletteOriginal),
+        nameof(ReadingPaletteWhite),
         nameof(ReadingRendererHint),
         nameof(ReadingRendererLabel),
         nameof(ReadingRendererNative),
@@ -135,6 +141,7 @@ public partial class MainWindowViewModel
     public string AboutCreatedByPrefix => _localization["AboutCreatedByPrefix"];
     public string AboutCreditsLabel => _localization["AboutCreditsLabel"];
     public string AboutCreditsPeriod => _localization["AboutCreditsPeriod"];
+    public string AboutForkLabel => _localization["AboutForkLabel"];
     public string AboutHeader => _localization["AboutHeader"];
     public string AboutHint => _localization["AboutHint"];
     public string AboutLabel => _localization["AboutLabel"];
@@ -142,6 +149,7 @@ public partial class MainWindowViewModel
     public string AboutLicenseLabel => _localization["AboutLicenseLabel"];
     public string AboutNoticeHint => _localization["AboutNoticeHint"];
     public string AboutNoticeLabel => _localization["AboutNoticeLabel"];
+    public string AboutRepositoryLabel => _localization["AboutRepositoryLabel"];
     public string AboutVersionHint => _localization["AboutVersionHint"];
     public string AboutVersionLabel => _localization["AboutVersionLabel"];
     public string AppMenuCloseFileHint => _localization["AppMenuCloseFileHint"];
@@ -187,6 +195,10 @@ public partial class MainWindowViewModel
     public string ReadingMinimapLabel => _localization["ReadingMinimapLabel"];
     public string ReadingMinimapOff => _localization["ReadingMinimapOff"];
     public string ReadingMinimapOn => _localization["ReadingMinimapOn"];
+    public string ReadingPaletteHint => _localization["ReadingPaletteHint"];
+    public string ReadingPaletteLabel => _localization["ReadingPaletteLabel"];
+    public string ReadingPaletteOriginal => _localization["ReadingPaletteOriginal"];
+    public string ReadingPaletteWhite => _localization["ReadingPaletteWhite"];
     public string ReadingRendererHint => _localization["ReadingRendererHint"];
     public string ReadingRendererLabel => _localization["ReadingRendererLabel"];
     public string ReadingRendererNative => _localization["ReadingRendererNative"];
@@ -245,6 +257,12 @@ public partial class MainWindowViewModel
         OnPropertyChanged(nameof(SelectedLanguageOption));
     }
 
+    partial void OnThemeChanged(ThemeMode value)
+    {
+        OnPropertyChanged(nameof(IsOriginalPaletteSelected));
+        OnPropertyChanged(nameof(IsWhitePaletteSelected));
+    }
+
     private static bool IsLocalizationChangeNotification(string? propertyName)
         => string.IsNullOrEmpty(propertyName)
            || propertyName == nameof(ILocalizationService.SelectedLanguage)
@@ -268,6 +286,35 @@ public partial class MainWindowViewModel
         if (persist)
         {
             PersistLanguage(normalized);
+        }
+    }
+
+    private void ApplyThemeSelection(ThemeMode theme, bool persist = true)
+    {
+        var normalized = NormalizeTheme(theme);
+        if (Theme == normalized)
+        {
+            return;
+        }
+
+        ApplyTheme(normalized);
+
+        if (persist)
+        {
+            PersistTheme(normalized);
+        }
+    }
+
+    private void PersistTheme(ThemeMode theme)
+    {
+        try
+        {
+            _settings.SaveThemeAsync(theme).AsTask().GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // Theme persistence remains best-effort for the same reason
+            // as the rest of the lightweight app settings.
         }
     }
 
@@ -538,6 +585,15 @@ public partial class MainWindowViewModel
             AppLanguage.English => AppLanguage.English,
             AppLanguage.Russian => AppLanguage.Russian,
             _ => AppLanguage.System
+        };
+
+    private static ThemeMode NormalizeTheme(ThemeMode theme)
+        => theme switch
+        {
+            ThemeMode.Light => ThemeMode.Light,
+            ThemeMode.Dark => ThemeMode.Dark,
+            ThemeMode.ClassicWhite => ThemeMode.ClassicWhite,
+            _ => ThemeMode.System
         };
 
     private abstract record UpdateStatusSnapshot

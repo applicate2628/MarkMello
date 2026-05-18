@@ -11,12 +11,18 @@ namespace MarkMello.Presentation.Services;
 /// </summary>
 public sealed class AvaloniaThemeService : IThemeService
 {
+    public const string ClassicWhiteThemeVariantKey = "ClassicWhite";
+
+    public static readonly ThemeVariant ClassicWhiteThemeVariant =
+        new(ClassicWhiteThemeVariantKey, ThemeVariant.Light);
+
     public void Apply(ThemeMode mode)
     {
         var variant = mode switch
         {
             ThemeMode.Light => ThemeVariant.Light,
             ThemeMode.Dark => ThemeVariant.Dark,
+            ThemeMode.ClassicWhite => ClassicWhiteThemeVariant,
             _ => ThemeVariant.Default
         };
 
@@ -34,7 +40,14 @@ public sealed class AvaloniaThemeService : IThemeService
     public ThemeMode GetEffectiveTheme()
     {
         var variant = global::Avalonia.Application.Current?.ActualThemeVariant;
-        return variant == ThemeVariant.Dark ? ThemeMode.Dark : ThemeMode.Light;
+        if (variant == ThemeVariant.Dark)
+        {
+            return ThemeMode.Dark;
+        }
+
+        return Equals(variant?.Key, ClassicWhiteThemeVariantKey)
+            ? ThemeMode.ClassicWhite
+            : ThemeMode.Light;
     }
 
     private static void ApplyCore(ThemeVariant variant)

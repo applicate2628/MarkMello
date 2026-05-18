@@ -1,5 +1,6 @@
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
-                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:services="using:MarkMello.Presentation.Services">
 
   <!--
     Палитра MarkMello.
@@ -49,6 +50,26 @@
       <SolidColorBrush x:Key="MmTitleBarBrush">#F9F6F2</SolidColorBrush>
       <!-- oklch(0.40 0.01 60) -->
       <SolidColorBrush x:Key="MmTitleBarTextBrush">#4C4742</SolidColorBrush>
+    </ResourceDictionary>
+
+    <ResourceDictionary x:Key="{x:Static services:AvaloniaThemeService.ClassicWhiteThemeVariant}">
+      <SolidColorBrush x:Key="MmBackgroundBrush">#FFFFFF</SolidColorBrush>
+      <SolidColorBrush x:Key="MmElevatedBackgroundBrush">#FFFFFF</SolidColorBrush>
+      <SolidColorBrush x:Key="MmSurfaceBrush">#F6F7F9</SolidColorBrush>
+      <SolidColorBrush x:Key="MmSurfaceHoverBrush">#EEF1F4</SolidColorBrush>
+      <SolidColorBrush x:Key="MmBorderBrush">#D9DEE5</SolidColorBrush>
+      <SolidColorBrush x:Key="MmBorderSoftBrush">#E8EBEF</SolidColorBrush>
+      <SolidColorBrush x:Key="MmTextBrush">#171A1F</SolidColorBrush>
+      <SolidColorBrush x:Key="MmTextSoftBrush">#535B66</SolidColorBrush>
+      <SolidColorBrush x:Key="MmTextFaintBrush">#7D8792</SolidColorBrush>
+      <SolidColorBrush x:Key="MmAccentBrush">#2563EB</SolidColorBrush>
+      <SolidColorBrush x:Key="MmAccentSoftBrush">#EAF2FF</SolidColorBrush>
+      <SolidColorBrush x:Key="MmCodeBackgroundBrush">#F6F8FA</SolidColorBrush>
+      <SolidColorBrush x:Key="MmCodeBorderBrush">#D0D7DE</SolidColorBrush>
+      <SolidColorBrush x:Key="MmQuoteBarBrush">#D0D7DE</SolidColorBrush>
+      <SolidColorBrush x:Key="MmSelectionBrush">#DDEBFF</SolidColorBrush>
+      <SolidColorBrush x:Key="MmTitleBarBrush">#FFFFFF</SolidColorBrush>
+      <SolidColorBrush x:Key="MmTitleBarTextBrush">#4B5563</SolidColorBrush>
     </ResourceDictionary>
 
     <ResourceDictionary x:Key="Dark">

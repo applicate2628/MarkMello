@@ -12,7 +12,7 @@ public interface IThemeService
     void Apply(ThemeMode mode);
 
     /// <summary>
-    /// Возвращает фактически активную light/dark тему после применения RequestedThemeVariant.
+    /// Возвращает фактически активную тему после применения RequestedThemeVariant.
     /// Для ThemeMode.System это должен быть уже резолвленный effective variant.
     /// </summary>
     ThemeMode GetEffectiveTheme();

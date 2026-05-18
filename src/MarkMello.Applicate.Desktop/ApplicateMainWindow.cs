@@ -236,7 +236,7 @@ public sealed class ApplicateMainWindow : MainWindow
         // Transitions collection is installed once per popup; the fade is
         // triggered by setting Opacity = 1 on a dispatch-back-to-UI tick
         // so Avalonia detects a property change to animate over.
-        string[] popupNames = ["AppMenuPanel", "AppSettingsPanel", "AppAboutPanel", "SettingsPanel"];
+        string[] popupNames = ["AppMenuPanel", "AppSettingsPanel", "AppAboutPanel", "AppUpdatesPanel", "SettingsPanel"];
         foreach (var name in popupNames)
         {
             var popup = this.FindControl<Avalonia.Controls.Primitives.Popup>(name);

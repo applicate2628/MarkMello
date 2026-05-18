@@ -54,7 +54,7 @@
                                Text="{Binding LanguageHint}" />
                   </StackPanel>
                   <ComboBox Grid.Column="1"
-                            Classes="mm-language-select"
+                            Classes="mm-settings-select mm-language-select"
                             HorizontalAlignment="Right"
                             ItemsSource="{Binding LanguageOptions}"
                             SelectedItem="{Binding SelectedLanguageOption, Mode=TwoWay}">

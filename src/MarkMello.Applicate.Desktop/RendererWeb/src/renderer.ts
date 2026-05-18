@@ -11,7 +11,7 @@ import {
 } from "./widthResizerVisibility";
 import { renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
 import { normalizeHljsLanguage } from "./hljsLanguage";
-import { runInitialRenderPipeline, type MathReadinessController } from "./initialRenderPipeline";
+import { runInitialRenderPipeline, type MathReadinessController, type RendererTheme } from "./initialRenderPipeline";
 import { applyLoadDocument, clearDocumentState } from "./loadDocument";
 import { renderMath as renderMathInit } from "./mathRenderInit";
 import { schedulePhaseBRebuild } from "./schematicMinimap";
@@ -79,7 +79,7 @@ type MinimapPolicy = {
 type FontFamilyMode = "serif" | "sans" | "mono";
 
 type HostMessage =
-  | { type: "theme"; theme: "light" | "dark" }
+  | { type: "theme"; theme: RendererTheme }
   | { type: "minimap-policy"; minimapPolicy: MinimapPolicy }
   | {
       type: "reading-preferences";
@@ -225,15 +225,16 @@ function renderMath(): MathReadinessController {
   return controller;
 }
 
-function getCurrentTheme(): "light" | "dark" {
-  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+function getCurrentTheme(): RendererTheme {
+  const theme = document.documentElement.dataset.theme;
+  return theme === "dark" || theme === "classic-white" ? theme : "light";
 }
 
-function applyTheme(theme: "light" | "dark"): void {
+function applyTheme(theme: RendererTheme): void {
   document.documentElement.dataset.theme = theme;
 }
 
-function initMermaidWithTheme(theme: "light" | "dark"): void {
+function initMermaidWithTheme(theme: RendererTheme): void {
   hostWindow.mermaid?.initialize({
     startOnLoad: false,
     theme: theme === "dark" ? "dark" : "default",
@@ -285,7 +286,7 @@ function renderCodeBlocks(): void {
   }
 }
 
-async function handleThemeChange(theme: "light" | "dark"): Promise<void> {
+async function handleThemeChange(theme: RendererTheme): Promise<void> {
   applyTheme(theme);
   initMermaidWithTheme(theme);
   await renderMermaid();

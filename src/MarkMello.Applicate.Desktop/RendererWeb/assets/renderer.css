@@ -101,6 +101,16 @@ body.mm-saving div.mm-width-handle {
   --mm-document-rule: rgba(255, 255, 255, 0.16);
 }
 
+:root[data-theme="classic-white"] {
+  --mm-accent: #2563EB;
+  --mm-accent-soft: #EAF2FF;
+  --mm-document-text: #171A1F;
+  --mm-document-muted: #535B66;
+  --mm-document-background: #FFFFFF;
+  --mm-document-code-background: #F6F8FA;
+  --mm-document-rule: rgba(31, 35, 40, 0.18);
+}
+
 .mm-drop-overlay {
   position: fixed;
   inset: 12px;

@@ -202,6 +202,7 @@ public sealed class JsonSettingsStore : ISettingsStore
         {
             ThemeMode.Light => ThemeMode.Light,
             ThemeMode.Dark => ThemeMode.Dark,
+            ThemeMode.ClassicWhite => ThemeMode.ClassicWhite,
             _ => ThemeMode.System
         };
 

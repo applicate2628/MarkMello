@@ -596,6 +596,65 @@ public sealed class MainWindowViewModelTests
             harness.ViewModel.SelectedLanguageOption);
     }
 
+    [Fact]
+    public void ReadingPaletteSelectionDefaultsToOriginalLightPalette()
+    {
+        var harness = CreateHarness();
+
+        Assert.True(harness.ViewModel.IsOriginalPaletteSelected);
+        Assert.False(harness.ViewModel.IsWhitePaletteSelected);
+    }
+
+    [Fact]
+    public void WhitePaletteSelectionPersistsClassicWhiteLightTheme()
+    {
+        var harness = CreateHarness();
+
+        harness.ViewModel.IsWhitePaletteSelected = true;
+
+        Assert.Equal(LightPaletteMode.White, harness.ViewModel.ReadingPreferences.LightPalette);
+        Assert.Equal(ThemeMode.ClassicWhite, harness.Settings.Theme);
+        Assert.Equal(ThemeMode.ClassicWhite, harness.ViewModel.Theme);
+        Assert.False(harness.ViewModel.IsOriginalPaletteSelected);
+        Assert.True(harness.ViewModel.IsWhitePaletteSelected);
+    }
+
+    [Fact]
+    public void WhitePaletteSelectionWhileDarkPersistsPreferenceWithoutLeavingDarkMode()
+    {
+        var harness = CreateHarness();
+
+        harness.ViewModel.CycleThemeCommand.Execute(null);
+        harness.ViewModel.IsWhitePaletteSelected = true;
+
+        Assert.Equal(LightPaletteMode.White, harness.ViewModel.ReadingPreferences.LightPalette);
+        Assert.Equal(ThemeMode.Dark, harness.Settings.Theme);
+        Assert.Equal(ThemeMode.Dark, harness.ViewModel.Theme);
+        Assert.False(harness.ViewModel.IsOriginalPaletteSelected);
+        Assert.True(harness.ViewModel.IsWhitePaletteSelected);
+    }
+
+    [Fact]
+    public void ThemeToggleReturnsFromDarkToSelectedLightPalette()
+    {
+        var harness = CreateHarness();
+
+        harness.ViewModel.IsWhitePaletteSelected = true;
+        harness.ViewModel.CycleThemeCommand.Execute(null);
+
+        Assert.Equal(ThemeMode.Dark, harness.Settings.Theme);
+        Assert.Equal(ThemeMode.Dark, harness.ViewModel.Theme);
+        Assert.False(harness.ViewModel.IsOriginalPaletteSelected);
+        Assert.True(harness.ViewModel.IsWhitePaletteSelected);
+
+        harness.ViewModel.CycleThemeCommand.Execute(null);
+
+        Assert.Equal(ThemeMode.ClassicWhite, harness.Settings.Theme);
+        Assert.Equal(ThemeMode.ClassicWhite, harness.ViewModel.Theme);
+        Assert.False(harness.ViewModel.IsOriginalPaletteSelected);
+        Assert.True(harness.ViewModel.IsWhitePaletteSelected);
+    }
+
     private static MarkdownSource CreateSource(string path, string content)
         => new(path, Path.GetFileName(path), content);
 

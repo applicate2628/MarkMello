@@ -10,6 +10,7 @@ namespace MarkMello.Domain;
 /// <param name="DocumentMinimapMode">Режим отображения миникарты документа.</param>
 /// <param name="RendererBackend">Механизм рендеринга Markdown-документа.</param>
 /// <param name="WidthResizerVisibility">Когда показывать визуальную линию изменения ширины.</param>
+/// <param name="LightPalette">Вариант светлой палитры документа.</param>
 public sealed record ReadingPreferences(
     FontFamilyMode FontFamily,
     int FontSize,
@@ -17,7 +18,8 @@ public sealed record ReadingPreferences(
     int ContentWidth,
     DocumentMinimapMode DocumentMinimapMode = DocumentMinimapMode.Auto,
     MarkdownRendererBackend RendererBackend = MarkdownRendererBackend.WebView,
-    WidthResizerVisibility WidthResizerVisibility = WidthResizerVisibility.OnHover)
+    WidthResizerVisibility WidthResizerVisibility = WidthResizerVisibility.OnHover,
+    LightPaletteMode LightPalette = LightPaletteMode.Original)
 {
     public const int MinFontSize = 14;
     public const int MaxFontSize = 24;
@@ -45,7 +47,8 @@ public sealed record ReadingPreferences(
         ContentWidth: MediumContentWidth,
         DocumentMinimapMode: DocumentMinimapMode.Auto,
         RendererBackend: MarkdownRendererBackend.WebView,
-        WidthResizerVisibility: WidthResizerVisibility.OnHover);
+        WidthResizerVisibility: WidthResizerVisibility.OnHover,
+        LightPalette: LightPaletteMode.Original);
 
     /// <summary>
     /// Нормализует пользовательские настройки до безопасного и предсказуемого диапазона.
@@ -74,6 +77,9 @@ public sealed record ReadingPreferences(
         var widthResizerVisibility = Enum.IsDefined(preferences.WidthResizerVisibility)
             ? preferences.WidthResizerVisibility
             : Default.WidthResizerVisibility;
+        var lightPalette = Enum.IsDefined(preferences.LightPalette)
+            ? preferences.LightPalette
+            : Default.LightPalette;
 
         return new ReadingPreferences(
             fontFamily,
@@ -82,7 +88,8 @@ public sealed record ReadingPreferences(
             contentWidth,
             documentMinimapMode,
             rendererBackend,
-            widthResizerVisibility);
+            widthResizerVisibility,
+            lightPalette);
     }
 
     public ReadingPreferences Normalize() => Normalize(this);

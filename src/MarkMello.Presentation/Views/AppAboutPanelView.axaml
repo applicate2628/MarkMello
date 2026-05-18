@@ -82,6 +82,32 @@
                     StartPoint="0,0.5"
                     EndPoint="1,0.5" />
 
+              <StackPanel Spacing="0"
+                          IsVisible="{Binding HasAboutForkInfo}">
+                <Border Classes="mm-setting-row">
+                  <Grid ColumnDefinitions="*,Auto"
+                        ColumnSpacing="12">
+                    <StackPanel Grid.Column="0"
+                                Spacing="2">
+                      <TextBlock Classes="mm-setting-label"
+                                 Text="{Binding AboutForkLabel}" />
+                      <TextBlock Classes="mm-setting-hint"
+                                 Text="{Binding AboutForkAuthor}" />
+                    </StackPanel>
+                    <Button Grid.Column="1"
+                            Classes="mm-inline-link"
+                            Tag="{Binding AboutRepositoryUrl}"
+                            Click="OnAboutLinkClick">
+                      <TextBlock Text="{Binding AboutRepositoryLabel}" />
+                    </Button>
+                  </Grid>
+                </Border>
+
+                <Line Classes="mm-setting-divider"
+                      StartPoint="0,0.5"
+                      EndPoint="1,0.5" />
+              </StackPanel>
+
               <Border Classes="mm-setting-row">
                 <StackPanel Spacing="8">
                   <TextBlock Classes="mm-setting-label"

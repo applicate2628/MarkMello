@@ -632,7 +632,8 @@
     return controller;
   }
   function getCurrentTheme() {
-    return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    const theme = document.documentElement.dataset.theme;
+    return theme === "dark" || theme === "classic-white" ? theme : "light";
   }
   function applyTheme(theme) {
     document.documentElement.dataset.theme = theme;
