@@ -44,6 +44,24 @@ public sealed class ApplicateEditWorkspaceTemplateTests
     }
 
     [Theory]
+    [InlineData(640, 900, 1200, 640)]
+    [InlineData(0, 900, 1200, 900)]
+    [InlineData(double.NaN, 0, 1200, 1200)]
+    public void PreviewHostWidthPrefersMeasuredWebSlot(
+        double slotWidth,
+        double surfaceWidth,
+        double controlWidth,
+        double expected)
+    {
+        var actual = ApplicateEditPreviewView.ResolvePreviewHostWidth(
+            slotWidth,
+            surfaceWidth,
+            controlWidth);
+
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
     [InlineData(0, 1)]
     [InlineData(120, 120)]
     [InlineData(720, 720)]

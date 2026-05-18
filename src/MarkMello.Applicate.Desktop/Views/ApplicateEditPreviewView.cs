@@ -25,6 +25,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 {
     private static readonly Thickness PreviewDocumentPadding = new(72, 96, 72, 160);
     private static readonly TimeSpan WebPreviewDebounce = TimeSpan.FromMilliseconds(180);
+    private static readonly TimeSpan ResizeContentWidthDebounce = TimeSpan.FromMilliseconds(140);
 
     // Window after a programmatic scroll during which the OPPOSITE side's
     // scroll events are ignored, suppressing the editor↔preview ping-pong
@@ -45,6 +46,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private Border _webRenderMask = null!;
     private readonly ToggleButton _syncToggle;
     private readonly DispatcherTimer _webRenderTimer;
+    private readonly DispatcherTimer _resizeContentWidthTimer;
     private EditorSessionViewModel? _session;
     private ScrollViewer? _hostScrollViewer;
     private ScrollBarVisibility? _hostScrollViewerVerticalMode;
@@ -155,6 +157,8 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
         _webRenderTimer = new DispatcherTimer { Interval = WebPreviewDebounce };
         _webRenderTimer.Tick += OnWebRenderTimerTick;
+        _resizeContentWidthTimer = new DispatcherTimer { Interval = ResizeContentWidthDebounce };
+        _resizeContentWidthTimer.Tick += OnResizeContentWidthTimerTick;
 
         _webSlot.PropertyChanged += OnWebSlotPropertyChanged;
         _webRenderMask.PropertyChanged += OnWebMaskPropertyChanged;
@@ -202,7 +206,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             && _webSlot.Bounds.Width > 0
             && _webSlot.Bounds.Height > 0)
         {
-            ApplyAvailableWidth();
+            ApplyAvailableWidth(deferWebContentWidth: true);
         }
     }
 
@@ -792,6 +796,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         TeardownEditorWiring();
         AttachSession(null);
         _webRenderTimer.Stop();
+        _resizeContentWidthTimer.Stop();
         ReleaseSharedHost();
 
         base.OnDetachedFromVisualTree(e);
@@ -800,7 +805,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     protected override void OnSizeChanged(SizeChangedEventArgs e)
     {
         base.OnSizeChanged(e);
-        ApplyAvailableWidth();
+        ApplyAvailableWidth(deferWebContentWidth: true);
     }
 
     private void AttachSession(EditorSessionViewModel? session)
@@ -1062,7 +1067,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             _session.CurrentPath ?? string.Empty,
             _session.FileName,
             _session.SourceText);
-        var widths = CalculatePreviewWidths(Bounds.Width, _session.ReadingPreferences, PreviewDocumentPadding);
+        var widths = CalculatePreviewWidths(GetPreviewHostWidth(), _session.ReadingPreferences, PreviewDocumentPadding);
 
         _sharedHost.View.UpdateInputs(
             source,
@@ -1186,14 +1191,30 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             _session.SourceText);
     }
 
-    private void ApplyAvailableWidth()
+    private void OnResizeContentWidthTimerTick(object? sender, EventArgs e)
+    {
+        _resizeContentWidthTimer.Stop();
+        ApplyAvailableWidth();
+    }
+
+    private void ApplyAvailableWidth(bool deferWebContentWidth = false)
     {
         var preferences = _session?.ReadingPreferences ?? ReadingPreferences.Default;
-        var widths = CalculatePreviewWidths(Bounds.Width, preferences, PreviewDocumentPadding);
+        var widths = CalculatePreviewWidths(GetPreviewHostWidth(), preferences, PreviewDocumentPadding);
         _nativePreview.AvailableContentWidth = widths.NativeContentWidth;
         if (_sharedHost is not null && _isAttachedToHost)
         {
-            _sharedHost.View.AvailableContentWidth = widths.WebColumnWidth;
+            if (deferWebContentWidth)
+            {
+                _resizeContentWidthTimer.Stop();
+                _resizeContentWidthTimer.Start();
+            }
+            else
+            {
+                _resizeContentWidthTimer.Stop();
+                _sharedHost.View.AvailableContentWidth = widths.WebColumnWidth;
+            }
+
             // The WebView wrapper is added to `_webSlot` (the Border directly
             // containing the WebView2 NativeControlHost). Sizing MinHeight from
             // `_webSlot.Bounds.Height` keeps the HWND viewport in lock-step with
@@ -1219,6 +1240,27 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
                 : (surfaceHeight > 0 ? surfaceHeight : Bounds.Height);
             _sharedHost.View.MinHeight = CalculateWebPreviewMinHeight(hostHeight);
         }
+    }
+
+    private double GetPreviewHostWidth()
+        => ResolvePreviewHostWidth(_webSlot.Bounds.Width, _surface.Bounds.Width, Bounds.Width);
+
+    internal static double ResolvePreviewHostWidth(
+        double slotWidth,
+        double surfaceWidth,
+        double controlWidth)
+    {
+        if (double.IsFinite(slotWidth) && slotWidth > 0)
+        {
+            return slotWidth;
+        }
+
+        if (double.IsFinite(surfaceWidth) && surfaceWidth > 0)
+        {
+            return surfaceWidth;
+        }
+
+        return controlWidth;
     }
 
     internal static ApplicateEditPreviewWidths CalculatePreviewWidths(
@@ -1337,10 +1379,12 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     public void Dispose()
     {
         _webRenderTimer.Stop();
+        _resizeContentWidthTimer.Stop();
         RestoreHostScrollMode();
         AttachSession(null);
         ReleaseSharedHost();
         _webRenderTimer.Tick -= OnWebRenderTimerTick;
+        _resizeContentWidthTimer.Tick -= OnResizeContentWidthTimerTick;
         _scrollBarOverlay?.Dispose();
         _scrollBarOverlay = null;
     }
