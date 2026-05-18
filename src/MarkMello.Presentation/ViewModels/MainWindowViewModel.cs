@@ -98,11 +98,13 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsAppMenuOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppSettingsOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppAboutOpen))]
+    [NotifyPropertyChangedFor(nameof(IsAppUpdatesOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppOverlayOpen))]
     [NotifyPropertyChangedFor(nameof(HasOpenOverlay))]
     [NotifyPropertyChangedFor(nameof(AppMenuOverlayContent))]
     [NotifyPropertyChangedFor(nameof(AppSettingsOverlayContent))]
     [NotifyPropertyChangedFor(nameof(AppAboutOverlayContent))]
+    [NotifyPropertyChangedFor(nameof(AppUpdatesOverlayContent))]
     [NotifyPropertyChangedFor(nameof(ReadingSettingsOverlayContent))]
     private ShellOverlayKind _shellOverlay = ShellOverlayKind.None;
 
@@ -134,11 +136,13 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsAppMenuOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppSettingsOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppAboutOpen))]
+    [NotifyPropertyChangedFor(nameof(IsAppUpdatesOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppOverlayOpen))]
     [NotifyPropertyChangedFor(nameof(HasOpenOverlay))]
     [NotifyPropertyChangedFor(nameof(AppMenuOverlayContent))]
     [NotifyPropertyChangedFor(nameof(AppSettingsOverlayContent))]
     [NotifyPropertyChangedFor(nameof(AppAboutOverlayContent))]
+    [NotifyPropertyChangedFor(nameof(AppUpdatesOverlayContent))]
     [NotifyPropertyChangedFor(nameof(ShowsDirtySaveButton))]
     private bool _isEditMode;
 
@@ -214,8 +218,14 @@ public partial class MainWindowViewModel : ObservableObject
 
     public bool IsAppAboutOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppAbout;
 
+    public bool IsAppUpdatesOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppUpdates;
+
     public bool IsAppOverlayOpen => ShowsAppMenuControl
-        && ShellOverlay is ShellOverlayKind.AppMenu or ShellOverlayKind.AppSettings or ShellOverlayKind.AppAbout;
+        && ShellOverlay is
+            ShellOverlayKind.AppMenu
+            or ShellOverlayKind.AppSettings
+            or ShellOverlayKind.AppAbout
+            or ShellOverlayKind.AppUpdates;
 
     public bool HasOpenOverlay => IsSettingsOpen || IsAppOverlayOpen;
 
@@ -224,6 +234,8 @@ public partial class MainWindowViewModel : ObservableObject
     public object? AppSettingsOverlayContent => IsAppSettingsOpen ? this : null;
 
     public object? AppAboutOverlayContent => IsAppAboutOpen ? this : null;
+
+    public object? AppUpdatesOverlayContent => IsAppUpdatesOpen ? this : null;
 
     public object? ReadingSettingsOverlayContent => IsSettingsOpen && IsViewer ? this : null;
 
@@ -847,6 +859,20 @@ public partial class MainWindowViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private void OpenAppUpdates()
+    {
+        if (!ShowsAppMenuControl)
+        {
+            CloseAppOverlayCore();
+            return;
+        }
+
+        MarkSecondaryFeaturesReady();
+
+        ShellOverlay = ShellOverlayKind.AppUpdates;
+    }
+
+    [RelayCommand]
     private void ReturnToAppMenu()
     {
         if (!ShowsAppMenuControl)
@@ -1113,11 +1139,13 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(IsAppMenuOpen));
         OnPropertyChanged(nameof(IsAppSettingsOpen));
         OnPropertyChanged(nameof(IsAppAboutOpen));
+        OnPropertyChanged(nameof(IsAppUpdatesOpen));
         OnPropertyChanged(nameof(IsAppOverlayOpen));
         OnPropertyChanged(nameof(HasOpenOverlay));
         OnPropertyChanged(nameof(AppMenuOverlayContent));
         OnPropertyChanged(nameof(AppSettingsOverlayContent));
         OnPropertyChanged(nameof(AppAboutOverlayContent));
+        OnPropertyChanged(nameof(AppUpdatesOverlayContent));
         OnPropertyChanged(nameof(ActiveDocumentContent));
         UpdateCommandStates();
     }
@@ -1692,7 +1720,11 @@ public partial class MainWindowViewModel : ObservableObject
 
     private void CloseAppOverlayCore()
     {
-        if (ShellOverlay is ShellOverlayKind.AppMenu or ShellOverlayKind.AppSettings or ShellOverlayKind.AppAbout)
+        if (ShellOverlay is
+            ShellOverlayKind.AppMenu
+            or ShellOverlayKind.AppSettings
+            or ShellOverlayKind.AppAbout
+            or ShellOverlayKind.AppUpdates)
         {
             ShellOverlay = ShellOverlayKind.None;
         }

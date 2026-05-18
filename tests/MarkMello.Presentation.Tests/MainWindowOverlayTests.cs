@@ -21,6 +21,7 @@ public sealed class MainWindowOverlayTests
     [InlineData("AppMenuPanel")]
     [InlineData("AppSettingsPanel")]
     [InlineData("AppAboutPanel")]
+    [InlineData("AppUpdatesPanel")]
     [InlineData("SettingsPanel")]
     public void MainOverlaysUseNonTopmostPlatformPopupWindows(string panelName)
     {
@@ -135,7 +136,7 @@ public sealed class MainWindowOverlayTests
     }
 
     [Fact]
-    public void UpdateSurfaceLivesInAppMenuNotAppSettings()
+    public void UpdateSurfaceUsesAppMenuEntryAndDedicatedPanel()
     {
         var appMenu = File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,
@@ -159,12 +160,48 @@ public sealed class MainWindowOverlayTests
             "MarkMello.Presentation",
             "Views",
             "AppSettingsPanelView.axaml"));
+        var appUpdates = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "AppUpdatesPanelView.axaml"));
 
         Assert.Contains("Text=\"{Binding UpdatesLabel}\"", appMenu, StringComparison.Ordinal);
-        Assert.Contains("Command=\"{Binding CheckForUpdatesCommand}\"", appMenu, StringComparison.Ordinal);
-        Assert.Contains("Command=\"{Binding DownloadUpdateCommand}\"", appMenu, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding OpenAppUpdatesCommand}\"", appMenu, StringComparison.Ordinal);
+        Assert.DoesNotContain("<Expander", appMenu, StringComparison.Ordinal);
+        Assert.DoesNotContain("Command=\"{Binding CheckForUpdatesCommand}\"", appMenu, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding CheckForUpdatesCommand}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding DownloadUpdateCommand}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding OpenDownloadedUpdateCommand}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding UpdatesHeader}\"", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("Text=\"{Binding UpdatesLabel}\"", appSettings, StringComparison.Ordinal);
         Assert.DoesNotContain("Command=\"{Binding CheckForUpdatesCommand}\"", appSettings, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MainWindowContainsDedicatedUpdatesPanel()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "MainWindow.axaml"));
+
+        Assert.Contains("<Popup Name=\"AppUpdatesPanel\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("IsOpen=\"{Binding IsAppUpdatesOpen}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("<views:AppUpdatesPanelView />", xaml, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -502,6 +502,17 @@
         <views:AppAboutPanelView />
       </Popup>
 
+      <Popup Name="AppUpdatesPanel"
+             ZIndex="1000"
+             IsOpen="{Binding IsAppUpdatesOpen}"
+             PlacementTarget="{Binding #AppMenuTriggerButton}"
+             Placement="BottomEdgeAlignedLeft"
+             VerticalOffset="8"
+             Topmost="False"
+             ShouldUseOverlayLayer="False">
+        <views:AppUpdatesPanelView />
+      </Popup>
+
       <Popup Name="SettingsPanel"
              ZIndex="1000"
              IsOpen="{Binding IsSettingsOpen}"

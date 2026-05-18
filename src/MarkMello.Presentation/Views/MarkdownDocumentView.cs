@@ -8,6 +8,7 @@ using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MarkMello.Application.Abstractions;
@@ -42,6 +43,9 @@ public sealed class MarkdownDocumentView : UserControl
 
     public static readonly StyledProperty<IImageSourceResolver?> ImageSourceResolverProperty =
         AvaloniaProperty.Register<MarkdownDocumentView, IImageSourceResolver?>(nameof(ImageSourceResolver));
+
+    public static readonly StyledProperty<string?> SourcePathProperty =
+        AvaloniaProperty.Register<MarkdownDocumentView, string?>(nameof(SourcePath));
 
     private const double DragSelectionThreshold = 4;
     private const double CodeBlockHorizontalScrollBarReserve = 16;
@@ -188,6 +192,12 @@ public sealed class MarkdownDocumentView : UserControl
     {
         get => GetValue(ImageSourceResolverProperty);
         set => SetValue(ImageSourceResolverProperty, value);
+    }
+
+    public string? SourcePath
+    {
+        get => GetValue(SourcePathProperty);
+        set => SetValue(SourcePathProperty, value);
     }
 
     public int? SelectionAnchor { get; private set; }
@@ -1429,6 +1439,16 @@ public sealed class MarkdownDocumentView : UserControl
             return;
         }
 
+        if (MarkdownLocalLinkResolver.TryResolve(
+                pressedLink.Url,
+                SourcePath,
+                File.Exists,
+                out var localTarget))
+        {
+            await LaunchLocalFileAsync(localTarget.Path);
+            return;
+        }
+
         if (!Uri.TryCreate(pressedLink.Url, UriKind.Absolute, out var uri))
         {
             return;
@@ -1441,6 +1461,23 @@ public sealed class MarkdownDocumentView : UserControl
         }
 
         await launcher.LaunchUriAsync(uri);
+    }
+
+    private async Task LaunchLocalFileAsync(string path)
+    {
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null)
+        {
+            return;
+        }
+
+        var file = await topLevel.StorageProvider.TryGetFileFromPathAsync(path).ConfigureAwait(true);
+        if (file is null)
+        {
+            return;
+        }
+
+        await topLevel.Launcher.LaunchFileAsync(file).ConfigureAwait(true);
     }
 
     private void RegisterHeadingAnchor(MarkdownHeadingBlock block, Control headingControl)

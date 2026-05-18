@@ -271,6 +271,11 @@
     <Setter Property="IsHitTestVisible" Value="True" />
     <Setter Property="RenderTransform" Value="translate(0px,0px) scale(1)" />
   </Style>
+  <Style Selector="Window.mm-app-updates-open Border.mm-settings-panel.mm-app-updates-panel">
+    <Setter Property="Opacity" Value="1" />
+    <Setter Property="IsHitTestVisible" Value="True" />
+    <Setter Property="RenderTransform" Value="translate(0px,0px) scale(1)" />
+  </Style>
 
   <Style Selector="Border.mm-settings-head-shell">
     <Setter Property="Padding" Value="18,14,18,10" />

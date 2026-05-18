@@ -349,6 +349,7 @@ public partial class MainWindow : Window
             or nameof(MainWindowViewModel.IsAppMenuOpen)
             or nameof(MainWindowViewModel.IsAppSettingsOpen)
             or nameof(MainWindowViewModel.IsAppAboutOpen)
+            or nameof(MainWindowViewModel.IsAppUpdatesOpen)
             or nameof(MainWindowViewModel.HasOpenOverlay))
         {
             SyncOverlayWindowClasses();
@@ -679,6 +680,15 @@ public partial class MainWindow : Window
             }
         }
 
+        if (_viewModel.IsAppUpdatesOpen)
+        {
+            var appUpdatesPanel = this.FindControl<Control>("AppUpdatesPanel");
+            if (appUpdatesPanel is not null && IsWithinVisual(source, appUpdatesPanel))
+            {
+                return true;
+            }
+        }
+
         var appMenuTrigger = this.FindControl<ToggleButton>("AppMenuTriggerButton");
         return appMenuTrigger is not null && IsWithinVisual(source, appMenuTrigger);
     }
@@ -691,6 +701,7 @@ public partial class MainWindow : Window
         Classes.Set("mm-app-menu-open", _viewModel.IsAppMenuOpen);
         Classes.Set("mm-app-settings-open", _viewModel.IsAppSettingsOpen);
         Classes.Set("mm-app-about-open", _viewModel.IsAppAboutOpen);
+        Classes.Set("mm-app-updates-open", _viewModel.IsAppUpdatesOpen);
     }
 
     private void OnViewModelCloseRequested(object? sender, EventArgs e)

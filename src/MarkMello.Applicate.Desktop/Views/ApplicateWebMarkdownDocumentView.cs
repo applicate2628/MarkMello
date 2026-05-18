@@ -5,6 +5,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Platform;
+using Avalonia.Platform.Storage;
 using Avalonia.Styling;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Diagnostics;
@@ -12,6 +13,7 @@ using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views.Minimap;
 using MarkMello.Domain;
 using MarkMello.Presentation;
+using MarkMello.Presentation.Views.Markdown;
 using Microsoft.Extensions.DependencyInjection;
 using SysMath = System.Math;
 
@@ -642,21 +644,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private async System.Threading.Tasks.Task HandleNewWindowAsync(string href)
     {
-        if (TryResolveLocalMarkdownLink(href, out var resolvedMarkdownPath))
+        if (TryResolveLocalLink(href, out var localTarget))
         {
-            var openDocs = App.Services?.GetService<Editing.IOpenDocumentsService>();
-            if (openDocs is not null)
-            {
-                try
-                {
-                    await openDocs.OpenAsync(resolvedMarkdownPath).ConfigureAwait(true);
-                }
-                catch (System.IO.IOException)
-                {
-                    // File moved or unreadable; silently no-op.
-                }
-                return;
-            }
+            await HandleLocalLinkAsync(localTarget).ConfigureAwait(true);
+            return;
         }
 
         if (!Uri.TryCreate(href, UriKind.Absolute, out var uri)
@@ -1129,25 +1120,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
-        // Relative-path links to local markdown/text files (typically inserted
-        // via fork's edit-mode drag-drop) should open as a new tab in the
-        // open-documents service instead of being launched as a web URL.
-        if (TryResolveLocalMarkdownLink(href, out var resolvedMarkdownPath))
+        // Relative-path links to local markdown/text files open as app tabs;
+        // other existing local files are handed to the OS default app.
+        if (TryResolveLocalLink(href, out var localTarget))
         {
-            var openDocs = App.Services?.GetService<Editing.IOpenDocumentsService>();
-            if (openDocs is not null)
-            {
-                try
-                {
-                    await openDocs.OpenAsync(resolvedMarkdownPath).ConfigureAwait(true);
-                }
-                catch (System.IO.IOException)
-                {
-                    // File moved or unreadable; surface nothing — user sees
-                    // the click had no effect and can investigate manually.
-                }
-                return;
-            }
+            await HandleLocalLinkAsync(localTarget).ConfigureAwait(true);
+            return;
         }
 
         if (!Uri.TryCreate(href, UriKind.Absolute, out var uri)
@@ -1163,122 +1141,85 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
     }
 
-    private static readonly string[] MarkdownLinkExtensions =
-        { ".md", ".markdown", ".mdown", ".markdn", ".txt" };
-
     internal static bool TryResolveLocalMarkdownLinkForTesting(
         string href,
         string? sourcePath,
         out string resolvedPath)
-        => TryResolveLocalMarkdownLink(href, sourcePath, File.Exists, out resolvedPath);
+        => TryResolveLocalLinkForTesting(
+            href,
+            sourcePath,
+            MarkdownLocalLinkKind.MarkdownDocument,
+            out resolvedPath);
 
-    private bool TryResolveLocalMarkdownLink(string href, out string resolvedPath)
-        => TryResolveLocalMarkdownLink(href, Source?.Path, File.Exists, out resolvedPath);
-
-    private static bool TryResolveLocalMarkdownLink(
+    internal static bool TryResolveLocalFileLinkForTesting(
         string href,
         string? sourcePath,
-        Func<string, bool> fileExists,
+        out string resolvedPath)
+        => TryResolveLocalLinkForTesting(
+            href,
+            sourcePath,
+            MarkdownLocalLinkKind.ExternalFile,
+            out resolvedPath);
+
+    private bool TryResolveLocalLink(string href, out MarkdownLocalLinkTarget target)
+        => MarkdownLocalLinkResolver.TryResolve(href, Source?.Path, File.Exists, out target);
+
+    private static bool TryResolveLocalLinkForTesting(
+        string href,
+        string? sourcePath,
+        MarkdownLocalLinkKind expectedKind,
         out string resolvedPath)
     {
         resolvedPath = string.Empty;
-        if (string.IsNullOrWhiteSpace(href))
+        if (!MarkdownLocalLinkResolver.TryResolve(href, sourcePath, File.Exists, out var target)
+            || target.Kind != expectedKind)
         {
             return false;
         }
 
-        // The renderer feeds the raw href attribute for ordinary clicks and
-        // WebView may feed an absolute request URI for context-menu opens.
-        // Keep non-file absolute URI schemes on the browser-launch path.
-        string candidate;
-        var trimmed = href.Trim();
-        if (Uri.TryCreate(trimmed, UriKind.Absolute, out var uri))
-        {
-            if (!uri.IsFile)
-            {
-                return false;
-            }
-
-            candidate = uri.LocalPath;
-        }
-        else
-        {
-            candidate = trimmed;
-        }
-
-        candidate = StripLocalLinkDecoration(candidate);
-        if (string.IsNullOrWhiteSpace(candidate))
-        {
-            return false;
-        }
-
-        try
-        {
-            candidate = Uri.UnescapeDataString(candidate);
-        }
-        catch (UriFormatException)
-        {
-            return false;
-        }
-
-        try
-        {
-            // Only treat .md/.markdown/.txt as openable in the tabs strip; other
-            // extensions fall through to default browser launch.
-            var ext = System.IO.Path.GetExtension(candidate).ToLowerInvariant();
-            if (!MarkdownLinkExtensions.Contains(ext))
-            {
-                return false;
-            }
-
-            // Resolve relative to the current Source's directory when needed.
-            if (!System.IO.Path.IsPathRooted(candidate))
-            {
-                var sourceDir = string.IsNullOrWhiteSpace(sourcePath)
-                    ? null
-                    : System.IO.Path.GetDirectoryName(sourcePath);
-                if (string.IsNullOrWhiteSpace(sourceDir))
-                {
-                    return false;
-                }
-                candidate = System.IO.Path.GetFullPath(System.IO.Path.Combine(sourceDir, candidate));
-            }
-            else
-            {
-                candidate = System.IO.Path.GetFullPath(candidate);
-            }
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
-        catch (NotSupportedException)
-        {
-            return false;
-        }
-        catch (System.IO.PathTooLongException)
-        {
-            return false;
-        }
-
-        if (!fileExists(candidate))
-        {
-            return false;
-        }
-
-        resolvedPath = candidate;
+        resolvedPath = target.Path;
         return true;
     }
 
-    private static string StripLocalLinkDecoration(string candidate)
+    private async Task HandleLocalLinkAsync(MarkdownLocalLinkTarget target)
     {
-        var fragmentIndex = candidate.IndexOf('#', StringComparison.Ordinal);
-        var queryIndex = candidate.IndexOf('?', StringComparison.Ordinal);
-        var cutIndex = fragmentIndex >= 0 && queryIndex >= 0
-            ? System.Math.Min(fragmentIndex, queryIndex)
-            : System.Math.Max(fragmentIndex, queryIndex);
+        if (target.Kind == MarkdownLocalLinkKind.MarkdownDocument)
+        {
+            var openDocs = App.Services?.GetService<Editing.IOpenDocumentsService>();
+            if (openDocs is not null)
+            {
+                try
+                {
+                    await openDocs.OpenAsync(target.Path).ConfigureAwait(true);
+                }
+                catch (System.IO.IOException)
+                {
+                    // File moved or unreadable; surface nothing — user sees
+                    // the click had no effect and can investigate manually.
+                }
+            }
 
-        return cutIndex >= 0 ? candidate[..cutIndex] : candidate;
+            return;
+        }
+
+        await LaunchLocalFileAsync(target.Path).ConfigureAwait(true);
+    }
+
+    private async Task LaunchLocalFileAsync(string path)
+    {
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null)
+        {
+            return;
+        }
+
+        var file = await topLevel.StorageProvider.TryGetFileFromPathAsync(path).ConfigureAwait(true);
+        if (file is null)
+        {
+            return;
+        }
+
+        await topLevel.Launcher.LaunchFileAsync(file).ConfigureAwait(true);
     }
 
     private void ApplyReadingPreferences()

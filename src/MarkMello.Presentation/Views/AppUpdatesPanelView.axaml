@@ -1,0 +1,90 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:MarkMello.Presentation.ViewModels"
+             mc:Ignorable="d"
+             x:Class="MarkMello.Presentation.Views.AppUpdatesPanelView"
+             x:DataType="vm:MainWindowViewModel">
+      <Border
+              Classes="mm-settings-panel mm-popover-left mm-app-updates-panel"
+              Width="320">
+        <StackPanel>
+          <Border Classes="mm-settings-head-shell">
+            <Grid ColumnDefinitions="Auto,*,Auto"
+                  ColumnSpacing="12">
+              <Button Grid.Column="0"
+                      Classes="mm-settings-close"
+                      Command="{Binding ReturnToAppMenuCommand}"
+                      ToolTip.Tip="{Binding OverlayBackToMenu}">
+                <Path Data="M9.5,1.5 L2.5,5.5 L9.5,9.5"
+                      Stroke="{DynamicResource MmTextFaintBrush}"
+                      StrokeThickness="1.4"
+                      StrokeLineCap="Round"
+                      StrokeJoin="Round"
+                      Fill="Transparent" />
+              </Button>
+              <TextBlock Classes="mm-settings-title"
+                         Grid.Column="1"
+                         VerticalAlignment="Center"
+                         Text="{Binding UpdatesHeader}" />
+              <Button Grid.Column="2"
+                      Classes="mm-settings-close"
+                      Command="{Binding CloseOverlayCommand}"
+                      ToolTip.Tip="{Binding OverlayCloseUpdates}">
+                <Path Data="M0,0 L10,10 M10,0 L0,10"
+                      Stroke="{DynamicResource MmTextFaintBrush}"
+                      StrokeThickness="1.4"
+                      StrokeLineCap="Round" />
+              </Button>
+            </Grid>
+          </Border>
+
+          <Border Classes="mm-settings-body-shell">
+            <StackPanel Spacing="0">
+              <Border Classes="mm-setting-row">
+                <Grid ColumnDefinitions="*,Auto"
+                      ColumnSpacing="12">
+                  <StackPanel Grid.Column="0"
+                              Spacing="4">
+                    <TextBlock Classes="mm-setting-label"
+                               FontWeight="SemiBold"
+                               Text="{Binding UpdateStatusTitle}"
+                               TextWrapping="Wrap" />
+                    <TextBlock Classes="mm-setting-body"
+                               Text="{Binding UpdateStatusMessage}"
+                               TextWrapping="Wrap" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1"
+                             Classes="mm-setting-meta"
+                             Text="{Binding UpdateStateBadge}" />
+                </Grid>
+              </Border>
+
+              <Line Classes="mm-setting-divider"
+                    StartPoint="0,0.5"
+                    EndPoint="1,0.5" />
+
+              <Border Classes="mm-setting-row">
+                <StackPanel Spacing="8">
+                  <Button Classes="mm-dialog-secondary"
+                          HorizontalAlignment="Left"
+                          Content="{Binding CheckForUpdatesLabel}"
+                          Command="{Binding CheckForUpdatesCommand}" />
+                  <Button Classes="mm-dialog-primary"
+                          HorizontalAlignment="Left"
+                          Content="{Binding DownloadUpdateLabel}"
+                          Command="{Binding DownloadUpdateCommand}"
+                          IsVisible="{Binding CanDownloadAvailableUpdate}" />
+                  <Button Classes="mm-dialog-secondary"
+                          HorizontalAlignment="Left"
+                          Content="{Binding DownloadedUpdateActionLabel}"
+                          Command="{Binding OpenDownloadedUpdateCommand}"
+                          IsVisible="{Binding CanOpenDownloadedUpdate}" />
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </Border>
+</UserControl>

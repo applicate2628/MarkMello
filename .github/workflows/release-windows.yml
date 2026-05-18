@@ -119,7 +119,7 @@ jobs:
           repo_name="${GITHUB_REPOSITORY#*/}"
 
           if [[ "${{ github.event_name }}" == "push" ]]; then
-            if [[ "$version" == *-* ]]; then
+            if [[ "$version" == *-* && "$version" != *-applicate ]]; then
               prerelease="true"
             else
               prerelease="false"

@@ -179,6 +179,26 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void OpenAppUpdatesCommandSwitchesFromMenuToAppUpdates()
+    {
+        var harness = CreateHarness();
+
+        harness.ViewModel.ToggleAppMenuCommand.Execute(null);
+        harness.ViewModel.OpenAppUpdatesCommand.Execute(null);
+
+        Assert.False(harness.ViewModel.IsAppMenuOpen);
+        Assert.True(harness.ViewModel.IsAppUpdatesOpen);
+        Assert.True(harness.ViewModel.IsAppOverlayOpen);
+        Assert.NotNull(harness.ViewModel.AppUpdatesOverlayContent);
+
+        harness.ViewModel.ReturnToAppMenuCommand.Execute(null);
+
+        Assert.True(harness.ViewModel.IsAppMenuOpen);
+        Assert.False(harness.ViewModel.IsAppUpdatesOpen);
+        Assert.Null(harness.ViewModel.AppUpdatesOverlayContent);
+    }
+
+    [Fact]
     public void OpenAboutCommandSwitchesFromSettingsToAboutAndBack()
     {
         var harness = CreateHarness();

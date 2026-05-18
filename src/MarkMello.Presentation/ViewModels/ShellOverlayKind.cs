@@ -6,5 +6,6 @@ public enum ShellOverlayKind
     AppMenu,
     AppSettings,
     AppAbout,
+    AppUpdates,
     ReadingSettings
 }

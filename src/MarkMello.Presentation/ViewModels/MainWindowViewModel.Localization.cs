@@ -87,6 +87,7 @@ public partial class MainWindowViewModel
         nameof(OverlayCloseAbout),
         nameof(OverlayCloseMenu),
         nameof(OverlayCloseSettings),
+        nameof(OverlayCloseUpdates),
         nameof(ReadingFontHint),
         nameof(ReadingFontLabel),
         nameof(ReadingFontMono),
@@ -121,6 +122,7 @@ public partial class MainWindowViewModel
         nameof(TitleBarClose),
         nameof(TitleBarMaximize),
         nameof(TitleBarMinimize),
+        nameof(UpdatesHeader),
         nameof(UpdatesHint),
         nameof(UpdatesLabel),
         nameof(UpdateNotificationDismiss),
@@ -171,6 +173,7 @@ public partial class MainWindowViewModel
     public string OverlayCloseAbout => _localization["OverlayCloseAbout"];
     public string OverlayCloseMenu => _localization["OverlayCloseMenu"];
     public string OverlayCloseSettings => _localization["OverlayCloseSettings"];
+    public string OverlayCloseUpdates => _localization["OverlayCloseUpdates"];
     public string ReadingFontHint => _localization["ReadingFontHint"];
     public string ReadingFontLabel => _localization["ReadingFontLabel"];
     public string ReadingFontMono => _localization["ReadingFontMono"];
@@ -205,6 +208,7 @@ public partial class MainWindowViewModel
     public string TitleBarClose => _localization["TitleBarClose"];
     public string TitleBarMaximize => _localization["TitleBarMaximize"];
     public string TitleBarMinimize => _localization["TitleBarMinimize"];
+    public string UpdatesHeader => _localization["UpdatesHeader"];
     public string UpdatesHint => _localization["UpdatesHint"];
     public string UpdatesLabel => _localization["UpdatesLabel"];
     public string UpdateNotificationDismiss => _localization["UpdateNotificationDismiss"];

@@ -52,6 +52,24 @@ public sealed class ApplicateWebMarkdownDocumentViewShellModeTests
         Assert.Equal(string.Empty, resolvedPath);
     }
 
+    [Fact]
+    public void LocalFileLinkResolverReturnsNonMarkdownFilesForShellLaunch()
+    {
+        using var temp = new TempDirectory();
+        var sourcePath = Path.Combine(temp.Path, "source.md");
+        var targetPath = Path.Combine(temp.Path, "data.csv");
+        File.WriteAllText(sourcePath, "# Source");
+        File.WriteAllText(targetPath, "a,b");
+
+        var resolved = ApplicateWebMarkdownDocumentView.TryResolveLocalFileLinkForTesting(
+            "data.csv",
+            sourcePath,
+            out var resolvedPath);
+
+        Assert.True(resolved);
+        Assert.Equal(targetPath, resolvedPath);
+    }
+
     private sealed class TempDirectory : IDisposable
     {
         public TempDirectory()

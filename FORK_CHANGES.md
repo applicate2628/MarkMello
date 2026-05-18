@@ -66,6 +66,12 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - The WebView renderer hides the document body, minimap, and width-resizer handle until the bootstrap pipeline finishes math + mermaid + code-block rendering and posts `layout-ready`. Without this gate the user briefly sees a fallback state on tab switch and fresh launch (web fonts not yet swapped, `\[ ... \]` math placeholders, raw mermaid source, width handle at a stale X coordinate). The reveal uses a 120ms CSS opacity transition shared by all three surfaces.
 - The hide-rule is scoped to `body > main.mm-document` (and the minimap aside, and the width-handle div) so that the minimap's cloned `.mm-document` subtree is not affected; the clone always renders at full opacity inside the minimap container.
 
+## Bugfix Release Scope (v0.3.2-applicate)
+
+- The Updates entry in the application menu now opens a Settings-style overlay panel. The manual `Check now`, download, and open-release actions live inside that panel instead of expanding inline in the menu.
+- Existing local links to Markdown and text files open as Applicate tabs, while links to other existing local files are passed to the operating system's default application.
+- The release workflow treats Applicate suffix tags such as `v0.3.2-applicate` as stable releases so the published GitHub Release can become Latest automatically.
+
 ## Bugfix Release Scope (v0.3.1-applicate)
 
 - Markdown links rendered by the WebView path now keep their authored target in `data-mm-href` and resolve display links against the source document directory instead of the generated temporary HTML directory.
