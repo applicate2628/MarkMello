@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace MarkMello.Applicate.Desktop.Activation;
@@ -66,36 +67,25 @@ public sealed class ApplicateSingleInstanceService : IDisposable
     }
 
     public static bool ForwardActivation(string[] args)
+        => ForwardActivation(
+            args,
+            new NamedPipeApplicateActivationForwarder(PipeName),
+            ApplicateForegroundActivationPermission.Instance);
+
+    internal static bool ForwardActivation(
+        string[] args,
+        IApplicateActivationForwarder forwarder,
+        IApplicateForegroundActivationPermission foregroundPermission)
     {
+        ArgumentNullException.ThrowIfNull(args);
+        ArgumentNullException.ThrowIfNull(forwarder);
+        ArgumentNullException.ThrowIfNull(foregroundPermission);
+
         var filePaths = ApplicateActivationArguments.GetSupportedFilePaths(args);
         var payload = ApplicateActivationArguments.CreatePayload(filePaths);
 
-        try
-        {
-            using var pipe = new NamedPipeClientStream(
-                ".",
-                PipeName,
-                PipeDirection.Out,
-                PipeOptions.Asynchronous);
-            pipe.Connect(timeout: 2500);
-
-            using var writer = new StreamWriter(pipe, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), leaveOpen: false);
-            writer.Write(payload);
-            writer.Flush();
-            return true;
-        }
-        catch (IOException)
-        {
-            return false;
-        }
-        catch (TimeoutException)
-        {
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return false;
-        }
+        foregroundPermission.PermitPrimaryForegroundActivation();
+        return forwarder.Forward(payload);
     }
 
     public void StartListening()
@@ -178,5 +168,79 @@ public sealed class ApplicateSingleInstanceService : IDisposable
         }
 
         handler(this, new ApplicateActivationRequestedEventArgs(filePaths));
+    }
+
+    private sealed class NamedPipeApplicateActivationForwarder(string pipeName) : IApplicateActivationForwarder
+    {
+        public bool Forward(string payload)
+        {
+            try
+            {
+                using var pipe = new NamedPipeClientStream(
+                    ".",
+                    pipeName,
+                    PipeDirection.Out,
+                    PipeOptions.Asynchronous);
+                pipe.Connect(timeout: 2500);
+
+                using var writer = new StreamWriter(
+                    pipe,
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                    leaveOpen: false);
+                writer.Write(payload);
+                writer.Flush();
+                return true;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (TimeoutException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+    }
+}
+
+internal interface IApplicateActivationForwarder
+{
+    bool Forward(string payload);
+}
+
+internal interface IApplicateForegroundActivationPermission
+{
+    void PermitPrimaryForegroundActivation();
+}
+
+internal sealed class ApplicateForegroundActivationPermission : IApplicateForegroundActivationPermission
+{
+    public static readonly ApplicateForegroundActivationPermission Instance = new();
+
+    private ApplicateForegroundActivationPermission()
+    {
+    }
+
+    public void PermitPrimaryForegroundActivation()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        _ = NativeMethods.AllowSetForegroundWindow(NativeMethods.AsfwAny);
+    }
+
+    private static class NativeMethods
+    {
+        public const int AsfwAny = -1;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool AllowSetForegroundWindow(int processId);
     }
 }

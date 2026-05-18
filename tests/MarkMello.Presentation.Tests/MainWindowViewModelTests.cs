@@ -393,6 +393,48 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task InitializeAsyncStartsUpdateCheckInBackgroundWithoutBlockingStartup()
+    {
+        var harness = CreateHarness();
+        var pendingCheck = new TaskCompletionSource<UpdateCheckResult>();
+        harness.UpdateService.NextCheckTask = pendingCheck.Task;
+
+        var initializeTask = harness.ViewModel.InitializeAsync();
+
+        var completed = await Task.WhenAny(initializeTask, Task.Delay(TimeSpan.FromMilliseconds(100)));
+        Assert.Same(initializeTask, completed);
+        Assert.Equal(1, harness.UpdateService.CheckCallCount);
+        Assert.True(harness.ViewModel.IsCheckingForUpdates);
+        Assert.False(harness.ViewModel.IsUpdateNotificationVisible);
+
+        pendingCheck.SetResult(new UpdateCheckResult.UpToDate(
+            "1.0.0",
+            "1.0.0",
+            DateTimeOffset.Parse("2026-04-19T12:00:00Z", CultureInfo.InvariantCulture),
+            "https://github.com/dartdavros/MarkMello/releases/tag/v1.0.0"));
+        await harness.UpdateService.LastCheckTask!;
+    }
+
+    [Fact]
+    public async Task StartupUpdateCheckWhenUpdateAvailableShowsDismissibleNotification()
+    {
+        var harness = CreateHarness();
+        var package = CreateUpdatePackage();
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
+
+        await harness.ViewModel.InitializeAsync();
+        await harness.UpdateService.LastCheckTask!;
+
+        Assert.Equal("Update 1.2.3 available", harness.ViewModel.UpdateStatusTitle);
+        Assert.True(harness.ViewModel.IsUpdateNotificationVisible);
+        Assert.True(harness.ViewModel.CanDownloadAvailableUpdate);
+
+        harness.ViewModel.DismissUpdateNotificationCommand.Execute(null);
+
+        Assert.False(harness.ViewModel.IsUpdateNotificationVisible);
+    }
+
+    [Fact]
     public async Task DownloadUpdateCommandWhenSuccessfulShowsNativeAction()
     {
         var harness = CreateHarness();
@@ -445,7 +487,7 @@ public sealed class MainWindowViewModelTests
         Assert.True(harness.ViewModel.IsRussianLanguageSelected);
         Assert.Equal("Редактирование", harness.ViewModel.EditToggleLabel);
         Assert.Equal("Проверить", harness.ViewModel.CheckForUpdatesLabel);
-        Assert.Equal("Обновления", harness.ViewModel.UpdateStatusTitle);
+        Assert.Equal("Обновления", harness.ViewModel.UpdatesLabel);
     }
 
     [Fact]

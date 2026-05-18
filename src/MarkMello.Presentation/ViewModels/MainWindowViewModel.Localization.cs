@@ -54,6 +54,8 @@ public partial class MainWindowViewModel
         nameof(AboutLabel),
         nameof(AboutLicenseHint),
         nameof(AboutLicenseLabel),
+        nameof(AboutNoticeHint),
+        nameof(AboutNoticeLabel),
         nameof(AboutVersionHint),
         nameof(AboutVersionLabel),
         nameof(AppMenuCloseFileHint),
@@ -121,6 +123,7 @@ public partial class MainWindowViewModel
         nameof(TitleBarMinimize),
         nameof(UpdatesHint),
         nameof(UpdatesLabel),
+        nameof(UpdateNotificationDismiss),
         nameof(WelcomeCreateMd),
         nameof(WelcomeDropHint),
         nameof(WelcomeOpenFile),
@@ -135,6 +138,8 @@ public partial class MainWindowViewModel
     public string AboutLabel => _localization["AboutLabel"];
     public string AboutLicenseHint => _localization["AboutLicenseHint"];
     public string AboutLicenseLabel => _localization["AboutLicenseLabel"];
+    public string AboutNoticeHint => _localization["AboutNoticeHint"];
+    public string AboutNoticeLabel => _localization["AboutNoticeLabel"];
     public string AboutVersionHint => _localization["AboutVersionHint"];
     public string AboutVersionLabel => _localization["AboutVersionLabel"];
     public string AppMenuCloseFileHint => _localization["AppMenuCloseFileHint"];
@@ -202,6 +207,7 @@ public partial class MainWindowViewModel
     public string TitleBarMinimize => _localization["TitleBarMinimize"];
     public string UpdatesHint => _localization["UpdatesHint"];
     public string UpdatesLabel => _localization["UpdatesLabel"];
+    public string UpdateNotificationDismiss => _localization["UpdateNotificationDismiss"];
     public string WelcomeCreateMd => _localization["WelcomeCreateMd"];
     public string WelcomeDropHint => _localization["WelcomeDropHint"];
     public string WelcomeOpenFile => _localization["WelcomeOpenFile"];
@@ -404,8 +410,15 @@ public partial class MainWindowViewModel
 
     private void SetUpdateStatus(UpdateStatusSnapshot status)
     {
+        var wasNotificationVisible = IsUpdateNotificationVisible;
         _updateStatus = status;
+        _isUpdateNotificationDismissed = status is not (
+            UpdateStatusSnapshot.UpdateAvailableState or UpdateStatusSnapshot.DownloadReadyState);
         RefreshUpdateStatusTexts();
+        if (wasNotificationVisible != IsUpdateNotificationVisible)
+        {
+            OnPropertyChanged(nameof(IsUpdateNotificationVisible));
+        }
     }
 
     private void RefreshUpdateStatusTexts()

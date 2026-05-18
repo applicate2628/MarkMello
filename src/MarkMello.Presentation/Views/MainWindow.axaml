@@ -94,6 +94,15 @@
       <Setter Property="Opacity" Value="1" />
     </Style>
 
+    <Style Selector="Border.mm-update-notification">
+      <Setter Property="Background" Value="{DynamicResource MmSurfaceElevatedBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource MmAccentSoftBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="14,12" />
+      <Setter Property="BoxShadow" Value="0 14 32 0 #26000000" />
+    </Style>
+
     <Style Selector="Border.mm-progress">
       <Setter Property="Opacity" Value="0" />
       <Setter Property="Width" Value="0" />
@@ -407,6 +416,58 @@
               HorizontalAlignment="Left"
               Background="{DynamicResource MmAccentBrush}"
               IsHitTestVisible="False" />
+
+      <Border Classes="mm-update-notification"
+              ZIndex="320"
+              IsVisible="{Binding IsUpdateNotificationVisible}"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Top"
+              Width="360"
+              MaxWidth="420"
+              Margin="16">
+        <Grid ColumnDefinitions="*,Auto"
+              RowDefinitions="Auto,Auto"
+              ColumnSpacing="12"
+              RowSpacing="10">
+          <StackPanel Grid.Row="0"
+                      Grid.Column="0"
+                      Spacing="3">
+            <TextBlock Classes="mm-setting-label"
+                       FontSize="13"
+                       FontWeight="SemiBold"
+                       Text="{Binding UpdateStatusTitle}"
+                       TextWrapping="Wrap" />
+            <TextBlock Classes="mm-setting-body"
+                       Text="{Binding UpdateStatusMessage}"
+                       TextWrapping="Wrap" />
+          </StackPanel>
+          <Button Grid.Row="0"
+                  Grid.Column="1"
+                  Classes="mm-settings-close"
+                  Command="{Binding DismissUpdateNotificationCommand}"
+                  ToolTip.Tip="{Binding UpdateNotificationDismiss}">
+            <Path Data="M0,0 L10,10 M10,0 L0,10"
+                  Stroke="{DynamicResource MmTextFaintBrush}"
+                  StrokeThickness="1.4"
+                  StrokeLineCap="Round" />
+          </Button>
+          <StackPanel Grid.Row="1"
+                      Grid.Column="0"
+                      Grid.ColumnSpan="2"
+                      Orientation="Horizontal"
+                      HorizontalAlignment="Right"
+                      Spacing="8">
+            <Button Classes="mm-dialog-primary"
+                    Content="{Binding DownloadUpdateLabel}"
+                    Command="{Binding DownloadUpdateCommand}"
+                    IsVisible="{Binding CanDownloadAvailableUpdate}" />
+            <Button Classes="mm-dialog-secondary"
+                    Content="{Binding DownloadedUpdateActionLabel}"
+                    Command="{Binding OpenDownloadedUpdateCommand}"
+                    IsVisible="{Binding CanOpenDownloadedUpdate}" />
+          </StackPanel>
+        </Grid>
+      </Border>
 
       <Popup Name="AppMenuPanel"
              ZIndex="1000"

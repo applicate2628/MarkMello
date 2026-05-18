@@ -165,6 +165,12 @@ internal sealed class TestMarkdownRenderer : IMarkdownDocumentRenderer
 
 internal sealed class StubUpdateService : IUpdateService
 {
+    public int CheckCallCount { get; private set; }
+
+    public Task<UpdateCheckResult>? NextCheckTask { get; set; }
+
+    public Task<UpdateCheckResult>? LastCheckTask { get; private set; }
+
     public UpdateCheckResult NextCheckResult { get; set; }
         = new UpdateCheckResult.SourceNotConfigured("Update source is not configured.");
 
@@ -175,7 +181,11 @@ internal sealed class StubUpdateService : IUpdateService
         = new UpdatePrepareResult.Failed("No native handoff configured for this test.");
 
     public Task<UpdateCheckResult> CheckForUpdatesAsync(CancellationToken cancellationToken = default)
-        => Task.FromResult(NextCheckResult);
+    {
+        CheckCallCount++;
+        LastCheckTask = NextCheckTask ?? Task.FromResult(NextCheckResult);
+        return LastCheckTask;
+    }
 
     public Task<UpdateDownloadResult> DownloadUpdateAsync(
         AppUpdatePackage package,

@@ -133,4 +133,88 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("ToolTip.Tip=\"{Binding SaveTooltip}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("ToolTip.Tip=\"{Binding SaveAsTooltip}\"", xaml, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void UpdateSurfaceLivesInAppMenuNotAppSettings()
+    {
+        var appMenu = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "AppMenuPanelView.axaml"));
+        var appSettings = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "AppSettingsPanelView.axaml"));
+
+        Assert.Contains("Text=\"{Binding UpdatesLabel}\"", appMenu, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding CheckForUpdatesCommand}\"", appMenu, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding DownloadUpdateCommand}\"", appMenu, StringComparison.Ordinal);
+        Assert.DoesNotContain("Text=\"{Binding UpdatesLabel}\"", appSettings, StringComparison.Ordinal);
+        Assert.DoesNotContain("Command=\"{Binding CheckForUpdatesCommand}\"", appSettings, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MainWindowContainsTopLevelUpdateNotification()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "MainWindow.axaml"));
+
+        Assert.Contains("IsVisible=\"{Binding IsUpdateNotificationVisible}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding DismissUpdateNotificationCommand}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding DownloadUpdateCommand}\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AboutPanelUsesRepositoryNoticeInsteadOfPersonalAuthorCredit()
+    {
+        var aboutXaml = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "AppAboutPanelView.axaml"));
+        var applicateWindowCode = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "ApplicateMainWindow.cs"));
+
+        Assert.DoesNotContain("Andrey Ermolaev", aboutXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ermolaev.tech", aboutXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateAppAboutPanelView", applicateWindowCode, StringComparison.Ordinal);
+        Assert.Contains("AboutNoticeLabel", aboutXaml, StringComparison.Ordinal);
+    }
 }

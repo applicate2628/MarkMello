@@ -85,18 +85,10 @@
               <Border Classes="mm-setting-row">
                 <StackPanel Spacing="8">
                   <TextBlock Classes="mm-setting-label"
-                             Text="{Binding AboutCreditsLabel}" />
-                  <WrapPanel Orientation="Horizontal"
-                             ItemHeight="22">
-                    <TextBlock Classes="mm-setting-body"
-                               Text="{Binding AboutCreatedByPrefix}" />
-                    <Button Classes="mm-inline-link"
-                            Tag="https://ermolaev.tech"
-                            Click="OnAboutLinkClick"
-                            Content="Andrey Ermolaev" />
-                    <TextBlock Classes="mm-setting-body"
-                               Text="{Binding AboutCreditsPeriod}" />
-                  </WrapPanel>
+                             Text="{Binding AboutNoticeLabel}" />
+                  <TextBlock Classes="mm-setting-body"
+                             Text="{Binding AboutNoticeHint}"
+                             TextWrapping="Wrap" />
                 </StackPanel>
               </Border>
             </StackPanel>

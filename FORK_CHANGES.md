@@ -58,9 +58,8 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 
 ## About-Panel Scope
 
-- Upstream `AppAboutPanelView` content is preserved unchanged. The fork swaps the popup's `Child` at runtime in `ApplicateMainWindow` to `ApplicateAppAboutPanelView`, which subclasses the upstream view and appends a second credit row underneath the upstream one.
-- The new row reads `Applicate additions by Dmitry Denisenko (applicate2628)` and links to the fork maintainer's GitHub profile. Upstream copyright notices remain visible per GPL-3.0 §5.
-- No upstream files are edited for the About panel; the override is contained in `src/MarkMello.Applicate.Desktop/Views/ApplicateAppAboutPanelView.cs`.
+- The About panel shows version and license information, then points to `NOTICE.md` for copyright and attribution details.
+- Personal upstream author credits are not duplicated in the application UI. Repository-level notice files are the canonical attribution surface for the fork.
 
 ## Renderer Pipeline Scope
 

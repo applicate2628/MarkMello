@@ -60,7 +60,6 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallActiveDocumentBridge(viewModel);
         InstallSingleInstanceActivationBridge(viewModel, singleInstance);
         InstallPopupZOrderFollow(viewModel);
-        InstallApplicateAboutPanel();
         InstallPopupFadeIn();
         InstallUnifiedScrollBarStyle();
         InstallEditModeDragSuppression(viewModel);
@@ -292,22 +291,6 @@ public sealed class ApplicateMainWindow : MainWindow
             // opacity regardless. Swallow so the popup never disappears.
             child.Opacity = 1;
         }
-    }
-
-    private void InstallApplicateAboutPanel()
-    {
-        // The upstream AppAboutPanel popup lives in upstream MainWindow.axaml
-        // and binds `<views:AppAboutPanelView />` directly. The fork-overlay
-        // rule forbids editing upstream files, so we swap the popup's Child
-        // here for our subclass that appends the fork credit row. The popup's
-        // DataContext (MainWindowViewModel) flows to the new Child via the
-        // visual tree, so existing bindings such as AboutVersion keep working.
-        var popup = this.FindControl<Avalonia.Controls.Primitives.Popup>("AppAboutPanel");
-        if (popup is null)
-        {
-            return;
-        }
-        popup.Child = new ApplicateAppAboutPanelView();
     }
 
     private void InstallPopupZOrderFollow(MainWindowViewModel viewModel)
@@ -584,11 +567,7 @@ public sealed class ApplicateMainWindow : MainWindow
         {
             Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
             {
-                if (WindowState == WindowState.Minimized)
-                {
-                    WindowState = WindowState.Normal;
-                }
-                Activate();
+                ApplicateForegroundWindowActivator.ActivateExternalRequest(this);
 
                 if (args.FilePaths.Count == 0)
                 {
@@ -613,6 +592,7 @@ public sealed class ApplicateMainWindow : MainWindow
                             // Keep the existing window alive; the activation just fails closed.
                         }
                     }
+                    ApplicateForegroundWindowActivator.ActivateExternalRequest(this);
                     return;
                 }
 
@@ -620,6 +600,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 try
                 {
                     await viewModel.OpenPathAsync(lastPath).ConfigureAwait(true);
+                    ApplicateForegroundWindowActivator.ActivateExternalRequest(this);
                 }
                 catch (System.IO.IOException)
                 {

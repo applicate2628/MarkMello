@@ -39,6 +39,7 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly string _aboutVersion;
     private readonly string _aboutLicense = "GPLv3";
     private AppUpdatePackage? _availableUpdatePackage;
+    private bool _isUpdateNotificationDismissed;
     private ReadingPreferences _documentReadingPreferences = GetDocumentRenderingPreferences(ReadingPreferences.Default);
     private ReadingPreferences _lastNotifiedReadingPreferences = ReadingPreferences.Default;
 
@@ -263,6 +264,10 @@ public partial class MainWindowViewModel : ObservableObject
            && !string.IsNullOrWhiteSpace(DownloadedUpdatePath)
            && !IsCheckingForUpdates
            && !IsDownloadingUpdate;
+
+    public bool IsUpdateNotificationVisible
+        => !_isUpdateNotificationDismissed
+           && _updateStatus is UpdateStatusSnapshot.UpdateAvailableState or UpdateStatusSnapshot.DownloadReadyState;
 
     public string CheckForUpdatesLabel => IsCheckingForUpdates ? _localization["UpdateChecking"] : _localization["UpdateCheckNow"];
 
@@ -620,6 +625,8 @@ public partial class MainWindowViewModel : ObservableObject
         {
             await OpenPathAsync(path).ConfigureAwait(true);
         }
+
+        BeginStartupUpdateCheck();
     }
 
     [RelayCommand]
@@ -919,6 +926,37 @@ public partial class MainWindowViewModel : ObservableObject
             IsCheckingForUpdates = false;
             UpdateCommandStates();
         }
+    }
+
+    private void BeginStartupUpdateCheck()
+    {
+        if (!CanCheckForUpdates)
+        {
+            return;
+        }
+
+        _ = CheckForUpdatesForStartupAsync();
+    }
+
+    private async Task CheckForUpdatesForStartupAsync()
+    {
+        try
+        {
+            await CheckForUpdatesAsync().ConfigureAwait(true);
+        }
+        catch (System.Exception ex)
+        {
+            IsCheckingForUpdates = false;
+            SetUpdateStatus(new UpdateStatusSnapshot.CheckFailedState(ex.Message));
+            UpdateCommandStates();
+        }
+    }
+
+    [RelayCommand]
+    private void DismissUpdateNotification()
+    {
+        _isUpdateNotificationDismissed = true;
+        OnPropertyChanged(nameof(IsUpdateNotificationVisible));
     }
 
     [RelayCommand(CanExecute = nameof(CanDownloadAvailableUpdate))]

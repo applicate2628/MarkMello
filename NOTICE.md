@@ -40,9 +40,8 @@ Applicate additions are distributed under GPL-3.0 as part of this fork.
 - File drag-and-drop into the window: reading-mode drops open as new tabs,
   edit-mode drops insert at the caret position with image files saved next
   to the document and inserted as relative-link Markdown.
-- Fork-specific About panel credit row exposing this fork's authorship next
-  to the upstream credit, both rendered side by side without modifying the
-  upstream About view file.
+- About panel points users to repository notices for copyright and attribution
+  instead of duplicating personal author credits in the application UI.
 - Separate Windows installer metadata so the fork installs as `MarkMello Applicate`
   and does not reuse the upstream MarkMello AppId or ProgId.
 
