@@ -1,34 +1,3 @@
-/* Reveal-on-ready: hide the document body until the renderer pipeline
- * has finished math + mermaid + code-block rendering and posted
- * layout-ready. Without this, the user sees ~130ms of fallback state
- * on tab switch and fresh launch: title at a different font size
- * (web fonts not yet loaded), `\[ ... \]` math placeholders, and the
- * raw mermaid source code in a code block. The renderer.ts pipeline
- * adds `mm-rendered` after scheduleLayoutReady has posted, which
- * fades the body in. CSS transition keeps the reveal soft (120ms).
- * Safety: scheduleLayoutReady has a 250ms timeout that fires even if
- * `document.fonts.ready` never resolves, so the body cannot stay
- * hidden forever.
- *
- * Selector is restricted to `body > main.mm-document` because the
- * minimap clones the .mm-document element via cloneNode and nests
- * the clone inside `<div class="mm-minimap-content">`. Without the
- * body-direct-child scope, the clone would also inherit opacity 0
- * and never receive the mm-rendered toggle, leaving the minimap
- * permanently blank. */
-body > main.mm-document,
-aside.mm-minimap,
-div.mm-width-handle {
-  opacity: 0;
-  transition: opacity 120ms ease-out;
-}
-
-body > main.mm-document.mm-rendered,
-aside.mm-minimap.mm-rendered,
-div.mm-width-handle.mm-rendered {
-  opacity: 1;
-}
-
 /* Print: strip viewer chrome that has no meaning on paper or PDF.
  * The minimap is a navigation aid for scrolling, the width handle is
  * an interactive control — neither belongs in the printed document.

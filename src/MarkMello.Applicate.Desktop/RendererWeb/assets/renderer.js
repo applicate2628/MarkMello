@@ -128,11 +128,18 @@
     }
     deps.emitMark("mm-load-document", {
       documentName: message.documentName ?? "",
-      htmlLength: message.html.length
+      htmlLength: message.html.length,
+      renderId: message.renderId ?? null
     });
+    deps.debugLog(`load-document:start id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${message.theme ?? "(none)"} currentTheme=${document.documentElement.dataset.theme ?? "(none)"} htmlLength=${message.html.length}`);
     deps.cancelCurrentMathController();
     deps.resetModuleGlobals();
+    if (message.theme) {
+      deps.applyTheme(message.theme);
+    }
     main.innerHTML = message.html;
+    const firstHeading = main.querySelector("h1,h2,h3")?.textContent?.trim().replace(/\s+/g, " ").slice(0, 120) ?? "";
+    deps.debugLog(`load-document:swapped id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${document.documentElement.dataset.theme ?? "(none)"} firstHeading=${firstHeading}`);
     deps.ensureChromeNodes();
     deps.scrollWindowToTop();
     void deps.runInitialRenderPipeline();
@@ -140,6 +147,7 @@
   function clearDocumentState(deps) {
     const main = document.querySelector("main.mm-document");
     deps.emitMark("mm-clear-document");
+    deps.debugLog("clear-document");
     deps.cancelCurrentMathController();
     deps.resetModuleGlobals();
     if (main) {
@@ -527,6 +535,27 @@
     };
   }
 
+  // RendererWeb/src/widthHandleLayout.ts
+  function clampWidthHandleLeft(input) {
+    const hitArea = Math.max(0, input.hitArea);
+    const minimapReservedWidth = Math.max(0, input.minimapReservedWidth);
+    const viewportWidth = Math.max(0, input.viewportWidth);
+    const minimapLeftEdge = viewportWidth - minimapReservedWidth;
+    const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
+    return Math.max(0, Math.min(maxLeftBeforeMinimap, input.candidateLeft));
+  }
+  function calculateWidthHandleLeft(input) {
+    const hitArea = Math.max(0, input.hitArea);
+    const visibleTextRight = input.documentRight - Math.max(0, input.documentPaddingRight);
+    const candidateLeft = visibleTextRight + hitArea;
+    return clampWidthHandleLeft({
+      candidateLeft,
+      hitArea,
+      minimapReservedWidth: input.minimapReservedWidth,
+      viewportWidth: input.viewportWidth
+    });
+  }
+
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -595,6 +624,9 @@
       return;
     }
     hostWindow.invokeCSharpAction?.(serialized);
+  }
+  function postDebugLog(text) {
+    postHostMessage({ type: "debug-log", text });
   }
   function countFailedInSet(nodes) {
     let count = 0;
@@ -729,9 +761,6 @@
       type: "layout-ready",
       ...getScrollState()
     });
-    document.querySelector("main.mm-document")?.classList.add("mm-rendered");
-    document.querySelector("aside.mm-minimap")?.classList.add("mm-rendered");
-    document.querySelector("div.mm-width-handle")?.classList.add("mm-rendered");
   }
   function scheduleLayoutReady() {
     const generation = ++layoutReadyGeneration;
@@ -808,11 +837,13 @@
     const documentRect = documentElement.getBoundingClientRect();
     const documentStyle = getComputedStyle(documentElement);
     const documentPaddingRight = Number.parseFloat(documentStyle.paddingRight) || 0;
-    const trackGraceRight = 4;
-    const idealHandleLeft = documentRect.right - documentPaddingRight + trackGraceRight;
-    const minimapLeftEdge = window.innerWidth - minimapReservedWidth;
-    const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
-    const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
+    const clampedLeft = calculateWidthHandleLeft({
+      documentRight: documentRect.right,
+      documentPaddingRight,
+      hitArea,
+      minimapReservedWidth,
+      viewportWidth: window.innerWidth
+    });
     widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
   }
   function postWidthDragMove() {
@@ -869,11 +900,14 @@
         const minimapWidth = readRootPixelVariable("--mm-minimap-width", 0);
         const minimapGap = readRootPixelVariable("--mm-minimap-gap", 0);
         const minimapReserved = minimapRoot && !minimapRoot.hidden ? Math.max(0, minimapWidth + minimapGap * 2) : 0;
-        const minimapLeftEdge = window.innerWidth - minimapReserved;
-        const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
         const columnWidthDelta = previewMaxWidth - widthHandleStartMaxWidth;
         const idealHandleLeft = widthHandleStartLeft + columnWidthDelta / 2;
-        const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
+        const clampedLeft = clampWidthHandleLeft({
+          candidateLeft: idealHandleLeft,
+          hitArea,
+          minimapReservedWidth: minimapReserved,
+          viewportWidth: window.innerWidth
+        });
         widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
       }
       queueMinimapViewportUpdate();
@@ -1312,6 +1346,12 @@
       if (message.documentName !== void 0) {
         loadMessage.documentName = message.documentName;
       }
+      if (message.theme !== void 0) {
+        loadMessage.theme = message.theme;
+      }
+      if (message.renderId !== void 0) {
+        loadMessage.renderId = message.renderId;
+      }
       applyLoadDocument(loadMessage, buildLoadDocumentDeps());
       return;
     }
@@ -1361,7 +1401,9 @@
         window.scrollTo({ left: 0, top: 0, behavior: "instant" });
       },
       emitMark,
-      ensureChromeNodes
+      ensureChromeNodes,
+      applyTheme,
+      debugLog: postDebugLog
     };
   }
   function wireLinks() {

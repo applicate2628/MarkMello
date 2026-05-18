@@ -17,6 +17,7 @@ import { renderMath as renderMathInit } from "./mathRenderInit";
 import { schedulePhaseBRebuild } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
 import { createScrollCoalescer } from "./scrollCoalescer";
+import { calculateWidthHandleLeft, clampWidthHandleLeft } from "./widthHandleLayout";
 
 type KatexApi = {
   render: (
@@ -98,7 +99,7 @@ type HostMessage =
   | { type: "scroll-to-block"; blockIndex: number }
   | { type: "scroll-to"; anchor: string }
   | { type: "scroll-to-progress"; progressPercent: number }
-  | { type: "load-document"; html: string; documentName?: string; hasMermaid?: boolean; hasHljs?: boolean }
+  | { type: "load-document"; html: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number }
   | { type: "clear-document" }
   | { type: "host-scrollbar"; active: boolean };
 
@@ -177,6 +178,10 @@ function postHostMessage(message: RendererMessage): void {
   }
 
   hostWindow.invokeCSharpAction?.(serialized);
+}
+
+function postDebugLog(text: string): void {
+  postHostMessage({ type: "debug-log", text });
 }
 
 function countFailedInSet(nodes: Iterable<HTMLElement>): number {
@@ -337,27 +342,6 @@ function postLayoutReady(): void {
     type: "layout-ready",
     ...getScrollState()
   });
-  // Reveal the document body now that math + mermaid + code blocks
-  // have finished rendering and layout has settled. Renderer.css holds
-  // `main.mm-document` at opacity 0 until this class is added, which
-  // hides the ~130ms "fallback" state (web fonts not yet swapped,
-  // KaTeX `\[ ... \]` placeholders, raw mermaid source) that would
-  // otherwise be visible during a tab switch or fresh launch. See the
-  // .mm-rendered rule in renderer.css for the reveal transition.
-  document.querySelector("main.mm-document")?.classList.add("mm-rendered");
-  // Also reveal the minimap aside. CSS keeps it at opacity 0 until this
-  // class is added so the user does not see the Phase A → Phase B
-  // minimap rebuild flash (Phase A captures the doc immediately after
-  // initialVisibleReady, Phase B re-clones after allMathRendered if
-  // heights changed). With this gate the minimap fades in once with
-  // the body.
-  document.querySelector("aside.mm-minimap")?.classList.add("mm-rendered");
-  // Also reveal the width-resizer handle. Without this fade, the handle
-  // is positioned during the blank-fade window using a documentRect with
-  // partial layout (math/mermaid not yet rendered), producing a vertical
-  // bar at the wrong X coordinate that flashes for a frame during the
-  // transition.
-  document.querySelector("div.mm-width-handle")?.classList.add("mm-rendered");
 }
 
 function scheduleLayoutReady(): void {
@@ -455,11 +439,13 @@ function updateWidthHandlePosition(): void {
   // mid-document, making the column resize feel disconnected.
   const documentStyle = getComputedStyle(documentElement);
   const documentPaddingRight = Number.parseFloat(documentStyle.paddingRight) || 0;
-  const trackGraceRight = 4;
-  const idealHandleLeft = documentRect.right - documentPaddingRight + trackGraceRight;
-  const minimapLeftEdge = window.innerWidth - minimapReservedWidth;
-  const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
-  const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
+  const clampedLeft = calculateWidthHandleLeft({
+    documentRight: documentRect.right,
+    documentPaddingRight,
+    hitArea,
+    minimapReservedWidth,
+    viewportWidth: window.innerWidth,
+  });
   widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
 }
 
@@ -554,11 +540,14 @@ function scheduleWidthDragApply(): void {
       const minimapReserved = (minimapRoot && !minimapRoot.hidden)
         ? Math.max(0, minimapWidth + minimapGap * 2)
         : 0;
-      const minimapLeftEdge = window.innerWidth - minimapReserved;
-      const maxLeftBeforeMinimap = Math.max(0, minimapLeftEdge - hitArea);
       const columnWidthDelta = previewMaxWidth - widthHandleStartMaxWidth;
       const idealHandleLeft = widthHandleStartLeft + columnWidthDelta / 2;
-      const clampedLeft = Math.max(0, Math.min(maxLeftBeforeMinimap, idealHandleLeft));
+      const clampedLeft = clampWidthHandleLeft({
+        candidateLeft: idealHandleLeft,
+        hitArea,
+        minimapReservedWidth: minimapReserved,
+        viewportWidth: window.innerWidth,
+      });
       widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
     }
     // Live minimap update — track the source's new wrap during drag. Cost
@@ -1177,6 +1166,12 @@ function handleHostMessage(raw: unknown): void {
     if (message.documentName !== undefined) {
       loadMessage.documentName = message.documentName;
     }
+    if (message.theme !== undefined) {
+      loadMessage.theme = message.theme;
+    }
+    if (message.renderId !== undefined) {
+      loadMessage.renderId = message.renderId;
+    }
     applyLoadDocument(loadMessage, buildLoadDocumentDeps());
     return;
   }
@@ -1237,6 +1232,8 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
     scrollWindowToTop: () => { window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior }); },
     emitMark,
     ensureChromeNodes,
+    applyTheme,
+    debugLog: postDebugLog,
   };
 }
 

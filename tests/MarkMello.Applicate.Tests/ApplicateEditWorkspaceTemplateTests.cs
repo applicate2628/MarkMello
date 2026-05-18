@@ -89,4 +89,23 @@ public sealed class ApplicateEditWorkspaceTemplateTests
                 useWebPreview: false,
                 ScrollBarVisibility.Auto));
     }
+
+    [Theory]
+    [InlineData(true, true, false, true)]
+    [InlineData(true, true, true, false)]
+    [InlineData(false, true, true, false)]
+    [InlineData(false, false, true, true)]
+    public void WebPreviewMaskOnlyCoversInitialOrDetachedRender(
+        bool isRenderInFlight,
+        bool isAttachedToHost,
+        bool hasCompletedInitialRender,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            ApplicateEditPreviewView.ShouldShowWebRenderMask(
+                isRenderInFlight,
+                isAttachedToHost,
+                hasCompletedInitialRender));
+    }
 }

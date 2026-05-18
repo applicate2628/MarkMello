@@ -70,6 +70,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _shellDocumentReadyConsumed;
     private TaskCompletionSource<bool>? _shellReady;
     private bool _isWebWidthDragging;
+    private long _renderSequence;
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -198,6 +199,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             viewerChromeEnabledChanged: ViewerChromeEnabled != viewerChromeEnabled,
             documentScrollEnabledChanged: DocumentScrollEnabled != documentScrollEnabled,
             wheelProxyEnabledChanged: WheelProxyEnabled != wheelProxyEnabled);
+
+        ApplicateTrace.ModeToggle(
+            $"Web.UpdateInputs action={action} oldPath={Source?.Path ?? "(null)"} newPath={source?.Path ?? "(null)"} hasLoaded={_hasLoadedDocument} awaiting={_awaitingLayoutReady} theme={GetThemeName()} chrome={viewerChromeEnabled}");
 
         _isUpdatingInputs = true;
         try
@@ -432,6 +436,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         DocumentRenderInvalidated?.Invoke(this, EventArgs.Empty);
+        var renderId = ++_renderSequence;
         _hasLoadedDocument = false;
         _awaitingLayoutReady = false;
         _hasLayoutReady = false;
@@ -443,10 +448,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         CancelRender();
 
         var source = Source;
+        ApplicateTrace.ModeToggle(
+            $"Web.QueueRender id={renderId} source={source?.Path ?? "(null)"} shell={_shellMode} theme={GetThemeName()}");
         if (_shellMode)
         {
             _renderCancellation = new CancellationTokenSource();
-            _ = QueueRenderShellAsync(source, _renderCancellation.Token);
+            _ = QueueRenderShellAsync(source, renderId, _renderCancellation.Token);
             return;
         }
 
@@ -461,13 +468,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _ = RenderAsync(source, _renderCancellation.Token);
     }
 
-    private async Task QueueRenderShellAsync(MarkdownSource? source, CancellationToken cancellationToken)
+    private async Task QueueRenderShellAsync(MarkdownSource? source, long renderId, CancellationToken cancellationToken)
     {
         try
         {
+            ApplicateTrace.ModeToggle($"Web.RenderShell start id={renderId} source={source?.Path ?? "(null)"}");
             if (!_shellNavigated)
             {
                 _shellReady ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                ApplicateTrace.ModeToggle($"Web.RenderShell navigate-shell id={renderId}");
                 await NavigateToShellAsync(cancellationToken).ConfigureAwait(true);
                 _shellNavigated = true;
             }
@@ -477,32 +486,42 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             // page load — the renderer's message listener doesn't exist yet.
             if (_shellReady is not null)
             {
+                ApplicateTrace.ModeToggle($"Web.RenderShell wait-shell-ready id={renderId}");
                 using var registration = cancellationToken.Register(() => _shellReady.TrySetCanceled(cancellationToken));
                 await _shellReady.Task.ConfigureAwait(true);
+                ApplicateTrace.ModeToggle($"Web.RenderShell shell-ready id={renderId}");
             }
 
             if (source is null)
             {
+                ApplicateTrace.ModeToggle($"Web.RenderShell post-clear id={renderId}");
                 PostRendererMessage(new { type = "clear-document" });
                 return;
             }
 
+            ApplicateTrace.ModeToggle($"Web.RenderShell render-body-start id={renderId} source={source.Path}");
             var body = await _renderer
                 .RenderBodyAsync(source, ReadingPreferences, ImageSourceResolver, cancellationToken)
                 .ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
+            ApplicateTrace.ModeToggle(
+                $"Web.RenderShell render-body-end id={renderId} source={source.Path} htmlLength={body.BodyHtml.Length} theme={GetThemeName()}");
 
             PostRendererMessage(new
             {
                 type = "load-document",
                 html = body.BodyHtml,
                 documentName = source.FileName,
+                theme = GetThemeName(),
                 hasMermaid = body.HasMermaidBlock,
                 hasHljs = body.HasCodeBlockWithSyntax,
+                renderId,
             });
+            ApplicateTrace.ModeToggle($"Web.RenderShell post-load id={renderId} source={source.Path}");
         }
         catch (OperationCanceledException)
         {
+            ApplicateTrace.ModeToggle($"Web.RenderShell canceled id={renderId}");
             // Superseded render; later QueueRender owns state.
         }
         catch

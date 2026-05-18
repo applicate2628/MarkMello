@@ -144,12 +144,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         // for edit-preview transitions since v0.2.0).
         _webRenderMask = new Border
         {
-            Background = Avalonia.Application.Current?.TryGetResource(
-                "MmBackgroundBrush",
-                Avalonia.Application.Current.ActualThemeVariant,
-                out var bg) == true && bg is IBrush bgBrush
-                ? bgBrush
-                : new SolidColorBrush(Colors.White),
+            Background = Brush("MmBackgroundBrush", new SolidColorBrush(Colors.White)),
             IsHitTestVisible = false,
             IsVisible = false
         };
@@ -627,6 +622,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
     private void OnViewerAppearanceChanged(object? sender, EventArgs e)
     {
+        UpdateWebRenderMaskBrush();
         if (_hasRenderedDocument)
         {
             QueueMinimapBuild();
@@ -635,6 +631,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
     private void OnViewerResourcesChanged(object? sender, ResourcesChangedEventArgs e)
     {
+        UpdateWebRenderMaskBrush();
         _lastWidthHandleVisualState = null;
         UpdateWidthHandleVisual();
         if (_hasRenderedDocument)
@@ -642,6 +639,9 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
             QueueMinimapBuild();
         }
     }
+
+    private void UpdateWebRenderMaskBrush()
+        => _webRenderMask.Background = Brush("MmBackgroundBrush", new SolidColorBrush(Colors.White));
 
     private void ApplyColumnWidth()
     {
@@ -829,6 +829,14 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         if (this.TryFindResource(key, ActualThemeVariant, out var resource) && resource is IBrush brush)
         {
             return brush;
+        }
+
+        if (Avalonia.Application.Current?.TryGetResource(
+                key,
+                Avalonia.Application.Current.ActualThemeVariant,
+                out var appResource) == true && appResource is IBrush appBrush)
+        {
+            return appBrush;
         }
 
         return fallback;

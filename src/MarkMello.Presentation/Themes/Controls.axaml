@@ -405,21 +405,11 @@
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="Cursor" Value="Hand" />
-    <Setter Property="Transitions">
-      <Transitions>
-        <BrushTransition Property="Foreground"
-                         Duration="{DynamicResource MmDurationFast}"
-                         Easing="{DynamicResource MmEasingStandard}" />
-      </Transitions>
-    </Setter>
   </Style>
   <Style Selector="ToggleButton.mm-segmented-item /template/ ContentPresenter">
     <Setter Property="BoxShadow" Value="0 0 0 0 Transparent" />
     <Setter Property="Transitions">
       <Transitions>
-        <BrushTransition Property="Background"
-                         Duration="{DynamicResource MmDurationFast}"
-                         Easing="{DynamicResource MmEasingStandard}" />
         <BoxShadowsTransition Property="BoxShadow"
                               Duration="{DynamicResource MmDurationFast}"
                          Easing="{DynamicResource MmEasingStandard}" />

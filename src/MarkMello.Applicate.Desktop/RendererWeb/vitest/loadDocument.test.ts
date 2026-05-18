@@ -9,6 +9,8 @@ function makeDeps(overrides: Partial<LoadDocumentDeps> = {}): LoadDocumentDeps {
     scrollWindowToTop: vi.fn(),
     emitMark: vi.fn(),
     ensureChromeNodes: vi.fn(),
+    applyTheme: vi.fn(),
+    debugLog: vi.fn(),
     ...overrides,
   };
 }
@@ -68,6 +70,18 @@ describe("applyLoadDocument", () => {
     expect(deps.ensureChromeNodes).toHaveBeenCalledTimes(1);
   });
 
+  it("applies the host theme before swapping document html", () => {
+    const order: string[] = [];
+    const deps = makeDeps({
+      applyTheme: () => { order.push("theme"); },
+      ensureChromeNodes: () => { order.push("chrome"); },
+    });
+
+    applyLoadDocument({ html: "<p>x</p>", theme: "dark" }, deps);
+
+    expect(order).toEqual(["theme", "chrome"]);
+  });
+
   it("survives missing mm-document element by no-op", () => {
     document.body.innerHTML = "<div>no main here</div>";
     const deps = makeDeps();
@@ -95,6 +109,8 @@ describe("applyLoadDocument — chrome survival (Decision 5)", () => {
       scrollWindowToTop: () => {},
       emitMark: () => {},
       ensureChromeNodes: () => {},
+      applyTheme: () => {},
+      debugLog: () => {},
     });
 
     // Same element identity preserved across the swap.

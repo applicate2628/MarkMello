@@ -33,4 +33,13 @@ describe("handleHostMessage(load-document)", () => {
     const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
     expect(() => load({ type: "load-document", html: "" })).not.toThrow();
   });
+
+  it("applies load-document theme before renderer pipeline starts", () => {
+    const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
+    document.documentElement.dataset.theme = "light";
+
+    load({ type: "load-document", html: "<p>x</p>", theme: "dark" });
+
+    expect(document.documentElement.dataset.theme).toBe("dark");
+  });
 });

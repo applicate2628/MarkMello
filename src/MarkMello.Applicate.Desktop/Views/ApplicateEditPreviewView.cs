@@ -58,10 +58,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private bool _hostEventsWired;
     private bool _syncEnabled;
     // Tracks whether the shared WebView is between DocumentRenderInvalidated
-    // (new Navigate started) and DocumentRendered (new content ready). Hide
-    // _webSlot during that window so the user does not see the previous
-    // document's content while the new one is loading.
+    // (new Navigate started) and DocumentRendered (new content ready).
     private bool _isWebRenderInFlight;
+    private bool _hasCompletedWebPreviewRender;
     private DateTime _ignoreEditorScrollUntil;
     private DateTime _ignorePreviewScrollUntil;
 
@@ -108,12 +107,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         // visible through the swap.
         _webRenderMask = new Border
         {
-            Background = Avalonia.Application.Current?.TryGetResource(
-                "MmBackgroundBrush",
-                Avalonia.Application.Current.ActualThemeVariant,
-                out var bg) == true && bg is IBrush bgBrush
-                ? bgBrush
-                : new SolidColorBrush(Colors.White),
+            Background = ResolveBrush("MmBackgroundBrush", new SolidColorBrush(Colors.White)),
             IsHitTestVisible = false,
             IsVisible = false,
             // Reserve the right-edge gutter for the scrollbar overlay so
@@ -162,6 +156,35 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
         _webSlot.PropertyChanged += OnWebSlotPropertyChanged;
         _webRenderMask.PropertyChanged += OnWebMaskPropertyChanged;
+        ActualThemeVariantChanged += OnPreviewAppearanceChanged;
+        ResourcesChanged += OnPreviewResourcesChanged;
+    }
+
+    private void OnPreviewAppearanceChanged(object? sender, EventArgs e)
+        => UpdateWebRenderMaskBrush();
+
+    private void OnPreviewResourcesChanged(object? sender, ResourcesChangedEventArgs e)
+        => UpdateWebRenderMaskBrush();
+
+    private void UpdateWebRenderMaskBrush()
+        => _webRenderMask.Background = ResolveBrush("MmBackgroundBrush", new SolidColorBrush(Colors.White));
+
+    private IBrush ResolveBrush(string key, IBrush fallback)
+    {
+        if (this.TryFindResource(key, ActualThemeVariant, out var resource) && resource is IBrush brush)
+        {
+            return brush;
+        }
+
+        if (Avalonia.Application.Current?.TryGetResource(
+                key,
+                Avalonia.Application.Current.ActualThemeVariant,
+                out var appResource) == true && appResource is IBrush appBrush)
+        {
+            return appBrush;
+        }
+
+        return fallback;
     }
 
     private void OnWebSlotPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
@@ -991,6 +1014,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     {
         ApplicateTrace.ModeToggle("SharedView Rendered -> renderInFlight=false");
         _isWebRenderInFlight = false;
+        _hasCompletedWebPreviewRender = true;
         // Deferred-attach path: if we held off on AttachTo while the new
         // document was loading (see ApplyVisuals), do the reparent now —
         // content is committed in the WebView and visible-stale window is
@@ -1157,13 +1181,19 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
                 _isAttachedToHost = true;
             }
             // Keep _webSlot mounted with full layout footprint so the
-            // SOURCE|PREVIEW toolbar row stays put. Mask covers _webSlot
-            // when (a) a render is in flight or (b) we're still waiting
-            // to attach (deferred). Once attached AND render committed,
-            // the mask goes off and content shows immediately.
+            // SOURCE|PREVIEW toolbar row stays put. Mask only while there
+            // is no committed preview yet or the WebView is not attached;
+            // after the first successful render, keep the previous preview
+            // visible until the next tab/source render commits. The runtime
+            // log showed the old policy toggling this mask on every tab
+            // switch (`False -> True -> False`), which was the visible
+            // preview flicker before the new document arrived.
             _webSlot.IsVisible = true;
             _webSlot.Opacity = 1;
-            var maskVisible = _isWebRenderInFlight || !_isAttachedToHost;
+            var maskVisible = ShouldShowWebRenderMask(
+                _isWebRenderInFlight,
+                _isAttachedToHost,
+                _hasCompletedWebPreviewRender);
             _webRenderMask.IsVisible = maskVisible;
             // ScrollBar overlay stays permanently visible — its template-part
             // Transitions are cleared in WebViewHostScrollBarOverlay so it
@@ -1352,6 +1382,12 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         ScrollBarVisibility originalMode)
         => useWebPreview ? ScrollBarVisibility.Disabled : originalMode;
 
+    internal static bool ShouldShowWebRenderMask(
+        bool isWebRenderInFlight,
+        bool isAttachedToHost,
+        bool hasCompletedInitialWebPreviewRender)
+        => !isAttachedToHost || (isWebRenderInFlight && !hasCompletedInitialWebPreviewRender);
+
     private void RestoreHostScrollMode()
     {
         if (_hostScrollViewer is not null && _hostScrollViewerVerticalMode is { } mode)
@@ -1385,6 +1421,8 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         ReleaseSharedHost();
         _webRenderTimer.Tick -= OnWebRenderTimerTick;
         _resizeContentWidthTimer.Tick -= OnResizeContentWidthTimerTick;
+        ActualThemeVariantChanged -= OnPreviewAppearanceChanged;
+        ResourcesChanged -= OnPreviewResourcesChanged;
         _scrollBarOverlay?.Dispose();
         _scrollBarOverlay = null;
     }

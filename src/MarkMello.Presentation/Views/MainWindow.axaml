@@ -169,6 +169,54 @@
                     MinWidth="206"
                     VerticalAlignment="Center"
                     Margin="0,0,8,0">
+          <Grid Width="58"
+                Height="28"
+                VerticalAlignment="Center">
+            <StackPanel Orientation="Horizontal"
+                        Spacing="6"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Center">
+              <Button Classes="topbar-ghost"
+                      IsVisible="{Binding ShowsDirtySaveButton}"
+                      Command="{Binding SaveCommand}"
+                      ToolTip.Tip="{Binding SaveTooltip}">
+                <Grid Width="14"
+                      Height="14">
+                  <Path Data="M2.25 1.75H10.5L11.75 3V12.25H2.25Z M4 1.75V5.25H9.5V1.75 M4 12.25V8H10V12.25"
+                        Stroke="{DynamicResource MmTextSoftBrush}"
+                        StrokeThickness="1.35"
+                        StrokeLineCap="Round"
+                        StrokeJoin="Round"
+                        Fill="Transparent"
+                        Stretch="Uniform" />
+                </Grid>
+              </Button>
+
+              <Button Classes="topbar-ghost"
+                      IsVisible="{Binding IsEditMode}"
+                      Command="{Binding SaveAsCommand}"
+                      ToolTip.Tip="{Binding SaveAsTooltip}">
+                <Grid Width="14"
+                      Height="14">
+                  <Path Data="M2.25 1.75H10.5L11.75 3V12.25H2.25Z M4 1.75V5.25H9.5V1.75 M4 12.25V8H9"
+                        Stroke="{DynamicResource MmTextSoftBrush}"
+                        StrokeThickness="1.25"
+                        StrokeLineCap="Round"
+                        StrokeJoin="Round"
+                        Fill="Transparent"
+                        Stretch="Uniform" />
+                  <Path Data="M8.25 10.75L11.5 7.5 12.5 8.5 9.25 11.75 8 12Z"
+                        Stroke="{DynamicResource MmTextSoftBrush}"
+                        StrokeThickness="1.05"
+                        StrokeLineCap="Round"
+                        StrokeJoin="Round"
+                        Fill="Transparent"
+                        Stretch="Uniform" />
+                </Grid>
+              </Button>
+            </StackPanel>
+          </Grid>
+
           <Button Classes="topbar-ghost"
                   Command="{Binding CycleThemeCommand}"
                   ToolTip.Tip="{Binding NextThemeHint}">
@@ -224,45 +272,6 @@
                       StrokeThickness="1.5"
                       StrokeLineCap="Round" />
               </Canvas>
-            </Grid>
-          </Button>
-
-          <Button Classes="topbar-ghost"
-                  IsVisible="{Binding ShowsDirtySaveButton}"
-                  Command="{Binding SaveCommand}"
-                  ToolTip.Tip="{Binding SaveTooltip}">
-            <Grid Width="14"
-                  Height="14">
-              <Path Data="M2.25 1.75H10.5L11.75 3V12.25H2.25Z M4 1.75V5.25H9.5V1.75 M4 12.25V8H10V12.25"
-                    Stroke="{DynamicResource MmTextSoftBrush}"
-                    StrokeThickness="1.35"
-                    StrokeLineCap="Round"
-                    StrokeJoin="Round"
-                    Fill="Transparent"
-                    Stretch="Uniform" />
-            </Grid>
-          </Button>
-
-          <Button Classes="topbar-ghost"
-                  IsVisible="{Binding IsEditMode}"
-                  Command="{Binding SaveAsCommand}"
-                  ToolTip.Tip="{Binding SaveAsTooltip}">
-            <Grid Width="14"
-                  Height="14">
-              <Path Data="M2.25 1.75H10.5L11.75 3V12.25H2.25Z M4 1.75V5.25H9.5V1.75 M4 12.25V8H9"
-                    Stroke="{DynamicResource MmTextSoftBrush}"
-                    StrokeThickness="1.25"
-                    StrokeLineCap="Round"
-                    StrokeJoin="Round"
-                    Fill="Transparent"
-                    Stretch="Uniform" />
-              <Path Data="M8.25 10.75L11.5 7.5 12.5 8.5 9.25 11.75 8 12Z"
-                    Stroke="{DynamicResource MmTextSoftBrush}"
-                    StrokeThickness="1.05"
-                    StrokeLineCap="Round"
-                    StrokeJoin="Round"
-                    Fill="Transparent"
-                    Stretch="Uniform" />
             </Grid>
           </Button>
 
