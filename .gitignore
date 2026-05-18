@@ -38,6 +38,7 @@ node_modules/
 .reports/
 .agents/
 .claude/
+work-items/
 docs/superpowers/
 
 # Other
