@@ -1,0 +1,4 @@
+# Renderer vendor assets are pinned by SHA-256 manifests. Keep the checked-out
+# bytes stable on Windows runners instead of letting autocrlf rewrite newlines.
+src/MarkMello.Applicate.Desktop/RendererWeb/assets/**/*.js text eol=lf
+src/MarkMello.Applicate.Desktop/RendererWeb/assets/**/*.css text eol=lf
