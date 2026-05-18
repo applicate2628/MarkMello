@@ -49,22 +49,55 @@
                       Classes="mm-setting-row"
                       MinHeight="104"
                       ClipToBounds="True">
-                <Grid ColumnDefinitions="*,Auto"
-                      ColumnSpacing="12"
-                      VerticalAlignment="Top">
-                  <StackPanel Grid.Column="0"
-                              Spacing="4">
-                    <TextBlock Classes="mm-setting-label"
-                               FontWeight="SemiBold"
-                               Text="{Binding UpdateStatusTitle}"
-                               TextWrapping="Wrap" />
-                    <TextBlock Classes="mm-setting-body"
-                               Text="{Binding UpdateStatusMessage}"
-                               TextWrapping="Wrap" />
-                  </StackPanel>
-                  <TextBlock Grid.Column="1"
-                             Classes="mm-setting-meta"
-                             Text="{Binding UpdateStateBadge}" />
+                <Grid RowDefinitions="Auto,10">
+                  <Grid x:Name="UpdateStatusContent"
+                        Grid.Row="0"
+                        ColumnDefinitions="*,Auto"
+                        ColumnSpacing="12"
+                        Opacity="1"
+                        RenderTransform="translate(0px,0px)"
+                        VerticalAlignment="Top">
+                    <Grid.Transitions>
+                      <Transitions>
+                        <DoubleTransition Property="Opacity"
+                                          Duration="{DynamicResource MmDurationStandard}"
+                                          Easing="{DynamicResource MmEasingStandard}" />
+                        <TransformOperationsTransition Property="RenderTransform"
+                                                       Duration="{DynamicResource MmDurationStandard}"
+                                                       Easing="{DynamicResource MmEasingStandard}" />
+                      </Transitions>
+                    </Grid.Transitions>
+                    <StackPanel Grid.Column="0"
+                                Spacing="4">
+                      <TextBlock Classes="mm-setting-label"
+                                 FontWeight="SemiBold"
+                                 Text="{Binding UpdateStatusTitle}"
+                                 TextWrapping="Wrap" />
+                      <TextBlock Classes="mm-setting-body"
+                                 Text="{Binding UpdateStatusMessage}"
+                                 TextWrapping="Wrap" />
+                    </StackPanel>
+                    <TextBlock Grid.Column="1"
+                               Classes="mm-setting-meta"
+                               Text="{Binding UpdateStateBadge}" />
+                  </Grid>
+                  <ProgressBar Grid.Row="1"
+                               Height="2"
+                               Margin="0,7,0,0"
+                               Minimum="0"
+                               Maximum="100"
+                               IsIndeterminate="{Binding IsUpdateBusy}"
+                               Opacity="{Binding UpdateBusyIndicatorOpacity}"
+                               Background="{DynamicResource MmBorderSoftBrush}"
+                               Foreground="{DynamicResource MmAccentBrush}">
+                    <ProgressBar.Transitions>
+                      <Transitions>
+                        <DoubleTransition Property="Opacity"
+                                          Duration="{DynamicResource MmDurationStandard}"
+                                          Easing="{DynamicResource MmEasingStandard}" />
+                      </Transitions>
+                    </ProgressBar.Transitions>
+                  </ProgressBar>
                 </Grid>
               </Border>
 
@@ -83,15 +116,62 @@
                           Grid.Column="0"
                           HorizontalAlignment="Left"
                           MinWidth="112"
-                          Content="{Binding CheckForUpdatesLabel}"
-                          Command="{Binding CheckForUpdatesCommand}" />
+                          Command="{Binding CheckForUpdatesCommand}">
+                    <Grid MinWidth="74">
+                      <TextBlock HorizontalAlignment="Center"
+                                 Text="{Binding CheckForUpdatesIdleLabel}"
+                                 Opacity="{Binding CheckForUpdatesIdleLabelOpacity}">
+                        <TextBlock.Transitions>
+                          <Transitions>
+                            <DoubleTransition Property="Opacity"
+                                              Duration="{DynamicResource MmDurationStandard}"
+                                              Easing="{DynamicResource MmEasingStandard}" />
+                          </Transitions>
+                        </TextBlock.Transitions>
+                      </TextBlock>
+                      <TextBlock HorizontalAlignment="Center"
+                                 Text="{Binding CheckForUpdatesBusyLabel}"
+                                 Opacity="{Binding CheckForUpdatesBusyLabelOpacity}">
+                        <TextBlock.Transitions>
+                          <Transitions>
+                            <DoubleTransition Property="Opacity"
+                                              Duration="{DynamicResource MmDurationStandard}"
+                                              Easing="{DynamicResource MmEasingStandard}" />
+                          </Transitions>
+                        </TextBlock.Transitions>
+                      </TextBlock>
+                    </Grid>
+                  </Button>
                   <Button Classes="mm-dialog-primary"
                           Grid.Column="1"
                           HorizontalAlignment="Stretch"
-                          Content="{Binding DownloadUpdateLabel}"
                           Command="{Binding DownloadUpdateCommand}"
                           IsEnabled="{Binding CanDownloadAvailableUpdate}"
                           Opacity="{Binding DownloadUpdateActionOpacity}">
+                    <Grid>
+                      <TextBlock HorizontalAlignment="Center"
+                                 Text="{Binding DownloadUpdateIdleLabel}"
+                                 Opacity="{Binding DownloadUpdateIdleLabelOpacity}">
+                        <TextBlock.Transitions>
+                          <Transitions>
+                            <DoubleTransition Property="Opacity"
+                                              Duration="{DynamicResource MmDurationStandard}"
+                                              Easing="{DynamicResource MmEasingStandard}" />
+                          </Transitions>
+                        </TextBlock.Transitions>
+                      </TextBlock>
+                      <TextBlock HorizontalAlignment="Center"
+                                 Text="{Binding DownloadUpdateBusyLabel}"
+                                 Opacity="{Binding DownloadUpdateBusyLabelOpacity}">
+                        <TextBlock.Transitions>
+                          <Transitions>
+                            <DoubleTransition Property="Opacity"
+                                              Duration="{DynamicResource MmDurationStandard}"
+                                              Easing="{DynamicResource MmEasingStandard}" />
+                          </Transitions>
+                        </TextBlock.Transitions>
+                      </TextBlock>
+                    </Grid>
                     <Button.Transitions>
                       <Transitions>
                         <DoubleTransition Property="Opacity"

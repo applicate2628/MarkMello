@@ -177,6 +177,10 @@ internal sealed class StubUpdateService : IUpdateService
     public UpdateDownloadResult NextDownloadResult { get; set; }
         = new UpdateDownloadResult.Failed("No downloaded update configured for this test.");
 
+    public Task<UpdateDownloadResult>? NextDownloadTask { get; set; }
+
+    public Task<UpdateDownloadResult>? LastDownloadTask { get; private set; }
+
     public UpdatePrepareResult NextPrepareResult { get; set; }
         = new UpdatePrepareResult.Failed("No native handoff configured for this test.");
 
@@ -190,7 +194,10 @@ internal sealed class StubUpdateService : IUpdateService
     public Task<UpdateDownloadResult> DownloadUpdateAsync(
         AppUpdatePackage package,
         CancellationToken cancellationToken = default)
-        => Task.FromResult(NextDownloadResult);
+    {
+        LastDownloadTask = NextDownloadTask ?? Task.FromResult(NextDownloadResult);
+        return LastDownloadTask;
+    }
 
     public Task<UpdatePrepareResult> PrepareDownloadedUpdateAsync(
         AppUpdatePackage package,

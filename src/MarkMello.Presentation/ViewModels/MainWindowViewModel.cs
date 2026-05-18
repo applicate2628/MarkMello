@@ -318,7 +318,19 @@ public partial class MainWindowViewModel : ObservableObject
            && !IsCheckingForUpdates
            && !IsDownloadingUpdate;
 
-    public double DownloadUpdateActionOpacity => CanDownloadAvailableUpdate ? 1.0 : 0.0;
+    public bool IsUpdateBusy => IsCheckingForUpdates || IsDownloadingUpdate;
+
+    public double UpdateBusyIndicatorOpacity => IsUpdateBusy ? 1.0 : 0.0;
+
+    public double CheckForUpdatesIdleLabelOpacity => IsCheckingForUpdates ? 0.0 : 1.0;
+
+    public double CheckForUpdatesBusyLabelOpacity => IsCheckingForUpdates ? 1.0 : 0.0;
+
+    public double DownloadUpdateIdleLabelOpacity => IsDownloadingUpdate ? 0.0 : 1.0;
+
+    public double DownloadUpdateBusyLabelOpacity => IsDownloadingUpdate ? 1.0 : 0.0;
+
+    public double DownloadUpdateActionOpacity => CanDownloadAvailableUpdate || IsDownloadingUpdate ? 1.0 : 0.0;
 
     public double OpenDownloadedUpdateActionOpacity => CanOpenDownloadedUpdate ? 1.0 : 0.0;
 
@@ -328,7 +340,15 @@ public partial class MainWindowViewModel : ObservableObject
 
     public string CheckForUpdatesLabel => IsCheckingForUpdates ? _localization["UpdateChecking"] : _localization["UpdateCheckNow"];
 
+    public string CheckForUpdatesIdleLabel => _localization["UpdateCheckNow"];
+
+    public string CheckForUpdatesBusyLabel => _localization["UpdateChecking"];
+
     public string DownloadUpdateLabel => IsDownloadingUpdate ? _localization["UpdateDownloading"] : _localization["UpdateDownload"];
+
+    public string DownloadUpdateIdleLabel => _localization["UpdateDownload"];
+
+    public string DownloadUpdateBusyLabel => _localization["UpdateDownloading"];
 
     public string DownloadedUpdateActionLabel
         => _availableUpdatePackage?.InstallAction switch
@@ -1762,10 +1782,20 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(CanCheckForUpdates));
         OnPropertyChanged(nameof(CanDownloadAvailableUpdate));
         OnPropertyChanged(nameof(CanOpenDownloadedUpdate));
+        OnPropertyChanged(nameof(IsUpdateBusy));
+        OnPropertyChanged(nameof(UpdateBusyIndicatorOpacity));
+        OnPropertyChanged(nameof(CheckForUpdatesIdleLabelOpacity));
+        OnPropertyChanged(nameof(CheckForUpdatesBusyLabelOpacity));
+        OnPropertyChanged(nameof(DownloadUpdateIdleLabelOpacity));
+        OnPropertyChanged(nameof(DownloadUpdateBusyLabelOpacity));
         OnPropertyChanged(nameof(DownloadUpdateActionOpacity));
         OnPropertyChanged(nameof(OpenDownloadedUpdateActionOpacity));
         OnPropertyChanged(nameof(CheckForUpdatesLabel));
+        OnPropertyChanged(nameof(CheckForUpdatesIdleLabel));
+        OnPropertyChanged(nameof(CheckForUpdatesBusyLabel));
         OnPropertyChanged(nameof(DownloadUpdateLabel));
+        OnPropertyChanged(nameof(DownloadUpdateIdleLabel));
+        OnPropertyChanged(nameof(DownloadUpdateBusyLabel));
         OnPropertyChanged(nameof(DownloadedUpdateActionLabel));
         OnPropertyChanged(nameof(UpdateStateBadge));
     }

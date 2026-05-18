@@ -201,6 +201,13 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("MinHeight=\"216\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("RowDefinitions=\"Auto,Auto,Auto\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("ColumnDefinitions=\"Auto,156\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"UpdateStatusContent\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("IsIndeterminate=\"{Binding IsUpdateBusy}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Opacity=\"{Binding UpdateBusyIndicatorOpacity}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding CheckForUpdatesIdleLabel}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding CheckForUpdatesBusyLabel}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding DownloadUpdateIdleLabel}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding DownloadUpdateBusyLabel}\"", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("Height=\"300\"", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("RowDefinitions=\"*,Auto,104\"", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("ItemsSource=\"{Binding ThemeOptions}\"", appSettings, StringComparison.Ordinal);

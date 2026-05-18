@@ -342,7 +342,11 @@ public partial class MainWindowViewModel
         OnPropertyChanged(nameof(EditShortcutLabel));
         OnPropertyChanged(nameof(NextThemeHint));
         OnPropertyChanged(nameof(CheckForUpdatesLabel));
+        OnPropertyChanged(nameof(CheckForUpdatesIdleLabel));
+        OnPropertyChanged(nameof(CheckForUpdatesBusyLabel));
         OnPropertyChanged(nameof(DownloadUpdateLabel));
+        OnPropertyChanged(nameof(DownloadUpdateIdleLabel));
+        OnPropertyChanged(nameof(DownloadUpdateBusyLabel));
         OnPropertyChanged(nameof(DownloadedUpdateActionLabel));
         OnPropertyChanged(nameof(UpdateStateBadge));
         OnPropertyChanged(nameof(IsSystemLanguageSelected));

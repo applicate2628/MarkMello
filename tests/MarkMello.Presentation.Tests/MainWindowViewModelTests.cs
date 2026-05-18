@@ -436,6 +436,32 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task CheckForUpdatesCommandWhilePendingExposesSmoothBusyState()
+    {
+        var harness = CreateHarness();
+        var pendingCheck = new TaskCompletionSource<UpdateCheckResult>();
+        harness.UpdateService.NextCheckTask = pendingCheck.Task;
+
+        var checkTask = harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+
+        Assert.True(harness.ViewModel.IsCheckingForUpdates);
+        Assert.True(harness.ViewModel.IsUpdateBusy);
+        Assert.Equal(1.0, harness.ViewModel.UpdateBusyIndicatorOpacity);
+        Assert.Equal(0.0, harness.ViewModel.CheckForUpdatesIdleLabelOpacity);
+        Assert.Equal(1.0, harness.ViewModel.CheckForUpdatesBusyLabelOpacity);
+        Assert.Equal("Checking...", harness.ViewModel.CheckForUpdatesBusyLabel);
+        Assert.Equal("Checking...", harness.ViewModel.CheckForUpdatesLabel);
+
+        pendingCheck.SetResult(new UpdateCheckResult.SourceNotConfigured("No release source configured."));
+        await checkTask;
+
+        Assert.False(harness.ViewModel.IsUpdateBusy);
+        Assert.Equal(0.0, harness.ViewModel.UpdateBusyIndicatorOpacity);
+        Assert.Equal(1.0, harness.ViewModel.CheckForUpdatesIdleLabelOpacity);
+        Assert.Equal(0.0, harness.ViewModel.CheckForUpdatesBusyLabelOpacity);
+    }
+
+    [Fact]
     public async Task StartupUpdateCheckWhenUpdateAvailableShowsDismissibleNotification()
     {
         var harness = CreateHarness();
@@ -473,6 +499,38 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("Launch installer", harness.ViewModel.DownloadedUpdateActionLabel);
         Assert.Equal(downloadedPath, harness.ViewModel.DownloadedUpdatePath);
         Assert.Equal("Ready", harness.ViewModel.UpdateStateBadge);
+    }
+
+    [Fact]
+    public async Task DownloadUpdateCommandWhilePendingKeepsDownloadSlotVisible()
+    {
+        var harness = CreateHarness();
+        var package = CreateUpdatePackage();
+        var downloadedPath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", package.AssetName);
+        var pendingDownload = new TaskCompletionSource<UpdateDownloadResult>();
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
+        harness.UpdateService.NextDownloadTask = pendingDownload.Task;
+
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+        var downloadTask = harness.ViewModel.DownloadUpdateCommand.ExecuteAsync(null);
+
+        Assert.True(harness.ViewModel.IsDownloadingUpdate);
+        Assert.True(harness.ViewModel.IsUpdateBusy);
+        Assert.Equal(1.0, harness.ViewModel.UpdateBusyIndicatorOpacity);
+        Assert.Equal(1.0, harness.ViewModel.DownloadUpdateActionOpacity);
+        Assert.Equal(0.0, harness.ViewModel.OpenDownloadedUpdateActionOpacity);
+        Assert.Equal(0.0, harness.ViewModel.DownloadUpdateIdleLabelOpacity);
+        Assert.Equal(1.0, harness.ViewModel.DownloadUpdateBusyLabelOpacity);
+        Assert.Equal("Downloading...", harness.ViewModel.DownloadUpdateBusyLabel);
+        Assert.Equal("Downloading...", harness.ViewModel.DownloadUpdateLabel);
+
+        pendingDownload.SetResult(new UpdateDownloadResult.Success(package, downloadedPath));
+        await downloadTask;
+
+        Assert.False(harness.ViewModel.IsUpdateBusy);
+        Assert.Equal(0.0, harness.ViewModel.UpdateBusyIndicatorOpacity);
+        Assert.Equal(0.0, harness.ViewModel.DownloadUpdateActionOpacity);
+        Assert.Equal(1.0, harness.ViewModel.OpenDownloadedUpdateActionOpacity);
     }
 
     [Fact]
