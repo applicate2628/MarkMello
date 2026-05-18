@@ -17,23 +17,35 @@ public partial class EditWorkspaceView : UserControl
     private const double ScrollSyncMinViewportAnchorY = 24;
     private const double ScrollSyncHitTestX = 2;
     private const int MaxScrollSyncAttachAttempts = 4;
+    private const int ScrollBarDragSettleDelayMs = 120;
 
     private TextBox? _editorTextBox;
     private TextPresenter? _editorTextPresenter;
     private ScrollViewer? _editorScrollViewer;
     private ScrollViewer? _previewScrollViewer;
     private MarkdownDocumentView? _previewDocumentView;
+    private readonly List<ScrollBar> _scrollBarsWithDragHandlers = [];
+    private readonly DispatcherTimer _scrollBarDragSettleTimer;
     private bool _isSynchronizingScroll;
+    private ScrollViewer? _activeScrollBarDragSource;
 
     public EditWorkspaceView()
     {
         InitializeComponent();
+        _scrollBarDragSettleTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(ScrollBarDragSettleDelayMs)
+        };
+        _scrollBarDragSettleTimer.Tick += OnScrollBarDragSettleTimerTick;
     }
 
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
         DataContextChanged += OnDataContextChanged;
+        AddHandler(PointerPressedEvent, OnScrollBarDragPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerReleasedEvent, OnScrollBarDragPointerReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerCaptureLostEvent, OnScrollBarDragPointerCaptureLost, RoutingStrategies.Tunnel, handledEventsToo: true);
         ApplySplitRatio();
         AttachScrollSynchronizationAsync();
         FocusEditorAsync();
@@ -42,6 +54,9 @@ public partial class EditWorkspaceView : UserControl
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         DataContextChanged -= OnDataContextChanged;
+        RemoveHandler(PointerPressedEvent, OnScrollBarDragPointerPressed);
+        RemoveHandler(PointerReleasedEvent, OnScrollBarDragPointerReleased);
+        RemoveHandler(PointerCaptureLostEvent, OnScrollBarDragPointerCaptureLost);
         DetachScrollSynchronization();
         base.OnDetachedFromVisualTree(e);
     }
@@ -97,6 +112,8 @@ public partial class EditWorkspaceView : UserControl
 
         _editorScrollViewer.PropertyChanged += OnScrollViewerPropertyChanged;
         _previewScrollViewer.PropertyChanged += OnScrollViewerPropertyChanged;
+        AttachScrollBarDragHandlers(_editorScrollViewer);
+        AttachScrollBarDragHandlers(_previewScrollViewer);
         _previewDocumentView.DocumentRendered += OnPreviewDocumentRendered;
         _previewDocumentView.DocumentRenderInvalidated += OnPreviewDocumentRenderInvalidated;
 
@@ -105,6 +122,8 @@ public partial class EditWorkspaceView : UserControl
 
     private void DetachScrollSynchronization()
     {
+        DetachScrollBarDragHandlers();
+
         if (_editorScrollViewer is not null)
         {
             _editorScrollViewer.PropertyChanged -= OnScrollViewerPropertyChanged;
@@ -127,12 +146,24 @@ public partial class EditWorkspaceView : UserControl
         _previewScrollViewer = null;
         _previewDocumentView = null;
         _isSynchronizingScroll = false;
+        _activeScrollBarDragSource = null;
+        _scrollBarDragSettleTimer.Stop();
     }
 
     private void OnScrollViewerPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
     {
         if (e.Property != ScrollViewer.OffsetProperty || _isSynchronizingScroll)
         {
+            return;
+        }
+
+        if (_activeScrollBarDragSource is not null)
+        {
+            if (ReferenceEquals(sender, _activeScrollBarDragSource))
+            {
+                RestartScrollBarDragSettleTimer();
+            }
+
             return;
         }
 
@@ -355,6 +386,108 @@ public partial class EditWorkspaceView : UserControl
         {
             _isSynchronizingScroll = false;
         }
+    }
+
+    private void OnScrollBarDragPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        _activeScrollBarDragSource = TryGetOwnedScrollViewerFromScrollBarChrome(e.Source);
+    }
+
+    private void OnScrollBarDragPointerReleased(object? sender, PointerReleasedEventArgs e)
+        => CompleteScrollBarDrag();
+
+    private void OnScrollBarDragPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+        => CompleteScrollBarDrag();
+
+    private void CompleteScrollBarDrag()
+    {
+        var source = _activeScrollBarDragSource;
+        if (source is null)
+        {
+            return;
+        }
+
+        _activeScrollBarDragSource = null;
+        _scrollBarDragSettleTimer.Stop();
+
+        Dispatcher.UIThread.Post(() => SynchronizeFromScrollBarDragSource(source), DispatcherPriority.Background);
+    }
+
+    private void OnScrollBarDragSettleTimerTick(object? sender, EventArgs e)
+    {
+        _scrollBarDragSettleTimer.Stop();
+        var source = _activeScrollBarDragSource;
+        if (source is not null)
+        {
+            _activeScrollBarDragSource = null;
+            SynchronizeFromScrollBarDragSource(source);
+        }
+    }
+
+    private void RestartScrollBarDragSettleTimer()
+    {
+        _scrollBarDragSettleTimer.Stop();
+        _scrollBarDragSettleTimer.Start();
+    }
+
+    private void SynchronizeFromScrollBarDragSource(ScrollViewer source)
+    {
+        if (ReferenceEquals(source, _editorScrollViewer))
+        {
+            SynchronizePreviewToEditor();
+            return;
+        }
+
+        if (ReferenceEquals(source, _previewScrollViewer))
+        {
+            SynchronizeEditorToPreview();
+        }
+    }
+
+    private ScrollViewer? TryGetOwnedScrollViewerFromScrollBarChrome(object? source)
+    {
+        if (source is not Control control)
+        {
+            return null;
+        }
+
+        var scrollBar = control as ScrollBar ?? control.FindAncestorOfType<ScrollBar>();
+        var scrollViewer = scrollBar?.FindAncestorOfType<ScrollViewer>();
+        if (ReferenceEquals(scrollViewer, _editorScrollViewer)
+            || ReferenceEquals(scrollViewer, _previewScrollViewer))
+        {
+            return scrollViewer;
+        }
+
+        return null;
+    }
+
+    private void AttachScrollBarDragHandlers(ScrollViewer scrollViewer)
+    {
+        foreach (var scrollBar in scrollViewer.GetVisualDescendants().OfType<ScrollBar>())
+        {
+            scrollBar.AddHandler(PointerPressedEvent, OnScrollBarDragPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
+            scrollBar.AddHandler(PointerReleasedEvent, OnScrollBarDragPointerReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
+            scrollBar.AddHandler(PointerCaptureLostEvent, OnScrollBarDragPointerCaptureLost, RoutingStrategies.Tunnel, handledEventsToo: true);
+            _scrollBarsWithDragHandlers.Add(scrollBar);
+        }
+    }
+
+    private void DetachScrollBarDragHandlers()
+    {
+        foreach (var scrollBar in _scrollBarsWithDragHandlers)
+        {
+            scrollBar.RemoveHandler(PointerPressedEvent, OnScrollBarDragPointerPressed);
+            scrollBar.RemoveHandler(PointerReleasedEvent, OnScrollBarDragPointerReleased);
+            scrollBar.RemoveHandler(PointerCaptureLostEvent, OnScrollBarDragPointerCaptureLost);
+        }
+
+        _scrollBarsWithDragHandlers.Clear();
     }
 
     private void OnFormatButtonClick(object? sender, RoutedEventArgs e)

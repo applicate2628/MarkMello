@@ -1,7 +1,5 @@
 using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Media;
-using Avalonia.Media.Transformation;
 using Avalonia.Threading;
 using MarkMello.Presentation.ViewModels;
 using System.ComponentModel;
@@ -69,7 +67,6 @@ public partial class AppUpdatesPanelView : UserControl
     {
         var generation = ++_statusTransitionGeneration;
         UpdateStatusContent.Opacity = 0;
-        UpdateStatusContent.RenderTransform = TransformOperations.Parse("translate(0px,3px)");
         _ = CompleteStatusContentTransitionAsync(generation);
     }
 
@@ -85,7 +82,6 @@ public partial class AppUpdatesPanelView : UserControl
                 }
 
                 UpdateStatusContent.Opacity = 1;
-                UpdateStatusContent.RenderTransform = TransformOperations.Identity;
             },
             DispatcherPriority.Background);
     }

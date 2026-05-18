@@ -55,16 +55,12 @@
                         ColumnDefinitions="*,Auto"
                         ColumnSpacing="12"
                         Opacity="1"
-                        RenderTransform="translate(0px,0px)"
                         VerticalAlignment="Top">
                     <Grid.Transitions>
                       <Transitions>
                         <DoubleTransition Property="Opacity"
                                           Duration="{DynamicResource MmDurationStandard}"
                                           Easing="{DynamicResource MmEasingStandard}" />
-                        <TransformOperationsTransition Property="RenderTransform"
-                                                       Duration="{DynamicResource MmDurationStandard}"
-                                                       Easing="{DynamicResource MmEasingStandard}" />
                       </Transitions>
                     </Grid.Transitions>
                     <StackPanel Grid.Column="0"

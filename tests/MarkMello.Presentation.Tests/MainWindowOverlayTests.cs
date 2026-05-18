@@ -208,6 +208,8 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("Text=\"{Binding CheckForUpdatesBusyLabel}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding DownloadUpdateIdleLabel}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding DownloadUpdateBusyLabel}\"", appUpdates, StringComparison.Ordinal);
+        Assert.DoesNotContain("TransformOperationsTransition Property=\"RenderTransform\"", appUpdates, StringComparison.Ordinal);
+        Assert.DoesNotContain("RenderTransform=\"translate", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("Height=\"300\"", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("RowDefinitions=\"*,Auto,104\"", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("ItemsSource=\"{Binding ThemeOptions}\"", appSettings, StringComparison.Ordinal);
@@ -253,6 +255,40 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("IsVisible=\"{Binding IsUpdateNotificationVisible}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding DismissUpdateNotificationCommand}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding DownloadUpdateCommand}\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MainWindowUsesStartupShellFade()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "MainWindow.axaml"));
+        var codeBehind = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "MainWindow.axaml.cs"));
+
+        Assert.Contains("Name=\"ShellRoot\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("DoubleTransition Property=\"Opacity\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("PrepareShellForStartup", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("RevealShellAfterStartupAsync", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("ShellRoot.Opacity = 0", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("ShellRoot.Opacity = 1", codeBehind, StringComparison.Ordinal);
     }
 
     [Fact]

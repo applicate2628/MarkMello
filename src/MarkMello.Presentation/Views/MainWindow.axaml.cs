@@ -7,6 +7,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MarkMello.Application.Abstractions;
 using MarkMello.Domain;
@@ -49,6 +50,7 @@ public partial class MainWindow : Window
 
         ConfigurePlatformChrome();
         InitializeComponent();
+        PrepareShellForStartup();
         ApplyStartupWindowPlacement();
         SyncOverlayWindowClasses();
 
@@ -98,7 +100,20 @@ public partial class MainWindow : Window
     private async void OnWindowOpened(object? sender, EventArgs e)
     {
         await _startupInitializationTask.ConfigureAwait(true);
+        await RevealShellAfterStartupAsync().ConfigureAwait(true);
         await CompleteStartupSmokeTestAsync().ConfigureAwait(true);
+    }
+
+    private void PrepareShellForStartup()
+    {
+        ShellRoot.Opacity = 0;
+    }
+
+    private async Task RevealShellAfterStartupAsync()
+    {
+        await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Render);
+        await Task.Delay(60).ConfigureAwait(true);
+        ShellRoot.Opacity = 1;
     }
 
     private async Task InitializeStartupAsync()
