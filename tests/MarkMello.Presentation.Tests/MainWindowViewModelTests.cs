@@ -118,7 +118,7 @@ public sealed class MainWindowViewModelTests
 
         Assert.True(harness.ViewModel.IsAppMenuOpen);
         Assert.True(harness.ViewModel.ShowsAppMenuControl);
-        Assert.NotNull(harness.ViewModel.AppMenuOverlayContent);
+        Assert.True(harness.ViewModel.IsAppOverlayOpen);
 
         await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
 
@@ -126,7 +126,6 @@ public sealed class MainWindowViewModelTests
         Assert.False(harness.ViewModel.ShowsAppMenuControl);
         Assert.False(harness.ViewModel.IsAppMenuOpen);
         Assert.False(harness.ViewModel.IsAppOverlayOpen);
-        Assert.Null(harness.ViewModel.AppMenuOverlayContent);
     }
 
     [Fact]
@@ -189,13 +188,12 @@ public sealed class MainWindowViewModelTests
         Assert.False(harness.ViewModel.IsAppMenuOpen);
         Assert.True(harness.ViewModel.IsAppUpdatesOpen);
         Assert.True(harness.ViewModel.IsAppOverlayOpen);
-        Assert.NotNull(harness.ViewModel.AppUpdatesOverlayContent);
 
         harness.ViewModel.ReturnToAppMenuCommand.Execute(null);
 
         Assert.True(harness.ViewModel.IsAppMenuOpen);
         Assert.False(harness.ViewModel.IsAppUpdatesOpen);
-        Assert.Null(harness.ViewModel.AppUpdatesOverlayContent);
+        Assert.True(harness.ViewModel.IsAppOverlayOpen);
     }
 
     [Fact]
@@ -433,6 +431,27 @@ public sealed class MainWindowViewModelTests
             DateTimeOffset.Parse("2026-04-19T12:00:00Z", CultureInfo.InvariantCulture),
             "https://github.com/dartdavros/MarkMello/releases/tag/v1.0.0"));
         await harness.UpdateService.LastCheckTask!;
+    }
+
+    [Fact]
+    public async Task StartupUpdateCheckKeepsAppMenuBadgeStableWhilePending()
+    {
+        var harness = CreateHarness();
+        var package = CreateUpdatePackage();
+        var pendingCheck = new TaskCompletionSource<UpdateCheckResult>();
+        harness.UpdateService.NextCheckTask = pendingCheck.Task;
+
+        await harness.ViewModel.InitializeAsync();
+
+        Assert.True(harness.ViewModel.IsCheckingForUpdates);
+        Assert.Equal("Checking", harness.ViewModel.UpdateStateBadge);
+        Assert.Equal("Manual", harness.ViewModel.AppMenuUpdateStateBadge);
+
+        pendingCheck.SetResult(new UpdateCheckResult.UpdateAvailable(package));
+        await harness.UpdateService.LastCheckTask!;
+
+        Assert.Equal("Available", harness.ViewModel.UpdateStateBadge);
+        Assert.Equal("Available", harness.ViewModel.AppMenuUpdateStateBadge);
     }
 
     [Fact]

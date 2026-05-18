@@ -24,6 +24,7 @@ public sealed class EditWorkspaceViewTests
         Assert.Contains("AttachScrollBarDragHandlers", codeBehind, StringComparison.Ordinal);
         Assert.Contains("RestartScrollBarDragSettleTimer", codeBehind, StringComparison.Ordinal);
         Assert.Contains("SynchronizeFromScrollBarDragSource", codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain("_activeScrollBarDragSource = null;\r\n            SynchronizeFromScrollBarDragSource(source);", codeBehind, StringComparison.Ordinal);
         Assert.Contains("TryGetOwnedScrollViewerFromScrollBarChrome", codeBehind, StringComparison.Ordinal);
         Assert.Contains("CompleteScrollBarDrag", codeBehind, StringComparison.Ordinal);
     }

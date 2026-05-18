@@ -106,11 +106,6 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsAppUpdatesOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppOverlayOpen))]
     [NotifyPropertyChangedFor(nameof(HasOpenOverlay))]
-    [NotifyPropertyChangedFor(nameof(AppMenuOverlayContent))]
-    [NotifyPropertyChangedFor(nameof(AppSettingsOverlayContent))]
-    [NotifyPropertyChangedFor(nameof(AppAboutOverlayContent))]
-    [NotifyPropertyChangedFor(nameof(AppUpdatesOverlayContent))]
-    [NotifyPropertyChangedFor(nameof(ReadingSettingsOverlayContent))]
     private ShellOverlayKind _shellOverlay = ShellOverlayKind.None;
 
     [ObservableProperty]
@@ -144,10 +139,6 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsAppUpdatesOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppOverlayOpen))]
     [NotifyPropertyChangedFor(nameof(HasOpenOverlay))]
-    [NotifyPropertyChangedFor(nameof(AppMenuOverlayContent))]
-    [NotifyPropertyChangedFor(nameof(AppSettingsOverlayContent))]
-    [NotifyPropertyChangedFor(nameof(AppAboutOverlayContent))]
-    [NotifyPropertyChangedFor(nameof(AppUpdatesOverlayContent))]
     [NotifyPropertyChangedFor(nameof(ShowsDirtySaveButton))]
     private bool _isEditMode;
 
@@ -233,16 +224,6 @@ public partial class MainWindowViewModel : ObservableObject
             or ShellOverlayKind.AppUpdates;
 
     public bool HasOpenOverlay => IsSettingsOpen || IsAppOverlayOpen;
-
-    public object? AppMenuOverlayContent => IsAppMenuOpen ? this : null;
-
-    public object? AppSettingsOverlayContent => IsAppSettingsOpen ? this : null;
-
-    public object? AppAboutOverlayContent => IsAppAboutOpen ? this : null;
-
-    public object? AppUpdatesOverlayContent => IsAppUpdatesOpen ? this : null;
-
-    public object? ReadingSettingsOverlayContent => IsSettingsOpen && IsViewer ? this : null;
 
     public bool ShowsReadingStatus => IsViewer && !IsEditMode;
 
@@ -369,6 +350,15 @@ public partial class MainWindowViewModel : ObservableObject
                     : CanDownloadAvailableUpdate
                         ? _localization["UpdateBadgeAvailable"]
                         : _localization["UpdateBadgeManual"];
+
+    public string AppMenuUpdateStateBadge
+        => IsDownloadingUpdate
+            ? _localization["UpdateBadgeDownloading"]
+            : CanOpenDownloadedUpdate
+                ? _localization["UpdateBadgeReady"]
+                : CanDownloadAvailableUpdate
+                    ? _localization["UpdateBadgeAvailable"]
+                    : _localization["UpdateBadgeManual"];
 
     public FontFamilyMode SelectedFontFamilyMode
     {
@@ -1183,7 +1173,6 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(HasDocumentTitle));
         OnPropertyChanged(nameof(ShowsReadingStatus));
         OnPropertyChanged(nameof(ShowsEditToggle));
-        OnPropertyChanged(nameof(ReadingSettingsOverlayContent));
         RefreshWindowTitle();
         UpdateCommandStates();
     }
@@ -1207,10 +1196,6 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(IsAppUpdatesOpen));
         OnPropertyChanged(nameof(IsAppOverlayOpen));
         OnPropertyChanged(nameof(HasOpenOverlay));
-        OnPropertyChanged(nameof(AppMenuOverlayContent));
-        OnPropertyChanged(nameof(AppSettingsOverlayContent));
-        OnPropertyChanged(nameof(AppAboutOverlayContent));
-        OnPropertyChanged(nameof(AppUpdatesOverlayContent));
         OnPropertyChanged(nameof(ActiveDocumentContent));
         UpdateCommandStates();
     }
@@ -1798,6 +1783,7 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(DownloadUpdateBusyLabel));
         OnPropertyChanged(nameof(DownloadedUpdateActionLabel));
         OnPropertyChanged(nameof(UpdateStateBadge));
+        OnPropertyChanged(nameof(AppMenuUpdateStateBadge));
     }
 
     private static string GetProductVersion()

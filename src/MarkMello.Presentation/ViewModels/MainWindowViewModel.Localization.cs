@@ -349,6 +349,7 @@ public partial class MainWindowViewModel
         OnPropertyChanged(nameof(DownloadUpdateBusyLabel));
         OnPropertyChanged(nameof(DownloadedUpdateActionLabel));
         OnPropertyChanged(nameof(UpdateStateBadge));
+        OnPropertyChanged(nameof(AppMenuUpdateStateBadge));
         OnPropertyChanged(nameof(IsSystemLanguageSelected));
         OnPropertyChanged(nameof(IsEnglishLanguageSelected));
         OnPropertyChanged(nameof(IsRussianLanguageSelected));

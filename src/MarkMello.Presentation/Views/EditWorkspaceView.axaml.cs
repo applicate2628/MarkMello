@@ -424,7 +424,6 @@ public partial class EditWorkspaceView : UserControl
         var source = _activeScrollBarDragSource;
         if (source is not null)
         {
-            _activeScrollBarDragSource = null;
             SynchronizeFromScrollBarDragSource(source);
         }
     }

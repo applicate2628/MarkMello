@@ -198,6 +198,8 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("Command=\"{Binding DownloadUpdateCommand}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding OpenDownloadedUpdateCommand}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding UpdatesHeader}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding AppMenuUpdateStateBadge}\"", appMenu, StringComparison.Ordinal);
+        Assert.DoesNotContain("Text=\"{Binding UpdateStateBadge}\"", appMenu, StringComparison.Ordinal);
         Assert.Contains("MinHeight=\"216\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("RowDefinitions=\"Auto,Auto,Auto\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("ColumnDefinitions=\"Auto,156\"", appUpdates, StringComparison.Ordinal);

@@ -110,7 +110,7 @@
                   </StackPanel>
                   <TextBlock Grid.Column="1"
                              Classes="mm-setting-meta"
-                             Text="{Binding UpdateStateBadge}" />
+                             Text="{Binding AppMenuUpdateStateBadge}" />
                 </Grid>
               </Button>
             </StackPanel>

@@ -1,9 +1,14 @@
 <Styles xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:sys="clr-namespace:System;assembly=System.Runtime">
 
   <!-- Single source of truth for every Avalonia ScrollBar in the app.
-       Bar track 10 px, thumb 7 px centred inside, 7 px corner radius.
+       ScrollBarSize drives the track, hit target, and Thumb cross-axis size.
        Always visible, faint track, gray theme thumb, arrows kept. -->
+
+  <Styles.Resources>
+    <sys:Double x:Key="ScrollBarSize">14</sys:Double>
+  </Styles.Resources>
 
   <Style Selector="ScrollBar">
     <Setter Property="AllowAutoHide" Value="False" />
@@ -12,33 +17,37 @@
   </Style>
 
   <Style Selector="ScrollBar:vertical">
-    <Setter Property="Width" Value="10" />
-    <Setter Property="MinWidth" Value="10" />
+    <Setter Property="Width" Value="{DynamicResource ScrollBarSize}" />
+    <Setter Property="MinWidth" Value="{DynamicResource ScrollBarSize}" />
   </Style>
   <Style Selector="ScrollBar:horizontal">
-    <Setter Property="Height" Value="10" />
-    <Setter Property="MinHeight" Value="10" />
+    <Setter Property="Height" Value="{DynamicResource ScrollBarSize}" />
+    <Setter Property="MinHeight" Value="{DynamicResource ScrollBarSize}" />
   </Style>
 
   <!-- Track: faint visible strip behind the thumb (Chrome paints one). -->
+  <Style Selector="ScrollBar /template/ Track">
+    <Setter Property="UseLayoutRounding" Value="False" />
+  </Style>
   <Style Selector="ScrollBar /template/ Border#TrackRect">
     <Setter Property="Background" Value="{DynamicResource MmBorderBrush}" />
     <Setter Property="Opacity" Value="0.55" />
   </Style>
 
-  <!-- Thumb shared state. Per-orientation templates below give the visual
-       a 7 px short-axis dimension centred inside the 10 px track, so the
-       full 10 px stays clickable (hit-test on Thumb) while the painted
-       pill reads as a narrower rounded bar. -->
+  <!-- Thumb shared state. Per-orientation templates below bind the painted
+       short-axis dimension to ScrollBarSize too, so Fluent's actual Thumb
+       bounds and the visible pill cannot drift apart. -->
   <Style Selector="ScrollBar /template/ Thumb">
     <Setter Property="Background" Value="{DynamicResource MmTextSoftBrush}" />
+    <Setter Property="UseLayoutRounding" Value="False" />
   </Style>
   <Style Selector="ScrollBar:vertical /template/ Thumb">
+    <Setter Property="MinWidth" Value="0" />
     <Setter Property="MinHeight" Value="60" />
     <Setter Property="Template">
       <ControlTemplate>
         <Border Background="{TemplateBinding Background}"
-                Width="7"
+                Width="{DynamicResource ScrollBarSize}"
                 HorizontalAlignment="Center"
                 CornerRadius="7" />
       </ControlTemplate>
@@ -46,10 +55,11 @@
   </Style>
   <Style Selector="ScrollBar:horizontal /template/ Thumb">
     <Setter Property="MinWidth" Value="60" />
+    <Setter Property="MinHeight" Value="0" />
     <Setter Property="Template">
       <ControlTemplate>
         <Border Background="{TemplateBinding Background}"
-                Height="7"
+                Height="{DynamicResource ScrollBarSize}"
                 VerticalAlignment="Center"
                 CornerRadius="7" />
       </ControlTemplate>
