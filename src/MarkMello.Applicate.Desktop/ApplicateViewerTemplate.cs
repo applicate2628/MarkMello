@@ -12,7 +12,8 @@ internal sealed class ApplicateViewerTemplate : IDataTemplate
 {
     public Control Build(object? param) => new ApplicateViewerView(
         App.Services?.GetService<IApplicateHtmlMarkdownRenderer>(),
-        App.Services?.GetService<IApplicateShellAssetBundleFactory>())
+        App.Services?.GetService<IApplicateShellAssetBundleFactory>(),
+        App.Services?.GetService<IApplicateSharedWebViewHost>())
     {
         DataContext = param
     };

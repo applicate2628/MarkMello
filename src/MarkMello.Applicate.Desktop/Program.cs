@@ -5,9 +5,11 @@ using MarkMello.Applicate.Desktop.Activation;
 using MarkMello.Applicate.Desktop.Editing;
 using MarkMello.Applicate.Desktop.Math;
 using MarkMello.Applicate.Desktop.Rendering;
+using MarkMello.Applicate.Desktop.Settings;
 using MarkMello.Domain.Diagnostics;
 using MarkMello.Infrastructure;
 using MarkMello.Infrastructure.Diagnostics;
+using MarkMello.Infrastructure.Settings;
 using MarkMello.Presentation;
 using MarkMello.Presentation.Views;
 using Microsoft.Extensions.DependencyInjection;
@@ -59,6 +61,16 @@ internal static class Program
             collection.AddSingleton(singleInstance);
         }
         collection.Replace(ServiceDescriptor.Singleton<IMarkdownDocumentRenderer, ApplicateMarkdownDocumentRenderer>());
+
+        // Wrap the upstream ISettingsStore with the Applicate-side renderer-
+        // backend coercion (design D8 / Phase 3). The wrapper is the OUTER
+        // ISettingsStore; the inner JsonSettingsStore continues to own the
+        // disk file. Constructing JsonSettingsStore here keeps the same
+        // disk-file resolution behavior as the upstream registration in
+        // AddInfrastructure (ApplicationData\MarkMello\settings.json).
+        collection.Replace(ServiceDescriptor.Singleton<ISettingsStore>(
+            static _ => new ApplicateRendererCoercingSettingsStore(new JsonSettingsStore())));
+
         collection.AddSingleton<ApplicateWebAssetEmbedder>();
         collection.AddSingleton<IApplicateHtmlMarkdownRenderer, ApplicateHtmlMarkdownRenderer>();
         collection.AddSingleton<IApplicateShellAssetBundleFactory, ApplicateShellAssetBundleFactory>();

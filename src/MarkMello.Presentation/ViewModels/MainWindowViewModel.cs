@@ -43,7 +43,6 @@ public partial class MainWindowViewModel : ObservableObject
     private AppUpdatePackage? _availableUpdatePackage;
     private bool _isUpdateNotificationDismissed;
     private ThemeMode _selectedLightPalette = ThemeMode.Light;
-    private ReadingPreferences _documentReadingPreferences = GetDocumentRenderingPreferences(ReadingPreferences.Default);
     private ReadingPreferences _lastNotifiedReadingPreferences = ReadingPreferences.Default;
 
     public event EventHandler? CloseRequested;
@@ -260,8 +259,6 @@ public partial class MainWindowViewModel : ObservableObject
             ApplyLightPalette(LightPaletteMode.White);
         }
     }
-
-    public ReadingPreferences DocumentReadingPreferences => _documentReadingPreferences;
 
     public bool ShowsEditPencilIcon => !IsEditMode;
 
@@ -1226,14 +1223,14 @@ public partial class MainWindowViewModel : ObservableObject
     {
         var oldValue = _lastNotifiedReadingPreferences;
         _lastNotifiedReadingPreferences = value;
-        var documentRenderingPreferences = GetDocumentRenderingPreferences(value);
-        var documentRenderingPreferencesChanged = documentRenderingPreferences != _documentReadingPreferences;
-        _documentReadingPreferences = documentRenderingPreferences;
 
-        if (documentRenderingPreferencesChanged)
+        // F-03/F-12 fix: propagate ReadingPreferences directly to the
+        // editor session. The old _documentReadingPreferences ghost copy
+        // (minimap-stripped variant for the deleted native renderer) is
+        // gone -- the WebView consumes ReadingPreferences directly.
+        if (value != oldValue)
         {
             EditorSession?.UpdateReadingPreferences(value);
-            OnPropertyChanged(nameof(DocumentReadingPreferences));
         }
 
         NotifyReadingPreferenceDependentBindings(oldValue, value);
@@ -1665,12 +1662,6 @@ public partial class MainWindowViewModel : ObservableObject
             OnPropertyChanged(nameof(IsOriginalPaletteSelected));
             OnPropertyChanged(nameof(IsWhitePaletteSelected));
         }
-    }
-
-    private static ReadingPreferences GetDocumentRenderingPreferences(ReadingPreferences preferences)
-    {
-        var normalized = ReadingPreferences.Normalize(preferences);
-        return normalized with { DocumentMinimapMode = ReadingPreferences.Default.DocumentMinimapMode };
     }
 
     private static ThemeMode GetThemeModeForLightPalette(LightPaletteMode palette)

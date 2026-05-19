@@ -1,56 +1,181 @@
+using System;
 using Avalonia.Controls;
+using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Views;
+using MarkMello.Domain;
 
 namespace MarkMello.Applicate.Desktop.Rendering;
 
 /// <summary>
+/// Failure class for the shared host's <see cref="IApplicateSharedWebViewHost.RendererFailed"/>
+/// event. Routes the three cases the design D3 identifies through one
+/// discriminator so consumers (and the failure view) can pick the right
+/// title, body, and retry policy.
+/// </summary>
+public enum ApplicateRendererFailureKind
+{
+    /// <summary>The WebView2 runtime is missing or its environment failed to
+    /// initialise. Terminal for the session; retry is not offered.</summary>
+    WebView2RuntimeMissing,
+
+    /// <summary>A specific document failed to render — RenderAsync threw or
+    /// the navigation completed unsuccessfully. Retry is offered.</summary>
+    DocumentRenderFailed,
+
+    /// <summary>Navigation aborted or a stale generation completed after a
+    /// newer one started. Internal no-op per design D3 / Invariant I-4;
+    /// the failure view normally should not be shown for this class.</summary>
+    StaleNavigation,
+}
+
+/// <summary>
+/// Mounting intent passed to <see cref="IApplicateSharedWebViewHost.AttachTo"/>.
+/// The host forwards the flags to the underlying WebView when issuing the
+/// next render request so the renderer JS can pick the correct chrome,
+/// scroll, and wheel-proxy behaviour for viewer vs. edit-preview.
+/// </summary>
+/// <param name="ViewerChromeEnabled">Whether the renderer should paint the
+/// viewer-chrome (toolbar / minimap rail). Edit-preview sets this to
+/// <c>false</c>.</param>
+/// <param name="DocumentScrollEnabled">Whether the renderer-internal
+/// scroll surface is active. Edit-preview keeps this <c>true</c>.</param>
+/// <param name="WheelProxyEnabled">Whether wheel events are proxied to the
+/// host instead of consumed by the renderer body.</param>
+public sealed record ApplicateWebMountIntent(
+    bool ViewerChromeEnabled,
+    bool DocumentScrollEnabled,
+    bool WheelProxyEnabled);
+
+/// <summary>
+/// Render request for the currently-attached slot. The host uses
+/// <see cref="ApplicateWebMountIntent"/> from the prior <see cref="IApplicateSharedWebViewHost.AttachTo"/>
+/// call to fold chrome / scroll / wheel-proxy flags into the underlying
+/// <c>UpdateInputs</c> call.
+/// </summary>
+public sealed record ApplicateWebRenderRequest(
+    ReadingPreferences ReadingPreferences,
+    IImageSourceResolver? ImageSourceResolver,
+    double AvailableContentWidth);
+
+/// <summary>
+/// Failure context emitted by <see cref="IApplicateSharedWebViewHost.RendererFailed"/>.
+/// Carries the failure class plus enough provenance to drive the failure
+/// view and the diagnostics-copy payload.
+/// </summary>
+/// <param name="Kind">Failure class. See <see cref="ApplicateRendererFailureKind"/>.</param>
+/// <param name="DocumentPath">Absolute path of the document whose render
+/// failed, when known. May be null for runtime-missing failures.</param>
+/// <param name="Timestamp">Capture moment of the failure event. UTC is
+/// preferred for diagnostics payloads.</param>
+/// <param name="Exception">Optional exception captured at the failure site.
+/// Intended for the diagnostics-copy payload; consumers must not render
+/// exception details into user-facing strings without redaction.</param>
+public sealed record ApplicateRendererFailureEvent(
+    ApplicateRendererFailureKind Kind,
+    string? DocumentPath,
+    DateTime Timestamp,
+    Exception? Exception = null);
+
+/// <summary>
 /// Owns the single application-wide WebView2-backed document view.
 ///
-/// To keep the underlying native HWND warm without ever showing its load state
-/// to the user, the host parks the view in an offscreen "warmup" panel
-/// supplied via <see cref="SetWarmupParent"/>. While parked the view has real
-/// bounds so the renderer initialises correctly; only <c>Margin</c> pushes the
-/// HWND offscreen (verified empirically by the scratch smoke at
-/// <c>.scratch/webview-smoke/run.out.txt</c> — MarkMello renderer gates fired
-/// with a 640x360 viewport while parked at <c>Margin=-5000</c>, no visible
-/// leak per <c>.scratch/webview-smoke/visual-offscreen-screen.png</c>).
+/// The host parks the view in an offscreen "warmup" panel supplied via
+/// <see cref="SetWarmupParent"/> so its WebView2 controller initialises
+/// without showing the load state to the user. When a consumer (viewer
+/// surface, edit-mode preview) wants the WebView to show in its slot it
+/// calls <see cref="AttachTo"/>; the host reparents the view into the
+/// consumer panel inside a single intentional-reparent scope so the WebView2
+/// adapter, DOM, scroll, and viewport state survive.
 ///
-/// When a consumer (viewer surface, edit-mode preview) wants to show the
-/// rendered document it calls <see cref="AttachTo"/>; the view is reparented
-/// into the consumer panel via
-/// <see cref="Avalonia.Controls.NativeWebView.BeginReparenting"/> so the
-/// adapter, DOM, scroll, and viewport survive. <see cref="DetachFrom"/>
-/// returns the view to the warmup panel rather than destroying it, keeping
-/// it warm for the next consumer.
+/// Phase 4 introduces the slot-visibility invariant (design D1 / D7):
+///
+/// <list type="bullet">
+///   <item><term>PARKED</term><description>Slot is the warmup panel.
+///   <see cref="ApplicateWebMarkdownDocumentView"/> stays parented offscreen
+///   to keep the WebView2 controller hot.</description></item>
+///   <item><term>SWITCHING</term><description>Slot is the consumer slot but
+///   it is held <c>IsVisible=false</c>. Avalonia's <c>NativeControlHost</c>
+///   cascades that to <c>SetWindowPos(SWP_HIDEWINDOW)</c> on the WebView2
+///   HWND, so the on-screen rectangle is owned by the parent Avalonia
+///   background only — there is no native HWND in the airspace to leak a
+///   stale frame.</description></item>
+///   <item><term>COMMITTED</term><description>The WebView fired
+///   <c>DocumentRendered</c> for the generation the host issued. The slot
+///   transitions to <c>IsVisible=true</c>, the user sees the freshly painted
+///   document, no flash.</description></item>
+/// </list>
+///
+/// The host tags each render request with a monotonically increasing
+/// generation token; <c>DocumentRendered</c> events with a stale generation
+/// are dropped silently (Invariant I-4).
 /// </summary>
 public interface IApplicateSharedWebViewHost
 {
     /// <summary>
-    /// The shared WebView. Consumers subscribe to its events directly and must
-    /// unsubscribe on detach. Never null after host construction.
+    /// The shared WebView. Consumers may subscribe to non-render events
+    /// (scroll state, minimap state, width drag, wheel, viewer interaction)
+    /// directly and must unsubscribe on detach. Never null after host
+    /// construction.
     /// </summary>
     ApplicateWebMarkdownDocumentView View { get; }
 
     /// <summary>
-    /// Register the offscreen warmup panel. Called once at app startup by the
-    /// fork-owned main window. The view is mounted into this panel
-    /// immediately so its WebView2 adapter can initialise without showing the
-    /// load state to the user.
+    /// Register the offscreen warmup panel. Called once at app startup by
+    /// the fork-owned main window. The view is mounted into this panel
+    /// immediately so its WebView2 adapter can initialise without showing
+    /// the load state to the user.
     /// </summary>
     void SetWarmupParent(Panel parent);
 
     /// <summary>
-    /// Reparent the shared view into <paramref name="target"/>. If currently
-    /// attached to the warmup parent or another consumer panel, the detach +
-    /// new attach happen inside a single intentional-reparent scope so the
-    /// underlying native adapter survives. A no-op if already attached to
-    /// <paramref name="target"/>.
+    /// Reparent the shared view into <paramref name="target"/> for the given
+    /// mount intent. Idempotent against the currently-attached panel: a
+    /// second call with the same panel updates the mount intent but does not
+    /// re-reparent. The slot enters <c>SWITCHING</c> (or stays in
+    /// <c>COMMITTED</c> if the next render request determines no work is
+    /// needed); the host owns the slot's <c>IsVisible</c> transitions from
+    /// this point forward until <see cref="ReturnToWarmup"/>.
     /// </summary>
-    void AttachTo(Panel target);
+    void AttachTo(Panel target, ApplicateWebMountIntent intent);
 
     /// <summary>
-    /// Return the shared view to the warmup panel if it currently sits in
-    /// <paramref name="from"/>. Safe to call on a non-matching panel.
+    /// Return the shared view to the warmup panel. The host transitions to
+    /// <c>PARKED</c>; any active consumer slot is released and its
+    /// <c>IsVisible</c> is restored to <c>true</c> so the parent panel can
+    /// continue laying out its own content. Safe to call when already
+    /// parked.
     /// </summary>
-    void DetachFrom(Panel from);
+    /// <summary>Returns true when the host's WebView is currently parented under the given target panel.</summary>
+    bool IsAttachedTo(Panel target);
+
+    void ReturnToWarmup();
+
+    /// <summary>
+    /// Issue a new render generation against the currently-attached slot.
+    /// The host bumps its generation token, transitions the slot to
+    /// <c>SWITCHING</c> (hiding the slot), forwards <c>UpdateInputs</c> to
+    /// the underlying WebView, and waits for the matching
+    /// <c>DocumentRendered</c> before transitioning to <c>COMMITTED</c>.
+    /// </summary>
+    /// <param name="source">Document source to render. <c>null</c> requests
+    /// an empty document (about:blank-equivalent).</param>
+    /// <param name="request">Render parameters folded with the current
+    /// mount intent.</param>
+    void RequestRender(MarkdownSource? source, ApplicateWebRenderRequest request);
+
+    /// <summary>
+    /// Retry the last failed render in the current slot. Re-uses the source
+    /// and request from the in-flight generation at the failure moment so
+    /// transient renderer-side faults can recover without consumer
+    /// involvement. No-op when there is no captured failure context or the
+    /// failure was terminal (<see cref="ApplicateRendererFailureKind.WebView2RuntimeMissing"/>).
+    /// </summary>
+    void RetryRender();
+
+    /// <summary>
+    /// Raised when the WebView pipeline fails — runtime missing, per-document
+    /// render failure, or stale-navigation abort. Consumers subscribe to
+    /// route the failure to their slot's failure-view surface.
+    /// </summary>
+    event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
 }

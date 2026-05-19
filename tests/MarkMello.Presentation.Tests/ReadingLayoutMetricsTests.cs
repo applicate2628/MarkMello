@@ -14,4 +14,34 @@ public sealed class ReadingLayoutMetricsTests
 
         Assert.Equal(1224d, maxWidth);
     }
+
+    [Fact]
+    public void GetDocumentHorizontalPaddingMatchesCanonicalConstantWhenContentWidthIsNormalized()
+    {
+        // F-02 fix: when ContentWidth is one of the named presets the
+        // formula collapses to the canonical horizontal padding constant.
+        var preferences = ReadingPreferences.Default with { ContentWidth = ReadingPreferences.MediumContentWidth };
+
+        var horizontalPadding = ReadingLayoutMetrics.GetDocumentHorizontalPadding(preferences);
+
+        Assert.Equal(ReadingLayoutMetrics.DocumentHorizontalPadding, horizontalPadding);
+    }
+
+    [Fact]
+    public void GetDocumentHorizontalPaddingCompensatesForUnnormalizedContentWidth()
+    {
+        // F-02 fix: when the active ContentWidth differs from the
+        // Normalize(...) result, the formula widens the padding so the
+        // rendered column still reaches the canonical max width.
+        var preferences = ReadingPreferences.Default with { ContentWidth = 600 };
+        // Normalize maps 600 -> 640 (NarrowContentWidth via clamp+round).
+        var normalized = ReadingPreferences.Normalize(preferences);
+        Assert.Equal(ReadingPreferences.NarrowContentWidth, normalized.ContentWidth);
+
+        var horizontalPadding = ReadingLayoutMetrics.GetDocumentHorizontalPadding(preferences);
+
+        Assert.Equal(
+            ReadingPreferences.NarrowContentWidth + ReadingLayoutMetrics.DocumentHorizontalPadding - 600d,
+            horizontalPadding);
+    }
 }

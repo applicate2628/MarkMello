@@ -16,10 +16,6 @@
         DragDrop.AllowDrop="True"
         UseLayoutRounding="True">
   <Window.DataTemplates>
-    <DataTemplate DataType="vm:MainWindowViewModel"
-                  x:DataType="vm:MainWindowViewModel">
-      <views:ViewerView />
-    </DataTemplate>
     <DataTemplate DataType="vm:EditorSessionViewModel"
                   x:DataType="vm:EditorSessionViewModel">
       <views:EditWorkspaceView />

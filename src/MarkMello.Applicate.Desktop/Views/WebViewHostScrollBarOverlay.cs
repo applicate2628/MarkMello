@@ -55,6 +55,15 @@ internal sealed class WebViewHostScrollBarOverlay : IDisposable
     private bool _suppressOurOwnEcho;
     private bool _hostScrollbarActivated;
     private bool _disposed;
+    // F-05 fix: consumer-ownership guard. Both ApplicateViewerView and
+    // ApplicateEditPreviewView create their own WebViewHostScrollBarOverlay
+    // bound to the *shared* WebView; ScrollStateChanged fires on the shared
+    // view, so both overlays would otherwise process events for whichever
+    // consumer currently owns the airspace. While IsAttachedToHost is
+    // false this overlay is dormant: scroll-state mirroring early-returns
+    // and the host-scrollbar activation gate is skipped, matching the
+    // failure-handler pattern in the consumer views.
+    private bool _isAttachedToHost;
 
     public WebViewHostScrollBarOverlay(ApplicateWebMarkdownDocumentView view)
     {
@@ -86,9 +95,8 @@ internal sealed class WebViewHostScrollBarOverlay : IDisposable
     // Opacity=1, but on each visual-tree reattach the template re-initialises
     // at Opacity=0 and animates back to 1, producing an unwanted scrollbar
     // fade-in. Clearing the template parts' Transitions in TemplateApplied
-    // makes the 0→1 jump instant. (The actual flicker user saw on tab change
-    // turned out to be _webRenderMask z-order — see ApplicateEditPreviewView
-    // construction. This Transitions=null clear was kept as defense in depth.)
+    // makes the 0→1 jump instant. Kept as defense in depth alongside the
+    // host slot-visibility invariant.
     private static readonly string[] FaderTemplateParts =
         ["TrackRect", "PART_LineUpButton", "PART_LineDownButton"];
 
@@ -108,6 +116,20 @@ internal sealed class WebViewHostScrollBarOverlay : IDisposable
     public ScrollBar Control => _scrollBar;
 
     /// <summary>
+    /// Consumer-ownership flag. The consumer view (viewer or edit-preview)
+    /// flips this <c>true</c> when its slot becomes the active mount for
+    /// the shared WebView and <c>false</c> when ownership transfers. While
+    /// <c>false</c> the overlay refuses to mirror scroll-state events from
+    /// the shared <see cref="ApplicateWebMarkdownDocumentView"/> so two
+    /// overlays (one per consumer) cannot fight over the same WebView.
+    /// </summary>
+    public bool IsAttachedToHost
+    {
+        get => _isAttachedToHost;
+        set => _isAttachedToHost = value;
+    }
+
+    /// <summary>
     /// Activate Chromium-side scrollbar hiding via the existing
     /// <c>host-scrollbar</c> renderer message. Idempotent — safe to call
     /// multiple times. The renderer toggles
@@ -118,6 +140,15 @@ internal sealed class WebViewHostScrollBarOverlay : IDisposable
 
     private void OnViewScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)
     {
+        // F-05 fix: ignore scroll-state mirroring when this consumer's
+        // overlay is not the active owner. The shared view broadcasts to
+        // every subscribed overlay; without the gate the inactive surface
+        // would update its hidden ScrollBar geometry on every scroll tick.
+        if (!_isAttachedToHost)
+        {
+            return;
+        }
+
         // First-event activation: by the time the renderer fires its first
         // scroll-state message, renderer.js has loaded and its host-message
         // handler exists. Sending host-scrollbar=on now guarantees the

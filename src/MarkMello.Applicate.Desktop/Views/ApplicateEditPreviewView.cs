@@ -2,6 +2,7 @@ using System;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
@@ -23,7 +24,18 @@ namespace MarkMello.Applicate.Desktop.Views;
 
 internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 {
-    private static readonly Thickness PreviewDocumentPadding = new(72, 96, 72, 160);
+    // F-02 fix: horizontal sides come from
+    // ApplicateDocumentLayout.CalculatePreviewDocumentPadding ->
+    // ReadingLayoutMetrics.GetDocumentHorizontalPadding so both consumer
+    // surfaces (viewer + edit-preview) use one source of truth. The
+    // previous Thickness(72, 96, 72, 160) literal sum (72 + 72 = 144)
+    // happened to match the canonical 144 px horizontal padding by
+    // coincidence at default ContentWidth = 820 only; any custom
+    // ContentWidth made the consumer column drift from the viewer.
+    // F-16 note: vertical 96/160 reserve preview-toolbar gap (top) and
+    // end-of-doc breathing room (bottom).
+    private const double PreviewDocumentPaddingTop = 96;
+    private const double PreviewDocumentPaddingBottom = 160;
     private static readonly TimeSpan WebPreviewDebounce = TimeSpan.FromMilliseconds(180);
     private static readonly TimeSpan ResizeContentWidthDebounce = TimeSpan.FromMilliseconds(140);
 
@@ -36,15 +48,19 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private readonly IApplicateSharedWebViewHost? _sharedHost;
     private readonly Grid _root = new() { UseLayoutRounding = true };
     private readonly Grid _surface = new() { UseLayoutRounding = true };
-    private readonly ApplicateMarkdownDocumentView _nativePreview;
-    private readonly ScrollViewer _nativeScroll;
-    // Reserve a 12px right strip for the Avalonia ScrollBar overlay. WebView2
-    // HWND fills _webSlot via NativeControlHost — without this margin the HWND
-    // would paint into the scrollbar's Avalonia airspace via Win32 z-order.
-    private readonly Panel _webSlot = new() { UseLayoutRounding = true, Margin = new Thickness(0, 0, 12, 0) };
+
+    // F-01 fix: reserve a right strip for the Avalonia ScrollBar overlay.
+    // WebView2 HWND fills _webSlot via NativeControlHost - without this margin
+    // the HWND would paint into the scrollbar's Avalonia airspace via Win32
+    // z-order. Width comes from ApplicateDocumentLayout.GetWebSlotScrollBarGutter
+    // which reads the canonical ScrollBarSize theme resource, so the slot and
+    // the painted bar always agree.
+    private readonly Panel _webSlot = new() { UseLayoutRounding = true, Margin = ApplicateDocumentLayout.GetWebSlotScrollBarGutter() };
+    private readonly ApplicateRendererFailureView _failureView;
     private WebViewHostScrollBarOverlay? _scrollBarOverlay;
-    private Border _webRenderMask = null!;
     private readonly ToggleButton _syncToggle;
+    // TEMP-HIDE-PREVIEW-TOGGLE — debug toggle; remove with the surrounding scaffolding.
+    private readonly ToggleButton _hidePreviewToggle;
     private readonly DispatcherTimer _webRenderTimer;
     private readonly DispatcherTimer _resizeContentWidthTimer;
     private EditorSessionViewModel? _session;
@@ -54,70 +70,26 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private ScrollViewer? _editorScrollViewer;
     private TextBox? _dropTargetTextBox;
     private bool _isAttachedToHost;
-    private bool _webPreviewFailed;
     private bool _hostEventsWired;
     private bool _syncEnabled;
-    // Tracks whether the shared WebView is between DocumentRenderInvalidated
-    // (new Navigate started) and DocumentRendered (new content ready).
-    private bool _isWebRenderInFlight;
-    private bool _hasCompletedWebPreviewRender;
     private DateTime _ignoreEditorScrollUntil;
     private DateTime _ignorePreviewScrollUntil;
 
     public ApplicateEditPreviewView(IApplicateSharedWebViewHost? sharedHost)
     {
         _sharedHost = sharedHost;
-        _nativePreview = new ApplicateMarkdownDocumentView
-        {
-            DocumentPadding = PreviewDocumentPadding,
-            UseLayoutRounding = true
-        };
 
-        // Wrap native preview in its own ScrollViewer so the surface row
-        // itself does not need to scroll. This keeps the toolbar (Row 0)
-        // fixed when the outer host scroll viewer is disabled, and gives us
-        // a single scroll source to sync against in native mode.
-        _nativeScroll = new ScrollViewer
+        _failureView = new ApplicateRendererFailureView
         {
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            UseLayoutRounding = true,
-            Content = _nativePreview
-        };
-        _nativeScroll.ScrollChanged += OnNativeScrollChanged;
-
-        _surface.Children.Add(_nativeScroll);
-        _surface.Children.Add(_webSlot);
-
-        // Native HWND of WebView2 ignores Avalonia Opacity, so hiding the
-        // slot via Opacity = 0 leaves the previous document painted. Cover
-        // the WebView with an opaque mask while a new render is in flight
-        // so the user sees a clean blank tile instead of stale content.
-        // The mask is themed to MmBackgroundBrush so it matches the body
-        // background in both light and dark variants.
-        //
-        // Z-order: mask is added BEFORE the scrollbar overlay so the
-        // scrollbar stays visible on top of the mask. Otherwise the mask
-        // (sized to fill the _surface) covers the right-edge scrollbar
-        // strip too, producing the "scrollbar flicks on every tab change"
-        // artifact — the user sees both the preview content AND the
-        // scrollbar blink to background-color for the ~130ms render-in-
-        // flight window. With the scrollbar above the mask, only the
-        // WebView content is hidden; the scrollbar stays permanently
-        // visible through the swap.
-        _webRenderMask = new Border
-        {
-            Background = ResolveBrush("MmBackgroundBrush", new SolidColorBrush(Colors.White)),
-            IsHitTestVisible = false,
             IsVisible = false,
-            // Reserve the right-edge gutter for the scrollbar overlay so
-            // the mask only covers the WebView body area (which is itself
-            // inset by _webSlot.Margin = 12px right). The scrollbar strip
-            // is a 12px column on the right edge; masking it would defeat
-            // the permanent-visible scrollbar invariant.
-            Margin = new Thickness(0, 0, 12, 0)
+            // F-01 fix: same right margin as _webSlot keeps the failure surface
+            // flush against the scrollbar overlay strip; both consume the
+            // canonical ScrollBarSize theme resource via ApplicateDocumentLayout.
+            Margin = ApplicateDocumentLayout.GetWebSlotScrollBarGutter(),
         };
-        _surface.Children.Add(_webRenderMask);
+
+        _surface.Children.Add(_webSlot);
+        _surface.Children.Add(_failureView);
 
         // Avalonia ScrollBar overlay (Option A — Chromium-authority +
         // Avalonia-mirror per consultant blueprint .scratch/codex-prompts/
@@ -125,12 +97,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         // WebKit ::-webkit-scrollbar so thumb-drag uses Avalonia pointer
         // capture (no sideways release-zone) and runs in the same layout
         // pass as the rest of the visual tree (no IPC mouse-thumb lag).
-        // Native wheel/touch/keyboard scrolling continues to work in
-        // Chromium because body.overflow-y stays auto. Only the visible
-        // scrollbar element is swapped.
-        //
-        // Added LAST so it sits on top of _webRenderMask in z-order. See
-        // the mask construction above for why this order matters.
         if (_sharedHost is not null)
         {
             _scrollBarOverlay = new WebViewHostScrollBarOverlay(_sharedHost.View);
@@ -138,7 +104,8 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         }
 
         _syncToggle = BuildSyncToggle();
-        var toolbar = BuildPreviewToolbar(_syncToggle);
+        _hidePreviewToggle = BuildHidePreviewToggle();
+        var toolbar = BuildPreviewToolbar(_syncToggle, _hidePreviewToggle);
 
         _root.RowDefinitions = new RowDefinitions("Auto,*");
         Grid.SetRow(toolbar, 0);
@@ -155,36 +122,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         _resizeContentWidthTimer.Tick += OnResizeContentWidthTimerTick;
 
         _webSlot.PropertyChanged += OnWebSlotPropertyChanged;
-        _webRenderMask.PropertyChanged += OnWebMaskPropertyChanged;
-        ActualThemeVariantChanged += OnPreviewAppearanceChanged;
-        ResourcesChanged += OnPreviewResourcesChanged;
-    }
-
-    private void OnPreviewAppearanceChanged(object? sender, EventArgs e)
-        => UpdateWebRenderMaskBrush();
-
-    private void OnPreviewResourcesChanged(object? sender, ResourcesChangedEventArgs e)
-        => UpdateWebRenderMaskBrush();
-
-    private void UpdateWebRenderMaskBrush()
-        => _webRenderMask.Background = ResolveBrush("MmBackgroundBrush", new SolidColorBrush(Colors.White));
-
-    private IBrush ResolveBrush(string key, IBrush fallback)
-    {
-        if (this.TryFindResource(key, ActualThemeVariant, out var resource) && resource is IBrush brush)
-        {
-            return brush;
-        }
-
-        if (Avalonia.Application.Current?.TryGetResource(
-                key,
-                Avalonia.Application.Current.ActualThemeVariant,
-                out var appResource) == true && appResource is IBrush appBrush)
-        {
-            return appBrush;
-        }
-
-        return fallback;
     }
 
     private void OnWebSlotPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
@@ -194,23 +131,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             return;
         }
         ApplicateTrace.ModeToggle($"_webSlot.{e.Property.Name}: {e.OldValue} -> {e.NewValue}");
-        // Retry the deferred AttachTo when the slot finally lays out. In the
-        // pre-warm hot path the shared WebView is already rendered, so the
-        // first ApplyVisuals runs while _webSlot.Bounds is still 0×0 and the
-        // bounds-gate short-circuits the attach. Once Avalonia commits the
-        // layout pass and Bounds become non-zero, we retry — the pre-resize
-        // block in SharedHost.AttachTo can now see real target bounds and
-        // resize the warmup-parent to match BEFORE the reparent.
-        if (e.Property == Visual.BoundsProperty
-            && _sharedHost is not null
-            && !_isAttachedToHost
-            && !_isWebRenderInFlight
-            && _webSlot.Bounds.Width > 0
-            && _webSlot.Bounds.Height > 0
-            && ShouldUseWebPreview())
-        {
-            ApplyVisuals();
-        }
 
         // After permanent attach is complete, slot resize events (window
         // resize, splitter drag, sidebar toggle) still need to flow into the
@@ -219,13 +139,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         // the size set at attach time and Chromium's scrollbar drag math
         // operates against a viewport that no longer matches the visible
         // track length — user sees "mouse outpaces thumb".
-        //
-        // Codex consultant fork-side fix (gpt-5.5 xhigh, .scratch/codex-
-        // prompts/webview-scrollbar-drag-asymmetry-residual-2026-05-16).
         if (e.Property == Visual.BoundsProperty
             && _sharedHost is not null
             && _isAttachedToHost
-            && !_isWebRenderInFlight
             && _webSlot.Bounds.Width > 0
             && _webSlot.Bounds.Height > 0)
         {
@@ -233,21 +149,12 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         }
     }
 
-    private void OnWebMaskPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
-    {
-        if (e.Property != Visual.IsVisibleProperty)
-        {
-            return;
-        }
-        ApplicateTrace.ModeToggle($"_webRenderMask.IsVisible: {e.OldValue} -> {e.NewValue}");
-    }
-
-    private static Border BuildPreviewToolbar(ToggleButton syncToggle)
+    private static Border BuildPreviewToolbar(ToggleButton syncToggle, ToggleButton hidePreviewToggle)
     {
         var label = new TextBlock
         {
             Text = "PREVIEW",
-            VerticalAlignment = VerticalAlignment.Center
+            VerticalAlignment = VerticalAlignment.Center,
         };
         label.Classes.Add("mm-editor-toolbar-label");
 
@@ -255,7 +162,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
-            Children = { label }
+            Children = { label },
         };
 
         var rightGroup = new StackPanel
@@ -263,7 +170,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Right,
-            Children = { syncToggle }
+            Children = { hidePreviewToggle, syncToggle },
         };
 
         var grid = new Grid();
@@ -278,9 +185,15 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         return toolbar;
     }
 
-    private ToggleButton BuildSyncToggle()
+    // TODO(architectural-cleanliness): toolbar-toggle dimensions should live in
+    // ApplicateScrollBars.axaml or a Themes/Controls.axaml style class
+    // ("mm-editor-toolbar-toggle"). Until then this single helper is the only
+    // place that mints toolbar toggles, so every consumer reads from one
+    // source instead of duplicating literals across BuildSyncToggle /
+    // BuildHidePreviewToggle.
+    private static ToggleButton CreateToolbarToggle(string glyph)
     {
-        var toggle = new ToggleButton
+        return new ToggleButton
         {
             Width = 28,
             Height = 24,
@@ -288,22 +201,46 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             MinHeight = 24,
             Padding = new Thickness(0),
             CornerRadius = new CornerRadius(4),
-            Background = Avalonia.Media.Brushes.Transparent,
+            Background = Brushes.Transparent,
             BorderThickness = new Thickness(0),
-            Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+            Cursor = new Cursor(StandardCursorType.Hand),
             Content = new TextBlock
             {
-                Text = "⇅",
+                Text = glyph,
                 FontSize = 14,
                 HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Center,
             },
             IsChecked = false,
-            IsThreeState = false
+            IsThreeState = false,
         };
+    }
+
+    private ToggleButton BuildSyncToggle()
+    {
+        var toggle = CreateToolbarToggle("⇅");
         ToolTip.SetTip(toggle, "Editor ↔ preview scroll sync");
         toggle.IsCheckedChanged += OnSyncToggleChanged;
         return toggle;
+    }
+
+    // TEMP-HIDE-PREVIEW-TOGGLE — debug surface for isolating viewer-side bugs
+    // by collapsing the preview render area while keeping the editor pane.
+    // Remove when bug-hunting cycle ends.
+    private ToggleButton BuildHidePreviewToggle()
+    {
+        var toggle = CreateToolbarToggle("🚫");
+        ToolTip.SetTip(toggle, "Скрыть превью (временно, для тестирования)");
+        toggle.IsCheckedChanged += OnHidePreviewToggleChanged;
+        return toggle;
+    }
+
+    private void OnHidePreviewToggleChanged(object? sender, RoutedEventArgs e)
+    {
+        if (sender is ToggleButton toggle)
+        {
+            _surface.IsVisible = toggle.IsChecked != true;
+        }
     }
 
     private void OnSyncToggleChanged(object? sender, RoutedEventArgs e)
@@ -312,8 +249,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         if (_syncEnabled)
         {
             EnsureEditorWiring();
-            // On enable, snap the preview to the editor's current position so
-            // the two surfaces start aligned.
             ForwardEditorScrollToPreview();
         }
     }
@@ -331,8 +266,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             return;
         }
 
-        // Upstream EditWorkspaceView.axaml names the editor TextBox "EditorTextBox".
-        // It lives in the same TopLevel as this preview (left pane of the split).
         var textBox = topLevel.GetVisualDescendants()
             .OfType<TextBox>()
             .FirstOrDefault(static tb => string.Equals(tb.Name, "EditorTextBox", StringComparison.Ordinal));
@@ -493,12 +426,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             return BuildImageInsertAsync(sourcePath, currentDocumentPath, ext)!;
         }
 
-        // Markdown (and other text-like) drops are inserted as a relative-path
-        // Markdown link, NOT as the file's content. This matches user
-        // expectation when dragging a file in: a reference appears at the
-        // caret, the file stays where it is. The link is rendered as
-        // clickable in preview and stays portable when the document and
-        // dropped file move together.
         if (MarkdownInsertExtensions.Contains(ext))
         {
             var displayName = Path.GetFileNameWithoutExtension(sourcePath);
@@ -511,10 +438,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private static string BuildRelativeLinkTarget(string sourcePath, string? currentDocumentPath)
     {
-        // Compute a relative path from the host document's directory to the
-        // dropped file when both exist on the same drive. Fall back to the
-        // absolute path otherwise (untitled host, cross-drive, etc.) so the
-        // link still resolves when the user saves the document later.
         var hostDir = string.IsNullOrWhiteSpace(currentDocumentPath)
             ? null
             : Path.GetDirectoryName(currentDocumentPath);
@@ -537,10 +460,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private static string EncodeMarkdownLinkTarget(string target)
     {
-        // Wrap in angle brackets when the path contains spaces or other
-        // characters that confuse the Markdown link parser. Angle-bracket
-        // form (`<path with spaces>`) is supported by CommonMark and our
-        // renderer pipeline.
         if (target.Contains(' ') || target.Contains('(') || target.Contains(')'))
         {
             return "<" + target + ">";
@@ -554,11 +473,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         string ext)
     {
         var altText = Path.GetFileNameWithoutExtension(sourcePath);
-
-        // Default: copy the image next to the markdown under an `images/`
-        // subdirectory and emit a relative reference. Base64 inlining bloats
-        // the document and slows rendering, so we only fall back to it when
-        // the host document has not been saved yet (no anchor directory).
         var documentDirectory = string.IsNullOrWhiteSpace(currentDocumentPath)
             ? null
             : Path.GetDirectoryName(currentDocumentPath);
@@ -583,8 +497,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             return $"![{altText}]({EncodeMarkdownLinkTarget(relative)})";
         }
 
-        // Untitled or unwritable directory: fall back to base64 so the user
-        // still gets a working reference.
         var bytes = await File.ReadAllBytesAsync(sourcePath).ConfigureAwait(true);
         var base64 = Convert.ToBase64String(bytes);
         var mime = MimeTypeFromExtension(ext);
@@ -647,11 +559,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             caret = currentText.Length;
         }
 
-        // Block-level inserts (image links, md file links) should be on their
-        // own line. Pad with newlines when the caret is adjacent to
-        // non-newline content so the link does not merge with surrounding
-        // text (which would yield "![alt](path)# Heading" parsed as inline
-        // text).
         var charBefore = caret > 0 ? currentText[caret - 1] : '\n';
         var charAfter = caret < currentText.Length ? currentText[caret] : '\n';
         var leading = charBefore == '\n' ? string.Empty : "\n";
@@ -704,20 +611,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
         if (_isAttachedToHost && _sharedHost is not null)
         {
-            // WebView preview active: forward percent through the IPC.
             _ignorePreviewScrollUntil = DateTime.UtcNow + SyncOriginGuard;
             _sharedHost.View.ScrollToProgress(percent);
-            return;
         }
-
-        // Native preview active: drive _nativeScroll directly.
-        var nativeMaximum = _nativeScroll.Extent.Height - _nativeScroll.Viewport.Height;
-        if (nativeMaximum <= 0)
-        {
-            return;
-        }
-        _ignorePreviewScrollUntil = DateTime.UtcNow + SyncOriginGuard;
-        _nativeScroll.Offset = _nativeScroll.Offset.WithY(percent / 100.0 * nativeMaximum);
     }
 
     private void ForwardPreviewScrollToEditor(double previewProgressPercent)
@@ -738,52 +634,15 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         _editorScrollViewer.Offset = _editorScrollViewer.Offset.WithY(targetOffset);
     }
 
-    private void OnNativeScrollChanged(object? sender, ScrollChangedEventArgs e)
-    {
-        if (!_syncEnabled || _isAttachedToHost)
-        {
-            // Sync disabled OR WebView preview is active (its own
-            // ScrollStateChanged drives editor sync). Don't double-drive.
-            return;
-        }
-
-        if (DateTime.UtcNow < _ignorePreviewScrollUntil)
-        {
-            // Editor-origin scroll just propagated to native; suppress this
-            // echo to break the ping-pong loop.
-            return;
-        }
-
-        var maximum = _nativeScroll.Extent.Height - _nativeScroll.Viewport.Height;
-        if (maximum <= 0)
-        {
-            return;
-        }
-
-        var percent = SysMath.Clamp(_nativeScroll.Offset.Y / maximum * 100.0, 0, 100);
-        ForwardPreviewScrollToEditor(percent);
-    }
-
     protected override void OnDataContextChanged(EventArgs e)
     {
         base.OnDataContextChanged(e);
-        // Defer the heavy AttachSession work (which fires UpdateInputs, reparent
-        // of the shared WebView, and ApplyVisuals) until the preview is mounted
-        // into the visual tree. Running it directly here makes IDataTemplate.Build
-        // synchronously do ~400ms of work, during which the OLD ContentControl
-        // child (ViewerView) still owns the screen and the user sees reader-mode
-        // content while their edit-toggle press has already flipped the button —
-        // a visible parasitic frame on enter-edit. OnAttachedToVisualTree picks
-        // the session back up from DataContext below.
         if (this.GetVisualParent() is not null)
         {
             AttachSession(DataContext as EditorSessionViewModel);
         }
         else if (DataContext is null)
         {
-            // DataContext was cleared (e.g., a detached preview being recycled
-            // with a null context). Tear the session down so any cached state
-            // does not leak into the next mount.
             AttachSession(null);
         }
     }
@@ -793,19 +652,19 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         base.OnAttachedToVisualTree(e);
         ApplicateTrace.ModeToggle($"EditPreview.OnAttachedToVisualTree Bounds={Bounds} _webSlot.Bounds={_webSlot.Bounds}");
 
-        // Permanent mount: reparent the shared WebView2 into _webSlot ONCE on
-        // first tree attach, regardless of whether DataContext is a session
-        // yet. This is the ONLY SetParent operation in the WebView's lifetime
-        // — subsequent mode toggles flip editSlot.IsVisible, which cascades
-        // to SetWindowPos(SWP_HIDEWINDOW) on the HWND via NativeControlHost
-        // (verified by pre-flight probe at 15:24:17). Because editSlot is
-        // IsVisible=false at the moment this attach runs (reader is the
-        // initial mode), the HWND geometry-lag is invisible to the user.
-        if (_sharedHost is not null && !_isAttachedToHost)
-        {
-            _sharedHost.AttachTo(_webSlot);
-            _isAttachedToHost = true;
-        }
+        // Subscribe to ancestor visibility flips. The bridge owns
+        // editSlot.IsVisible — when it flips true we become the active
+        // consumer and AttachTo runs from OnEffectiveVisibilityChanged.
+        PropertyChanged += OnEditPreviewPropertyChanged;
+        AttachedToVisualTree += OnAnyAttachmentChange;
+        DetachedFromVisualTree += OnAnyAttachmentChange;
+        AttachAncestorVisibilityListeners();
+        OnEffectiveVisibilityChanged();
+
+        // Always wire host events even before we own the WebView — the
+        // DocumentRendered/Failure subscriptions are idempotent and survive
+        // viewer↔edit transitions.
+        WireSharedHostEvents();
 
         AttachSession(DataContext as EditorSessionViewModel);
         UpdateHostScrollMode();
@@ -814,15 +673,106 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
+        PropertyChanged -= OnEditPreviewPropertyChanged;
+        AttachedToVisualTree -= OnAnyAttachmentChange;
+        DetachedFromVisualTree -= OnAnyAttachmentChange;
+        DetachAncestorVisibilityListeners();
         RestoreHostScrollMode();
         TeardownEditorDropWiring();
         TeardownEditorWiring();
         AttachSession(null);
         _webRenderTimer.Stop();
         _resizeContentWidthTimer.Stop();
-        ReleaseSharedHost();
+        UnwireSharedHostEvents();
 
         base.OnDetachedFromVisualTree(e);
+    }
+
+    private void OnEditPreviewPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == Visual.IsVisibleProperty)
+        {
+            OnEffectiveVisibilityChanged();
+        }
+    }
+
+    private readonly System.Collections.Generic.List<Avalonia.Visual> _ancestorListeners = new();
+
+    private void OnAnyAttachmentChange(object? sender, VisualTreeAttachmentEventArgs e)
+    {
+        DetachAncestorVisibilityListeners();
+        AttachAncestorVisibilityListeners();
+        OnEffectiveVisibilityChanged();
+    }
+
+    private void AttachAncestorVisibilityListeners()
+    {
+        for (Avalonia.Visual? v = this; v is not null; v = v.GetVisualParent())
+        {
+            v.PropertyChanged += OnAncestorPropertyChanged;
+            _ancestorListeners.Add(v);
+        }
+    }
+
+    private void DetachAncestorVisibilityListeners()
+    {
+        foreach (var v in _ancestorListeners)
+        {
+            v.PropertyChanged -= OnAncestorPropertyChanged;
+        }
+        _ancestorListeners.Clear();
+    }
+
+    private void OnAncestorPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == Visual.IsVisibleProperty)
+        {
+            OnEffectiveVisibilityChanged();
+        }
+    }
+
+    private void OnEffectiveVisibilityChanged()
+    {
+        if (_sharedHost is null)
+        {
+            return;
+        }
+
+        if (IsEffectivelyVisible)
+        {
+            var intent = new ApplicateWebMountIntent(
+                ViewerChromeEnabled: false,
+                DocumentScrollEnabled: true,
+                WheelProxyEnabled: false);
+            _sharedHost.AttachTo(_webSlot, intent);
+            _isAttachedToHost = true;
+            // F-05 fix: signal consumer ownership of the scrollbar overlay
+            // so its scroll-state mirror is no longer dormant.
+            if (_scrollBarOverlay is not null)
+            {
+                _scrollBarOverlay.IsAttachedToHost = true;
+            }
+            // Issue a fresh render against the current session. The host's
+            // RequestRender fast-path commits immediately if the source is
+            // unchanged from a prior prewarm/render.
+            if (_session is not null)
+            {
+                QueueWebPreviewRender(immediate: true);
+            }
+        }
+        else
+        {
+            // Edit-preview is no longer the active consumer (mode toggle
+            // back to viewer). Clear the local flag so the next visibility
+            // flip will re-AttachTo cleanly.
+            _isAttachedToHost = false;
+            // F-05 fix: hand consumer ownership of the scrollbar overlay
+            // back to the inactive state.
+            if (_scrollBarOverlay is not null)
+            {
+                _scrollBarOverlay.IsAttachedToHost = false;
+            }
+        }
     }
 
     protected override void OnSizeChanged(SizeChangedEventArgs e)
@@ -846,7 +796,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         }
 
         _session = session;
-        _webPreviewFailed = false;
 
         if (_session is not null)
         {
@@ -860,18 +809,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     {
         if (e.PropertyName is nameof(EditorSessionViewModel.ReadingPreferences))
         {
-            if (_session?.ReadingPreferences.RendererBackend == MarkdownRendererBackend.WebView)
-            {
-                // Re-arm fallback on explicit user-pref switch back to WebView.
-                _webPreviewFailed = false;
-            }
             ApplySession();
-            return;
-        }
-
-        if (e.PropertyName is nameof(EditorSessionViewModel.RenderedPreview))
-        {
-            ApplyNativePreview();
             return;
         }
 
@@ -886,83 +824,21 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private void ApplySession()
     {
         var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        ApplyNativePreview();
-        var t1 = System.Diagnostics.Stopwatch.GetTimestamp();
-        ApplyRendererMode();
-        var t2 = System.Diagnostics.Stopwatch.GetTimestamp();
-        ApplyAvailableWidth();
-        var t3 = System.Diagnostics.Stopwatch.GetTimestamp();
-        var freq = System.Diagnostics.Stopwatch.Frequency / 1000.0;
-        ApplicateTrace.ModeToggle(
-            $"ApplySession timing: native={(t1 - t0) / freq:F1}ms renderer={(t2 - t1) / freq:F1}ms width={(t3 - t2) / freq:F1}ms");
-    }
-
-    private void ApplyNativePreview()
-    {
         if (_session is null)
         {
-            _nativePreview.Document = RenderedMarkdownDocument.Empty;
-            _nativePreview.ImageSourceResolver = null;
-            _nativePreview.ReadingPreferences = ReadingPreferences.Default;
-            return;
-        }
-
-        // Skip native-side render work whenever WebView is the active
-        // preview. _nativeScroll is hardcoded to IsVisible=false in
-        // ApplyVisuals (the native surface is stubbed out in this build
-        // because it flashed between Avalonia native and WebView during
-        // source change), so feeding the heavy RenderedPreview document
-        // into _nativePreview only pays the synchronous Avalonia layout
-        // cost (measured 814ms on the wave_ports heavy-MathType file)
-        // for no visible result. The fallback path explicitly re-applies
-        // the document via OnSharedFallbackRequested so the native
-        // surface still has fresh content when WebView actually fails.
-        if (ShouldUseWebPreview())
-        {
-            return;
-        }
-
-        _nativePreview.Document = _session.RenderedPreview;
-        _nativePreview.ImageSourceResolver = _session.ImageSourceResolver;
-        _nativePreview.ReadingPreferences = _session.ReadingPreferences;
-    }
-
-    private void ApplyRendererMode()
-    {
-        if (ShouldUseWebPreview())
-        {
-            WireSharedHostEvents();
-            QueueWebPreviewRender(immediate: true);
+            // No session: stop the debounce timer; the host stays attached
+            // to _webSlot (permanent mount) and its slot.IsVisible is owned
+            // by the outer bridge. No render request is issued.
+            _webRenderTimer.Stop();
         }
         else
         {
-            ReleaseSharedHost();
+            QueueWebPreviewRender(immediate: true);
         }
-
-        ApplyVisuals();
+        ApplyAvailableWidth();
         UpdateHostScrollMode();
-    }
-
-    private bool ShouldUseWebPreview()
-        => _session?.ReadingPreferences.RendererBackend == MarkdownRendererBackend.WebView
-           && _sharedHost is not null
-           && !_webPreviewFailed;
-
-    private bool IsWebPreviewActiveOrTargeted()
-        => _isAttachedToHost || (ShouldUseWebPreview() && _hostEventsWired);
-
-    private void ReleaseSharedHost()
-    {
-        // Permanent mount: never call _sharedHost.DetachFrom from here. The
-        // shared WebView lives in _webSlot for the lifetime of this control
-        // (which is permanent in editSlot since v0.3.x sibling-mount). On
-        // session=null (mode toggle to reader, or document close), only the
-        // event subscriptions need to come down — the HWND stays in place
-        // and gets hidden by the cascade from editSlot.IsVisible=false. The
-        // OLD DetachFrom path returned the View to the warmup parent and
-        // forced a Win32 SetParent on the next enter-edit, which produced
-        // the 154ms HWND geometry-lag bug (verified [hwnd-probe] evidence).
-        UnwireSharedHostEvents();
+        var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        ApplicateTrace.ModeToggle($"ApplySession elapsed={elapsedMs:F1}ms");
     }
 
     private void WireSharedHostEvents()
@@ -973,10 +849,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         }
 
         _sharedHost.View.DocumentRendered += OnSharedDocumentRendered;
-        _sharedHost.View.DocumentRenderInvalidated += OnSharedDocumentInvalidated;
-        _sharedHost.View.FallbackRequested += OnSharedFallbackRequested;
         _sharedHost.View.ViewerInteractionRequested += OnSharedViewerInteractionRequested;
         _sharedHost.View.ScrollStateChanged += OnSharedScrollStateChanged;
+        _sharedHost.RendererFailed += OnSharedRendererFailed;
         _hostEventsWired = true;
     }
 
@@ -988,10 +863,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         }
 
         _sharedHost.View.DocumentRendered -= OnSharedDocumentRendered;
-        _sharedHost.View.DocumentRenderInvalidated -= OnSharedDocumentInvalidated;
-        _sharedHost.View.FallbackRequested -= OnSharedFallbackRequested;
         _sharedHost.View.ViewerInteractionRequested -= OnSharedViewerInteractionRequested;
         _sharedHost.View.ScrollStateChanged -= OnSharedScrollStateChanged;
+        _sharedHost.RendererFailed -= OnSharedRendererFailed;
         _hostEventsWired = false;
     }
 
@@ -1012,40 +886,29 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void OnSharedDocumentRendered(object? sender, EventArgs e)
     {
-        ApplicateTrace.ModeToggle("SharedView Rendered -> renderInFlight=false");
-        _isWebRenderInFlight = false;
-        _hasCompletedWebPreviewRender = true;
-        // Deferred-attach path: if we held off on AttachTo while the new
-        // document was loading (see ApplyVisuals), do the reparent now —
-        // content is committed in the WebView and visible-stale window is
-        // closed. ApplyVisuals would also do the attach on its next call,
-        // but doing it here lets us avoid the extra ApplyVisuals re-entry
-        // and keeps the mask→content swap in one tick.
-        if (_sharedHost is not null && !_isAttachedToHost && ShouldUseWebPreview())
+        ApplicateTrace.ModeToggle("SharedView Rendered (edit-preview)");
+        // Render committed: hide any visible failure overlay.
+        _failureView.IsVisible = false;
+    }
+
+    private void OnSharedRendererFailed(object? sender, ApplicateRendererFailureEvent e)
+    {
+        // Consumer-side filter: react only when this view is the active host
+        // consumer. The host fires RendererFailed once per failure but both
+        // consumers (viewer + edit-preview) are subscribed; without this
+        // filter the inactive surface would also show the failure overlay.
+        // The single source of truth for "active consumer" is _isAttachedToHost.
+        if (!_isAttachedToHost)
         {
-            _sharedHost.AttachTo(_webSlot);
-            _isAttachedToHost = true;
+            return;
         }
-        ApplyVisuals();
+
+        _failureView.ShowFailure(
+            e,
+            retry: e.Kind == ApplicateRendererFailureKind.DocumentRenderFailed ? RetryCurrentRender : null);
     }
 
-    private void OnSharedDocumentInvalidated(object? sender, EventArgs e)
-    {
-        ApplicateTrace.ModeToggle("SharedView Invalidated -> renderInFlight=true");
-        _isWebRenderInFlight = true;
-        ApplyVisuals();
-    }
-
-    private void OnSharedFallbackRequested(object? sender, EventArgs e)
-    {
-        _webPreviewFailed = true;
-        ReleaseSharedHost();
-        // Web failed → native surface becomes the active renderer. Feed
-        // its Document now; ApplyNativePreview's WebView-gate would have
-        // skipped this assignment during normal flow.
-        ApplyNativePreview();
-        ApplyVisuals();
-    }
+    private void RetryCurrentRender() => _sharedHost?.RetryRender();
 
     private void OnSharedViewerInteractionRequested(object? sender, EventArgs e)
     {
@@ -1057,7 +920,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void QueueWebPreviewRender(bool immediate)
     {
-        if (!ShouldUseWebPreview() || _sharedHost is null)
+        if (_sharedHost is null || _session is null)
         {
             _webRenderTimer.Stop();
             return;
@@ -1082,7 +945,17 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void ApplyWebPreviewSource()
     {
-        if (_session is null || _sharedHost is null || !ShouldUseWebPreview())
+        if (_session is null || _sharedHost is null)
+        {
+            return;
+        }
+
+        // Only issue render requests when this consumer actually owns the
+        // WebView (i.e. it is effectively visible and was AttachTo'd from
+        // OnEffectiveVisibilityChanged). Without this gate the editor's
+        // debounced source-changed callback would steal the WebView away
+        // from the viewer mid-render.
+        if (!_isAttachedToHost || !IsEffectivelyVisible)
         {
             return;
         }
@@ -1091,121 +964,16 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             _session.CurrentPath ?? string.Empty,
             _session.FileName,
             _session.SourceText);
-        var widths = CalculatePreviewWidths(GetPreviewHostWidth(), _session.ReadingPreferences, PreviewDocumentPadding);
+        var widths = CalculatePreviewWidths(
+            GetPreviewHostWidth(),
+            _session.ReadingPreferences,
+            ResolveDocumentPadding(_session.ReadingPreferences));
 
-        _sharedHost.View.UpdateInputs(
-            source,
-            CreateWebPreviewPreferences(_session.ReadingPreferences),
-            _session.ImageSourceResolver,
-            widths.WebColumnWidth,
-            viewerChromeEnabled: false,
-            documentScrollEnabled: true,
-            wheelProxyEnabled: false);
-
-        ApplyVisuals();
-    }
-
-    // Single canonical visibility decision:
-    //   showWebView == true  →  reparent shared view into _webSlot, show WebView,
-    //                            hide native preview
-    //   showWebView == false →  detach shared view back to warmup parent, show
-    //                            native preview as placeholder
-    //
-    // showWebView is true only when the user requested WebView, the host has
-    // already rendered the current source, and we have not been told to fall
-    // back. Until then native is shown — the WebView keeps loading offscreen
-    // in the warmup panel so the user never sees a partial/loading paint.
-    private void ApplyVisuals()
-    {
-        // Native preview is stubbed out in this build (see
-        // ApplicateMainWindow.InstallNativeRendererStub) because its render
-        // flashes between Avalonia native and WebView during source change,
-        // producing visible jitter in edit mode.
-        _nativeScroll.IsVisible = false;
-
-        // Only mount the shared WebView into this preview's slot while the
-        // preview is actually meant to display WebView output. Without this
-        // gate, OnDetachedFromVisualTree's AttachSession(null) -> ApplySession
-        // -> ApplyRendererMode -> ReleaseSharedHost detaches the View to the
-        // warmup parent, and the immediate trailing ApplyVisuals call here
-        // would re-attach it to the slot of the preview that is being torn
-        // down — producing a visible double-reparent flicker and leaving the
-        // native HWND briefly parented under a control whose visual tree is
-        // mid-unmount.
-        var shouldShowWeb = _sharedHost is not null && ShouldUseWebPreview();
-
-        // Tab-switch sequence inside Avalonia's ContentControl rebinding fires
-        // AttachSession(null) followed ~1.4s later by AttachSession(newSession).
-        // During that null window, _session is null, so ShouldUseWebPreview()
-        // returns false even though the shared WebView is still mounted in
-        // _webSlot (_isAttachedToHost==True throughout). Hiding _webSlot here
-        // would (a) make the WebView content vanish for the duration of the
-        // gap, (b) take the sibling-mounted ScrollBar overlay with it (they
-        // share _webSlot as parent), and (c) — if the second AttachSession
-        // never arrives due to a race — leave the slot permanently invisible.
-        // Both visible bugs ("scrollbar flickers with text on tab switch" and
-        // "render disappears after several tab switches") come from this one
-        // path.
-        //
-        // The else branch's original purpose was to prevent re-attach-into-
-        // tearing-down-control during OnDetachedFromVisualTree. But that path
-        // takes _isAttachedToHost down explicitly via ReleaseSharedHost (and
-        // the visual tree detach itself hides everything cascading from the
-        // parent's IsVisible=false). So gating on _isAttachedToHost is the
-        // correct signal: while the WebView is mounted in our slot, the slot
-        // must remain visible regardless of transient session-null states.
-        var keepSlotVisibleAttached = _isAttachedToHost && _sharedHost is not null;
-
-        if (shouldShowWeb || keepSlotVisibleAttached)
-        {
-            // Defer AttachTo while either (a) a new render is in flight
-            // OR (b) the target slot has not laid out yet. Both cases
-            // would leak a stale frame: (a) the WebView would reparent
-            // its previous DOM into _webSlot for the 250-450ms before
-            // the new HTML commits, and the Avalonia mask Border CANNOT
-            // cover a native HWND (Win32 z-order — native child windows
-            // always sit above their Avalonia siblings); (b) AttachTo
-            // with target.Bounds=0×0 makes SharedHost skip the pre-resize
-            // block, so the View keeps its warmup-parent size (1024×768)
-            // for the 20-40ms until Avalonia's next layout pass propagates
-            // the real slot bounds — visible as a brief CSS reflow when
-            // AvailableContentWidth then changes from the pre-warm value
-            // to the actual slot width. Retry path: OnWebSlotPropertyChanged
-            // triggers ApplyVisuals when _webSlot.Bounds become non-zero.
-            var canAttach = !_isWebRenderInFlight
-                && _webSlot.Bounds.Width > 0
-                && _webSlot.Bounds.Height > 0;
-            if (!_isAttachedToHost && canAttach)
-            {
-                _sharedHost!.AttachTo(_webSlot);
-                _isAttachedToHost = true;
-            }
-            // Keep _webSlot mounted with full layout footprint so the
-            // SOURCE|PREVIEW toolbar row stays put. Mask only while there
-            // is no committed preview yet or the WebView is not attached;
-            // after the first successful render, keep the previous preview
-            // visible until the next tab/source render commits. The runtime
-            // log showed the old policy toggling this mask on every tab
-            // switch (`False -> True -> False`), which was the visible
-            // preview flicker before the new document arrived.
-            _webSlot.IsVisible = true;
-            _webSlot.Opacity = 1;
-            var maskVisible = ShouldShowWebRenderMask(
-                _isWebRenderInFlight,
-                _isAttachedToHost,
-                _hasCompletedWebPreviewRender);
-            _webRenderMask.IsVisible = maskVisible;
-            // ScrollBar overlay stays permanently visible — its template-part
-            // Transitions are cleared in WebViewHostScrollBarOverlay so it
-            // never fades in/out independently. The mask above already
-            // covers the WebView content during render-in-flight; the
-            // scrollbar staying put through that is the desired UX.
-        }
-        else
-        {
-            _webSlot.IsVisible = false;
-            _webRenderMask.IsVisible = false;
-        }
+        var request = new ApplicateWebRenderRequest(
+            ReadingPreferences: CreateWebPreviewPreferences(_session.ReadingPreferences),
+            ImageSourceResolver: _session.ImageSourceResolver,
+            AvailableContentWidth: widths.WebColumnWidth);
+        _sharedHost.RequestRender(source, request);
     }
 
     private MarkdownSource? BuildCurrentSource()
@@ -1230,8 +998,11 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private void ApplyAvailableWidth(bool deferWebContentWidth = false)
     {
         var preferences = _session?.ReadingPreferences ?? ReadingPreferences.Default;
-        var widths = CalculatePreviewWidths(GetPreviewHostWidth(), preferences, PreviewDocumentPadding);
-        _nativePreview.AvailableContentWidth = widths.NativeContentWidth;
+        var widths = CalculatePreviewWidths(
+            GetPreviewHostWidth(),
+            preferences,
+            ResolveDocumentPadding(preferences));
+
         if (_sharedHost is not null && _isAttachedToHost)
         {
             if (deferWebContentWidth)
@@ -1245,24 +1016,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
                 _sharedHost.View.AvailableContentWidth = widths.WebColumnWidth;
             }
 
-            // The WebView wrapper is added to `_webSlot` (the Border directly
-            // containing the WebView2 NativeControlHost). Sizing MinHeight from
-            // `_webSlot.Bounds.Height` keeps the HWND viewport in lock-step with
-            // the slot the wrapper actually lives in — Chromium maps thumb-drag
-            // delta against that viewport.
-            //
-            // Previously this used `_surface.Bounds.Height` (Row 1 of the outer
-            // grid), which is taller than `_webSlot` (the slot lives one Border
-            // deeper) and can drift during layout. The mismatch made the HWND
-            // height-sample inconsistent with the visible track length, so the
-            // thumb visually lagged the mouse during fast drag. Per Codex
-            // consultant diagnosis (gpt-5.5 xhigh, .scratch/codex-prompts/
-            // webview-scrollbar-drag-asymmetry-residual-2026-05-16).
-            //
-            // Fall through `_webSlot → _surface → Bounds` so the pre-warm path
-            // (slot not yet measured) still resolves to a usable hostHeight,
-            // and `CalculateWebPreviewMinHeight`'s `> 0` guard handles the
-            // zero-bounds edge with the `1` sentinel.
             var slotHeight = _webSlot.Bounds.Height;
             var surfaceHeight = _surface.Bounds.Height;
             var hostHeight = slotHeight > 0
@@ -1311,42 +1064,25 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     }
 
     internal static double CalculateWebPreviewMinHeight(double hostHeight)
-        // Use the actual measured surface (Row 1) height — no 480px floor.
-        // The previous `max(480, hostHeight)` forced the WebView2 HWND to be
-        // at least 480 px tall regardless of the visible preview surface
-        // height; on smaller windows or split-pane layouts the HWND then
-        // overflowed into the toolbar area and Avalonia's surface clipping
-        // hid part of the Chromium scrollbar track. Result: dragging the
-        // thumb top-to-bottom in one mouse motion only covered a fraction
-        // of the actual scroll range because the visible track length was
-        // less than the HWND-internal track length. Codex consultant
-        // diagnosis (gpt-5.5 xhigh, .scratch/codex-prompts/webview-drag-
-        // quality-asymmetry-20260516-214356.md) verified by user.
-        //
-        // The `> 0` guard already handles the "host not yet measured" case,
-        // falling through to the `: 1` minimal sentinel that lets the
-        // WebView2 controller initialise. The 480 floor was defensive
-        // overkill — viewer mode's `max(480, Bounds.Height)` at
-        // ApplicateViewerView.cs:674 is harmless because window content
-        // height is essentially always ≥ 480.
         => double.IsFinite(hostHeight) && hostHeight > 0 ? hostHeight : 1;
 
     internal static ReadingPreferences CreateWebPreviewPreferences(ReadingPreferences preferences)
         => ReadingPreferences.Normalize(preferences) with { DocumentMinimapMode = DocumentMinimapMode.Off };
 
-    internal static double CalculatePreWarmColumnWidth(ReadingPreferences preferences)
-    {
-        // Match CalculatePreviewWidths' unconstrained-host path (hostWidth <= 0):
-        // returns ContentWidth + horizontal PreviewDocumentPadding so the
-        // pre-warm column matches the natural column width edit-mode would
-        // pick on a wide host. On narrower hosts the edit-mode width-update
-        // arrives via AvailableContentWidth setter → OnLiveInputChanged →
-        // ApplyReadingPreferences (CSS-only, no DOM re-render).
-        var normalized = ReadingPreferences.Normalize(preferences);
-        return normalized.ContentWidth
-            + PreviewDocumentPadding.Left
-            + PreviewDocumentPadding.Right;
-    }
+    /// <summary>
+    /// Resolves the document column padding the edit-preview surface should
+    /// apply for a given <paramref name="preferences"/>. The horizontal sides
+    /// flow through <see cref="ApplicateDocumentLayout.CalculatePreviewDocumentPadding"/>
+    /// (which reads the canonical horizontal padding helper); the vertical
+    /// sides keep the edit-preview's own top/bottom constants
+    /// (<see cref="PreviewDocumentPaddingTop"/>,
+    /// <see cref="PreviewDocumentPaddingBottom"/>).
+    /// </summary>
+    private static Thickness ResolveDocumentPadding(ReadingPreferences preferences)
+        => ApplicateDocumentLayout.CalculatePreviewDocumentPadding(
+            preferences,
+            PreviewDocumentPaddingTop,
+            PreviewDocumentPaddingBottom);
 
     private void UpdateHostScrollMode()
     {
@@ -1363,30 +1099,11 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             return;
         }
 
-        // Always disable the outer host ScrollViewer: scroll lives inside the
-        // preview surface (WebView's own scroll or _nativeScroll). Otherwise
-        // the outer scroll would lift the toolbar (Row 0) along with the
-        // content when it scrolls in native mode.
+        // Always disable the outer host ScrollViewer: scroll lives inside
+        // the WebView. Otherwise the outer scroll would lift the toolbar
+        // (Row 0) along with the content when it scrolls.
         _hostScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
     }
-
-    /// <remarks>
-    /// Kept for backward compatibility with existing tests that exercise the
-    /// previous mode-dependent behaviour. The runtime path now always returns
-    /// <see cref="ScrollBarVisibility.Disabled"/> regardless of mode because
-    /// the surface owns its own scroll source (WebView internal scroll or
-    /// <c>_nativeScroll</c>).
-    /// </remarks>
-    internal static ScrollBarVisibility CalculateHostVerticalScrollMode(
-        bool useWebPreview,
-        ScrollBarVisibility originalMode)
-        => useWebPreview ? ScrollBarVisibility.Disabled : originalMode;
-
-    internal static bool ShouldShowWebRenderMask(
-        bool isWebRenderInFlight,
-        bool isAttachedToHost,
-        bool hasCompletedInitialWebPreviewRender)
-        => !isAttachedToHost || (isWebRenderInFlight && !hasCompletedInitialWebPreviewRender);
 
     private void RestoreHostScrollMode()
     {
@@ -1412,17 +1129,21 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         return null;
     }
 
+    /// <summary>Test seam — exposes the failure overlay visibility.</summary>
+    internal bool IsFailureViewVisibleForTesting => _failureView.IsVisible;
+
+    /// <summary>Test seam — exposes the inner web slot panel.</summary>
+    internal Panel WebSlotForTesting => _webSlot;
+
     public void Dispose()
     {
         _webRenderTimer.Stop();
         _resizeContentWidthTimer.Stop();
         RestoreHostScrollMode();
         AttachSession(null);
-        ReleaseSharedHost();
+        UnwireSharedHostEvents();
         _webRenderTimer.Tick -= OnWebRenderTimerTick;
         _resizeContentWidthTimer.Tick -= OnResizeContentWidthTimerTick;
-        ActualThemeVariantChanged -= OnPreviewAppearanceChanged;
-        ResourcesChanged -= OnPreviewResourcesChanged;
         _scrollBarOverlay?.Dispose();
         _scrollBarOverlay = null;
     }

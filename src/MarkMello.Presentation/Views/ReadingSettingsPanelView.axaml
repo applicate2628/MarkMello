@@ -272,13 +272,16 @@
                 </Border>
               </StackPanel>
 
-              <!-- TEMP-NATIVE-STUB (Applicate fork): renderer toggle row
-                   hidden because the native (Avalonia) backend has jitter
-                   during render that the v0.2 WebView fade-on-ready fix
-                   does not cover. The fork forces WebView in
-                   ApplicateMainWindow.InstallNativeRendererStub. To
-                   restore the toggle, set IsVisible back to true and
-                   undo the InstallNativeRendererStub force-WebView. -->
+              <!-- Applicate fork: renderer toggle row hidden because
+                   WebView is the only renderer the Applicate-side build
+                   supports (the native Avalonia backend was removed in
+                   the renderer-flash cleanup). The fork enforces the
+                   WebView-only invariant in
+                   ApplicateMainWindow.InstallApplicateRendererPolicy
+                   (in-memory) and ApplicateRendererCoercingSettingsStore
+                   (on-disk). To re-expose the toggle in an upstream-style
+                   build, restore IsVisible to true and remove the
+                   coercion in both surfaces. -->
               <StackPanel Spacing="0" IsVisible="False">
                 <Line Classes="mm-setting-divider"
                       StartPoint="0,0.5"

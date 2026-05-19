@@ -1,7 +1,6 @@
 using System.Reflection;
 using System.Threading;
 using Avalonia;
-using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using MarkMello.Applicate.Desktop;
 using MarkMello.Applicate.Desktop.Views;
@@ -70,42 +69,10 @@ public sealed class ApplicateEditWorkspaceTemplateTests
         Assert.Equal(expected, ApplicateEditPreviewView.CalculateWebPreviewMinHeight(hostHeight));
     }
 
-    [Fact]
-    public void WebPreviewDisablesOuterPreviewScrollViewer()
-    {
-        Assert.Equal(
-            ScrollBarVisibility.Disabled,
-            ApplicateEditPreviewView.CalculateHostVerticalScrollMode(
-                useWebPreview: true,
-                ScrollBarVisibility.Auto));
-    }
-
-    [Fact]
-    public void NativePreviewRestoresOuterPreviewScrollViewerMode()
-    {
-        Assert.Equal(
-            ScrollBarVisibility.Auto,
-            ApplicateEditPreviewView.CalculateHostVerticalScrollMode(
-                useWebPreview: false,
-                ScrollBarVisibility.Auto));
-    }
-
-    [Theory]
-    [InlineData(true, true, false, true)]
-    [InlineData(true, true, true, false)]
-    [InlineData(false, true, true, false)]
-    [InlineData(false, false, true, true)]
-    public void WebPreviewMaskOnlyCoversInitialOrDetachedRender(
-        bool isRenderInFlight,
-        bool isAttachedToHost,
-        bool hasCompletedInitialRender,
-        bool expected)
-    {
-        Assert.Equal(
-            expected,
-            ApplicateEditPreviewView.ShouldShowWebRenderMask(
-                isRenderInFlight,
-                isAttachedToHost,
-                hasCompletedInitialRender));
-    }
+    // F-10 fix: the CalculateHostVerticalScrollMode test-surface helper
+    // was deleted alongside the native renderer; the runtime path now
+    // unconditionally disables the outer preview ScrollViewer (the
+    // WebView owns its own scroll source). UpdateHostScrollMode encodes
+    // this directly; an integration-level test would need a hosted
+    // preview surface which is out of scope for this unit-test class.
 }
