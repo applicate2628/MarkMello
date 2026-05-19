@@ -59,8 +59,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private readonly ApplicateRendererFailureView _failureView;
     private WebViewHostScrollBarOverlay? _scrollBarOverlay;
     private readonly ToggleButton _syncToggle;
-    // TEMP-HIDE-PREVIEW-TOGGLE — debug toggle; remove with the surrounding scaffolding.
-    private readonly ToggleButton _hidePreviewToggle;
     private readonly DispatcherTimer _webRenderTimer;
     private readonly DispatcherTimer _resizeContentWidthTimer;
     private EditorSessionViewModel? _session;
@@ -74,6 +72,18 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     private bool _syncEnabled;
     private DateTime _ignoreEditorScrollUntil;
     private DateTime _ignorePreviewScrollUntil;
+    // EP-A startup gate. Mirrors ApplicateViewerView._hasValidBounds. The
+    // FIRST render after edit-preview becomes visible would otherwise fire
+    // while _webSlot.Bounds is still 0x0 (Avalonia hasn't measured the
+    // newly-cascade-visible slot yet) — CalculatePreviewWidths falls back
+    // to preferredColumnWidth (ContentWidth + 144 padding) so the renderer
+    // paints the document at the fallback width, then ~16-140 ms later
+    // the bounds settle, OnSizeChanged debounces ApplyAvailableWidth, the
+    // renderer gets the real (smaller) width, and the user sees the
+    // document visibly reflow ("становится криво"). The gate flips once
+    // on the first valid measurement of _webSlot; subsequent activations
+    // and tab-switches keep it true.
+    private bool _hasValidSlotBounds;
 
     public ApplicateEditPreviewView(IApplicateSharedWebViewHost? sharedHost)
     {
@@ -104,8 +114,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         }
 
         _syncToggle = BuildSyncToggle();
-        _hidePreviewToggle = BuildHidePreviewToggle();
-        var toolbar = BuildPreviewToolbar(_syncToggle, _hidePreviewToggle);
+        var toolbar = BuildPreviewToolbar(_syncToggle);
 
         _root.RowDefinitions = new RowDefinitions("Auto,*");
         Grid.SetRow(toolbar, 0);
@@ -145,11 +154,25 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             && _webSlot.Bounds.Width > 0
             && _webSlot.Bounds.Height > 0)
         {
+            // EP-A startup gate: first valid slot measurement releases the
+            // gate and fires one immediate render against the now-known
+            // column width, replacing the would-be-stale 964 fallback render
+            // that would otherwise paint before bounds settled.
+            if (!_hasValidSlotBounds)
+            {
+                _hasValidSlotBounds = true;
+                if (_session is not null && IsEffectivelyVisible)
+                {
+                    QueueWebPreviewRender(immediate: true);
+                }
+                return;
+            }
+
             ApplyAvailableWidth(deferWebContentWidth: true);
         }
     }
 
-    private static Border BuildPreviewToolbar(ToggleButton syncToggle, ToggleButton hidePreviewToggle)
+    private static Border BuildPreviewToolbar(ToggleButton syncToggle)
     {
         var label = new TextBlock
         {
@@ -170,7 +193,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Right,
-            Children = { hidePreviewToggle, syncToggle },
+            Children = { syncToggle },
         };
 
         var grid = new Grid();
@@ -222,25 +245,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         ToolTip.SetTip(toggle, "Editor ↔ preview scroll sync");
         toggle.IsCheckedChanged += OnSyncToggleChanged;
         return toggle;
-    }
-
-    // TEMP-HIDE-PREVIEW-TOGGLE — debug surface for isolating viewer-side bugs
-    // by collapsing the preview render area while keeping the editor pane.
-    // Remove when bug-hunting cycle ends.
-    private ToggleButton BuildHidePreviewToggle()
-    {
-        var toggle = CreateToolbarToggle("🚫");
-        ToolTip.SetTip(toggle, "Скрыть превью (временно, для тестирования)");
-        toggle.IsCheckedChanged += OnHidePreviewToggleChanged;
-        return toggle;
-    }
-
-    private void OnHidePreviewToggleChanged(object? sender, RoutedEventArgs e)
-    {
-        if (sender is ToggleButton toggle)
-        {
-            _surface.IsVisible = toggle.IsChecked != true;
-        }
     }
 
     private void OnSyncToggleChanged(object? sender, RoutedEventArgs e)
@@ -790,6 +794,15 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         }
         ApplicateTrace.ModeToggle($"EditPreview.AttachSession from={(_session is not null)} to={(session is not null)}");
 
+        // EP-B: a session swap means any previously-displayed failure overlay
+        // belongs to the prior document. Clear it eagerly — the next render
+        // will re-raise RendererFailed if the new document also fails, and
+        // a successful fast-path Commit (HasLoadedDocumentForSource → true)
+        // would otherwise leave the stale overlay visible because Commit
+        // fires no DocumentRendered event for OnSharedDocumentRendered to
+        // pick up.
+        _failureView.IsVisible = false;
+
         if (_session is not null)
         {
             _session.PropertyChanged -= OnSessionPropertyChanged;
@@ -956,6 +969,24 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         // debounced source-changed callback would steal the WebView away
         // from the viewer mid-render.
         if (!_isAttachedToHost || !IsEffectivelyVisible)
+        {
+            return;
+        }
+
+        // EP-A startup gate. Suppress the FIRST render until _webSlot has
+        // been measured at non-zero size. Without this, GetPreviewHostWidth
+        // would return 0 (or stale fallback control width), CalculatePreview-
+        // Widths would return preferredColumnWidth (= ContentWidth + 144 px
+        // padding, default 964 px), and the renderer would paint the
+        // document at that fallback width — then ~16-140 ms later the
+        // bounds settle, OnSizeChanged's debounced ApplyAvailableWidth
+        // pushes the correct width, and the document visibly reflows. The
+        // gate is flipped in OnWebSlotPropertyChanged on the first valid
+        // bounds, which then queues a single immediate render against the
+        // real width. Once flipped the gate stays true for the lifetime
+        // of this control, so subsequent activations and tab-switches
+        // proceed without it.
+        if (!_hasValidSlotBounds)
         {
             return;
         }
