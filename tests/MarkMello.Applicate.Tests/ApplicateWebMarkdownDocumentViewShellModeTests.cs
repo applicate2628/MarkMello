@@ -6,13 +6,20 @@ namespace MarkMello.Applicate.Tests;
 public sealed class ApplicateWebMarkdownDocumentViewShellModeTests
 {
     [Fact]
-    public void ShouldCompleteRenderRequiresAllThreeSignalsInShellMode()
+    public void ShouldCompleteRenderGatesOnLoadedDocumentAndLayoutReady()
     {
         // The state machine that gates DocumentRendered is the same in shell
-        // and legacy modes. This test pins the contract.
+        // and legacy modes. Render completion no longer waits for minimap
+        // state — minimapSourceReady can lag the first paint when an async
+        // pipeline is cancelled mid-flight (F-04 multi-fire), and gating the
+        // render on it caused the renderer to never declare completion after
+        // tab-switch loads. The minimap visibility check now runs from the
+        // renderer's own observer chain (queueMinimapViewportUpdate /
+        // updateMinimapVisibility) once policy + layout settle, decoupled
+        // from this render-completion gate.
         Assert.False(ApplicateWebMarkdownDocumentView.ShouldCompleteRenderForTesting(false, false, false));
         Assert.False(ApplicateWebMarkdownDocumentView.ShouldCompleteRenderForTesting(true, false, false));
-        Assert.False(ApplicateWebMarkdownDocumentView.ShouldCompleteRenderForTesting(true, true, false));
+        Assert.True(ApplicateWebMarkdownDocumentView.ShouldCompleteRenderForTesting(true, true, false));
         Assert.True(ApplicateWebMarkdownDocumentView.ShouldCompleteRenderForTesting(true, true, true));
     }
 

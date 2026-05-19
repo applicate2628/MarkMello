@@ -112,14 +112,21 @@ public sealed class ApplicateWebMinimapStateTests
     [Theory]
     [InlineData(false, true, true, false)]
     [InlineData(true, false, true, false)]
-    [InlineData(true, true, false, false)]
+    [InlineData(true, true, false, true)]
     [InlineData(true, true, true, true)]
-    public void WebRendererCompletesOnlyAfterLayoutAndMinimapStateAreReady(
+    public void WebRendererCompletesAfterLoadedDocumentAndLayoutAreReady(
         bool hasLoadedDocument,
         bool hasLayoutReady,
         bool hasMinimapState,
         bool expected)
     {
+        // hasMinimapState is retained on the call site for source-compat with
+        // callers that still propagate the signal, but it is no longer part
+        // of the completion gate — see ApplicateWebMarkdownDocumentViewShell-
+        // ModeTests.ShouldCompleteRenderGatesOnLoadedDocumentAndLayoutReady
+        // for the rationale (F-04 multi-fire + cancelled pipeline starves
+        // minimapSourceReady; minimap visibility is driven by its own
+        // observer chain post-completion).
         var actual = ApplicateWebMarkdownDocumentView.ShouldCompleteRenderForTesting(
             hasLoadedDocument,
             hasLayoutReady,

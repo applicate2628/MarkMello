@@ -5,6 +5,8 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
+using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Styling;
 using Avalonia.VisualTree;
@@ -53,7 +55,6 @@ public sealed class ApplicateMainWindow : MainWindow
         DataTemplates.Insert(0, viewerTemplate);
         InstallViewerHostTemplate(viewerTemplate);
         InstallSharedWebViewWarmupPanel();
-        InstallSharedHostPrewarm(viewModel);
         InstallTabsAndWelcome();
         InstallSiblingMountedViews(viewModel);
         InstallHostShortcutBridge(viewModel);
@@ -63,7 +64,8 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallPopupFadeIn();
         InstallUnifiedScrollBarStyle();
         InstallEditModeDragSuppression(viewModel);
-        InstallNativeRendererStub(viewModel);
+        InstallApplicateRendererPolicy(viewModel);
+        InstallTabHotkeys();
         Opened += (_, _) => Title = $"{Title} [Applicate overlay]";
         Opened += (_, _) => Avalonia.Threading.Dispatcher.UIThread.Post(
             InstallStatusHintAboveWebView,
@@ -79,6 +81,64 @@ public sealed class ApplicateMainWindow : MainWindow
     // such a popup as a separate transient top-level window on Win32, and
     // top-level windows always stack above their owner's child HWNDs.
     private Avalonia.Controls.Primitives.Popup? _statusHintPopup;
+
+    // Ctrl+1..9 activates the open document at that 1-based ordinal index.
+    // Browser convention: Ctrl+9 jumps to the LAST tab rather than the 9th
+    // (so users with many tabs always have a "go to end" shortcut). The
+    // handler is bubble-routed so child controls (TextBox, WebView2 HWND)
+    // can still see and own the keystroke if they are focused and want it;
+    // we only act when no descendant has handled the event yet.
+    private void InstallTabHotkeys()
+    {
+        AddHandler(KeyDownEvent, OnTabHotkey, RoutingStrategies.Bubble, handledEventsToo: false);
+    }
+
+    private void OnTabHotkey(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyModifiers != KeyModifiers.Control)
+        {
+            return;
+        }
+
+        var ordinal = e.Key switch
+        {
+            Key.D1 => 1,
+            Key.D2 => 2,
+            Key.D3 => 3,
+            Key.D4 => 4,
+            Key.D5 => 5,
+            Key.D6 => 6,
+            Key.D7 => 7,
+            Key.D8 => 8,
+            Key.D9 => 9,
+            _ => 0,
+        };
+        if (ordinal == 0)
+        {
+            return;
+        }
+
+        var openDocs = App.Services?.GetService<IOpenDocumentsService>();
+        if (openDocs is null || openDocs.OpenDocuments.Count == 0)
+        {
+            return;
+        }
+
+        var docs = openDocs.OpenDocuments;
+        var index = ordinal == 9
+            ? docs.Count - 1
+            : System.Math.Min(ordinal - 1, docs.Count - 1);
+
+        var target = docs[index];
+        if (ReferenceEquals(target, openDocs.ActiveDocument))
+        {
+            e.Handled = true;
+            return;
+        }
+
+        openDocs.Activate(target);
+        e.Handled = true;
+    }
 
     private void InstallStatusHintAboveWebView()
     {
@@ -131,22 +191,30 @@ public sealed class ApplicateMainWindow : MainWindow
     }
 
     // ===========================================================
-    // TEMP-NATIVE-STUB: temporary stub for the native (Avalonia) markdown
-    // renderer until the v0.3 cross-fade-with-screenshot work lands.
-    // Native render flashes between Avalonia and WebView during source
-    // change, producing visible jitter in edit mode that the v0.2
-    // WebView opacity-fade fix does not cover. While the stub is in
-    // place: every selection is forced to WebView, and the Renderer
-    // row in the reading-settings popup shows a static note instead
-    // of the segmented Native/WebView toggle.
+    // InstallApplicateRendererPolicy — Applicate-side renderer-backend
+    // policy. WebView is the only renderer Applicate supports; the native
+    // Avalonia markdown renderer (MarkdownDocumentView + CSharpMath) was
+    // removed from the Applicate-side delivery pipeline. This policy
+    // enforces the WebView-only invariant at the in-memory view-model
+    // boundary by coercing every assignment of
+    // MainWindowViewModel.SelectedRendererBackend == Native back to
+    // WebView. The disk-side coercion of any pre-fork persisted
+    // "RendererBackend": "Native" value lives in
+    // ApplicateRendererCoercingSettingsStore (registered in Program.cs);
+    // together they make the WebView-only invariant true at every
+    // observable layer.
     //
-    // To restore native renderer support:
-    //   1. Remove the InstallNativeRendererStub call in the constructor.
-    //   2. Delete this method and DisableNativeToggleInSettings.
-    //   3. Verify upstream segmented control rebinds correctly (the
-    //      runtime patch here mutates the popup tree at first open).
+    // Permanent policy. The upstream MarkdownRendererBackend.Native enum
+    // member stays for upstream MarkMello.Desktop (non-Applicate) builds,
+    // but Applicate never lets it reach a renderer.
+    //
+    // Upstream ReadingSettingsPanelView.axaml already wraps the renderer
+    // toggle row in <StackPanel IsVisible="False"> so the segmented
+    // control is hidden from the user; this method only needs to defend
+    // against programmatic assignment (e.g. settings restore racing the
+    // disk-side coercer, future code paths assigning the value).
     // ===========================================================
-    private void InstallNativeRendererStub(MainWindowViewModel viewModel)
+    private void InstallApplicateRendererPolicy(MainWindowViewModel viewModel)
     {
         // Force WebView whenever Native gets selected (via prefs restore or
         // user click). Setting SelectedRendererBackend = WebView triggers
@@ -1023,81 +1091,6 @@ public sealed class ApplicateMainWindow : MainWindow
             // Flush a consolidated save now that the restored set is final.
             SaveSession();
         });
-    }
-
-    // Push the active document into the singleton shared WebView while it is
-    // still parented to the offscreen warmup panel — so the renderer's heavy
-    // first paint (~530ms RenderAsync + shell-load + JS messaging) happens
-    // before the user ever presses Ctrl+E. Without this, the first enter-edit
-    // pays the full WebView render synchronously inside the toggle window
-    // (verified at 532ms in .scratch/mode-toggle.log 07:40:12.771→13.303).
-    // Subsequent UpdateInputs from EditPreviewView.ApplyWebPreviewSource hit
-    // a hot WebView with Source/ImageSourceResolver already matching → action
-    // degrades to None/ApplyLivePreferences, no full re-render.
-    private void InstallSharedHostPrewarm(MainWindowViewModel viewModel)
-    {
-        var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
-        if (sharedHost is null)
-        {
-            return;
-        }
-
-        var pumpScheduled = false;
-
-        void Push()
-        {
-            pumpScheduled = false;
-            var doc = viewModel.Document;
-            if (doc is null)
-            {
-                return;
-            }
-
-            try
-            {
-                var prefs = ApplicateEditPreviewView.CreateWebPreviewPreferences(viewModel.DocumentReadingPreferences);
-                var width = ApplicateEditPreviewView.CalculatePreWarmColumnWidth(viewModel.DocumentReadingPreferences);
-                sharedHost.View.UpdateInputs(
-                    source: doc,
-                    readingPreferences: prefs,
-                    imageSourceResolver: viewModel.ImageSourceResolver,
-                    availableContentWidth: width,
-                    viewerChromeEnabled: false,
-                    documentScrollEnabled: true,
-                    wheelProxyEnabled: false);
-                ApplicateTrace.ModeToggle($"SharedHost prewarm pushed: path={doc.Path} width={width:F1}");
-            }
-            catch (System.Exception ex)
-            {
-                ApplicateTrace.ModeToggle($"SharedHost prewarm FAILED: {ex.GetType().Name}: {ex.Message}");
-            }
-        }
-
-        void Schedule()
-        {
-            if (pumpScheduled)
-            {
-                return;
-            }
-            pumpScheduled = true;
-            Avalonia.Threading.Dispatcher.UIThread.Post(
-                Push,
-                Avalonia.Threading.DispatcherPriority.Background);
-        }
-
-        viewModel.PropertyChanged += (_, e) =>
-        {
-            if (e.PropertyName == nameof(MainWindowViewModel.Document)
-                || e.PropertyName == nameof(MainWindowViewModel.DocumentReadingPreferences)
-                || e.PropertyName == nameof(MainWindowViewModel.ImageSourceResolver))
-            {
-                Schedule();
-            }
-        };
-
-        // Initial push covers command-line activation, restore-session,
-        // and any synchronous load completed before the constructor finished.
-        Schedule();
     }
 
     private void InstallSharedWebViewWarmupPanel()

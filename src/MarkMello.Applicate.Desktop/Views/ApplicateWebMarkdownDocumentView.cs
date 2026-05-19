@@ -61,7 +61,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private double _scrollHeight;
     private double _clientHeight;
     private bool _isUpdatingInputs;
-    private bool _hasReceivedDocumentReady;
     private int _intentionalReparentDepth;
     private MarkMello.Presentation.ViewModels.MainWindowViewModel? _mainWindowViewModel;
     private readonly bool _shellMode;
@@ -441,7 +440,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _awaitingLayoutReady = false;
         _hasLayoutReady = false;
         _hasMinimapState = false;
-        _hasReceivedDocumentReady = false;
         _scrollTop = 0;
         _scrollHeight = 0;
         _clientHeight = 0;
@@ -628,23 +626,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private void OnNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
     {
         _isLoadingGeneratedDocument = false;
-        if (!e.IsSuccess)
-        {
-            // Phase-aware: only treat a navigation failure as a real load error
-            // before the renderer JS posts "document-ready" for the initial
-            // load. After that, !IsSuccess almost always means a stale or
-            // superseded navigation (cancelled by a subsequent Navigate, or
-            // an internal WebView2 reload) — treating those as fallback was
-            // causing edit-mode webview to flash-and-vanish: first nav
-            // rendered and committed the surface, then a stale completion
-            // raised FallbackRequested → _webPreviewFailed → flip to native.
-            if (_hasReceivedDocumentReady)
-            {
-                return;
-            }
-
-            FallbackRequested?.Invoke(this, EventArgs.Empty);
-        }
+        // NavigationCompleted with IsSuccess=false on our local file:// pipeline
+        // is dominated by superseded-navigate events (rapid tab switches cancel
+        // the in-flight navigate). Real WebView load errors surface through the
+        // exception catches in RenderShell / render-generated-document, which
+        // is the single source of truth for "FallbackRequested". Empirically
+        // confirmed via diagnostic logging 2026-05-19: every observed
+        // user-visible false-fire of the failure view originated here, never
+        // from the catches. Branch removed.
     }
 
     private void OnNewWindowRequested(object? sender, WebViewNewWindowRequestedEventArgs e)
@@ -701,7 +690,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             var type = typeProperty.GetString();
             if (type == "document-ready")
             {
-                _hasReceivedDocumentReady = true;
                 if (_shellMode && !_shellDocumentReadyConsumed)
                 {
                     // First document-ready in shell mode = empty shell page loaded.
@@ -1049,7 +1037,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         bool hasLoadedDocument,
         bool hasLayoutReady,
         bool hasMinimapState)
-        => hasLoadedDocument && hasLayoutReady && hasMinimapState;
+        // hasMinimapState dropped from the gate 2026-05-19: in shell-mode the
+        // renderer's minimap path is policy-gated (F-07), refresh-content-gated,
+        // and reading-preferences-gated; the minimap-state message can post much
+        // later than layout-ready (or never when conditions deny minimap show).
+        // Holding DocumentRendered on it leaves slot.IsVisible=false forever —
+        // exact regression observed 2026-05-19 06:32. Slot commits at layout-ready;
+        // minimap reservation flows separately via MinimapStateChanged.
+        => hasLoadedDocument && hasLayoutReady;
 
     private void HandleWidthDragMessage(JsonElement root)
     {
@@ -1258,15 +1253,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             // Render not finished yet. Two cases:
             // - No render in flight: a live-preference change after an
             //   earlier source has been cleared. Kick a fresh render off.
-            // - Render IS in flight: do not cancel it. Cancelling restarts
-            //   the cycle and the canceled Navigate fires
-            //   NavigationCompleted with IsSuccess=false before
-            //   _hasReceivedDocumentReady is set, which trips
-            //   FallbackRequested → _webPreviewFailed = true and breaks the
-            //   shared preview permanently. The current in-flight render
+            // - Render IS in flight: do not cancel it. The in-flight render
             //   will send the up-to-date AvailableContentWidth to the
             //   renderer in SendReadingPreferences on document-ready, so the
-            //   user still sees content at the correct width.
+            //   user still sees content at the correct width. Cancelling
+            //   would only thrash the layout pipeline without changing the
+            //   final committed state.
             if (_renderCancellation is not null)
             {
                 return;
@@ -1350,11 +1342,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 fontSize = ReadingPreferences.FontSize,
                 lineHeight = ReadingPreferences.LineHeight,
                 maxWidth,
-                // Host's clamp floor — renderer uses this to limit drag preview
-                // so it doesn't go below where host will clamp on echo. Without
-                // it, drag visually pulls to renderer-local min (200) but host
-                // re-clamps to 320, document snaps wider on release.
-                minMaxWidth = ApplicateViewerView.MinManualContentWidth,
+                // F-06 fix: host's clamp floor sourced from the canonical
+                // owner (ApplicateDocumentLayout). Renderer uses this to limit
+                // drag preview so it doesn't go below where host will clamp on
+                // echo; without it, drag visually pulls to renderer-local min
+                // (200) but host re-clamps, snapping the document wider on
+                // release. Previous reference (ApplicateViewerView.MinManualContentWidth)
+                // inverted the dependency direction: a shared lower layer was
+                // reading a constant from one specific consumer slot.
+                minMaxWidth = ApplicateDocumentLayout.MinManualContentWidth,
                 minimapMode = ReadingPreferences.DocumentMinimapMode.ToString().ToLowerInvariant(),
                 viewerChromeEnabled = ViewerChromeEnabled,
                 documentScrollEnabled = DocumentScrollEnabled,

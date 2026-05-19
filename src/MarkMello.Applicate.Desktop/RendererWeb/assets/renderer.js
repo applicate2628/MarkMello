@@ -593,21 +593,13 @@
   var widthHandleDragging = false;
   var widthHandleStartClientX = 0;
   var widthHandleStartMaxWidth = 0;
-  var widthHandleStartLeft = 0;
   var pendingWidthDragDeltaX = 0;
   var widthDragFrameRequested = false;
   var widthDragApplyFrameRequested = false;
   var layoutReadyGeneration = 0;
   var layoutReadyTimer;
   var lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
-  var minimapPolicy = {
-    // Mirrors ApplicateDocumentMinimapBuildPolicy until the host sends minimap-policy.
-    // WebView uses CSS scrollHeight while Native uses Avalonia visual height; keep
-    // this shared value intentionally permissive until WebView-specific tuning exists.
-    minHostWidth: 1100,
-    minScrollableViewportRatio: 1.5,
-    maxDetailedDocumentHeight: 24e4
-  };
+  var minimapPolicy = null;
   function applyViewerChromeState() {
     document.documentElement.dataset.mmChrome = viewerChromeEnabled ? "on" : "off";
   }
@@ -863,8 +855,6 @@
     widthHandleDragging = true;
     widthHandleStartClientX = event.clientX;
     pendingWidthDragDeltaX = 0;
-    const startLeftFromStyle = parseFloat(widthHandleRoot.style.left);
-    widthHandleStartLeft = Number.isFinite(startLeftFromStyle) ? startLeftFromStyle : widthHandleRoot.getBoundingClientRect().left;
     const inlineMaxWidth = parseFloat(
       document.documentElement.style.getPropertyValue("--mm-document-max-width")
     );
@@ -895,21 +885,7 @@
       }
       const previewMaxWidth = Math.max(hostMinMaxWidth, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
       document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
-      if (widthHandleRoot) {
-        const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
-        const minimapWidth = readRootPixelVariable("--mm-minimap-width", 0);
-        const minimapGap = readRootPixelVariable("--mm-minimap-gap", 0);
-        const minimapReserved = minimapRoot && !minimapRoot.hidden ? Math.max(0, minimapWidth + minimapGap * 2) : 0;
-        const columnWidthDelta = previewMaxWidth - widthHandleStartMaxWidth;
-        const idealHandleLeft = widthHandleStartLeft + columnWidthDelta / 2;
-        const clampedLeft = clampWidthHandleLeft({
-          candidateLeft: idealHandleLeft,
-          hitArea,
-          minimapReservedWidth: minimapReserved,
-          viewportWidth: window.innerWidth
-        });
-        widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
-      }
+      updateWidthHandlePosition();
       queueMinimapViewportUpdate();
     });
   }
@@ -1032,7 +1008,7 @@
     const root = document.scrollingElement ?? document.documentElement;
     const documentHeight = root.scrollHeight;
     const viewportHeight = root.clientHeight;
-    if (!hasReceivedHostPreferences || !viewerChromeEnabled || !minimapSourceReady || minimapMode === "off" || viewportHeight <= 0 || documentHeight <= viewportHeight) {
+    if (!hasReceivedHostPreferences || !minimapPolicy || !viewerChromeEnabled || !minimapSourceReady || minimapMode === "off" || viewportHeight <= 0 || documentHeight <= viewportHeight) {
       return false;
     }
     if (documentHeight > minimapPolicy.maxDetailedDocumentHeight) {
@@ -1048,10 +1024,15 @@
     if (!minimapRoot) {
       return;
     }
+    const wasVisible = !minimapRoot.hidden;
+    const hadClass = document.body.classList.contains(MINIMAP_VISIBLE_CLASS);
     const visible = shouldShowMinimap();
     minimapRoot.hidden = !visible;
     document.body.classList.toggle(MINIMAP_VISIBLE_CLASS, visible);
     postMinimapState(visible, forcePostState);
+    if (wasVisible !== visible || hadClass !== visible) {
+      updateWidthHandlePosition();
+    }
   }
   function getCurrentMinimapReservedWidth() {
     if (!minimapRoot || minimapRoot.hidden) {
@@ -1374,6 +1355,7 @@
     ensureWidthHandle();
     ensureDropOverlay();
     updateWidthHandlePosition();
+    refreshMinimapContent("A");
   }
   function buildLoadDocumentDeps() {
     return {

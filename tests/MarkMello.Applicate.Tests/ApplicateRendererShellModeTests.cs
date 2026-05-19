@@ -6,11 +6,13 @@ namespace MarkMello.Applicate.Tests;
 public sealed class ApplicateRendererShellModeTests
 {
     [Fact]
-    public void IsEnabledDefaultsToFalseWhenEnvVarMissing()
+    public void IsEnabledDefaultsToTrueWhenEnvVarMissing()
     {
-        Assert.False(ApplicateRendererShellMode.ReadFromEnvironment(envValue: null));
-        Assert.False(ApplicateRendererShellMode.ReadFromEnvironment(envValue: ""));
-        Assert.False(ApplicateRendererShellMode.ReadFromEnvironment(envValue: "  "));
+        // Post-Phase 4 default is shell-mode ON (no per-document Navigate).
+        // Legacy mode is opt-in via MARKMELLO_RENDERER_SHELL_MODE=0.
+        Assert.True(ApplicateRendererShellMode.ReadFromEnvironment(envValue: null));
+        Assert.True(ApplicateRendererShellMode.ReadFromEnvironment(envValue: ""));
+        Assert.True(ApplicateRendererShellMode.ReadFromEnvironment(envValue: "  "));
     }
 
     [Theory]
@@ -23,7 +25,8 @@ public sealed class ApplicateRendererShellModeTests
     [InlineData("false", false)]
     [InlineData("off", false)]
     [InlineData("no", false)]
-    [InlineData("garbage", false)]
+    // Unknown values fail-open to the new default (shell-mode).
+    [InlineData("garbage", true)]
     public void IsEnabledParsesCommonBooleanStrings(string envValue, bool expected)
     {
         Assert.Equal(expected, ApplicateRendererShellMode.ReadFromEnvironment(envValue));

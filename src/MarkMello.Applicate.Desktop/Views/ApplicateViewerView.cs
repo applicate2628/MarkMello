@@ -1,204 +1,151 @@
+using System;
 using System.ComponentModel;
 using Avalonia;
-using Avalonia.Animation;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
-using Avalonia.Media;
-using Avalonia.Threading;
+using Avalonia.VisualTree;
 using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Rendering;
-using MarkMello.Applicate.Desktop.Views.Minimap;
 using MarkMello.Domain;
 using MarkMello.Presentation.ViewModels;
 using SysMath = System.Math;
 
 namespace MarkMello.Applicate.Desktop.Views;
 
+/// <summary>
+/// Read-only viewer surface for the active document. WebView2 is the only
+/// renderer; failure routes through <see cref="ApplicateRendererFailureView"/>.
+///
+/// Phase 4 collapses this control to a passive slot owner that delegates the
+/// rendered surface to <see cref="IApplicateSharedWebViewHost"/>. The host
+/// reparents the shared WebView into <c>_webSlot</c> when the viewer is
+/// visible, owns the slot's <c>IsVisible</c> across SWITCHING ↔ COMMITTED
+/// transitions, and surfaces runtime / per-document failures through
+/// <see cref="IApplicateSharedWebViewHost.RendererFailed"/>.
+/// </summary>
 public sealed class ApplicateViewerView : UserControl, IDisposable
 {
     private const double WheelStepMultiplier = 6.0;
-    internal const double MinManualContentWidth = 320.0;
+    /// <summary>
+    /// Backwards-compatible re-export of
+    /// <see cref="ApplicateDocumentLayout.MinManualContentWidth"/>. The
+    /// canonical owner is <see cref="ApplicateDocumentLayout"/>; this
+    /// alias keeps existing test-surface and shared-document-view callers
+    /// working without churning their references in this audit pass.
+    /// </summary>
+    internal const double MinManualContentWidth = ApplicateDocumentLayout.MinManualContentWidth;
     private const double ViewportHorizontalGutter = 32.0;
-    private const double MinimapColumnGap = 24.0;
-    private const double WidthHandleHitArea = 24.0;
-    private const double WidthHandleIdleTrackWidth = 2.0;
-    private const double WidthHandleHoverTrackWidth = 5.0;
-    private const double WidthHandleDraggingTrackWidth = 7.0;
 
+    // _webSlot owns the airspace the shared WebView lives in while the
+    // viewer is the active consumer. The shared host flips _webSlot.IsVisible
+    // between SWITCHING (false) and COMMITTED (true). The right margin
+    // reserves room for the Avalonia ScrollBar overlay (mounted as a sibling
+    // by the shared-host wiring above) so the WebView2 HWND does not paint
+    // into the scrollbar strip via Win32 z-order. Width comes from
+    // ApplicateDocumentLayout.GetWebSlotScrollBarGutter which reads the
+    // canonical ScrollBarSize theme resource — same value that drives the
+    // ScrollBar style's painted width, so reservation and bar agree.
+    private readonly Panel _webSlot = new()
+    {
+        UseLayoutRounding = true,
+        Margin = ApplicateDocumentLayout.GetWebSlotScrollBarGutter(),
+    };
     private readonly ScrollViewer _scroll;
     private readonly Border _scrollContentFrame;
     private readonly Border _column;
     private readonly Grid _documentShell;
     private readonly Grid _documentLayer;
-    private readonly Border _webRenderMask;
-    private readonly ApplicateMarkdownDocumentView _documentView;
-    private readonly IApplicateHtmlMarkdownRenderer? _htmlRenderer;
-    private readonly IApplicateShellAssetBundleFactory? _shellAssetFactory;
-    private readonly Border _widthHandle;
-    private readonly Border _widthHandleTrack;
-    private readonly ContentControl _minimapHost;
-    private ApplicateWebMarkdownDocumentView? _webDocumentView;
-    private WebViewHostScrollBarOverlay? _webDocumentScrollBarOverlay;
+    private readonly IApplicateSharedWebViewHost? _sharedHost;
+    private readonly ApplicateRendererFailureView _failureView;
+    private WebViewHostScrollBarOverlay? _scrollBarOverlay;
     private MainWindowViewModel? _viewModel;
     private bool _isDraggingWidth;
-    private bool _isWidthHandleHovering;
-    private ApplicateDocumentMinimapView? _minimap;
-    private int _minimapBuildGeneration;
-    private bool _isMinimapBuildQueued;
-    private bool _hasRenderedDocument;
-    private Point _dragStart;
     private double _dragStartWidth;
     private double? _manualContentWidth;
     private double _lastViewModelContentWidth;
     private double _lastReadingProgress;
-    private double _documentHorizontalPadding = 144.0;
+    // F-04 fix: initialize to 0.0; SyncFromViewModel is the sole writer.
+    // The previous 144.0 default was a phantom value mirroring the
+    // edit-preview's hardcoded padding sum; it was always overwritten
+    // before any render so the literal misled readers about the source
+    // of truth (ReadingLayoutMetrics.GetDocumentHorizontalPadding).
+    private double _documentHorizontalPadding;
     private double _webMinimapReservedWidth;
-    private Size _lastMinimapExtent;
-    private Size _lastMinimapViewport;
     private MarkdownSource? _lastDocumentSource;
-    private MarkdownRendererBackend _lastRequestedRendererBackend = MarkdownRendererBackend.Native;
-    // WebView is the primary renderer; the native Avalonia surface is kept
-    // only as a fallback when the WebView pipeline fails. Starting the state
-    // machine at WebView prevents the native renderer from painting its
-    // progressive layout in the body of the viewer while the WebView is
-    // still loading — that painted-then-replaced flicker was visible as
-    // ~1.5s of incremental Avalonia content before the WebView took over.
-    private ApplicateRendererSurfaceKind _activeRendererSurface = ApplicateRendererSurfaceKind.WebView;
-    private ApplicateRendererSurfaceKind? _pendingRendererSurface;
-    private bool _pendingRendererReady;
-    private long _rendererSwitchGeneration;
-    private bool _webRendererFailedForCurrentDocument;
-    private ApplicateWidthHandleVisualState? _lastWidthHandleVisualState;
+    private bool _hostEventsWired;
+    private bool _isAttachedToHost;
+    private bool _hasValidBounds;
 
     public ApplicateViewerView(
         IApplicateHtmlMarkdownRenderer? htmlRenderer = null,
-        IApplicateShellAssetBundleFactory? shellAssetFactory = null)
+        IApplicateShellAssetBundleFactory? shellAssetFactory = null,
+        IApplicateSharedWebViewHost? sharedHost = null)
     {
-        _htmlRenderer = htmlRenderer;
-        _shellAssetFactory = shellAssetFactory;
-        _documentView = new ApplicateMarkdownDocumentView
-        {
-            DocumentPadding = new Thickness(72, 96, 72, 160),
-            UseLayoutRounding = true
-        };
-        _documentView.DocumentRendered += OnDocumentRendered;
-        _documentView.DocumentRenderInvalidated += OnDocumentRenderInvalidated;
-        ApplicateRendererSurfaceTransition.EnsureOpacityTransition(_documentView);
+        // htmlRenderer / shellAssetFactory parameters preserved for ctor
+        // compatibility with the legacy IDataTemplate; the renderer is now
+        // owned exclusively by the shared host. The parameters are silently
+        // ignored — keeping them in the signature avoids breaking
+        // ApplicateViewerTemplate's three-arg construction call.
+        _ = htmlRenderer;
+        _ = shellAssetFactory;
+        _sharedHost = sharedHost;
 
-        _widthHandleTrack = new Border
+        _failureView = new ApplicateRendererFailureView
         {
-            Width = WidthHandleIdleTrackWidth,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Stretch,
-            Margin = new Thickness(0, 42, 6, 42),
-            CornerRadius = new CornerRadius(99),
-            Background = Brush("MmTextFaintBrush", new SolidColorBrush(Color.FromArgb(70, 120, 120, 120))),
-            Opacity = 0,
-            IsHitTestVisible = false,
-            Transitions =
-            [
-                new DoubleTransition
-                {
-                    Property = Visual.OpacityProperty,
-                    Duration = ApplicateMotion.Standard,
-                    Easing = ApplicateMotion.Easing
-                },
-                new DoubleTransition
-                {
-                    Property = Layoutable.WidthProperty,
-                    Duration = ApplicateMotion.Standard,
-                    Easing = ApplicateMotion.Easing
-                }
-            ]
+            IsVisible = false,
         };
 
-        _widthHandle = new Border
-        {
-            Width = WidthHandleHitArea,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Stretch,
-            Background = Brushes.Transparent,
-            Cursor = new Cursor(StandardCursorType.SizeWestEast),
-            Child = _widthHandleTrack
-        };
-        _widthHandle.PointerEntered += OnWidthHandlePointerEntered;
-        _widthHandle.PointerExited += OnWidthHandlePointerExited;
-        _widthHandle.PointerPressed += OnWidthHandlePointerPressed;
-        _widthHandle.PointerMoved += OnWidthHandlePointerMoved;
-        _widthHandle.PointerReleased += OnWidthHandlePointerReleased;
-        _widthHandle.PointerCaptureLost += OnWidthHandlePointerCaptureLost;
-
+        // documentLayer hosts the WebView slot and the optional failure
+        // overlay. The Avalonia ScrollBar overlay (mounted once the host
+        // attaches the View) is added directly into documentLayer too — see
+        // EnsureSharedHostMounted.
         _documentLayer = new Grid { UseLayoutRounding = true };
-        _documentLayer.Children.Add(_documentView);
-
-        // Theme-matching mask overlay shown between DocumentRenderInvalidated
-        // and DocumentRendered. Native WebView2 HWND ignores Avalonia Opacity,
-        // so on tab switch the old document's content stays painted while
-        // RenderAsync builds the new HTML — observed as ~200-400ms of stale
-        // content under the new tab's title. The mask sits z-above the
-        // WebView, opaque, and is toggled by render events so the user sees
-        // a clean theme-colored tile during the render gap.
-        // Mirrors ApplicateEditPreviewView's _webRenderMask pattern (proven
-        // for edit-preview transitions since v0.2.0).
-        _webRenderMask = new Border
-        {
-            Background = Brush("MmBackgroundBrush", new SolidColorBrush(Colors.White)),
-            IsHitTestVisible = false,
-            IsVisible = false
-        };
-        _documentLayer.Children.Add(_webRenderMask);
+        _documentLayer.Children.Add(_webSlot);
+        _documentLayer.Children.Add(_failureView);
 
         _documentShell = new Grid { UseLayoutRounding = true };
         _documentShell.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));
-        _documentShell.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(WidthHandleHitArea)));
         Grid.SetColumn(_documentLayer, 0);
-        Grid.SetColumn(_widthHandle, 1);
         _documentShell.Children.Add(_documentLayer);
-        _documentShell.Children.Add(_widthHandle);
 
         _column = new Border
         {
-            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center,
             UseLayoutRounding = true,
-            Child = _documentShell
+            Child = _documentShell,
         };
 
         _scrollContentFrame = new Border
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
             UseLayoutRounding = true,
-            Child = _column
+            Child = _column,
         };
 
         _scroll = new ScrollViewer
         {
-            HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled,
-            VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            // WebView owns its internal scroll, so the outer Avalonia
+            // ScrollViewer stays in disabled mode. Kept as a wrapper so the
+            // outer host layout (welcome screen, error states) can still
+            // place this control without measuring through the WebView2
+            // HWND.
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
             UseLayoutRounding = true,
             Content = new Grid
             {
                 UseLayoutRounding = true,
                 Children =
                 {
-                    _scrollContentFrame
-                }
-            }
+                    _scrollContentFrame,
+                },
+            },
         };
         _scroll.ScrollChanged += OnScrollChanged;
         _scroll.AddHandler(InputElement.PointerWheelChangedEvent, OnPointerWheelChanged, RoutingStrategies.Tunnel);
-
-        _minimapHost = new ContentControl
-        {
-            Width = 136,
-            Margin = new Thickness(0, 64, 16, 64),
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Stretch,
-            IsHitTestVisible = false,
-            UseLayoutRounding = true
-        };
-        _minimapHost.AddHandler(InputElement.PointerWheelChangedEvent, OnPointerWheelChanged, RoutingStrategies.Tunnel);
 
         Content = new Grid
         {
@@ -206,12 +153,8 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
             Children =
             {
                 _scroll,
-                _minimapHost
-            }
+            },
         };
-
-        ActualThemeVariantChanged += OnViewerAppearanceChanged;
-        ResourcesChanged += OnViewerResourcesChanged;
     }
 
     protected override void OnDataContextChanged(EventArgs e)
@@ -220,30 +163,116 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         AttachViewModel(DataContext as MainWindowViewModel);
     }
 
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        // Subscribe to ancestor visibility flips so we only AttachTo when
+        // the bridge-controlled outer slot actually shows the viewer to the
+        // user. The bridge toggles viewerSlot/editSlot IsVisible — we hook
+        // both this control's own IsVisible and walk up to find an ancestor
+        // ContentControl/Panel that the bridge owns.
+        AttachedToVisualTree += OnAnyAttachmentChange;
+        DetachedFromVisualTree += OnAnyAttachmentChange;
+        PropertyChanged += OnViewerPropertyChanged;
+        AttachAncestorVisibilityListeners();
+        OnEffectiveVisibilityChanged();
+        SyncFromViewModel();
+    }
+
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
-        ActualThemeVariantChanged -= OnViewerAppearanceChanged;
-        ResourcesChanged -= OnViewerResourcesChanged;
-        DisposeWebDocumentView();
-
+        AttachedToVisualTree -= OnAnyAttachmentChange;
+        DetachedFromVisualTree -= OnAnyAttachmentChange;
+        PropertyChanged -= OnViewerPropertyChanged;
+        DetachAncestorVisibilityListeners();
+        UnwireSharedHostEvents();
         AttachViewModel(null);
-        _minimapBuildGeneration++;
-        _isMinimapBuildQueued = false;
-        RemoveMinimap();
-        _hasRenderedDocument = false;
-        _lastMinimapExtent = default;
-        _lastMinimapViewport = default;
         base.OnDetachedFromVisualTree(e);
+    }
+
+    private readonly System.Collections.Generic.List<Avalonia.Visual> _ancestorListeners = new();
+
+    private void OnAnyAttachmentChange(object? sender, VisualTreeAttachmentEventArgs e)
+    {
+        DetachAncestorVisibilityListeners();
+        AttachAncestorVisibilityListeners();
+        OnEffectiveVisibilityChanged();
+    }
+
+    private void AttachAncestorVisibilityListeners()
+    {
+        for (Avalonia.Visual? v = this; v is not null; v = v.GetVisualParent())
+        {
+            v.PropertyChanged += OnAncestorPropertyChanged;
+            _ancestorListeners.Add(v);
+        }
+    }
+
+    private void DetachAncestorVisibilityListeners()
+    {
+        foreach (var v in _ancestorListeners)
+        {
+            v.PropertyChanged -= OnAncestorPropertyChanged;
+        }
+        _ancestorListeners.Clear();
+    }
+
+    private void OnAncestorPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == Visual.IsVisibleProperty)
+        {
+            OnEffectiveVisibilityChanged();
+        }
+    }
+
+    private void OnViewerPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == Visual.IsVisibleProperty)
+        {
+            OnEffectiveVisibilityChanged();
+        }
+    }
+
+    private void OnEffectiveVisibilityChanged()
+    {
+        if (IsEffectivelyVisible)
+        {
+            // Always re-AttachTo on visibility — the host's AttachTo is a
+            // no-op when the target panel is already its current parent,
+            // and a reparent when not. This handles the edit-preview→viewer
+            // mode toggle where edit had stolen the WebView previously.
+            EnsureSharedHostMounted(force: true);
+            IssueRenderRequest();
+        }
+        else
+        {
+            _isAttachedToHost = false;
+            // F-05 fix: hand consumer ownership of the scrollbar overlay
+            // back to the inactive state when this view stops being the
+            // shared WebView's owner.
+            if (_scrollBarOverlay is not null)
+            {
+                _scrollBarOverlay.IsAttachedToHost = false;
+            }
+        }
     }
 
     protected override void OnSizeChanged(SizeChangedEventArgs e)
     {
         base.OnSizeChanged(e);
-        ApplyColumnWidth();
-        if (_hasRenderedDocument)
+
+        if (!_hasValidBounds && Bounds.Width > 0 && Bounds.Height > 0)
         {
-            QueueMinimapBuild();
+            // First measured layout rectangle — release the startup gate and
+            // perform a single full sync with real geometry. This replaces the
+            // 3 phantom-width renders that previously fired before the layout
+            // pass completed.
+            _hasValidBounds = true;
+            SyncFromViewModel();
+            return;
         }
+
+        ApplyColumnWidth();
     }
 
     private void AttachViewModel(MainWindowViewModel? viewModel)
@@ -270,22 +299,16 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        // F-09 fix: subscribe only to canonical preferences source
+        // (ReadingPreferences) — the deleted DocumentReadingPreferences
+        // ghost copy is no longer published, and SyncFromViewModel always
+        // reads ReadingPreferences directly.
         if (e.PropertyName is nameof(MainWindowViewModel.RenderedDocument)
-            or nameof(MainWindowViewModel.DocumentReadingPreferences)
+            or nameof(MainWindowViewModel.Document)
             or nameof(MainWindowViewModel.DocumentColumnMaxWidth)
             or nameof(MainWindowViewModel.ReadingPreferences))
         {
             SyncFromViewModel();
-            if (_hasRenderedDocument)
-            {
-                if (!ShouldShowMinimap())
-                {
-                    RemoveMinimap();
-                    return;
-                }
-
-                QueueMinimapBuild();
-            }
         }
     }
 
@@ -293,31 +316,11 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     {
         if (_viewModel is null)
         {
-            _documentView.Document = RenderedMarkdownDocument.Empty;
-            _documentView.ReadingPreferences = ReadingPreferences.Default;
-            _documentView.ImageSourceResolver = null;
-            _documentView.AvailableContentWidth = double.NaN;
-            if (_webDocumentView is not null)
-            {
-                _webDocumentView.UpdateInputs(
-                    source: null,
-                    readingPreferences: ReadingPreferences.Default,
-                    imageSourceResolver: null,
-                    availableContentWidth: double.NaN,
-                    viewerChromeEnabled: true);
-            }
-
-            _activeRendererSurface = ApplicateRendererSurfaceKind.Native;
-            _pendingRendererSurface = null;
-            _pendingRendererReady = false;
-            _rendererSwitchGeneration++;
-            ApplyRendererSurfaceVisuals();
+            _lastDocumentSource = null;
             _manualContentWidth = null;
             _lastViewModelContentWidth = 0;
             _lastReadingProgress = 0;
             _webMinimapReservedWidth = 0;
-            _lastDocumentSource = null;
-            _webRendererFailedForCurrentDocument = false;
             _column.MaxWidth = double.PositiveInfinity;
             return;
         }
@@ -326,152 +329,172 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         if (documentChanged)
         {
             _lastDocumentSource = _viewModel.Document;
-            _webRendererFailedForCurrentDocument = false;
             _webMinimapReservedWidth = 0;
             _lastReadingProgress = 0;
-        }
-
-        var requestedRendererBackend = _viewModel.DocumentReadingPreferences.RendererBackend;
-        if (_lastRequestedRendererBackend != requestedRendererBackend)
-        {
-            _lastRequestedRendererBackend = requestedRendererBackend;
-            if (requestedRendererBackend == MarkdownRendererBackend.WebView)
-            {
-                _webRendererFailedForCurrentDocument = false;
-            }
-        }
-
-        var requestedRendererSurface = ResolveRequestedRendererSurface();
-        if (requestedRendererSurface == ApplicateRendererSurfaceKind.WebView)
-        {
-            if (EnsureWebDocumentView() is null)
-            {
-                requestedRendererSurface = ApplicateRendererSurfaceKind.Native;
-            }
-        }
-
-        if (ShouldUpdateNativeSurface(
-            requestedRendererSurface,
-            _activeRendererSurface,
-            _hasRenderedDocument,
-            documentChanged))
-        {
-            _documentView.Document = _viewModel.RenderedDocument;
-            _documentView.ReadingPreferences = _viewModel.DocumentReadingPreferences;
-            _documentView.ImageSourceResolver = _viewModel.ImageSourceResolver;
+            // A document switch means any previously displayed failure view
+            // is stale. Clear it so the failure overlay does not linger over
+            // the new document's first paint.
+            _failureView.IsVisible = false;
         }
 
         var viewModelContentWidth = _viewModel.ContentWidthSetting;
         _documentHorizontalPadding = SysMath.Max(0, _viewModel.DocumentColumnMaxWidth - viewModelContentWidth);
-        if (_manualContentWidth is null ||
-            (!_isDraggingWidth && SysMath.Abs(viewModelContentWidth - _lastViewModelContentWidth) > double.Epsilon))
+        if (_manualContentWidth is null
+            || (!_isDraggingWidth && SysMath.Abs(viewModelContentWidth - _lastViewModelContentWidth) > double.Epsilon))
         {
             _manualContentWidth = viewModelContentWidth;
         }
 
         _lastViewModelContentWidth = viewModelContentWidth;
 
-        if (_webDocumentView is not null
-            && (requestedRendererSurface == ApplicateRendererSurfaceKind.WebView || IsWebRendererVisibleOrTargeted()))
-        {
-            var webAlreadyRenderedCurrentDocument =
-                requestedRendererSurface == ApplicateRendererSurfaceKind.WebView
-                && _webDocumentView.HasLoadedDocumentForSource(_viewModel.Document);
-            _webDocumentView.UpdateInputs(
-                source: _viewModel.Document,
-                readingPreferences: CreateWebDocumentReadingPreferences(
-                    _viewModel.DocumentReadingPreferences,
-                    _viewModel.ReadingPreferences),
-                imageSourceResolver: _viewModel.ImageSourceResolver,
-                availableContentWidth: CalculateDocumentColumnWidthForSurface(ApplicateRendererSurfaceKind.WebView),
-                viewerChromeEnabled: true);
-            StageRendererSurface(requestedRendererSurface);
-            if (webAlreadyRenderedCurrentDocument)
-            {
-                CommitPendingRendererSurface(ApplicateRendererSurfaceKind.WebView);
-            }
-        }
-        else
-        {
-            StageRendererSurface(requestedRendererSurface);
-        }
-
+        IssueRenderRequest();
         ApplyColumnWidth();
     }
 
-    private void OnDocumentRendered(object? sender, EventArgs e)
+    private void IssueRenderRequest()
     {
-        var senderKind = ReferenceEquals(sender, _webDocumentView) ? "web" : ReferenceEquals(sender, _documentView) ? "native" : "?";
-        ApplicateTrace.ModeToggle($"Viewer.OnDocumentRendered sender={senderKind} pending={_pendingRendererSurface}");
-        // Hide mask conditions:
-        //   (1) WebView Rendered — the normal happy path, WebView committed new content
-        //   (2) Native Rendered AND pending=Native — WebView gave up via fallback
-        //       and Native committed. WebView surface is no longer the active path,
-        //       so the mask's purpose (hide stale WebView) is moot.
-        // Native renderer's parallel Rendered (no fallback) runs ~70ms after
-        // Invalidated, faster than WebView. If we react to that we'd unmask
-        // while WebView is still loading and re-expose stale content.
-        var isWebRendered = ReferenceEquals(sender, _webDocumentView);
-        var isNativeFallbackCommit = ReferenceEquals(sender, _documentView)
-            && _pendingRendererSurface == ApplicateRendererSurfaceKind.Native;
-        if (isWebRendered || isNativeFallbackCommit)
-        {
-            _webRenderMask.IsVisible = false;
-        }
-
-        if (ReferenceEquals(sender, _webDocumentView)
-            && _pendingRendererSurface == ApplicateRendererSurfaceKind.WebView)
-        {
-            CommitPendingRendererSurface(ApplicateRendererSurfaceKind.WebView);
-            MarkCurrentDocumentRendered();
-            return;
-        }
-
-        if (ReferenceEquals(sender, _documentView)
-            && _pendingRendererSurface == ApplicateRendererSurfaceKind.Native)
-        {
-            CommitPendingRendererSurface(ApplicateRendererSurfaceKind.Native);
-            MarkCurrentDocumentRendered();
-            return;
-        }
-
-        if (!IsRenderedSurfaceActive(sender))
+        if (_sharedHost is null || _viewModel is null)
         {
             return;
         }
 
-        MarkCurrentDocumentRendered();
+        // Only own the WebView while we are actually visible. The
+        // effective-visibility listener calls IssueRenderRequest when this
+        // consumer becomes visible; calls outside that window are skipped
+        // so we do not steal the WebView from edit-preview.
+        if (!_isAttachedToHost || !IsEffectivelyVisible)
+        {
+            return;
+        }
+
+        // Startup gate (see _hasValidBounds field doc): refuse to push render
+        // requests until the host's layout rectangle has been measured. Three
+        // sync triggers fire before that point at startup; gating here folds
+        // them into one render that uses the real width. OnSizeChanged
+        // re-triggers SyncFromViewModel on the first valid measurement.
+        if (!_hasValidBounds)
+        {
+            return;
+        }
+
+        // Single source of truth for reader policy (minimap mode, font, line
+        // height, content width, etc.) is _viewModel.ReadingPreferences — the
+        // shell-level value the user sees and edits in the menu. The host
+        // gets this canonical record directly. No merge dance, no stripped
+        // intermediate (_documentReadingPreferences). The previous indirection
+        // through MainWindowViewModel.GetDocumentRenderingPreferences existed
+        // to feed the now-removed Avalonia native renderer with a policy-free
+        // payload; the WebView has always been the source-of-truth consumer.
+        var request = new ApplicateWebRenderRequest(
+            ReadingPreferences: _viewModel.ReadingPreferences,
+            ImageSourceResolver: _viewModel.ImageSourceResolver,
+            AvailableContentWidth: CalculateDocumentColumnWidthForWebSurface());
+
+        _sharedHost.RequestRender(_viewModel.Document, request);
     }
 
-    private void OnDocumentRenderInvalidated(object? sender, EventArgs e)
+    private void EnsureSharedHostMounted(bool force = false)
     {
-        var senderKind = ReferenceEquals(sender, _webDocumentView) ? "web" : ReferenceEquals(sender, _documentView) ? "native" : "?";
-        ApplicateTrace.ModeToggle($"Viewer.OnDocumentRenderInvalidated sender={senderKind}");
-        if (!IsRenderedSurfaceActive(sender))
+        if (_sharedHost is null)
         {
             return;
         }
 
-        _webRenderMask.IsVisible = true;
+        if (!force && _isAttachedToHost)
+        {
+            return;
+        }
 
-        _hasRenderedDocument = false;
-        _lastMinimapExtent = default;
-        _lastMinimapViewport = default;
-        _webMinimapReservedWidth = 0;
-        _minimapBuildGeneration++;
-        RemoveMinimap();
+        var intent = new ApplicateWebMountIntent(
+            ViewerChromeEnabled: true,
+            DocumentScrollEnabled: true,
+            WheelProxyEnabled: true);
+        _sharedHost.AttachTo(_webSlot, intent);
+        _isAttachedToHost = true;
+
+        // Mount the Avalonia ScrollBar overlay against the shared WebView.
+        // Sibling-mounted inside _documentLayer so the WebView2 HWND does
+        // not occlude it via Win32 z-order. Disposed in Dispose().
+        if (_scrollBarOverlay is null)
+        {
+            _scrollBarOverlay = new WebViewHostScrollBarOverlay(_sharedHost.View);
+            _documentLayer.Children.Add(_scrollBarOverlay.Control);
+        }
+        // F-05 fix: signal consumer ownership now that the shared WebView
+        // has been re-attached to this view's slot.
+        _scrollBarOverlay.IsAttachedToHost = true;
+
+        WireSharedHostEvents();
     }
 
-    private void MarkCurrentDocumentRendered()
+    private void WireSharedHostEvents()
+    {
+        if (_sharedHost is null || _hostEventsWired)
+        {
+            return;
+        }
+
+        _sharedHost.View.DocumentRendered += OnHostDocumentRendered;
+        _sharedHost.View.ScrollStateChanged += OnHostScrollStateChanged;
+        _sharedHost.View.MinimapStateChanged += OnHostMinimapStateChanged;
+        _sharedHost.View.WidthDragRequested += OnHostWidthDragRequested;
+        _sharedHost.View.WheelRequested += OnHostWheelRequested;
+        _sharedHost.View.ViewerInteractionRequested += OnHostViewerInteractionRequested;
+        _sharedHost.RendererFailed += OnHostRendererFailed;
+        _hostEventsWired = true;
+    }
+
+    private void UnwireSharedHostEvents()
+    {
+        if (_sharedHost is null || !_hostEventsWired)
+        {
+            return;
+        }
+
+        _sharedHost.View.DocumentRendered -= OnHostDocumentRendered;
+        _sharedHost.View.ScrollStateChanged -= OnHostScrollStateChanged;
+        _sharedHost.View.MinimapStateChanged -= OnHostMinimapStateChanged;
+        _sharedHost.View.WidthDragRequested -= OnHostWidthDragRequested;
+        _sharedHost.View.WheelRequested -= OnHostWheelRequested;
+        _sharedHost.View.ViewerInteractionRequested -= OnHostViewerInteractionRequested;
+        _sharedHost.RendererFailed -= OnHostRendererFailed;
+        _hostEventsWired = false;
+    }
+
+    private void OnHostDocumentRendered(object? sender, EventArgs e)
     {
         _viewModel?.MarkReadableDocumentRendered();
-        _hasRenderedDocument = true;
-        QueueMinimapBuild();
-        Dispatcher.UIThread.Post(QueueMinimapBuild, DispatcherPriority.Loaded);
+        // Any prior failure view dismissed on successful render — the host
+        // committed the slot to IsVisible=true, and a stale failure overlay
+        // beneath the now-visible WebView would block input.
+        _failureView.IsVisible = false;
     }
+
+    private void OnHostRendererFailed(object? sender, ApplicateRendererFailureEvent e)
+    {
+        // Consumer-side filter: react only when this view is the active host
+        // consumer. The host fires RendererFailed once per failure but both
+        // consumers (viewer + edit-preview) are subscribed; without this
+        // filter the inactive surface would also show the failure overlay.
+        // The single source of truth for "active consumer" is _isAttachedToHost.
+        if (!_isAttachedToHost)
+        {
+            return;
+        }
+
+        _failureView.ShowFailure(
+            e,
+            retry: e.Kind == ApplicateRendererFailureKind.DocumentRenderFailed ? RetryCurrentRender : null);
+    }
+
+    private void RetryCurrentRender() => _sharedHost?.RetryRender();
 
     private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
+        // The WebView owns scroll geometry now; OnHostScrollStateChanged
+        // drives reading-progress. The outer Avalonia ScrollViewer is
+        // disabled, so this handler is effectively a no-op kept for the
+        // ScrollChanged subscription surface.
         if (_viewModel is null)
         {
             return;
@@ -479,19 +502,10 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
         var max = _scroll.ScrollBarMaximum.Y;
         var current = _scroll.Offset.Y;
-        if (!IsWebRendererActive())
+        if (max > 0)
         {
-            _lastReadingProgress = max > 0 ? SysMath.Clamp(current / max * 100.0, 0, 100) : 0;
-            _viewModel.ReadingProgress = _lastReadingProgress;
+            _lastReadingProgress = SysMath.Clamp(current / max * 100.0, 0, 100);
         }
-
-        if (_hasRenderedDocument && HasMinimapLayoutMetricsChanged())
-        {
-            QueueMinimapBuild();
-        }
-
-        UpdateMinimapScrollState();
-        UpdateMinimapVisibility();
     }
 
     private void OnPointerWheelChanged(object? sender, PointerWheelEventArgs e)
@@ -510,19 +524,14 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
     private bool ScrollByWheelDelta(double deltaY)
     {
-        var maxOffset = _scroll.ScrollBarMaximum.Y;
-        if (maxOffset <= 0)
+        if (_sharedHost is null)
         {
             return false;
         }
 
-        var nextOffset = SysMath.Clamp(_scroll.Offset.Y + deltaY, 0, maxOffset);
-        if (SysMath.Abs(nextOffset - _scroll.Offset.Y) <= double.Epsilon)
-        {
-            return false;
-        }
-
-        _scroll.Offset = new Vector(_scroll.Offset.X, nextOffset);
+        // Outer ScrollViewer is disabled — delegate the scroll-by request to
+        // the shared WebView so the renderer's own scroll position responds.
+        _sharedHost.View.ScrollDocumentBy(deltaY);
         return true;
     }
 
@@ -536,112 +545,29 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         {
             1 => deltaY * baseStep * 3.0,
             2 => deltaY * SysMath.Max(baseStep, viewportHeight * 0.85),
-            _ => deltaY
+            _ => deltaY,
         };
-    }
-
-    private void OnWidthHandlePointerEntered(object? sender, PointerEventArgs e)
-    {
-        _isWidthHandleHovering = true;
-        UpdateWidthHandleVisual();
-    }
-
-    private void OnWidthHandlePointerExited(object? sender, PointerEventArgs e)
-    {
-        _isWidthHandleHovering = false;
-        UpdateWidthHandleVisual();
-    }
-
-    private void OnWidthHandlePointerPressed(object? sender, PointerPressedEventArgs e)
-    {
-        if (_viewModel is null || !e.GetCurrentPoint(_widthHandle).Properties.IsLeftButtonPressed)
-        {
-            return;
-        }
-
-        _isDraggingWidth = true;
-        _dragStart = e.GetPosition(this);
-        _dragStartWidth = _manualContentWidth ?? _viewModel.ContentWidthSetting;
-        UpdateWidthHandleVisual();
-        e.Pointer.Capture(_widthHandle);
-        SetWebDocumentHitTestingForWidthDrag(false);
-        e.Handled = true;
-    }
-
-    private void OnWidthHandlePointerMoved(object? sender, PointerEventArgs e)
-    {
-        if (!_isDraggingWidth || _viewModel is null)
-        {
-            return;
-        }
-
-        var delta = e.GetPosition(this).X - _dragStart.X;
-        ApplyWidthDragDelta(delta);
-        e.Handled = true;
-    }
-
-    private void OnWidthHandlePointerReleased(object? sender, PointerReleasedEventArgs e)
-    {
-        if (!_isDraggingWidth)
-        {
-            return;
-        }
-
-        FinishWidthHandleDrag();
-        e.Pointer.Capture(null);
-        e.Handled = true;
-    }
-
-    private void OnWidthHandlePointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
-    {
-        FinishWidthHandleDrag();
     }
 
     private void FinishWidthHandleDrag()
     {
         _isDraggingWidth = false;
-        UpdateWidthHandleVisual();
         SetWebDocumentHitTestingForWidthDrag(true);
     }
 
     private void ApplyWidthDragDelta(double deltaX)
     {
-        // The column is center-aligned, so dragging the right handle by N pixels
-        // grows the readable document by 2N pixels and keeps the centerline stable.
         _manualContentWidth = ClampManualContentWidth(CalculateWidthDragContentWidth(_dragStartWidth, deltaX));
         ApplyColumnWidth();
     }
 
     private void SetWebDocumentHitTestingForWidthDrag(bool enabled)
     {
-        if (_webDocumentView is not null)
+        if (_sharedHost is not null)
         {
-            _webDocumentView.IsHitTestVisible = enabled;
+            _sharedHost.View.IsHitTestVisible = enabled;
         }
     }
-
-    private void OnViewerAppearanceChanged(object? sender, EventArgs e)
-    {
-        UpdateWebRenderMaskBrush();
-        if (_hasRenderedDocument)
-        {
-            QueueMinimapBuild();
-        }
-    }
-
-    private void OnViewerResourcesChanged(object? sender, ResourcesChangedEventArgs e)
-    {
-        UpdateWebRenderMaskBrush();
-        _lastWidthHandleVisualState = null;
-        UpdateWidthHandleVisual();
-        if (_hasRenderedDocument)
-        {
-            QueueMinimapBuild();
-        }
-    }
-
-    private void UpdateWebRenderMaskBrush()
-        => _webRenderMask.Background = Brush("MmBackgroundBrush", new SolidColorBrush(Colors.White));
 
     private void ApplyColumnWidth()
     {
@@ -650,66 +576,33 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
             return;
         }
 
+        // Skip column-width math against an unmeasured layout. The clamp
+        // floor of 320 + phantom padding produces an apparent width of 464,
+        // which is propagated to Chromium via _sharedHost.View.AvailableContentWidth.
+        // OnSizeChanged retriggers a full SyncFromViewModel once bounds are
+        // real, which calls ApplyColumnWidth again with the correct width.
+        if (!_hasValidBounds)
+        {
+            return;
+        }
+
         var desiredContentWidth = _manualContentWidth ?? _viewModel.ContentWidthSetting;
         var visibleContentWidth = ClampManualContentWidth(desiredContentWidth);
         var documentColumnWidth = visibleContentWidth + _documentHorizontalPadding;
-        _documentView.AvailableContentWidth = visibleContentWidth;
-        var layoutSurface = GetLayoutRendererSurface();
-        var layoutUsesWebRenderer = layoutSurface == ApplicateRendererSurfaceKind.WebView;
-        _scroll.VerticalScrollBarVisibility = layoutUsesWebRenderer
-            ? Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled
-            : Avalonia.Controls.Primitives.ScrollBarVisibility.Auto;
-        var nativeWidthHandleSlotWidth = layoutUsesWebRenderer ? 0 : WidthHandleHitArea;
-        _documentShell.ColumnDefinitions[1].Width = new GridLength(nativeWidthHandleSlotWidth);
-        _widthHandle.IsVisible = !layoutUsesWebRenderer;
-        _widthHandle.IsHitTestVisible = !layoutUsesWebRenderer;
-        if (_webDocumentView is not null)
+
+        if (_sharedHost is not null)
         {
-            // The WebView document uses CSS border-box padding, so it needs the
-            // full document column width to keep the readable text width aligned
-            // with the native renderer. The WebView surface itself may be wider:
-            // its DOM minimap is viewport-fixed and should anchor to the window
-            // edge, not to the readable text column.
-            _webDocumentView.AvailableContentWidth = IsWebRendererVisibleOrTargeted()
-                ? CalculateDocumentColumnWidthForSurface(ApplicateRendererSurfaceKind.WebView)
-                : documentColumnWidth;
-            _webDocumentView.MinHeight = SysMath.Max(480, Bounds.Height);
+            _sharedHost.View.AvailableContentWidth = CalculateDocumentColumnWidthForWebSurface();
+            _sharedHost.View.MinHeight = SysMath.Max(480, Bounds.Height);
         }
 
-        var documentLayerWidth = CalculateDocumentLayerWidth(documentColumnWidth, Bounds.Width, layoutUsesWebRenderer);
-        var shellWidth = documentLayerWidth + nativeWidthHandleSlotWidth;
+        var documentLayerWidth = CalculateDocumentLayerWidth(documentColumnWidth, Bounds.Width, useWebRenderer: true);
+        var shellWidth = documentLayerWidth;
 
         _documentLayer.Width = documentLayerWidth;
         _column.Width = shellWidth;
         _column.MaxWidth = shellWidth;
-        UpdateWidthHandleVisual();
     }
-
-    internal static ReadingPreferences CreateWebDocumentReadingPreferences(
-        ReadingPreferences documentPreferences,
-        ReadingPreferences shellPreferences)
-        => documentPreferences with { DocumentMinimapMode = shellPreferences.DocumentMinimapMode };
-
-    internal static bool ShouldUpdateNativeSurfaceForTesting(
-        ApplicateRendererSurfaceKind requestedSurface,
-        ApplicateRendererSurfaceKind activeSurface,
-        bool hasRenderedDocument,
-        bool documentChanged)
-        => ShouldUpdateNativeSurface(requestedSurface, activeSurface, hasRenderedDocument, documentChanged);
-
-    private static bool ShouldUpdateNativeSurface(
-        ApplicateRendererSurfaceKind requestedSurface,
-        ApplicateRendererSurfaceKind activeSurface,
-        bool hasRenderedDocument,
-        bool documentChanged)
-        // Only feed the native renderer when it is the renderer the user is
-        // about to see — either the request explicitly targets Native, or
-        // Native is currently active (fallback after a WebView failure).
-        // Otherwise we skip the Document/prefs assignments to spare the CPU
-        // work of building Avalonia-side layout (math, code blocks, images)
-        // for a surface that will never paint.
-        => requestedSurface == ApplicateRendererSurfaceKind.Native
-           || activeSurface == ApplicateRendererSurfaceKind.Native;
 
     internal static double CalculateDocumentLayerWidth(double documentColumnWidth, double hostWidth, bool useWebRenderer)
         => useWebRenderer
@@ -720,9 +613,16 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         => dragStartWidth + deltaX * 2.0;
 
     private double ClampManualContentWidth(double contentWidth)
-        => ClampManualContentWidth(contentWidth, GetLayoutRendererSurface());
+    {
+        var availableWidth = CalculateAvailableContentWidth(
+            Bounds.Width,
+            _webMinimapReservedWidth,
+            _documentHorizontalPadding,
+            useWebRenderer: true);
+        return SysMath.Clamp(contentWidth, MinManualContentWidth, availableWidth);
+    }
 
-    private double CalculateDocumentColumnWidthForSurface(ApplicateRendererSurfaceKind surface)
+    private double CalculateDocumentColumnWidthForWebSurface()
     {
         if (_viewModel is null)
         {
@@ -730,217 +630,35 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         }
 
         var desiredContentWidth = _manualContentWidth ?? _viewModel.ContentWidthSetting;
-        return ClampManualContentWidth(desiredContentWidth, surface) + _documentHorizontalPadding;
+        return ClampManualContentWidth(desiredContentWidth) + _documentHorizontalPadding;
     }
-
-    private double ClampManualContentWidth(double contentWidth, ApplicateRendererSurfaceKind layoutSurface)
-    {
-        var availableWidth = CalculateAvailableContentWidth(
-            Bounds.Width,
-            GetResizeReservedWidth(layoutSurface),
-            _documentHorizontalPadding,
-            layoutSurface == ApplicateRendererSurfaceKind.WebView);
-        return SysMath.Clamp(contentWidth, MinManualContentWidth, availableWidth);
-    }
-
-    private void ApplyMinimapReservation()
-    {
-        var reservedWidth = GetNativeMinimapReservedWidth();
-        _scrollContentFrame.Padding = new Thickness(0, 0, reservedWidth, 0);
-    }
-
-    private double GetResizeReservedWidth()
-        => GetResizeReservedWidth(GetLayoutRendererSurface());
-
-    private double GetResizeReservedWidth(ApplicateRendererSurfaceKind layoutSurface)
-        => layoutSurface == ApplicateRendererSurfaceKind.WebView
-            ? _webMinimapReservedWidth
-            : GetNativeMinimapReservedWidth();
 
     internal static double CalculateAvailableContentWidth(
         double boundsWidth,
         double resizeReservedWidth,
         double documentHorizontalPadding,
         bool useWebRenderer)
-        => SysMath.Max(
+    {
+        _ = useWebRenderer;
+        return SysMath.Max(
             MinManualContentWidth,
             boundsWidth
                 - resizeReservedWidth
                 - documentHorizontalPadding
-                - (useWebRenderer ? 0 : WidthHandleHitArea)
                 - ViewportHorizontalGutter);
-
-    private double GetNativeMinimapReservedWidth()
-    {
-        if (_minimap is null || !_minimapHost.IsVisible)
-        {
-            return 0;
-        }
-
-        var minimapWidth = _minimapHost.Bounds.Width > 0 ? _minimapHost.Bounds.Width : _minimapHost.Width;
-        if (double.IsNaN(minimapWidth) || double.IsInfinity(minimapWidth) || minimapWidth <= 0)
-        {
-            minimapWidth = 136;
-        }
-
-        return minimapWidth + _minimapHost.Margin.Left + _minimapHost.Margin.Right + MinimapColumnGap;
     }
 
-    private void UpdateWidthHandleVisual()
+    private void OnHostScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)
     {
-        var visibility = _viewModel?.ReadingPreferences.WidthResizerVisibility
-            ?? ReadingPreferences.Default.WidthResizerVisibility;
-        var state = CalculateWidthHandleVisualState(visibility, _isWidthHandleHovering, _isDraggingWidth);
-        if (_lastWidthHandleVisualState == state)
-        {
-            return;
-        }
-
-        _lastWidthHandleVisualState = state;
-
-        _widthHandleTrack.Width = state.Width;
-        _widthHandleTrack.Opacity = state.Opacity;
-        _widthHandleTrack.Background = state.UseAccentBrush
-            ? Brush("MmAccentBrush", Brushes.OrangeRed)
-            : Brush("MmTextFaintBrush", new SolidColorBrush(Color.FromArgb(70, 120, 120, 120)));
-    }
-
-    internal static ApplicateWidthHandleVisualState CalculateWidthHandleVisualState(
-        WidthResizerVisibility visibility,
-        bool isHovering,
-        bool isDragging)
-    {
-        if (isDragging)
-        {
-            return new ApplicateWidthHandleVisualState(WidthHandleDraggingTrackWidth, 0.9, UseAccentBrush: true);
-        }
-
-        if (isHovering)
-        {
-            return new ApplicateWidthHandleVisualState(WidthHandleHoverTrackWidth, 0.72, UseAccentBrush: true);
-        }
-
-        var idleOpacity = visibility == WidthResizerVisibility.Always ? 0.18 : 0;
-        return new ApplicateWidthHandleVisualState(WidthHandleIdleTrackWidth, idleOpacity, UseAccentBrush: false);
-    }
-
-    private IBrush Brush(string key, IBrush fallback)
-    {
-        if (this.TryFindResource(key, ActualThemeVariant, out var resource) && resource is IBrush brush)
-        {
-            return brush;
-        }
-
-        if (Avalonia.Application.Current?.TryGetResource(
-                key,
-                Avalonia.Application.Current.ActualThemeVariant,
-                out var appResource) == true && appResource is IBrush appBrush)
-        {
-            return appBrush;
-        }
-
-        return fallback;
-    }
-
-    private void QueueMinimapBuild()
-    {
-        _minimapBuildGeneration++;
-        if (_isMinimapBuildQueued)
-        {
-            return;
-        }
-
-        _isMinimapBuildQueued = true;
-        Dispatcher.UIThread.Post(
-            () =>
-            {
-                _isMinimapBuildQueued = false;
-                BuildMinimapIfCurrent(_minimapBuildGeneration);
-            },
-            DispatcherPriority.Background);
-    }
-
-    private void BuildMinimapIfCurrent(int generation)
-    {
-        if (generation != _minimapBuildGeneration || !_hasRenderedDocument)
-        {
-            return;
-        }
-
-        _lastMinimapExtent = _scroll.Extent;
-        _lastMinimapViewport = _scroll.Viewport;
-
-        if (!ShouldShowMinimap())
-        {
-            RemoveMinimap();
-            return;
-        }
-
-        var snapshot = _documentView.CreateMiniatureSnapshot();
-        if (!ApplicateDocumentMinimapBuildPolicy.AllowsDetailedMiniature(snapshot))
-        {
-            RemoveMinimap();
-            return;
-        }
-
-        var minimap = EnsureMinimap();
-        minimap.SetSource(_documentView, snapshot);
-        UpdateMinimapScrollState();
-        UpdateMinimapVisibility();
-    }
-
-    private ApplicateDocumentMinimapView EnsureMinimap()
-    {
-        if (_minimap is not null)
-        {
-            return _minimap;
-        }
-
-        var minimap = new ApplicateDocumentMinimapView();
-        minimap.ScrollRequested += OnMinimapScrollRequested;
-        _minimap = minimap;
-        _minimapHost.Content = minimap;
-        _minimapHost.IsHitTestVisible = true;
-        return minimap;
-    }
-
-    private void RemoveMinimap()
-    {
-        if (_minimap is not null)
-        {
-            _minimap.ScrollRequested -= OnMinimapScrollRequested;
-            _minimap.ClearSource();
-            _minimap = null;
-        }
-
-        _minimapHost.Content = null;
-        _minimapHost.IsHitTestVisible = false;
-        ApplyMinimapReservation();
-        ApplyColumnWidth();
-    }
-
-    private void OnMinimapScrollRequested(object? sender, ApplicateDocumentMinimapScrollRequestedEventArgs e)
-    {
-        var targetOffset = SysMath.Clamp(e.OffsetY, 0, _scroll.ScrollBarMaximum.Y);
-        _scroll.Offset = new Vector(_scroll.Offset.X, targetOffset);
-    }
-
-    private void OnWebScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)
-    {
-        if (_viewModel is not null && IsWebRendererActive())
+        if (_viewModel is not null)
         {
             _lastReadingProgress = e.ProgressPercent;
             _viewModel.ReadingProgress = _lastReadingProgress;
         }
     }
 
-    private void OnWebMinimapStateChanged(object? sender, ApplicateWebMinimapStateEventArgs e)
+    private void OnHostMinimapStateChanged(object? sender, ApplicateWebMinimapStateEventArgs e)
     {
-        if (!IsWebRendererVisibleOrTargeted())
-        {
-            return;
-        }
-
         var nextReservedWidth = e.Visible ? e.ReservedWidth : 0;
         if (SysMath.Abs(_webMinimapReservedWidth - nextReservedWidth) < 0.5)
         {
@@ -951,9 +669,9 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         ApplyColumnWidth();
     }
 
-    private void OnWebWidthDragRequested(object? sender, ApplicateWebWidthDragEventArgs e)
+    private void OnHostWidthDragRequested(object? sender, ApplicateWebWidthDragEventArgs e)
     {
-        if (_viewModel is null || !IsWebRendererActive())
+        if (_viewModel is null)
         {
             return;
         }
@@ -962,7 +680,6 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         {
             _isDraggingWidth = true;
             _dragStartWidth = _manualContentWidth ?? _viewModel.ContentWidthSetting;
-            UpdateWidthHandleVisual();
             return;
         }
 
@@ -978,13 +695,8 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         }
     }
 
-    private void OnWebWheelRequested(object? sender, ApplicateWebWheelEventArgs e)
+    private void OnHostWheelRequested(object? sender, ApplicateWebWheelEventArgs e)
     {
-        if (!IsWebRendererActive())
-        {
-            return;
-        }
-
         var deltaY = NormalizeWebWheelDelta(
             e.DeltaY,
             e.DeltaMode,
@@ -993,23 +705,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         ScrollByWheelDelta(deltaY);
     }
 
-    private void OnWebFallbackRequested(object? sender, EventArgs e)
-    {
-        _webRendererFailedForCurrentDocument = true;
-        if (_pendingRendererSurface == ApplicateRendererSurfaceKind.WebView)
-        {
-            CancelPendingRendererSurface();
-        }
-
-        if (_activeRendererSurface == ApplicateRendererSurfaceKind.WebView)
-        {
-            StageRendererSurface(ApplicateRendererSurfaceKind.Native);
-        }
-
-        SyncFromViewModel();
-    }
-
-    private void OnWebViewerInteractionRequested(object? sender, EventArgs e)
+    private void OnHostViewerInteractionRequested(object? sender, EventArgs e)
     {
         if (_viewModel?.HasOpenOverlay == true)
         {
@@ -1017,303 +713,21 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         }
     }
 
-    private ApplicateWebMarkdownDocumentView? EnsureWebDocumentView()
-    {
-        if (_webDocumentView is not null)
-        {
-            return _webDocumentView;
-        }
+    /// <summary>Test seam — exposes the shared-host slot.</summary>
+    internal Panel WebSlotForTesting => _webSlot;
 
-        if (_htmlRenderer is null)
-        {
-            return null;
-        }
-
-        ApplicateWebMarkdownDocumentView view;
-        try
-        {
-            view = new ApplicateWebMarkdownDocumentView(_htmlRenderer, _shellAssetFactory)
-            {
-                IsVisible = false,
-                MinHeight = 1,
-                UseLayoutRounding = true
-            };
-            ApplicateRendererSurfaceTransition.EnsureOpacityTransition(view);
-        }
-        catch
-        {
-            _webRendererFailedForCurrentDocument = true;
-            return null;
-        }
-
-        view.DocumentRendered += OnDocumentRendered;
-        view.DocumentRenderInvalidated += OnDocumentRenderInvalidated;
-        view.ScrollStateChanged += OnWebScrollStateChanged;
-        view.MinimapStateChanged += OnWebMinimapStateChanged;
-        view.WidthDragRequested += OnWebWidthDragRequested;
-        view.WheelRequested += OnWebWheelRequested;
-        view.ViewerInteractionRequested += OnWebViewerInteractionRequested;
-        view.FallbackRequested += OnWebFallbackRequested;
-        _webDocumentView = view;
-
-        // Reserve a 12px right strip for the Avalonia ScrollBar overlay so
-        // the WebView2 HWND doesn't paint into the scrollbar's Avalonia
-        // airspace via Win32 z-order. Symmetric with edit-preview overlay
-        // setup in ApplicateEditPreviewView._webSlot.Margin.
-        view.Margin = new Thickness(0, 0, 12, 0);
-        _documentLayer.Children.Add(view);
-
-        // Avalonia ScrollBar overlay — see WebViewHostScrollBarOverlay class
-        // doc and the consultant blueprint at .scratch/codex-prompts/option-
-        // a-avalonia-scrollbar-overlay-blueprint.md. Replaces WebKit
-        // ::-webkit-scrollbar so drag tracks mouse perfectly (Avalonia
-        // pointer capture, no IPC lag, no sideways release-zone).
-        _webDocumentScrollBarOverlay = new WebViewHostScrollBarOverlay(view);
-        _documentLayer.Children.Add(_webDocumentScrollBarOverlay.Control);
-
-        return view;
-    }
-
-    private void DisposeWebDocumentView()
-    {
-        if (_webDocumentView is null)
-        {
-            return;
-        }
-
-        _webDocumentView.DocumentRendered -= OnDocumentRendered;
-        _webDocumentView.DocumentRenderInvalidated -= OnDocumentRenderInvalidated;
-        _webDocumentView.ScrollStateChanged -= OnWebScrollStateChanged;
-        _webDocumentView.MinimapStateChanged -= OnWebMinimapStateChanged;
-        _webDocumentView.WidthDragRequested -= OnWebWidthDragRequested;
-        _webDocumentView.WheelRequested -= OnWebWheelRequested;
-        _webDocumentView.ViewerInteractionRequested -= OnWebViewerInteractionRequested;
-        _webDocumentView.FallbackRequested -= OnWebFallbackRequested;
-        if (_webDocumentScrollBarOverlay is not null)
-        {
-            _documentLayer.Children.Remove(_webDocumentScrollBarOverlay.Control);
-            _webDocumentScrollBarOverlay.Dispose();
-            _webDocumentScrollBarOverlay = null;
-        }
-        _documentLayer.Children.Remove(_webDocumentView);
-        _webDocumentView.Dispose();
-        _webDocumentView = null;
-    }
-
-    private void UpdateMinimapScrollState()
-    {
-        if (_minimap is null)
-        {
-            return;
-        }
-
-        _minimap.ScrollOffset = _scroll.Offset.Y;
-        _minimap.ScrollMaximum = _scroll.ScrollBarMaximum.Y;
-        _minimap.ViewportHeight = _scroll.Viewport.Height;
-    }
-
-    private void UpdateMinimapVisibility()
-    {
-        if (_minimap is null)
-        {
-            return;
-        }
-
-        var visible = ShouldShowMinimap();
-        _minimapHost.IsVisible = visible;
-        _minimapHost.IsHitTestVisible = visible;
-        ApplyMinimapReservation();
-        ApplyColumnWidth();
-    }
-
-    private bool HasMinimapLayoutMetricsChanged()
-        => ApplicateDocumentMinimapBuildPolicy.HasLayoutMetricsChanged(
-            _lastMinimapExtent,
-            _lastMinimapViewport,
-            _scroll.Extent,
-            _scroll.Viewport);
-
-    private bool ShouldShowMinimap()
-    {
-        var mode = _viewModel?.ReadingPreferences.DocumentMinimapMode ?? DocumentMinimapMode.Auto;
-        if (GetLayoutRendererSurface() == ApplicateRendererSurfaceKind.WebView)
-        {
-            return false;
-        }
-
-        return ApplicateDocumentMinimapBuildPolicy.ShouldShow(
-            mode,
-            Bounds.Width,
-            _scroll.Extent,
-            _scroll.Viewport,
-            _scroll.ScrollBarMaximum.Y);
-    }
-
-    private bool IsWebRendererActive()
-        => _activeRendererSurface == ApplicateRendererSurfaceKind.WebView
-           && _webDocumentView is not null;
-
-    private bool IsWebRendererVisibleOrTargeted()
-        => IsWebRendererActive()
-           || _pendingRendererSurface == ApplicateRendererSurfaceKind.WebView;
-
-    private bool IsRenderedSurfaceActive(object? sender)
-        => ReferenceEquals(sender, _webDocumentView)
-            ? IsWebRendererActive()
-            : ReferenceEquals(sender, _documentView)
-              && _activeRendererSurface == ApplicateRendererSurfaceKind.Native;
-
-    private ApplicateRendererSurfaceKind ResolveRequestedRendererSurface()
-        => ShouldRequestWebRenderer()
-            ? ApplicateRendererSurfaceKind.WebView
-            : ApplicateRendererSurfaceKind.Native;
-
-    private ApplicateRendererSurfaceKind GetLayoutRendererSurface()
-        => _pendingRendererSurface is { } pending && _pendingRendererReady
-            ? pending
-            : _activeRendererSurface;
-
-    private void StageRendererSurface(ApplicateRendererSurfaceKind requestedSurface)
-    {
-        if (_pendingRendererSurface == requestedSurface)
-        {
-            ApplyRendererSurfaceVisuals();
-            return;
-        }
-
-        if (_pendingRendererSurface is not null && requestedSurface == _activeRendererSurface)
-        {
-            CancelPendingRendererSurface();
-            return;
-        }
-
-        if (_activeRendererSurface == requestedSurface)
-        {
-            _pendingRendererSurface = null;
-            _pendingRendererReady = false;
-            ApplyRendererSurfaceVisuals();
-            return;
-        }
-
-        _pendingRendererSurface = requestedSurface;
-        _pendingRendererReady = requestedSurface == ApplicateRendererSurfaceKind.Native;
-        _rendererSwitchGeneration++;
-        ApplyRendererSurfaceVisuals();
-
-        if (_pendingRendererReady)
-        {
-            CommitPendingRendererSurface(requestedSurface);
-        }
-    }
-
-    private void CommitPendingRendererSurface(ApplicateRendererSurfaceKind surface)
-    {
-        if (_pendingRendererSurface != surface)
-        {
-            return;
-        }
-
-        _pendingRendererReady = true;
-        var generation = ++_rendererSwitchGeneration;
-        ApplyColumnWidth();
-        ApplyRendererSurfaceVisuals();
-        RestoreReadingProgressForSurface(surface);
-        _ = CompleteRendererSwitchAfterDelayAsync(surface, generation);
-    }
-
-    private async Task CompleteRendererSwitchAfterDelayAsync(
-        ApplicateRendererSurfaceKind surface,
-        long generation)
-    {
-        await Task.Delay(ApplicateRendererSurfaceTransition.FadeDuration).ConfigureAwait(false);
-        await Dispatcher.UIThread.InvokeAsync(() =>
-        {
-            if (generation != _rendererSwitchGeneration || _pendingRendererSurface != surface || !_pendingRendererReady)
-            {
-                return;
-            }
-
-            _activeRendererSurface = surface;
-            _pendingRendererSurface = null;
-            _pendingRendererReady = false;
-            ApplyColumnWidth();
-            ApplyRendererSurfaceVisuals();
-            RestoreReadingProgressForSurface(surface);
-        });
-    }
-
-    private void RestoreReadingProgressForSurface(ApplicateRendererSurfaceKind surface)
-    {
-        if (surface == ApplicateRendererSurfaceKind.WebView)
-        {
-            _webDocumentView?.ScrollToProgress(_lastReadingProgress);
-            return;
-        }
-
-        RestoreNativeReadingProgress();
-        Dispatcher.UIThread.Post(RestoreNativeReadingProgress, DispatcherPriority.Loaded);
-    }
-
-    private void RestoreNativeReadingProgress()
-    {
-        var maxOffset = _scroll.ScrollBarMaximum.Y;
-        if (maxOffset <= 0)
-        {
-            return;
-        }
-
-        var targetOffset = SysMath.Clamp(_lastReadingProgress / 100.0 * maxOffset, 0, maxOffset);
-        _scroll.Offset = new Vector(_scroll.Offset.X, targetOffset);
-    }
-
-    private void CancelPendingRendererSurface()
-    {
-        _pendingRendererSurface = null;
-        _pendingRendererReady = false;
-        _rendererSwitchGeneration++;
-        ApplyColumnWidth();
-        ApplyRendererSurfaceVisuals();
-    }
-
-    private void ApplyRendererSurfaceVisuals()
-    {
-        ApplicateRendererSurfaceTransition.ApplyVisualState(
-            _documentView,
-            ApplicateRendererSurfaceTransition.CalculateVisualState(
-                ApplicateRendererSurfaceKind.Native,
-                _activeRendererSurface,
-                _pendingRendererSurface,
-                _pendingRendererReady));
-
-        if (_webDocumentView is not null)
-        {
-            ApplicateRendererSurfaceTransition.ApplyVisualState(
-                _webDocumentView,
-                ApplicateRendererSurfaceTransition.CalculateVisualState(
-                    ApplicateRendererSurfaceKind.WebView,
-                    _activeRendererSurface,
-                    _pendingRendererSurface,
-                    _pendingRendererReady));
-        }
-    }
-
-    private bool ShouldRequestWebRenderer()
-        => _viewModel?.DocumentReadingPreferences.RendererBackend == MarkdownRendererBackend.WebView
-           && _htmlRenderer is not null
-           && !_webRendererFailedForCurrentDocument;
-
-    internal bool IsWidthHandleOutsideDocumentLayerForTesting
-        => _widthHandle.Parent is not null
-           && !ReferenceEquals(_widthHandle.Parent, _documentLayer);
+    /// <summary>Test seam — exposes the failure overlay visibility.</summary>
+    internal bool IsFailureViewVisibleForTesting => _failureView.IsVisible;
 
     public void Dispose()
     {
-        DisposeWebDocumentView();
+        UnwireSharedHostEvents();
+        if (_scrollBarOverlay is not null)
+        {
+            _documentLayer.Children.Remove(_scrollBarOverlay.Control);
+            _scrollBarOverlay.Dispose();
+            _scrollBarOverlay = null;
+        }
         GC.SuppressFinalize(this);
     }
 }
-
-internal readonly record struct ApplicateWidthHandleVisualState(
-    double Width,
-    double Opacity,
-    bool UseAccentBrush);

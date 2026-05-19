@@ -17,7 +17,7 @@ import { renderMath as renderMathInit } from "./mathRenderInit";
 import { schedulePhaseBRebuild } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
 import { createScrollCoalescer } from "./scrollCoalescer";
-import { calculateWidthHandleLeft, clampWidthHandleLeft } from "./widthHandleLayout";
+import { calculateWidthHandleLeft } from "./widthHandleLayout";
 
 type KatexApi = {
   render: (
@@ -140,21 +140,20 @@ let widthHandleRoot: HTMLElement | null = null;
 let widthHandleDragging = false;
 let widthHandleStartClientX = 0;
 let widthHandleStartMaxWidth = 0;
-let widthHandleStartLeft = 0;
 let pendingWidthDragDeltaX = 0;
 let widthDragFrameRequested = false;
 let widthDragApplyFrameRequested = false;
 let layoutReadyGeneration = 0;
 let layoutReadyTimer: number | undefined;
 let lastPostedMinimapState: PostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
-let minimapPolicy: MinimapPolicy = {
-  // Mirrors ApplicateDocumentMinimapBuildPolicy until the host sends minimap-policy.
-  // WebView uses CSS scrollHeight while Native uses Avalonia visual height; keep
-  // this shared value intentionally permissive until WebView-specific tuning exists.
-  minHostWidth: 1100,
-  minScrollableViewportRatio: 1.5,
-  maxDetailedDocumentHeight: 240000
-};
+// F-07 fix: the host (ApplicateWebMarkdownDocumentView.SendMinimapPolicy)
+// always pushes the canonical ApplicateDocumentMinimapBuildPolicy values
+// before any user document loads (SendMinimapPolicy is invoked alongside
+// SendReadingPreferences in the document-ready / shell-ready paths).
+// minimapPolicy stays null until that message lands; shouldShowMinimap
+// gates on this so the renderer cannot make a minimap decision against
+// stale literals that drifted from C#.
+let minimapPolicy: MinimapPolicy | null = null;
 
 function applyViewerChromeState(): void {
   document.documentElement.dataset.mmChrome = viewerChromeEnabled ? "on" : "off";
@@ -433,7 +432,7 @@ function updateWidthHandlePosition(): void {
   const documentRect = documentElement.getBoundingClientRect();
   // Position handle at the right edge of the VISIBLE TEXT COLUMN, not at the
   // .mm-document box.right. With minimap visible, body.mm-has-minimap adds
-  // ~152px to padding-right (reserves space for the fixed minimap aside) so
+  // ~168px to padding-right (reserves space for the fixed minimap aside) so
   // box.right is far past where the user sees the readable column end. The
   // handle should sit just past the text — otherwise it floats in dead space
   // mid-document, making the column resize feel disconnected.
@@ -469,12 +468,6 @@ function handleWidthHandlePointerDown(event: PointerEvent): void {
   widthHandleDragging = true;
   widthHandleStartClientX = event.clientX;
   pendingWidthDragDeltaX = 0;
-  // Snapshot handle left for synthetic positioning during drag (avoids
-  // per-frame getBoundingClientRect → forced sync layout on heavy docs).
-  const startLeftFromStyle = parseFloat(widthHandleRoot.style.left);
-  widthHandleStartLeft = Number.isFinite(startLeftFromStyle)
-    ? startLeftFromStyle
-    : widthHandleRoot.getBoundingClientRect().left;
   // Snapshot current maxWidth for local live-preview during drag. Read from
   // the inline style if set, else fall back to last applied prefs.
   const inlineMaxWidth = parseFloat(
@@ -516,40 +509,26 @@ function scheduleWidthDragApply(): void {
       return;
     }
     // Live local preview: compute new maxWidth from deltaX and apply directly.
-    // Document is centered, so handle moves by deltaX implies column width
-    // changes by 2*deltaX. Bypass host round-trip — renderer owns the visual
-    // during drag, host gets final value on release.
+    // Column is center-aligned, so a cursor delta of N px moves each edge by
+    // N px (column total grows by 2N). Bypass host round-trip — renderer owns
+    // the visual during drag, host gets final value on release.
     // Min mirrors host's clamp (sent via reading-preferences as minMaxWidth);
     // fallback constant matches host's MinManualContentWidth in case the
     // message hasn't arrived yet (drag started before first prefs message).
     const previewMaxWidth = Math.max(hostMinMaxWidth, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
     document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
-    // Synthetic handle position during drag: handle tracks the DOCUMENT'S
-    // RIGHT EDGE, not the cursor. Column is center-aligned, so a ΔW change
-    // in column width moves each edge by ΔW/2. Cursor delta is unconstrained
-    // but `previewMaxWidth` IS clamped (min 200) → driving handle from the
-    // clamped column-width delta means the handle stops moving when the
-    // column hits its minimum, even if the cursor keeps going. Avoids
-    // calling updateWidthHandlePosition() which would do getBoundingClientRect()
-    // and force sync layout right after the setProperty above. Pointer-up
-    // does one canonical updateWidthHandlePosition() for re-sync.
-    if (widthHandleRoot) {
-      const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
-      const minimapWidth = readRootPixelVariable("--mm-minimap-width", 0);
-      const minimapGap = readRootPixelVariable("--mm-minimap-gap", 0);
-      const minimapReserved = (minimapRoot && !minimapRoot.hidden)
-        ? Math.max(0, minimapWidth + minimapGap * 2)
-        : 0;
-      const columnWidthDelta = previewMaxWidth - widthHandleStartMaxWidth;
-      const idealHandleLeft = widthHandleStartLeft + columnWidthDelta / 2;
-      const clampedLeft = clampWidthHandleLeft({
-        candidateLeft: idealHandleLeft,
-        hitArea,
-        minimapReservedWidth: minimapReserved,
-        viewportWidth: window.innerWidth,
-      });
-      widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
-    }
+    // Canonical handle re-alignment. ONE source of truth — reads actual
+    // .mm-document.right + paddingRight after the CSS var change, places
+    // handle at textRight + hit-area. The previous synthetic delta-math
+    // (`startLeft + columnDelta/2`) was wrong whenever the rendered column
+    // width disagreed with `previewMaxWidth`: viewport clamps, content
+    // min-width forced by wide formulas/code blocks/tables, or scrollbar-
+    // gutter all break the assumption. Symptom was "handle drifts onto
+    // text during drag, snaps back on release" — the snap was the
+    // canonical re-sync at pointerUp telling the truth. Cost: one forced
+    // layout flush per rAF; the previous path also forced one (via the
+    // minimap reserved-width read), so net cost is unchanged.
+    updateWidthHandlePosition();
     // Live minimap update — track the source's new wrap during drag. Cost
     // is one updateMinimapViewport per rAF (sync layout on source +
     // minimap clone). With content-visibility on source blocks the source
@@ -716,7 +695,13 @@ function shouldShowMinimap(): boolean {
   const root = document.scrollingElement ?? document.documentElement;
   const documentHeight = root.scrollHeight;
   const viewportHeight = root.clientHeight;
+  // F-07 fix: minimap decisions require both host preferences AND the
+  // canonical minimap policy delivered via the minimap-policy IPC
+  // message. Either missing means the renderer is still in the pre-
+  // policy bootstrap window; deny the decision so a stale built-in
+  // literal cannot drive a minimap show/hide.
   if (!hasReceivedHostPreferences
+    || !minimapPolicy
     || !viewerChromeEnabled
     || !minimapSourceReady
     || minimapMode === "off"
@@ -743,12 +728,27 @@ function updateMinimapVisibility(forcePostState = false): void {
     return;
   }
 
+  const wasVisible = !minimapRoot.hidden;
+  const hadClass = document.body.classList.contains(MINIMAP_VISIBLE_CLASS);
   const visible = shouldShowMinimap();
   minimapRoot.hidden = !visible;
   document.body.classList.toggle(MINIMAP_VISIBLE_CLASS, visible);
   postMinimapState(visible, forcePostState);
-  // Body class toggle changes .mm-document max-width + padding → ResizeObserver
-  // fires → updateWidthHandlePosition runs. One source of truth.
+  // Explicit handle re-alignment on minimap visibility transition. The body
+  // class toggle changes .mm-document padding-right (240↔72) and max-width
+  // calc (X+168↔X). When content forces a column min-width that exceeds the
+  // user-set max-width (wide formulas/tables/code), the BORDER-box width
+  // stays constant across the toggle while only padding-right shifts —
+  // ResizeObserver default observes content-box but its callback delivery
+  // relative to paint is not guaranteed same-frame in WebView2, producing
+  // a visible one-frame gap where the handle sits at the OLD textRight+24
+  // while text expands by 168px to the new position. Directly calling
+  // updateWidthHandlePosition here closes that gap; idempotent with the
+  // ResizeObserver fallback, costs one forced layout when (and only when)
+  // visibility actually transitioned.
+  if (wasVisible !== visible || hadClass !== visible) {
+    updateWidthHandlePosition();
+  }
 }
 
 function getCurrentMinimapReservedWidth(): number {
@@ -1203,6 +1203,24 @@ function ensureChromeNodes(): void {
   // Width-handle X depends on the new .mm-document bounding rect after innerHTML
   // swap; ensureWidthHandle only ensures the node exists.
   updateWidthHandlePosition();
+  // SYNCHRONOUS per-document minimap source rebuild. loadDocument.ts:55 calls
+  // ensureChromeNodes right after main.innerHTML swap and BEFORE the async
+  // runInitialRenderPipeline. Verified 2026-05-19: F-04 multi-fire from C#
+  // sends two load-documents per tab click, each calls cancelCurrentMathController
+  // and resetModuleGlobals (which sets minimapSourceReady=false). Both async
+  // pipelines hang at `await mathController.initialVisibleReady` (controller
+  // cancelled mid-flight), never reach scheduleLayoutReady, so the async
+  // refresh (in scheduleLayoutReady callback) never runs. Without this sync
+  // call, minimapSourceReady stays false forever after tab switch → minimap
+  // hidden. Initial launch was unaffected because module-init's own
+  // controller.initialVisibleReady.then(refreshMinimapContent) wiring at
+  // boot fires once and seeds the state; only subsequent loads were broken.
+  // Position-after-host-preferences arrival: at initial launch the host has
+  // already sent reading-preferences by the time the FIRST load-document
+  // arrives (theme + minimap-policy + reading-preferences all fire before
+  // load-document per ApplicateWebMarkdownDocumentView shell-ready handler),
+  // so chrome/mode are populated when this call fires.
+  refreshMinimapContent("A");
 }
 
 function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
@@ -1217,10 +1235,8 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
       scheduleLayoutReady: () => {
         initialRenderPipelineCompleted = true;
         scheduleLayoutReady();
-        // Re-emit document-ready so the host's _hasReceivedDocumentReady /
-        // _hasLoadedDocument state machine restarts for the new document.
-        // DOMContentLoaded's document-ready only fires once per shell
-        // navigation; load-document is the per-document analog.
+        // Re-emit document-ready so the host's _hasLoadedDocument state
+        // machine restarts for the new document.
         postHostMessage({
           type: "document-ready",
           mathCount: document.querySelectorAll("[data-tex]").length
@@ -1498,17 +1514,19 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   postScroll();
 
-  // SINGLE canonical observer for handle + minimap repositioning. Observes:
+  // Background observer for handle + minimap repositioning. Observes:
   //   .mm-document — catches max-width / padding changes (host reading-prefs,
-  //     body.mm-has-minimap class toggle, theme/font changes)
+  //     theme/font changes that affect column metrics)
   //   document.body — catches body content-area changes (html scrollbar
   //     appearing/disappearing as content-visibility blocks settle their real
   //     heights → shifts .mm-document's centered position without changing
   //     its own size, invisible to the .mm-document observer)
-  // All other paths that updated handle position have been removed; this
-  // observer is the source of truth except during drag (synthetic, in
-  // scheduleWidthDragApply) and on drag-end (canonical re-sync in
-  // handleWidthHandlePointerUp where the observer was gated).
+  // Gated during drag because scheduleWidthDragApply already calls
+  // updateWidthHandlePosition canonically each rAF — we don't want to
+  // double-update during drag AND we want to skip the heavy minimap rebuild
+  // until drag settles. Minimap visibility toggles call updateWidthHandle-
+  // Position directly (see updateMinimapVisibility) so they don't depend on
+  // this observer landing in the same frame as the body class change.
   const documentElement = document.querySelector<HTMLElement>(".mm-document");
   if (documentElement) {
     const resizeObserver = new ResizeObserver(() => {
