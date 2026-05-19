@@ -1235,6 +1235,9 @@
     if (viewerChromeChanged) {
       viewerChromeEnabled = next.viewerChromeEnabled;
       applyViewerChromeState();
+      if (!viewerChromeEnabled) {
+        updateMinimapVisibility(true);
+      }
     }
     if (documentScrollChanged) {
       documentScrollEnabled = next.documentScrollEnabled;

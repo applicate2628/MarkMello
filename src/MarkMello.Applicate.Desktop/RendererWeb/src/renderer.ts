@@ -1045,6 +1045,22 @@ function flushPendingReadingPreferences(): void {
   if (viewerChromeChanged) {
     viewerChromeEnabled = next.viewerChromeEnabled;
     applyViewerChromeState();
+    // Anti-blink for edit/reading toggle. When chrome flips to false
+    // (entering edit-preview), the minimap must hide IMMEDIATELY in
+    // this synchronous Phase-A rather than waiting for the 80 ms
+    // scheduleHeavyLiveUpdate timer that runs queueMinimapViewportUpdate
+    // (which then calls updateMinimapVisibility on the next rAF). The
+    // delayed path leaves the minimap painted from the prior viewer
+    // state for ~80–100 ms after the toggle — the user-reported
+    // "minimap blink" on edit/reading toggle. updateMinimapVisibility
+    // is idempotent and the body-class toggle reflows .mm-document on
+    // the next frame, so calling it here is safe; if chrome is
+    // transitioning to true the heavy-update path still owns the show
+    // decision because shouldShowMinimap requires policy + layout
+    // signals that may not yet be present in Phase A.
+    if (!viewerChromeEnabled) {
+      updateMinimapVisibility(true);
+    }
   }
   if (documentScrollChanged) {
     documentScrollEnabled = next.documentScrollEnabled;

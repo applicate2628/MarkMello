@@ -161,14 +161,32 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
             previousParent.IsVisible = true;
         }
 
-        // Show HWND back after Avalonia has run its next layout pass —
-        // NativeControlHost propagates the new bounds to the HWND during
-        // Arrange, so a Background-priority Dispatcher continuation runs
-        // strictly after that pass completes. The HWND is then visible at
-        // the correct slot rectangle and no longer leaks over chrome.
-        Avalonia.Threading.Dispatcher.UIThread.Post(
-            () => View.SetNativeWebViewVisibility(true),
-            Avalonia.Threading.DispatcherPriority.Background);
+        // Show HWND back strictly AFTER Avalonia's next layout pass on the
+        // target slot has propagated the new bounds to the HWND through
+        // NativeControlHost. Previous attempt used Dispatcher.Post(Background)
+        // — but Background only orders against the dispatcher queue, not
+        // against NativeControlHost's Arrange-time SetWindowPos. On FIRST
+        // edit activation the slot's bounds may still be from the
+        // synthetic infinity-prime measure (ApplicateMainWindow.
+        // InstallSiblingMountedViews lines 561-567), and Background can
+        // fire while the HWND still sits at prime-measure coordinates that
+        // overlap the edit-preview toolbar — the user-reported "first-
+        // activation overlap" symptom that survived the Background-post
+        // fix. LayoutUpdated fires after Arrange, where NativeControlHost
+        // updates HWND geometry, so this one-shot guarantees the show
+        // happens against settled bounds.
+        EventHandler? showAfterLayout = null;
+        showAfterLayout = (_, _) =>
+        {
+            if (showAfterLayout is null)
+            {
+                return;
+            }
+            target.LayoutUpdated -= showAfterLayout;
+            showAfterLayout = null;
+            View.SetNativeWebViewVisibility(true);
+        };
+        target.LayoutUpdated += showAfterLayout;
     }
 
     public bool IsAttachedTo(Panel target) => ReferenceEquals(_currentParent, target);

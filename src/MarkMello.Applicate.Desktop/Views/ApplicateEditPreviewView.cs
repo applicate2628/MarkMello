@@ -1147,6 +1147,20 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         // the WebView. Otherwise the outer scroll would lift the toolbar
         // (Row 0) along with the content when it scrolls.
         _hostScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
+        // Defensive: Avalonia's `Disabled` clamps content extent to the
+        // viewport but does NOT always reset the existing scroll offset.
+        // If the ScrollViewer had drifted to a non-zero Y offset (during
+        // the brief Auto-visibility window before UpdateHostScrollMode
+        // applied, or via stale state across visibility transitions),
+        // the offset would visibly shift the toolbar above the viewport
+        // top — exactly the "PREVIEW clipped at top" symptom. Force the
+        // Y offset back to 0 so the toolbar always sits at the viewport
+        // top edge.
+        var currentOffset = _hostScrollViewer.Offset;
+        if (currentOffset.Y != 0)
+        {
+            _hostScrollViewer.Offset = new Avalonia.Vector(currentOffset.X, 0);
+        }
     }
 
     private void RestoreHostScrollMode()
