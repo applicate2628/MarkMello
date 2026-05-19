@@ -529,6 +529,14 @@ public sealed class ApplicateMainWindow : MainWindow
                     ?.Dispose();
                 parentBorder.HorizontalAlignment = HorizontalAlignment.Stretch;
                 parentBorder.MaxWidth = double.PositiveInfinity;
+                // The XAML Border still carried a DoubleTransition on
+                // MaxWidth (legacy column-width animation for the upstream
+                // MarkdownDocumentView path). After we set MaxWidth to
+                // PositiveInfinity, the transition is no longer meaningful
+                // and just costs an animation registration per layout pass.
+                // Null it out so no animation infrastructure stays attached
+                // to this Border in the WebView path.
+                parentBorder.Transitions = null;
                 parentBorder.Child = editPreview;
             }
         }

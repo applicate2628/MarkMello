@@ -830,6 +830,19 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             or nameof(EditorSessionViewModel.CurrentPath)
             or nameof(EditorSessionViewModel.FileName))
         {
+            // Tab-switch in edit-mode flows through
+            // MainWindowViewModel.ApplyLoadedDocument(preserveEditModeAfterLoad=true),
+            // which MUTATES the EditorSession instance in place rather than
+            // swapping the reference. Result: OnDataContextChanged does NOT
+            // fire, AttachSession is NOT called, and ApplyAvailableWidth is
+            // NOT invoked synchronously for the new source. Without this
+            // synchronous re-apply, _sharedHost.View.MinHeight and
+            // AvailableContentWidth stay at values computed for the previous
+            // document until 140 ms after the next _webSlot BoundsChanged
+            // event — and during that window the WebView2 HWND can be
+            // reflowed with stale geometry against the new document load,
+            // contributing to the "render on tab-switch is wrong" symptom.
+            ApplyAvailableWidth(deferWebContentWidth: true);
             QueueWebPreviewRender(immediate: false);
         }
     }
