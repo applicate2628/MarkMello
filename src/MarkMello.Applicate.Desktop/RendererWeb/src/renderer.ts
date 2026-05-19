@@ -660,8 +660,20 @@ function cloneDocumentForMinimap(): HTMLElement | null {
   // aria attributes have no a11y effect. On a 138-formula doc KaTeX produces
   // many aria-hidden spans; skipping per-node attribute iteration is a
   // measurable refresh-clone cost reduction.
-  clone.querySelectorAll<HTMLElement>("*").forEach((node) => {
-    if (node.hasAttribute("id")) node.removeAttribute("id");
+  //
+  // IDs are stripped only on HTML elements. SVG ids are load-bearing —
+  // mermaid emits `<style>#mm-mermaid-XYZ .node rect{fill:...}</style>`
+  // inside the SVG and `<path marker-end="url(#arrowhead-XYZ)"/>` arrow
+  // refs, both scoped by the SVG's root id. Stripping those leaves the
+  // SVG's selectors orphaned (boxes fall back to default black fill,
+  // arrowheads disappear) — visible as dark filled rectangles in the
+  // minimap clone while the source view paints correctly. Duplicate
+  // ids across source/clone are accepted: the clone is inert and
+  // aria-hidden, and SVG `url(#...)` lookups in Chromium resolve to the
+  // first DOM match deterministically.
+  clone.querySelectorAll<Element>("*").forEach((node) => {
+    const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
+    if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
     const tag = node.tagName;
     if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
       node.setAttribute("tabindex", "-1");

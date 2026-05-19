@@ -47,11 +47,10 @@
             <Grid RowDefinitions="Auto,Auto,Auto">
               <Border Grid.Row="0"
                       Classes="mm-setting-row"
-                      MinHeight="104"
+                      Height="104"
                       ClipToBounds="True">
-                <Grid RowDefinitions="Auto,10">
+                <Grid>
                   <Grid x:Name="UpdateStatusContent"
-                        Grid.Row="0"
                         ColumnDefinitions="*,Auto"
                         ColumnSpacing="12"
                         Opacity="1"
@@ -77,9 +76,8 @@
                                Classes="mm-setting-meta"
                                Text="{Binding UpdateStateBadge}" />
                   </Grid>
-                  <ProgressBar Grid.Row="1"
+                  <ProgressBar VerticalAlignment="Bottom"
                                Height="2"
-                               Margin="0,7,0,0"
                                Minimum="0"
                                Maximum="100"
                                IsIndeterminate="{Binding IsUpdateBusy}"

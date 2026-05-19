@@ -976,7 +976,8 @@
     clone.style.paddingBottom = sourceStyle.paddingBottom;
     clone.style.paddingLeft = "0";
     clone.querySelectorAll("*").forEach((node) => {
-      if (node.hasAttribute("id")) node.removeAttribute("id");
+      const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
+      if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
       const tag = node.tagName;
       if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
         node.setAttribute("tabindex", "-1");
