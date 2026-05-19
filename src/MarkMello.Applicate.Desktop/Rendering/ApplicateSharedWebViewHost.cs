@@ -81,6 +81,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
     public void SetWarmupParent(Panel parent)
     {
         ArgumentNullException.ThrowIfNull(parent);
+
         if (ReferenceEquals(_warmupParent, parent))
         {
             return;
@@ -115,6 +116,20 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         ApplicateTrace.ModeToggle(
             $"SharedHost.AttachTo target.Bounds={target.Bounds} previous={(previousParent is null ? "(null)" : previousParent.GetType().Name)}");
         var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        // Anti-airspace-leak (RESTORED 2026-05-19 — c8c48c2 wiring inadvertently
+        // removed by 354fa86 refactor "remove View.MinHeight writes from consumers";
+        // user reported visible mode-toggle jitter regression as result).
+        //
+        // Hide the WebView2 HWND BEFORE the reparent so the single-frame window
+        // between SetParent and Avalonia's next layout pass (when NativeControlHost
+        // re-snaps the HWND to the new slot's bounds) cannot leak the WebView's
+        // backing-store paint at PREVIOUS bounds over the new parent's chrome.
+        //
+        // The HWND stays hidden until Commit() shows it after UpdateLayout has
+        // settled View.Bounds onto the new parent.
+        View.SetNativeWebViewVisibility(false);
+
         using (View.BeginIntentionalReparent())
         {
             previousParent?.Children.Remove(View);
@@ -132,7 +147,17 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         // commit" behaviour; the analyst-reported cross-parent geometry
         // leak needs a different fix path (likely per-parent gating in the
         // consumer's effective-visibility transition, see EP-03 wiring).
+        //
+        // Re-attempted 2026-05-19 19:14 after 06:32 fix to ShouldCompleteRender
+        // (drop hasMinimapState); strict false here broke a DIFFERENT path:
+        // ApplicateEditPreviewView triggers RequestRender via OnEffectiveVisibilityChanged
+        // / QueueWebPreviewRender pipeline that requires the slot to be in
+        // an effectively-visible state — hiding the slot at AttachTo time
+        // means RequestRender for edit never fires, leaving the edit pane
+        // blank. Hiding the symptom is also kostyl per AGENTS no-kostyl rule.
+        // Architectural fix needed — see follow-up discussion on this branch.
         target.IsVisible = _hasEverCommitted;
+
         // State machine: always SWITCHING after AttachTo. The next
         // RequestRender → DocumentRendered → Commit cycle clears it back to
         // COMMITTED and refreshes failure-retry context.
@@ -147,6 +172,14 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         {
             previousParent.IsVisible = true;
         }
+
+        // HWND show is coupled to Commit() — see Commit() body. Background-
+        // priority Dispatcher.Post (c8c48c2 original) fired too late on
+        // loaded frames (~450 ms after hide, leaving the slot visibly blank
+        // for ~260 ms after content was already ready). Commit() is the
+        // canonical "content ready, layout settled, slot visible" moment;
+        // showing the HWND there guarantees no perceptible gap between
+        // empty-slot and committed-content.
     }
 
     public bool IsAttachedTo(Panel target) => ReferenceEquals(_currentParent, target);
@@ -200,6 +233,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         {
             _currentParent.IsVisible = false;
         }
+
         // State machine always transitions through SWITCHING so the next
         // DocumentRendered commits cleanly (clears failure-retry context,
         // bumps _hasEverCommitted). Visibility is decoupled from state above.
@@ -274,7 +308,29 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
             && !ReferenceEquals(_currentParent, _warmupParent))
         {
             _currentParent.IsVisible = true;
+
+            // Force synchronous layout pass so View.Bounds reflects the new
+            // parent's bounds BEFORE we re-show the HWND. Without this, the
+            // fastPathCommit path (same source detected, Commit fires within
+            // ~0 ms of AttachTo) shows the HWND while View.Bounds still
+            // carries the previous parent's geometry — NativeControlHost
+            // calls SetWindowPos with stale bounds, and the user briefly
+            // sees the previous-mode-wide content cropped into the new
+            // parent's (narrower) position. UpdateLayout is the
+            // synchronous-layout path Avalonia exposes for exactly this case.
+            _currentParent.UpdateLayout();
         }
+
+        // Immediate Avalonia show. Deferred-show (via _webView.Bounds settle
+        // subscribe) deadlocked because Avalonia skips Measure/Arrange for
+        // hidden controls, so _webView.Bounds never updates while hidden.
+        // Win32 SetWindowPos direct on the cached HWND positioned content
+        // in wrong client coords (parent-walk did not match NativeControlHost's
+        // own coord conversion). Both reverted; immediate Avalonia show is
+        // the proven working path. Residual cold-edit ~70 ms HWND-bounds-lag
+        // is tracked in work-items/queue/2026-05-19-transactional-mode-toggle.md.
+        View.SetNativeWebViewVisibility(true);
+
         _state = HostState.Committed;
         // First Commit unlocks the "HWND has valid DOM" invariant: subsequent
         // RequestRender / AttachTo cycles keep the slot visible so the user

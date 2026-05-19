@@ -276,6 +276,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         if (_mainWindowViewModel is not null)
         {
             _mainWindowViewModel.PropertyChanged += OnMainWindowViewModelPropertyChanged;
+
+            // SyncWebViewAirspaceVisibility tracks _hiddenForPrompt internally
+            // and only writes IsVisible on prompt-state transitions, so it is
+            // safe to call here even though OnAttachedToVisualTree fires
+            // asynchronously (during Measure / ContentPresenter template
+            // application, after any BeginIntentionalReparent using-block has
+            // already disposed). See the SyncWebViewAirspaceVisibility body
+            // for the full WHY.
             SyncWebViewAirspaceVisibility();
         }
     }
@@ -286,7 +294,20 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             _mainWindowViewModel.PropertyChanged -= OnMainWindowViewModelPropertyChanged;
             _mainWindowViewModel = null;
-            _webView.IsVisible = true;
+
+            // On intentional reparent (shared-host AttachTo), the host owns
+            // _webView.IsVisible — specifically it sets visibility to false
+            // BEFORE the reparent as anti-airspace-leak (see
+            // ApplicateSharedWebViewHost.AttachTo: SetNativeWebViewVisibility(false)).
+            // Restoring to true here unconditionally would undo that hide and
+            // expose the HWND at previous bounds during the layout-pass gap.
+            // The same `_intentionalReparentDepth == 0` guard governs
+            // CancelRender below — gating this restoration the same way
+            // keeps the two policies aligned.
+            if (_intentionalReparentDepth == 0)
+            {
+                _webView.IsVisible = true;
+            }
         }
 
         // Skip cancelling the in-flight render when the detach is part of an
@@ -312,9 +333,37 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
     }
 
+    // Tracks whether THIS method previously hid _webView for the dirty-prompt
+    // modal — enables coexistence with the shared-host anti-airspace-leak path
+    // (which also writes _webView.IsVisible=false before intentional reparents).
+    // Without this tracker, SyncWebViewAirspaceVisibility would unconditionally
+    // restore IsVisible=true on every OnAttachedToVisualTree firing — and
+    // OnAttachedToVisualTree fires asynchronously during the Measure pass,
+    // AFTER any BeginIntentionalReparent using-block has already disposed —
+    // so the host's pre-reparent hide would be silently undone, leaving the
+    // HWND visible at OLD bounds for the layout-pass gap on every reparent.
+    private bool _hiddenForPrompt;
+
     private void SyncWebViewAirspaceVisibility()
     {
-        _webView.IsVisible = _mainWindowViewModel?.IsDirtyPromptOpen != true;
+        var shouldHideForPrompt = _mainWindowViewModel?.IsDirtyPromptOpen == true;
+        if (shouldHideForPrompt && !_hiddenForPrompt)
+        {
+            // Prompt just opened (or first attach while open) — hide HWND
+            // so the Avalonia overlay isn't occluded by Win32 airspace.
+            _hiddenForPrompt = true;
+            _webView.IsVisible = false;
+        }
+        else if (!shouldHideForPrompt && _hiddenForPrompt)
+        {
+            // Prompt just closed — restore the visibility WE took away.
+            _hiddenForPrompt = false;
+            _webView.IsVisible = true;
+        }
+        // else: no transition we own. Critical: do NOT write _webView.IsVisible
+        // here when the prompt is closed and we never hid it — that would
+        // override the shared-host's anti-airspace-leak hide set just before
+        // an intentional reparent.
     }
 
     /// <summary>
@@ -343,12 +392,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ApplicateTrace.ModeToggle($"SetNativeWebViewVisibility({isVisible}) viewId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this):X8} wrapper.Bounds={_webView.Bounds}");
         _webView.IsVisible = isVisible;
     }
-
-    /// <summary>Inspect the inner NativeWebView visibility for diagnostics.</summary>
-    internal bool NativeWebViewIsVisible => _webView.IsVisible;
-
-    /// <summary>Inspect the inner NativeWebView bounds for diagnostics.</summary>
-    internal Rect NativeWebViewBounds => _webView.Bounds;
 
     private sealed class ReparentScope : IDisposable
     {
@@ -1018,7 +1061,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void CompleteLayoutReady()
     {
-        if (!ShouldCompleteRender(_hasLoadedDocument, _hasLayoutReady, _hasMinimapState) || !_awaitingLayoutReady)
+        if (!ShouldCompleteRender(_hasLoadedDocument, _hasLayoutReady, _hasMinimapState)
+            || !_awaitingLayoutReady)
         {
             return;
         }

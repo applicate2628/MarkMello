@@ -558,14 +558,13 @@ public sealed class ApplicateMainWindow : MainWindow
         // batches invalidations until next dispatcher tick), so the user
         // never sees edit-mode chrome flashing at startup.
         editSlot.Children.Add(editWorkspace);
-        // Force template + measure + arrange synchronously while editSlot is
-        // briefly IsVisible=true. This realizes the EditWorkspaceView's
-        // templated content tree (which UserControl + ContentPresenter
-        // otherwise defers until first visible measure pass), fires
-        // OnAttachedToVisualTree on EditPreview, and triggers the one-time
-        // SharedHost.AttachTo reparent — all while no render frame is
-        // produced (Avalonia batches invalidations until next dispatcher
-        // tick, so the brief IsVisible=true does not flash on screen).
+        // Synthetic mount: realize templated visual tree NOW. Fires
+        // OnAttachedToVisualTree on EditPreview, which triggers the one-time
+        // SharedHost.AttachTo reparent so the WebView lives under editSlot
+        // before the user ever toggles into edit mode. Bounds here are
+        // intrinsic-content (Window has not been measured yet); real
+        // window-derived bounds settle on first user toggle when parent
+        // grid arranges editSlot for the editor+preview split.
         editSlot.IsVisible = true;
         editSlot.ApplyTemplate();
         editWorkspace.ApplyTemplate();
