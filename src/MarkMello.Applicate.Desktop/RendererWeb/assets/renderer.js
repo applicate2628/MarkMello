@@ -1235,6 +1235,10 @@
     if (viewerChromeChanged) {
       viewerChromeEnabled = next.viewerChromeEnabled;
       applyViewerChromeState();
+      if (!viewerChromeEnabled) {
+        updateMinimapVisibility(true);
+        updateWidthHandlePosition();
+      }
     }
     if (documentScrollChanged) {
       documentScrollEnabled = next.documentScrollEnabled;

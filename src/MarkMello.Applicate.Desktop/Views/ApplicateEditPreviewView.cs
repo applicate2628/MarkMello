@@ -165,7 +165,12 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
                 {
                     QueueWebPreviewRender(immediate: true);
                 }
-                return;
+                // Fall through to ApplyAvailableWidth so the slot-based
+                // MinHeight overwrites any stale value set during the
+                // pre-bounds window. Previously this path early-returned,
+                // leaving MinHeight=editPreview.Bounds.Height (toolbar+
+                // slot), causing the View to overflow upward — exactly
+                // the first-edit-activation overlap symptom.
             }
 
             ApplyAvailableWidth(deferWebContentWidth: true);
@@ -1060,12 +1065,19 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
                 _sharedHost.View.AvailableContentWidth = widths.WebColumnWidth;
             }
 
-            var slotHeight = _webSlot.Bounds.Height;
-            var surfaceHeight = _surface.Bounds.Height;
-            var hostHeight = slotHeight > 0
-                ? slotHeight
-                : (surfaceHeight > 0 ? surfaceHeight : Bounds.Height);
-            _sharedHost.View.MinHeight = CalculateWebPreviewMinHeight(hostHeight);
+            // View.MinHeight intentionally NOT set here. The View has
+            // VerticalAlignment=Stretch (set in its ctor) and is parented
+            // to _webSlot, so layout naturally arranges it at the slot's
+            // allocated height. Previously this method set
+            // MinHeight=hostHeight (slotHeight / surfaceHeight /
+            // Bounds.Height fallback chain); the Bounds.Height fallback
+            // included the Row 0 toolbar height, leaking View overflow
+            // into the toolbar's airspace on first activation, and the
+            // chain itself competed with ViewerView's ApplyColumnWidth
+            // for ownership of the same shared-View property — verified
+            // by trace 2026-05-19 as the source of the "PREVIEW
+            // overlapped by WebView" symptom. Stretch is the single
+            // source of truth for height.
         }
     }
 

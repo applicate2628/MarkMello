@@ -590,11 +590,27 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         var visibleContentWidth = ClampManualContentWidth(desiredContentWidth);
         var documentColumnWidth = visibleContentWidth + _documentHorizontalPadding;
 
-        if (_sharedHost is not null)
+        // Single-source consumer write: only the active consumer writes
+        // to the shared ApplicateWebMarkdownDocumentView. Without this
+        // guard the inactive viewer (with stale Bounds from its last
+        // visible state) kept overwriting AvailableContentWidth on the
+        // shared View whenever MainWindowViewModel PropertyChanged
+        // events (Document, RenderedDocument, ReadingPreferences)
+        // cascaded through OnViewModelPropertyChanged →
+        // SyncFromViewModel → ApplyColumnWidth.
+        if (_sharedHost is not null && _isAttachedToHost && IsEffectivelyVisible)
         {
             _sharedHost.View.AvailableContentWidth = CalculateDocumentColumnWidthForWebSurface();
-            _sharedHost.View.MinHeight = SysMath.Max(480, Bounds.Height);
         }
+        // View.MinHeight intentionally NOT set here. The View has
+        // VerticalAlignment=Stretch (set in its ctor) and is parented
+        // to _webSlot, so layout naturally arranges it at the slot's
+        // allocated height. The previous Max(480, Bounds.Height)
+        // assignment was a hardcoded floor that, when the viewer was
+        // inactive but PropertyChanged fired through it, leaked viewer-
+        // slot-sized MinHeight onto the shared View while edit-preview
+        // owned it (edit-preview's slot is shorter by Row 0 toolbar),
+        // causing View overflow → HWND paint over toolbar.
 
         var documentLayerWidth = CalculateDocumentLayerWidth(documentColumnWidth, Bounds.Width, useWebRenderer: true);
         var shellWidth = documentLayerWidth;

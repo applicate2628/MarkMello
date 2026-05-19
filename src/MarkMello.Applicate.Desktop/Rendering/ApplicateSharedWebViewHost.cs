@@ -115,19 +115,6 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         ApplicateTrace.ModeToggle(
             $"SharedHost.AttachTo target.Bounds={target.Bounds} previous={(previousParent is null ? "(null)" : previousParent.GetType().Name)}");
         var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        // Anti-airspace-leak. Hide the WebView2 HWND BEFORE the reparent so
-        // the single-frame window between SetParent and Avalonia's next
-        // layout pass (when NativeControlHost re-snaps the HWND to the new
-        // slot's bounds) cannot leak the WebView's backing-store paint over
-        // the new parent's chrome — the user-reported "WebView overlaps
-        // PREVIEW toolbar" symptom. The HWND stays hidden until we know the
-        // layout pass has run; deferred-show below uses a Background-
-        // priority Dispatcher post which runs strictly after any pending
-        // Measure/Arrange and after NativeControlHost propagates the new
-        // bounds. View.SetNativeWebViewVisibility was a dead anti-flash
-        // helper before this wiring (defined in ApplicateWebMarkdownDocument-
-        // View, zero callers); this is its intended caller.
-        View.SetNativeWebViewVisibility(false);
         using (View.BeginIntentionalReparent())
         {
             previousParent?.Children.Remove(View);
@@ -160,15 +147,6 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         {
             previousParent.IsVisible = true;
         }
-
-        // Show HWND back after Avalonia has run its next layout pass —
-        // NativeControlHost propagates the new bounds to the HWND during
-        // Arrange, so a Background-priority Dispatcher continuation runs
-        // strictly after that pass completes. The HWND is then visible at
-        // the correct slot rectangle and no longer leaks over chrome.
-        Avalonia.Threading.Dispatcher.UIThread.Post(
-            () => View.SetNativeWebViewVisibility(true),
-            Avalonia.Threading.DispatcherPriority.Background);
     }
 
     public bool IsAttachedTo(Panel target) => ReferenceEquals(_currentParent, target);
