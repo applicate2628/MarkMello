@@ -1288,11 +1288,34 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     }
 
     private string GetThemeName()
-        => ActualThemeVariant == ThemeVariant.Dark
+    {
+        // Empirically verified 2026-05-19 via DIAG-THEME trace:
+        // `ActualThemeVariant` becomes NULL whenever the View is briefly
+        // orphaned from the visual tree — specifically during the
+        // BeginIntentionalReparent block in ApplicateSharedWebViewHost.
+        // AttachTo where Children.Remove + Children.Add transit the View
+        // out of and back into a parented state. Each such transient
+        // null fires ActualThemeVariantChanged → OnThemeChanged →
+        // SendTheme. Without this fallback, the null-variant arm hits
+        // the "light" branch below, which is then written by the
+        // renderer as `documentElement.dataset.theme = "light"`. The
+        // renderer's `renderer.css` intentionally maps `:root` defaults
+        // to the cream Light palette (`--mm-document-background:
+        // #fcfaf6`) — there is no `[data-theme="light"]` override,
+        // because "light" IS root. Result: a classic-white user sees a
+        // cream flash on every edit/reading toggle. Fix: when this
+        // View's inherited ActualThemeVariant is unresolved (null
+        // during reparent transit), fall back to the application-level
+        // ActualThemeVariant, which the trace confirmed remains stable
+        // at `ClassicWhite` throughout the reparent window.
+        var variant = ActualThemeVariant
+            ?? Avalonia.Application.Current?.ActualThemeVariant;
+        return variant == ThemeVariant.Dark
             ? "dark"
-            : Equals(ActualThemeVariant?.Key, AvaloniaThemeService.ClassicWhiteThemeVariantKey)
+            : Equals(variant?.Key, AvaloniaThemeService.ClassicWhiteThemeVariantKey)
                 ? "classic-white"
                 : "light";
+    }
 
     internal static string ApplyInitialThemeForTesting(string html, string theme)
         => ApplyInitialTheme(html, theme);
