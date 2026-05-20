@@ -76,7 +76,15 @@ type RendererMessage =
   | { type: "perf-mark"; name: string; detail?: string }
   | { type: "headings-updated"; headings: ReadonlyArray<{ id: string; level: number; text: string }> }
   | { type: "active-heading-changed"; id: string }
-  | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number };
+  | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number }
+  // Mode-toggle reveal gate (2026-05-20). Posted in response to a host-sent
+  // `mode-settle-probe` message after two requestAnimationFrame ticks elapse —
+  // i.e. once CSS reflow on the new slot bounds has propagated and a paint has
+  // committed. The host uses this to defer `SetNativeWebViewVisibility(true)`
+  // on the Commit fast-path (Ctrl+E mode toggle within the same document), so
+  // the user never sees the HWND repainted at the old document width before
+  // the renderer catches up.
+  | { type: "mode-toggle-settled" };
 
 type MinimapMode = "auto" | "on" | "off";
 
@@ -112,7 +120,16 @@ type HostMessage =
   | { type: "clear-document" }
   | { type: "scroll-to-heading"; id: string }
   | { type: "open-find-bar" }
-  | { type: "host-scrollbar"; active: boolean };
+  | { type: "host-scrollbar"; active: boolean }
+  // Host-sent probe (2026-05-20). The host sends this after Avalonia
+  // UpdateLayout has settled the slot bounds but BEFORE making the WebView2
+  // HWND visible on the Commit fast-path (Ctrl+E same-document reparent).
+  // The renderer schedules two requestAnimationFrame ticks so CSS reflow has
+  // propagated and one paint has happened, refreshes chrome positions
+  // (width handle + minimap viewport) against the new bounds, then posts
+  // `mode-toggle-settled` back. The host then reveals the HWND, so the user
+  // never observes the renderer mid-reflow.
+  | { type: "mode-settle-probe" };
 
 const hostWindow = window as RendererWindow;
 const MINIMAP_CLASS = "mm-minimap";
@@ -137,6 +154,23 @@ let hasReceivedHostPreferences = false;
 let hasInitialLayoutSettled = false;
 let minimapViewportFrameRequested = false;
 let minimapRefreshTimer: number | undefined;
+// Resize coalescing (2026-05-20). The window.addEventListener("resize", ...)
+// handler at module-init bottom and the ResizeObserver watching `.mm-document`
+// + `document.body` both want to refresh chrome positions (width handle) and
+// queue a viewport-update. Without coalescing, a fast window-edge drag fires
+// both paths several times per frame; updateWidthHandlePosition() reads
+// getBoundingClientRect() (forces synchronous layout) on every call and the
+// chrome (width handle + minimap thumb) snaps visibly on each pass. One rAF
+// token serializes all reactive resize-time work to at most one pass per frame.
+// Note: this only coalesces JS-side reactive work; CSS reflow itself remains
+// browser-native (best-of-class). KaTeX is NOT re-triggered here — its layout
+// is already settled and the responsive sizing flows through CSS max-width.
+let resizeReactFrameRequested = false;
+// Mode-toggle reveal gate (2026-05-20). Set to a one-shot resolver when the
+// host's `mode-settle-probe` message lands; cleared after the renderer posts
+// `mode-toggle-settled` back. Two rAFs separate the probe from the response so
+// CSS reflow on any new slot bounds has propagated and one paint has happened.
+let modeToggleProbeFrameRequested = false;
 let minimapRoot: HTMLElement | null = null;
 let minimapContent: HTMLElement | null = null;
 let minimapViewport: HTMLElement | null = null;
@@ -1149,6 +1183,33 @@ function queueMinimapRefreshAfterLayoutSettles(): void {
   }, MINIMAP_REFRESH_DEBOUNCE_MS);
 }
 
+// Coalesces resize-time reactive work to at most one synchronous-layout pass
+// per frame. Both `window.addEventListener("resize", ...)` and the
+// ResizeObserver watching .mm-document + body route through this. Without
+// coalescing, a fast window-edge drag fires getBoundingClientRect() reads on
+// every event, causing the width-handle to snap visibly each tick. The actual
+// minimap viewport update is itself rAF-coalesced via queueMinimapViewportUpdate
+// (single token); coalescing the synchronous-layout reads here is the missing
+// piece for stable chrome positions during drag.
+function scheduleResizeReactions(): void {
+  if (resizeReactFrameRequested) {
+    return;
+  }
+
+  resizeReactFrameRequested = true;
+  window.requestAnimationFrame(() => {
+    resizeReactFrameRequested = false;
+    if (widthHandleDragging) {
+      // The drag pipeline (scheduleWidthDragApply) already calls
+      // updateWidthHandlePosition + queueMinimapViewportUpdate canonically
+      // each rAF. Resize ticks during drag must not double-process.
+      return;
+    }
+    updateWidthHandlePosition();
+    queueMinimapViewportUpdate();
+  });
+}
+
 type AppliedReadingPreferences = {
   fontFamily: FontFamilyMode;
   fontSize: number;
@@ -1430,6 +1491,36 @@ function handleHostMessage(raw: unknown): void {
 
   if (message.type === "clear-document") {
     clearDocumentState(buildLoadDocumentDeps());
+    return;
+  }
+
+  if (message.type === "mode-settle-probe") {
+    // Mode-toggle reveal gate (2026-05-20). The host sends this after Avalonia
+    // UpdateLayout has settled the slot bounds but BEFORE the WebView2 HWND
+    // is made visible on the Commit fast-path (Ctrl+E same-document reparent).
+    // Schedule two rAFs so CSS reflow on the new bounds has propagated and one
+    // paint has happened, refresh chrome positions, then post the ack so the
+    // host can flip the HWND visible without the user seeing the renderer
+    // mid-reflow. The host pairs this with a short timeout fallback, so a
+    // dropped or delayed ack does not hang the toggle.
+    if (modeToggleProbeFrameRequested) {
+      return;
+    }
+
+    modeToggleProbeFrameRequested = true;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        modeToggleProbeFrameRequested = false;
+        // Refresh chrome positions against the new bounds while we hold the
+        // synchronous-layout cost anyway. Idempotent with the canonical
+        // resize/observer paths; firing here makes the chrome correct in the
+        // very first paint that follows the HWND show.
+        updateWidthHandlePosition();
+        updateMinimapVisibility();
+        updateMinimapViewport();
+        postHostMessage({ type: "mode-toggle-settled" });
+      });
+    });
     return;
   }
 }
@@ -1885,8 +1976,13 @@ document.addEventListener("DOMContentLoaded", () => {
       if (widthHandleDragging) {
         return;
       }
+      // 100ms-debounced rebuild path stays as-is — it's already coarse.
       queueMinimapRefreshAfterLayoutSettles();
-      updateWidthHandlePosition();
+      // Synchronous-layout reads (updateWidthHandlePosition reads
+      // getBoundingClientRect) plus the viewport refresh are coalesced into
+      // a single rAF via scheduleResizeReactions, so a fast window-edge drag
+      // does not snap the chrome on every observer tick.
+      scheduleResizeReactions();
       window.requestAnimationFrame(postScroll);
     });
     resizeObserver.observe(documentElement);
@@ -1909,9 +2005,12 @@ document.addEventListener("scroll", () => {
 }, { passive: true });
 
 window.addEventListener("message", (event) => handleHostMessage(event.data));
+// Resize-time reactive work (chrome reposition + minimap viewport refresh)
+// is coalesced to at most one rAF per frame via scheduleResizeReactions; see
+// its declaration for the rationale. CSS reflow on the document itself stays
+// browser-native and is not affected by this debounce.
 window.addEventListener("resize", () => {
-  updateWidthHandlePosition();
-  queueMinimapViewportUpdate();
+  scheduleResizeReactions();
 });
 
 (window as unknown as { __mmPerfReport: typeof getReport; __mmFpsSampler: ReturnType<typeof getFpsSampler> }).__mmPerfReport = getReport;

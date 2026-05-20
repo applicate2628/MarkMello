@@ -40,6 +40,33 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
     // "do we already have something safe to show": this flag.
     private bool _hasEverCommitted;
 
+    // Mode-toggle reveal gate (2026-05-20). Set to true at AttachTo when the
+    // target panel actually differs from the previous parent — i.e. the WebView
+    // is being relocated to a slot whose bounds may differ. Cleared at Commit
+    // after the reveal sequence settles. The gate only takes effect when both
+    // this flag and _hasEverCommitted are true; on the cold path the legacy
+    // immediate-show behaviour stays (no previous-content backing store to
+    // protect, no reflow to wait for). Re-entrancy: a new AttachTo or
+    // RequestRender lands while a probe is in flight invalidates the wait via
+    // the activeGeneration token — see CompleteReveal.
+    private bool _reparentedThisCycle;
+
+    // One-shot subscription/timer pair backing the reveal gate. Both are
+    // armed in Commit() when _reparentedThisCycle && _hasEverCommitted, and
+    // both are released on either ack (ModeToggleSettled) OR fallback timer
+    // OR stale-generation supersede — whichever fires first.
+    private EventHandler? _activeSettleHandler;
+    private DispatcherTimer? _settleFallbackTimer;
+
+    // Fallback floor for the reveal gate. PE-budget-aware: 150ms total round
+    // trip covers IPC send + 2 rAFs (~16ms each at 60fps) + paint + return IPC
+    // (~5-30ms typical). User-perceived ceiling per dispatch: prior baseline
+    // mode-toggle p95 must not regress by more than 50ms. A 150ms ceiling
+    // means worst-case toggle latency rises by ~150ms, but worst case fires
+    // only when the renderer is paused (long mermaid render, GC) — typical
+    // ack lands inside one full frame (~16-32ms).
+    private static readonly TimeSpan SettleFallbackTimeout = TimeSpan.FromMilliseconds(150);
+
     public ApplicateSharedWebViewHost(
         IApplicateHtmlMarkdownRenderer renderer,
         IApplicateShellAssetBundleFactory shellAssetFactory)
@@ -142,6 +169,20 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
             target.Children.Add(View);
             _currentParent = target;
         }
+        // Mark the cycle as a real reparent. The reveal gate in Commit() only
+        // fires when this flag AND _hasEverCommitted are both true — i.e. the
+        // WebView has previously committed a document (so its HWND would paint
+        // stale-bounds content if revealed immediately) AND the slot has just
+        // been relocated (so the renderer must reflow). Pure same-panel
+        // AttachTo calls (handled by the ReferenceEquals early-return above)
+        // never reach this line, so they retain the existing fast-path behaviour.
+        _reparentedThisCycle = true;
+        // If a prior reveal probe is still in flight at this point, an
+        // AttachTo to a different panel supersedes it — cancel the wait so
+        // the older probe's ack cannot flip visibility against the new slot.
+        // (Re-arming for the new slot happens at the next Commit; until then
+        // SetNativeWebViewVisibility(false) above keeps the HWND hidden.)
+        ReleaseSettleSubscription();
         var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         ApplicateTrace.ModeToggle($"SharedHost.AttachTo done elapsed={elapsedMs:F2}ms");
 
@@ -419,15 +460,38 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
             _currentParent.UpdateLayout();
         }
 
-        // Immediate Avalonia show. Deferred-show (via _webView.Bounds settle
-        // subscribe) deadlocked because Avalonia skips Measure/Arrange for
-        // hidden controls, so _webView.Bounds never updates while hidden.
-        // Win32 SetWindowPos direct on the cached HWND positioned content
-        // in wrong client coords (parent-walk did not match NativeControlHost's
-        // own coord conversion). Both reverted; immediate Avalonia show is
-        // the proven working path. Residual cold-edit ~70 ms HWND-bounds-lag
-        // is tracked in work-items/queue/2026-05-19-transactional-mode-toggle.md.
-        View.SetNativeWebViewVisibility(true);
+        // Reveal-gate decision (2026-05-20). Only arm the gate when:
+        //   * a reparent happened this cycle (_reparentedThisCycle), AND
+        //   * the WebView has previously committed at least one document
+        //     (_hasEverCommitted), so there IS a previous backing-store paint
+        //     to protect the user from seeing at stale bounds.
+        // Cold-path Commit (first ever) keeps the legacy immediate-show
+        // behaviour: there is no previous content to defer, and the cold
+        // safe-show path (slot IsVisible=false in RequestRender until first
+        // Commit) already protects the white WebView2 backdrop.
+        //
+        // Pure same-source/same-panel Commit (no reparent) also keeps the
+        // legacy immediate-show: the HWND's backing store already paints the
+        // correct bounds, there is no reflow window to wait through.
+        var armRevealGate = _reparentedThisCycle && _hasEverCommitted;
+        _reparentedThisCycle = false;
+
+        if (armRevealGate)
+        {
+            BeginRevealAfterSettle();
+        }
+        else
+        {
+            // Immediate Avalonia show. Deferred-show (via _webView.Bounds settle
+            // subscribe) deadlocked because Avalonia skips Measure/Arrange for
+            // hidden controls, so _webView.Bounds never updates while hidden.
+            // Win32 SetWindowPos direct on the cached HWND positioned content
+            // in wrong client coords (parent-walk did not match NativeControlHost's
+            // own coord conversion). Both reverted; immediate Avalonia show is
+            // the proven working path. Residual cold-edit ~70 ms HWND-bounds-lag
+            // is tracked in work-items/queue/2026-05-19-transactional-mode-toggle.md.
+            View.SetNativeWebViewVisibility(true);
+        }
 
         _state = HostState.Committed;
         // First Commit unlocks the "HWND has valid DOM" invariant: subsequent
@@ -441,7 +505,86 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         _failureRequest = null;
 
         ApplicateTrace.ModeToggle(
-            $"SharedHost.Commit gen={_activeGeneration} slot={(_currentParent is null ? "(null)" : _currentParent.GetType().Name)}");
+            $"SharedHost.Commit gen={_activeGeneration} slot={(_currentParent is null ? "(null)" : _currentParent.GetType().Name)} revealGate={armRevealGate}");
+    }
+
+    /// <summary>
+    /// Reveal-gate sequence (2026-05-20). After Commit's UpdateLayout has
+    /// settled the slot bounds, send a probe to the renderer; the renderer
+    /// schedules two requestAnimationFrame ticks (so CSS reflow on the new
+    /// slot bounds has propagated and one paint has happened) and posts
+    /// <c>mode-toggle-settled</c> back, which routes through
+    /// <see cref="ApplicateWebMarkdownDocumentView.ModeToggleSettled"/> to
+    /// <see cref="OnRevealSettled"/>. A <see cref="DispatcherTimer"/> floor
+    /// ensures the toggle never hangs on a dropped ack.
+    ///
+    /// <para>Why both: the IPC ack is the authoritative signal that the
+    /// renderer has finished reflowing to the new bounds; the timer is a
+    /// safety net for paths where the renderer is unavailable (shell
+    /// pre-warm in flight) or temporarily stalled (heavy mermaid render,
+    /// long-running GC). Both targets call <see cref="CompleteReveal"/>
+    /// which unsubscribes, stops the timer, and flips HWND visibility.</para>
+    /// </summary>
+    private void BeginRevealAfterSettle()
+    {
+        // Defensive: release any pre-existing subscription/timer first so
+        // back-to-back commits do not stack listeners or arm overlapping
+        // timers. ReleaseSettleSubscription is idempotent.
+        ReleaseSettleSubscription();
+
+        _activeSettleHandler = OnRevealSettled;
+        View.ModeToggleSettled += _activeSettleHandler;
+
+        _settleFallbackTimer = new DispatcherTimer
+        {
+            Interval = SettleFallbackTimeout
+        };
+        _settleFallbackTimer.Tick += OnSettleFallbackTick;
+        _settleFallbackTimer.Start();
+
+        // Send the probe AFTER subscribing so the ack (which the renderer
+        // can post on the next paint frame) cannot land before the listener
+        // is attached. PostRendererMessage's underlying InvokeScript is
+        // already async; the renderer ack races the timer either way.
+        View.RequestModeToggleSettleProbe();
+        ApplicateTrace.ModeToggle($"SharedHost.RevealGate armed gen={_activeGeneration}");
+    }
+
+    private void OnRevealSettled(object? sender, EventArgs e)
+    {
+        ApplicateTrace.ModeToggle($"SharedHost.RevealGate ack gen={_activeGeneration}");
+        CompleteReveal();
+    }
+
+    private void OnSettleFallbackTick(object? sender, EventArgs e)
+    {
+        ApplicateTrace.ModeToggle($"SharedHost.RevealGate fallback gen={_activeGeneration}");
+        CompleteReveal();
+    }
+
+    private void CompleteReveal()
+    {
+        ReleaseSettleSubscription();
+        // Show the HWND now that the renderer has finished reflowing (or the
+        // fallback timer elapsed). The state machine has already advanced to
+        // Committed in Commit() above; this is just the deferred visual reveal.
+        View.SetNativeWebViewVisibility(true);
+    }
+
+    private void ReleaseSettleSubscription()
+    {
+        if (_activeSettleHandler is not null)
+        {
+            View.ModeToggleSettled -= _activeSettleHandler;
+            _activeSettleHandler = null;
+        }
+
+        if (_settleFallbackTimer is not null)
+        {
+            _settleFallbackTimer.Stop();
+            _settleFallbackTimer.Tick -= OnSettleFallbackTick;
+            _settleFallbackTimer = null;
+        }
     }
 
     private void OnViewFallbackRequested(object? sender, EventArgs e)

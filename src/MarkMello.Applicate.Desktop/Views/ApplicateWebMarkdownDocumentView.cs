@@ -206,6 +206,19 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     /// </summary>
     public event EventHandler<string>? ActiveHeadingChanged;
 
+    /// <summary>
+    /// Fires when the renderer acks a <c>mode-settle-probe</c> after two
+    /// requestAnimationFrame ticks elapse — i.e. once CSS reflow on the new
+    /// slot bounds has propagated and one paint has happened. The shared host
+    /// uses this to defer <see cref="SetNativeWebViewVisibility"/> on the
+    /// Commit fast-path (Ctrl+E same-document reparent), so the user never
+    /// sees the HWND repaint at the old document width before the renderer
+    /// catches up. One-shot semantics: the host subscribes for one toggle,
+    /// unsubscribes on either signal or timeout fallback, and re-arms on the
+    /// next toggle.
+    /// </summary>
+    public event EventHandler? ModeToggleSettled;
+
     internal bool HasLoadedDocumentForSource(MarkdownSource? source)
         => _hasLoadedDocument && !_awaitingLayoutReady && Equals(Source, source);
 
@@ -1094,6 +1107,17 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 return;
             }
 
+            if (type == "mode-toggle-settled")
+            {
+                // Renderer ack to the host-sent mode-settle-probe. Two rAFs
+                // have elapsed in the renderer, so CSS reflow on any new slot
+                // bounds has propagated and one paint has happened. The host
+                // listens once and uses this to flip HWND visibility on the
+                // Commit fast-path; see ApplicateSharedWebViewHost.Commit().
+                ModeToggleSettled?.Invoke(this, EventArgs.Empty);
+                return;
+            }
+
             if (type == "debug-log")
             {
                 if (document.RootElement.TryGetProperty("message", out var messageElement))
@@ -1777,6 +1801,21 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     public void SetHostScrollbarMode(bool active)
     {
         PostRendererMessage(new { type = "host-scrollbar", active });
+    }
+
+    /// <summary>
+    /// Send a one-shot <c>mode-settle-probe</c> to the renderer. The renderer
+    /// schedules two requestAnimationFrame ticks (so CSS reflow on any new
+    /// slot bounds has propagated and one paint has happened) and posts back
+    /// <c>mode-toggle-settled</c>, which surfaces here as the
+    /// <see cref="ModeToggleSettled"/> event. The shared host pairs this with
+    /// a short timeout fallback so a dropped ack never hangs the toggle.
+    /// Safe to call before any user document is loaded — the renderer still
+    /// honours the probe and returns after the two rAFs.
+    /// </summary>
+    internal void RequestModeToggleSettleProbe()
+    {
+        PostRendererMessage(new { type = "mode-settle-probe" });
     }
 
     public void ScrollToProgress(double progressPercent)

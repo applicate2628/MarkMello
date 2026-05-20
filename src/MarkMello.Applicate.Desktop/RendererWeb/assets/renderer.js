@@ -900,6 +900,8 @@
   var hasInitialLayoutSettled = false;
   var minimapViewportFrameRequested = false;
   var minimapRefreshTimer;
+  var resizeReactFrameRequested = false;
+  var modeToggleProbeFrameRequested = false;
   var minimapRoot = null;
   var minimapContent = null;
   var minimapViewport = null;
@@ -1626,6 +1628,20 @@
       queueMinimapViewportUpdate();
     }, MINIMAP_REFRESH_DEBOUNCE_MS);
   }
+  function scheduleResizeReactions() {
+    if (resizeReactFrameRequested) {
+      return;
+    }
+    resizeReactFrameRequested = true;
+    window.requestAnimationFrame(() => {
+      resizeReactFrameRequested = false;
+      if (widthHandleDragging) {
+        return;
+      }
+      updateWidthHandlePosition();
+      queueMinimapViewportUpdate();
+    });
+  }
   var lastAppliedReadingPreferences = null;
   var pendingReadingPreferences = null;
   var applyPrefsFrameRequested = false;
@@ -1806,6 +1822,22 @@
     }
     if (message.type === "clear-document") {
       clearDocumentState(buildLoadDocumentDeps());
+      return;
+    }
+    if (message.type === "mode-settle-probe") {
+      if (modeToggleProbeFrameRequested) {
+        return;
+      }
+      modeToggleProbeFrameRequested = true;
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          modeToggleProbeFrameRequested = false;
+          updateWidthHandlePosition();
+          updateMinimapVisibility();
+          updateMinimapViewport();
+          postHostMessage({ type: "mode-toggle-settled" });
+        });
+      });
       return;
     }
   }
@@ -2110,7 +2142,7 @@
           return;
         }
         queueMinimapRefreshAfterLayoutSettles();
-        updateWidthHandlePosition();
+        scheduleResizeReactions();
         window.requestAnimationFrame(postScroll);
       });
       resizeObserver.observe(documentElement);
@@ -2132,8 +2164,7 @@
   }, { passive: true });
   window.addEventListener("message", (event) => handleHostMessage(event.data));
   window.addEventListener("resize", () => {
-    updateWidthHandlePosition();
-    queueMinimapViewportUpdate();
+    scheduleResizeReactions();
   });
   window.__mmPerfReport = getReport;
   window.__mmFpsSampler = getFpsSampler();
