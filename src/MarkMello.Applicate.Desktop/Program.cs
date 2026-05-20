@@ -1,15 +1,18 @@
 using Avalonia;
 using MarkMello.Application;
 using MarkMello.Application.Abstractions;
+using MarkMello.Application.Diagnostics;
 using MarkMello.Applicate.Desktop.Activation;
 using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Editing;
 using MarkMello.Applicate.Desktop.Math;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Settings;
+using MarkMello.Domain;
 using MarkMello.Domain.Diagnostics;
 using MarkMello.Infrastructure;
 using MarkMello.Infrastructure.Diagnostics;
+using MarkMello.Infrastructure.Platform;
 using MarkMello.Infrastructure.Settings;
 using MarkMello.Presentation;
 using MarkMello.Presentation.Views;
@@ -49,6 +52,28 @@ internal static class Program
             singleInstance!.StartListening();
             ApplicateTrace.DiagMs("startup-pre-window", "single-instance-end");
 
+            // PE r2 §2 item D — Parallelize active-document I/O with shell load.
+            // Fire-and-forget thread-pool task that pre-reads the argv document
+            // (file read + canonicalization) and deposits it into
+            // EarlyDocumentCache. By the time MainWindowViewModel.InitializeAsync
+            // reaches LoadDocumentAsync (~273 ms cost serially per PE r2 §1 P2),
+            // the pre-read is typically complete and the VM consumes the cache
+            // entry instead of running File.ReadAllTextAsync itself.
+            //
+            // Constraints (PE r2 §4 + orchestrator brief):
+            //  - swallow + log any I/O / parse exception so the process never
+            //    crashes from the pre-read (cache stays empty -> VM falls
+            //    through to existing path with its own typed-error handling)
+            //  - canonicalize via Path.GetFullPath both at deposit (here) and
+            //    at consume (VM) — matches existing CommandLineActivation +
+            //    FileDocumentLoader canonicalization
+            //  - skip entirely when no argv path is available (no benefit,
+            //    no risk)
+            //  - no service provider available yet at this line (DI is built
+            //    inside ConfigureServices below), hence the static cache and
+            //    direct instantiation of CommandLineActivation
+            StartActiveDocumentPreRead(args);
+
             ApplicateTrace.DiagMs("startup-pre-window", "appbuilder-configure-start");
             var appBuilder = BuildAvaloniaApp();
             ApplicateTrace.DiagMs("startup-pre-window", "appbuilder-configure-end");
@@ -66,6 +91,68 @@ internal static class Program
         AppBuilder.Configure<App>()
             .UsePlatformDetect()
             .LogToTrace();
+
+    /// <summary>
+    /// Schedule a thread-pool pre-read of the argv document and deposit the
+    /// result into <see cref="EarlyDocumentCache"/>. Skips entirely when no
+    /// supported argv path is detected. All exceptions are caught and logged;
+    /// on failure the cache stays empty and the view model's existing
+    /// <c>FileDocumentLoader</c> path runs unchanged.
+    /// </summary>
+    private static void StartActiveDocumentPreRead(string[] args)
+    {
+        string? activationPath;
+        try
+        {
+            activationPath = new CommandLineActivation(args).GetActivationFilePath();
+        }
+        catch (Exception ex)
+        {
+            ApplicateTrace.Diag("startup-pre-window", $"perf-doc resolve-failed ex={ex.GetType().Name}");
+            return;
+        }
+
+        if (string.IsNullOrEmpty(activationPath))
+        {
+            ApplicateTrace.DiagMs("startup-pre-window", "perf-doc skipped reason=no-argv-doc");
+            return;
+        }
+
+        // Thread-pool fire-and-forget. The Task is intentionally not awaited
+        // anywhere; the rendezvous is the cache lookup in
+        // MainWindowViewModel.LoadDocumentAsync. The task must not propagate
+        // any exception (no unhandled async exception crash) — both the read
+        // and the deposit are wrapped in a single catch-all.
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                ApplicateTrace.DiagMs("startup-pre-window", "perf-doc read-start", $"path={activationPath}");
+
+                // Canonical absolute path — both deposit and consume key on
+                // Path.GetFullPath (constraint 4: avoid argv-relative vs
+                // absolute-path miss). CommandLineActivation already returns
+                // a full path but call again for safety / symmetry with
+                // FileDocumentLoader's own canonicalization.
+                var canonical = Path.GetFullPath(activationPath);
+                var content = File.ReadAllText(canonical);
+
+                var source = new MarkdownSource(
+                    Path: canonical,
+                    FileName: Path.GetFileName(canonical),
+                    Content: content);
+
+                EarlyDocumentCache.Deposit(canonical, source);
+                ApplicateTrace.DiagMs("startup-pre-window", "perf-doc read-done", $"bytes={content.Length}");
+            }
+            catch (Exception ex)
+            {
+                // Swallow and log — VM will fall through to FileDocumentLoader
+                // which has its own typed-error handling.
+                ApplicateTrace.Diag("startup-pre-window", $"perf-doc read-failed ex={ex.GetType().Name} msg={ex.Message}");
+            }
+        });
+    }
 
     private static ServiceProvider ConfigureServices(
         IStartupMetrics metrics,
@@ -93,6 +180,10 @@ internal static class Program
         collection.AddSingleton<IApplicateHtmlMarkdownRenderer, ApplicateHtmlMarkdownRenderer>();
         collection.AddSingleton<IApplicateShellAssetBundleFactory, ApplicateShellAssetBundleFactory>();
         collection.AddSingleton<IApplicateSharedWebViewHost, ApplicateSharedWebViewHost>();
+        // D-phase race fix: VM cache-hit branch awaits this readiness signal
+        // before publishing Document / State so the renderer pipeline can
+        // complete its initial-visible-ready pass without a mid-load reparent.
+        collection.AddSingleton<IRendererReadinessService, ApplicateRendererReadinessService>();
         collection.AddSingleton<IOpenDocumentsService, OpenDocumentsService>();
         collection.AddSingleton<IApplicateSessionStore>(new JsonApplicateSessionStore());
         collection.AddApplication();

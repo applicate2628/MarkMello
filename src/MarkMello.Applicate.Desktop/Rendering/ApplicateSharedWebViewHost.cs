@@ -337,6 +337,52 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         }
     }
 
+    public async Task WaitForShellReadyAsync(CancellationToken cancellationToken = default)
+    {
+        // Normalise off-UI callers exactly like PreWarmShellAsync. The View's
+        // EnsureShellReadyAsync writes _shellNavigated and (when it has to
+        // drive navigation) calls _webView.Navigate(...) which is Avalonia-
+        // controlled and must run on the UI thread. The fast-path
+        // (_shellNavigated == true) inside the View still awaits a TCS Task
+        // that completes asynchronously, so even already-ready calls are safe
+        // to drive through a UI-thread post.
+        if (!Dispatcher.UIThread.CheckAccess())
+        {
+            await Dispatcher.UIThread.InvokeAsync(
+                () => WaitForShellReadyAsync(cancellationToken),
+                DispatcherPriority.Background);
+            return;
+        }
+
+        try
+        {
+            // Delegates to the same internal entry point PreWarmShellAsync
+            // uses. EnsureShellReadyAsync is idempotent against _shellNavigated
+            // and against a pre-existing _shellReady TCS, so cache-hit callers
+            // do not race with PreWarmShellAsync and never issue a duplicate
+            // shell navigation. When the shell is already navigated and the
+            // document-ready IPC has fired, the underlying await returns
+            // immediately.
+            await View.EnsureShellReadyAsync(cancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            // Surface cancellation to the caller. The View leaves
+            // _shellNavigated == false on cancel so the lazy
+            // QueueRenderShellAsync path can retry.
+            throw;
+        }
+        catch
+        {
+            // Asset-bundle load failed, file write failed, or Navigate threw.
+            // The View has already restored _shellNavigated == false so the
+            // lazy path will retry at the next user RequestRender. Swallow
+            // here so the cache-hit consumer can fall through and let the
+            // standard render pipeline observe the failure through
+            // FallbackRequested -> RendererFailed -> failure-view surface.
+        }
+    }
+
     private void OnViewDocumentRendered(object? sender, EventArgs e)
     {
         // DocumentRendered is generation-agnostic from the View. The host

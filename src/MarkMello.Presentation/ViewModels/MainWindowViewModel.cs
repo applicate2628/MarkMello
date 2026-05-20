@@ -1,10 +1,13 @@
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MarkMello.Application.Abstractions;
+using MarkMello.Application.Diagnostics;
 using MarkMello.Application.Updates;
 using MarkMello.Application.UseCases;
 using MarkMello.Domain;
 using MarkMello.Domain.Diagnostics;
+using MarkMello.Presentation.Diagnostics;
 using MarkMello.Presentation.Localization;
 using System.Reflection;
 using System.ComponentModel;
@@ -28,6 +31,7 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly RenderMarkdownDocumentUseCase _renderMarkdown;
     private readonly IUpdateService _updateService;
     private readonly IImageSourceResolver? _imageSourceResolver;
+    private readonly IRendererReadinessService? _rendererReadiness;
 
     private bool _documentModelReadyMarked;
     private bool _readableDocumentMarked;
@@ -58,7 +62,8 @@ public partial class MainWindowViewModel : ObservableObject
         IStartupMetrics startupMetrics,
         RenderMarkdownDocumentUseCase renderMarkdown,
         IUpdateService updateService,
-        IImageSourceResolver? imageSourceResolver = null)
+        IImageSourceResolver? imageSourceResolver = null,
+        IRendererReadinessService? rendererReadiness = null)
     {
         _openDocument = openDocument;
         _saveDocument = saveDocument;
@@ -71,6 +76,7 @@ public partial class MainWindowViewModel : ObservableObject
         _renderMarkdown = renderMarkdown;
         _updateService = updateService;
         _imageSourceResolver = imageSourceResolver;
+        _rendererReadiness = rendererReadiness;
         _aboutVersion = GetProductVersion();
         _aboutForkAuthor = GetAssemblyMetadata("MarkMelloForkAuthor") ?? string.Empty;
         _aboutRepositoryUrl = GetRepositoryUrl();
@@ -1404,6 +1410,67 @@ public partial class MainWindowViewModel : ObservableObject
 
     private async Task LoadDocumentAsync(string path, bool preserveEditModeAfterLoad)
     {
+        // PE r2 §2 item D — consume the EarlyDocumentCache entry if Program.Main
+        // pre-read this path on a thread-pool task. The pre-read starts right
+        // after singleInstance.StartListening() and typically completes before
+        // the VM async path reaches here, overlapping the file read + parse cost
+        // with Avalonia init / window-open (saves ~150-250 ms per PE r2 §1 P2).
+        //
+        // On hit: skip _openDocument.ExecuteAsync entirely and dispatch the
+        // cached source through the existing ApplyOpenResult / ApplyLoadedDocument
+        // pipeline so all downstream invariants (state machine, edit-mode
+        // preservation, startup metrics, bridge reconcile gating) stay
+        // identical to the cold path.
+        //
+        // On miss: fall through to _openDocument.ExecuteAsync (FileDocumentLoader)
+        // which retains the full typed-error handling for I/O / parse failures.
+        if (!string.IsNullOrWhiteSpace(path)
+            && EarlyDocumentCache.TryConsume(path, out var cached)
+            && cached is not null)
+        {
+            StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit", $"path={cached.Path}");
+
+            // Renderer-readiness rendezvous (D-phase race fix). The cache-hit
+            // completes the file-I/O cost in ~0 ms, so without an explicit
+            // rendezvous Document/State get published BEFORE the WebView2
+            // environment finishes initialising and the shell HTML loads. The
+            // renderer pipeline then starts mid-load; a moment later
+            // session-restoration triggers an edit-mode reconcile that
+            // reparents the WebView into the edit slot, interrupting the
+            // in-flight initial-visible-ready pass and stalling
+            // first-paint by 10+ s (smoke d_fix_clean3, .scratch/startup-perf/).
+            //
+            // The previous Dispatcher.UIThread.InvokeAsync(..., Loaded) yield
+            // was a layout-rendezvous that incidentally paid for a slice of
+            // shell-init on slow paths but did NOT actually gate on shell
+            // readiness, so it left the race window open whenever the cache
+            // hit fired before EnvironmentRequested. Replacing with the
+            // explicit shell-ready signal owned by the WebView host closes
+            // both the WebView2-environment race and the in-flight-render
+            // reparent race in one rendezvous.
+            //
+            // _rendererReadiness is null in test contexts that construct the
+            // VM directly without the desktop DI graph; in that case fall back
+            // to a single dispatcher yield so behavior matches the previous
+            // path closely enough for VM unit tests.
+            StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-wait-renderer", $"path={cached.Path}");
+            if (_rendererReadiness is not null)
+            {
+                await _rendererReadiness.WaitReadyAsync().ConfigureAwait(true);
+            }
+            else
+            {
+                await Dispatcher.UIThread.InvokeAsync(
+                    () => { },
+                    DispatcherPriority.Background);
+            }
+            StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-renderer-ready", $"path={cached.Path}");
+
+            ApplyOpenResult(new OpenDocumentResult.Success(cached), preserveEditModeAfterLoad);
+            return;
+        }
+
+        StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-miss", $"path={path}");
         var result = await _openDocument.ExecuteAsync(path).ConfigureAwait(true);
         ApplyOpenResult(result, preserveEditModeAfterLoad);
     }
@@ -1444,12 +1511,26 @@ public partial class MainWindowViewModel : ObservableObject
 
     private void ApplyLoadedDocument(MarkdownSource source, bool preserveEditModeAfterLoad)
     {
+        // PE r2 E1: publish State BEFORE Document so the sibling-mount bridge
+        // sees a single Reconcile with viewerVis=true on the Document write,
+        // not a cascade of viewerVis=false→true straddling the State flip.
+        // The bridge's triple-gate (isViewer && !isEdit && document is not null)
+        // makes the intermediate State=Viewing reconcile safe — Document is
+        // still the previous value (null on cold load, or old doc on re-open)
+        // so viewerVisible evaluates false. The next assignment then flips
+        // Document and we land at viewerVis=true in one transition.
+        //
+        // Close-path symmetry (see CloseFileCore): Document is nulled BEFORE
+        // State drops to NoDocument so the same gate hides the viewer cleanly
+        // without a stale-document flash. Load-path symmetry mirrors that:
+        // Document is set AFTER State rises to Viewing so the viewer becomes
+        // visible only when the document is real.
+        State = ViewState.Viewing;
         Document = source;
         RenderedDocument = _renderMarkdown.Execute(
             source.Content,
             baseDirectory: TryGetDirectory(source.Path));
         _currentPath = source.Path;
-        State = ViewState.Viewing;
         ReadingProgress = 0;
         ClearLoadError();
 

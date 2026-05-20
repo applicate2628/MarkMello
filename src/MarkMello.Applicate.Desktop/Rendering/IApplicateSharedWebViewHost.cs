@@ -200,4 +200,27 @@ public interface IApplicateSharedWebViewHost
     /// not propagated past this Task.</para>
     /// </summary>
     Task PreWarmShellAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Await the shell-ready rendezvous, driving shell navigation if it has
+    /// not started yet. Returns a completed task when the shell has already
+    /// navigated and the <c>document-ready</c> IPC has fired; otherwise
+    /// converges on the same in-flight TCS the pre-warm and lazy shell-init
+    /// paths complete (idempotent — never issues a duplicate Navigate).
+    ///
+    /// <para>Used by the document-load fast-path (EarlyDocumentCache hit) to
+    /// defer publication of Document / State changes until the renderer
+    /// pipeline can actually consume them, closing the cache-hit race where
+    /// Document=true is published before the WebView2 environment finishes
+    /// initialising and a later session-restoration / edit-mode reconcile
+    /// reparents the renderer mid-pipeline.</para>
+    ///
+    /// <para>Safe to call from any thread; the underlying shell-ready TCS is
+    /// created with <c>TaskCreationOptions.RunContinuationsAsynchronously</c>,
+    /// so callers can <c>await</c> on the UI thread without re-entrancy
+    /// hazards. Returns immediately when shell mode is disabled or the view
+    /// has been disposed — neither case represents a real readiness signal,
+    /// but blocking would deadlock the consumer.</para>
+    /// </summary>
+    Task WaitForShellReadyAsync(CancellationToken cancellationToken = default);
 }
