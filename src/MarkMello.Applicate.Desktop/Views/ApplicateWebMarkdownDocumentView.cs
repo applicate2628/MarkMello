@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text;
@@ -189,6 +191,20 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     public event EventHandler? ViewerInteractionRequested;
 
     public event EventHandler? FallbackRequested;
+
+    /// <summary>
+    /// Fires when the renderer reports the current document's heading list
+    /// after a chrome rebuild (initial render + each load-document swap).
+    /// Drives the Avalonia-side Table of Contents panel.
+    /// </summary>
+    public event EventHandler<IReadOnlyList<MarkMello.Presentation.ViewModels.DocumentHeading>>? HeadingsChanged;
+
+    /// <summary>
+    /// Fires when the renderer's IntersectionObserver picks a new top-visible
+    /// heading as the user scrolls. The payload is the heading's stable slug
+    /// id; consumers highlight the matching TOC row.
+    /// </summary>
+    public event EventHandler<string>? ActiveHeadingChanged;
 
     internal bool HasLoadedDocumentForSource(MarkdownSource? source)
         => _hasLoadedDocument && !_awaitingLayoutReady && Equals(Source, source);
@@ -1058,6 +1074,26 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 return;
             }
 
+            if (type == "headings-updated")
+            {
+                HandleHeadingsUpdatedMessage(document.RootElement);
+                return;
+            }
+
+            if (type == "active-heading-changed")
+            {
+                if (document.RootElement.TryGetProperty("id", out var idElement)
+                    && idElement.ValueKind == JsonValueKind.String)
+                {
+                    var id = idElement.GetString();
+                    if (!string.IsNullOrEmpty(id))
+                    {
+                        ActiveHeadingChanged?.Invoke(this, id);
+                    }
+                }
+                return;
+            }
+
             if (type == "debug-log")
             {
                 if (document.RootElement.TryGetProperty("message", out var messageElement))
@@ -1214,6 +1250,79 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ScrollStateChanged?.Invoke(
             this,
             new ApplicateWebDocumentScrollEventArgs(progress, scrollTop, scrollHeight, clientHeight, topBlockIndex));
+    }
+
+    private void HandleHeadingsUpdatedMessage(JsonElement root)
+    {
+        if (!root.TryGetProperty("headings", out var headingsArray)
+            || headingsArray.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        var headings = new List<MarkMello.Presentation.ViewModels.DocumentHeading>(headingsArray.GetArrayLength());
+        foreach (var entry in headingsArray.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+            if (!entry.TryGetProperty("id", out var idProp)
+                || idProp.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+            var id = idProp.GetString();
+            if (string.IsNullOrEmpty(id))
+            {
+                continue;
+            }
+            int level = 1;
+            if (entry.TryGetProperty("level", out var levelProp)
+                && levelProp.ValueKind == JsonValueKind.Number
+                && levelProp.TryGetInt32(out var parsedLevel))
+            {
+                level = SysMath.Clamp(parsedLevel, 1, 6);
+            }
+            var text = entry.TryGetProperty("text", out var textProp)
+                       && textProp.ValueKind == JsonValueKind.String
+                ? textProp.GetString() ?? string.Empty
+                : string.Empty;
+            // Indent is pre-computed here so the host-side TOC row can bind
+            // to a primitive double without a value converter — keeps the
+            // XAML/code-built TOC layout simple.
+            var indent = (level - 1) * 12.0;
+            headings.Add(new MarkMello.Presentation.ViewModels.DocumentHeading(id, level, text, indent));
+        }
+
+        HeadingsChanged?.Invoke(this, headings);
+    }
+
+    /// <summary>
+    /// Send a <c>scroll-to-heading</c> IPC message to the renderer. The
+    /// renderer looks up the element by id and smoothly scrolls it into view.
+    /// Used by the Avalonia-side Table of Contents panel when the user clicks
+    /// a TOC entry.
+    /// </summary>
+    public void ScrollToHeading(string headingId)
+    {
+        if (string.IsNullOrEmpty(headingId))
+        {
+            return;
+        }
+
+        PostRendererMessage(new { type = "scroll-to-heading", id = headingId });
+    }
+
+    /// <summary>
+    /// Send an <c>open-find-bar</c> IPC message to the renderer. The
+    /// renderer toggles the in-document find bar (same controller as the
+    /// Ctrl+F keystroke). Used by the magnifier toolbar button so the user
+    /// can open Search without focusing the WebView first.
+    /// </summary>
+    public void OpenFindBar()
+    {
+        PostRendererMessage(new { type = "open-find-bar" });
     }
 
     private void HandleMinimapStateMessage(JsonElement root)

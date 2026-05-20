@@ -1176,6 +1176,9 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(HasDocumentTitle));
         OnPropertyChanged(nameof(ShowsReadingStatus));
         OnPropertyChanged(nameof(ShowsEditToggle));
+        // IsTocVisible depends on IsViewer (= State == Viewing); refresh
+        // the composite predicate when State transitions.
+        OnPropertyChanged(nameof(IsTocVisible));
         RefreshWindowTitle();
         UpdateCommandStates();
     }
@@ -1200,6 +1203,9 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(IsAppOverlayOpen));
         OnPropertyChanged(nameof(HasOpenOverlay));
         OnPropertyChanged(nameof(ActiveDocumentContent));
+        // IsTocVisible composite predicate excludes edit mode; refresh on
+        // every toggle so the column slides in/out with the mode change.
+        OnPropertyChanged(nameof(IsTocVisible));
         UpdateCommandStates();
     }
 

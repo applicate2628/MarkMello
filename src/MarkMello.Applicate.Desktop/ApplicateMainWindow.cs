@@ -446,16 +446,190 @@ public sealed class ApplicateMainWindow : MainWindow
         // strip above the content; no fork-side welcome panel needed.
         var tabsView = new ApplicateTabsView(openDocs);
 
+        // v0.3.2 — Table of Contents column lives to the left of the
+        // document content, spans the full content-area height, and has
+        // its own ScrollViewer so mouse-wheel input scrolls the TOC
+        // independently of the document. Visibility is composite-bound
+        // (IsTocVisible = IsViewer AND !IsEditMode AND user-pref AND has
+        // headings). The GridSplitter binds two-way to TocColumnWidth on
+        // the VM so the user's resize survives layout passes. When the
+        // TOC is hidden the entire toc-column collapses to zero width via
+        // the visibility binding, letting the document body take the
+        // full row.
+        var tocPanel = new ApplicateTocPanel
+        {
+            // Skip implicit DataContext inheritance — the panel will
+            // inherit MainWindow's DataContext (= MainWindowViewModel) by
+            // ancestry and its DataContextChanged handler will pick it up.
+        };
+        var tocColumn = new ColumnDefinition(new GridLength(240, GridUnitType.Pixel))
+        {
+            MinWidth = 160,
+            MaxWidth = 480,
+        };
+        var splitterColumn = new ColumnDefinition(new GridLength(1, GridUnitType.Pixel))
+        {
+            MinWidth = 0,
+            MaxWidth = 9,
+        };
+        var contentColumn = new ColumnDefinition(new GridLength(1, GridUnitType.Star));
+
+        var tocSplitter = new GridSplitter
+        {
+            Classes = { "mm-editor-splitter" },
+            ResizeDirection = GridResizeDirection.Columns,
+            ResizeBehavior = GridResizeBehavior.PreviousAndNext,
+        };
+
+        var contentGrid = new Grid
+        {
+            UseLayoutRounding = true,
+        };
+        contentGrid.ColumnDefinitions.Add(tocColumn);
+        contentGrid.ColumnDefinitions.Add(splitterColumn);
+        contentGrid.ColumnDefinitions.Add(contentColumn);
+        Grid.SetColumn(tocPanel, 0);
+        Grid.SetColumn(tocSplitter, 1);
+        Grid.SetColumn(contentPanel, 2);
+        contentGrid.Children.Add(tocPanel);
+        contentGrid.Children.Add(tocSplitter);
+        contentGrid.Children.Add(contentPanel);
+
+        // Visibility wiring: bind TOC panel + splitter to MainWindowViewModel.
+        // IsTocVisible composite predicate. The columns themselves stay in
+        // the Grid (resizable behaviour requires fixed column slots) but
+        // collapse to zero width when the TOC is hidden via a property
+        // listener installed below.
+        tocPanel.Bind(
+            Visual.IsVisibleProperty,
+            new Avalonia.Data.Binding(nameof(MainWindowViewModel.IsTocVisible)));
+        tocSplitter.Bind(
+            Visual.IsVisibleProperty,
+            new Avalonia.Data.Binding(nameof(MainWindowViewModel.IsTocVisible)));
+
+        // Bind TocColumn width <-> VM.TocColumnWidth so the user's drag is
+        // persisted across mode toggles. We listen to ColumnDefinition.Width
+        // changes (set by GridSplitter as the user drags) and write the new
+        // value back to the VM; we also listen to VM.TocColumnWidth changes
+        // (initial value, future "restore default" paths) and write to
+        // ColumnDefinition.Width. Avalonia ColumnDefinition.Width is a
+        // GridLength (struct) so we go through manual two-way wiring rather
+        // than a Binding (Binding cannot translate double <-> GridLength
+        // without a converter).
+        InstallTocColumnTwoWayBinding(tocColumn, splitterColumn);
+
         var grid = new Grid
         {
             RowDefinitions = new RowDefinitions("Auto,*")
         };
         Grid.SetRow(tabsView, 0);
-        Grid.SetRow(contentPanel, 1);
+        Grid.SetRow(contentGrid, 1);
         grid.Children.Add(tabsView);
-        grid.Children.Add(contentPanel);
+        grid.Children.Add(contentGrid);
 
         bodyPanel.Children.Add(grid);
+    }
+
+    /// <summary>
+    /// Two-way wiring between <see cref="MainWindowViewModel.TocColumnWidth"/>
+    /// and the TOC <see cref="ColumnDefinition.Width"/>. Avalonia's
+    /// <see cref="ColumnDefinition.Width"/> is a <see cref="GridLength"/>
+    /// struct and cannot be bound to a primitive <c>double</c> without a
+    /// converter; this helper translates both directions explicitly. Also
+    /// collapses the TOC and splitter columns to zero width when the TOC
+    /// is hidden so the document body claims the full row.
+    /// </summary>
+    private void InstallTocColumnTwoWayBinding(ColumnDefinition tocColumn, ColumnDefinition splitterColumn)
+    {
+        if (DataContext is not MainWindowViewModel vm)
+        {
+            // DataContext may attach asynchronously during Window
+            // construction; defer the binding until it lands.
+            DataContextChanged += DeferredAttach;
+            return;
+        }
+
+        AttachWiring(vm);
+
+        void DeferredAttach(object? sender, System.EventArgs e)
+        {
+            if (DataContext is not MainWindowViewModel attachedVm)
+            {
+                return;
+            }
+            DataContextChanged -= DeferredAttach;
+            AttachWiring(attachedVm);
+        }
+
+        void AttachWiring(MainWindowViewModel viewModel)
+        {
+            bool suppress = false;
+
+            void ApplyFromViewModel()
+            {
+                if (suppress)
+                {
+                    return;
+                }
+                suppress = true;
+                try
+                {
+                    if (viewModel.IsTocVisible)
+                    {
+                        tocColumn.Width = new GridLength(viewModel.TocColumnWidth, GridUnitType.Pixel);
+                        splitterColumn.Width = new GridLength(1, GridUnitType.Pixel);
+                    }
+                    else
+                    {
+                        tocColumn.Width = new GridLength(0, GridUnitType.Pixel);
+                        splitterColumn.Width = new GridLength(0, GridUnitType.Pixel);
+                    }
+                }
+                finally
+                {
+                    suppress = false;
+                }
+            }
+
+            void ApplyFromColumn()
+            {
+                if (suppress)
+                {
+                    return;
+                }
+                if (!viewModel.IsTocVisible)
+                {
+                    return;
+                }
+                if (tocColumn.Width.GridUnitType != GridUnitType.Pixel)
+                {
+                    return;
+                }
+                suppress = true;
+                try
+                {
+                    var clamped = System.Math.Clamp(tocColumn.Width.Value, 160.0, 480.0);
+                    viewModel.TocColumnWidth = clamped;
+                }
+                finally
+                {
+                    suppress = false;
+                }
+            }
+
+            ApplyFromViewModel();
+            viewModel.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(MainWindowViewModel.TocColumnWidth)
+                    || e.PropertyName == nameof(MainWindowViewModel.IsTocVisible))
+                {
+                    ApplyFromViewModel();
+                }
+            };
+
+            tocColumn.GetObservable(ColumnDefinition.WidthProperty)
+                .Subscribe(new Avalonia.Reactive.AnonymousObserver<GridLength>(_ => ApplyFromColumn()));
+        }
     }
 
     private void InstallSiblingMountedViews(MainWindowViewModel viewModel)

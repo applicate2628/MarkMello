@@ -1358,6 +1358,100 @@
     emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
     postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
   }
+  var activeHeadingObserver = null;
+  var lastPostedActiveHeadingId = null;
+  function extractAndPostHeadings() {
+    const main = document.querySelector("main.mm-document");
+    if (!main) {
+      postHostMessage({ type: "headings-updated", headings: [] });
+      lastPostedActiveHeadingId = null;
+      return;
+    }
+    const nodes = Array.from(
+      main.querySelectorAll("h1, h2, h3, h4, h5, h6")
+    );
+    const headings = nodes.map((node) => {
+      const id = node.id;
+      if (!id) {
+        return null;
+      }
+      const tag = node.tagName.toUpperCase();
+      const level = Number.parseInt(tag.slice(1), 10);
+      if (!Number.isFinite(level) || level < 1 || level > 6) {
+        return null;
+      }
+      const text = (node.textContent ?? "").trim();
+      return { id, level, text };
+    }).filter((h) => h !== null);
+    postHostMessage({ type: "headings-updated", headings });
+    rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
+  }
+  function rebuildActiveHeadingObserver(headingNodes) {
+    if (activeHeadingObserver) {
+      activeHeadingObserver.disconnect();
+      activeHeadingObserver = null;
+    }
+    lastPostedActiveHeadingId = null;
+    if (headingNodes.length === 0) {
+      return;
+    }
+    const inViewport = /* @__PURE__ */ new Set();
+    const callback = (entries) => {
+      for (const entry of entries) {
+        const target = entry.target;
+        if (entry.isIntersecting) {
+          inViewport.add(target);
+        } else {
+          inViewport.delete(target);
+        }
+      }
+      let active = null;
+      for (const node of headingNodes) {
+        const rect = node.getBoundingClientRect();
+        if (rect.top <= 10) {
+          active = node;
+        } else {
+          break;
+        }
+      }
+      if (active === null) {
+        active = headingNodes[0] ?? null;
+      }
+      if (active === null) {
+        return;
+      }
+      const id = active.id;
+      if (id && id !== lastPostedActiveHeadingId) {
+        lastPostedActiveHeadingId = id;
+        postHostMessage({ type: "active-heading-changed", id });
+      }
+    };
+    activeHeadingObserver = new IntersectionObserver(callback, {
+      rootMargin: "0px 0px -85% 0px",
+      threshold: [0, 1]
+    });
+    for (const node of headingNodes) {
+      activeHeadingObserver.observe(node);
+    }
+    window.requestAnimationFrame(() => {
+      let active = null;
+      for (const node of headingNodes) {
+        const rect = node.getBoundingClientRect();
+        if (rect.top <= 10) {
+          active = node;
+        } else {
+          break;
+        }
+      }
+      if (active === null) {
+        active = headingNodes[0] ?? null;
+      }
+      if (active && active.id && active.id !== lastPostedActiveHeadingId) {
+        lastPostedActiveHeadingId = active.id;
+        postHostMessage({ type: "active-heading-changed", id: active.id });
+      }
+    });
+  }
   function shouldShowMinimap() {
     const root = document.scrollingElement ?? document.documentElement;
     const documentHeight = root.scrollHeight;
@@ -1661,6 +1755,17 @@
       document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
       return;
     }
+    if (message.type === "scroll-to-heading") {
+      const target = document.getElementById(message.id);
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      return;
+    }
+    if (message.type === "open-find-bar") {
+      findBarController?.toggle();
+      return;
+    }
     if (message.type === "host-scrollbar") {
       document.documentElement.dataset.mmHostScrollbar = message.active ? "on" : "off";
       return;
@@ -1714,6 +1819,11 @@
     minimapSourceReady = false;
     hasInitialLayoutSettled = false;
     findBarController?.close();
+    if (activeHeadingObserver) {
+      activeHeadingObserver.disconnect();
+      activeHeadingObserver = null;
+    }
+    lastPostedActiveHeadingId = null;
   }
   function ensureChromeNodes() {
     ensureMinimap();
@@ -1721,6 +1831,7 @@
     ensureDropOverlay();
     updateWidthHandlePosition();
     refreshMinimapContent("A");
+    extractAndPostHeadings();
   }
   function buildLoadDocumentDeps() {
     return {

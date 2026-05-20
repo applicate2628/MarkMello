@@ -9,6 +9,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Input.Platform;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Transformation;
@@ -55,6 +56,10 @@ internal sealed class ApplicateTabsView : UserControl
     private readonly StackPanel _tabsPanel;
     private readonly Button _addButton;
     private readonly Avalonia.Controls.Shapes.Path _addButtonIcon;
+    // v0.3.2 — magnifier toolbar button beside the "+" open-file button.
+    // Triggers the renderer's find bar via MainWindowViewModel.OpenFindBarCommand.
+    private readonly Button _findButton;
+    private readonly Avalonia.Controls.Shapes.Path _findButtonIcon;
     private readonly Dictionary<Control, OpenDocument> _tabToDocument = new();
     private Border? _rootBorder;
 
@@ -92,14 +97,35 @@ internal sealed class ApplicateTabsView : UserControl
         ToolTip.SetTip(_addButton, "Open file");
         _addButton.Click += async (_, _) => await OnAddClickAsync().ConfigureAwait(true);
 
+        // v0.3.2 — magnifier button. Placed to the LEFT of the "+" button
+        // so the keyboard reading order matches the user's request
+        // ("лупу около плюсика, который open file"). Clicking the magnifier
+        // sends an open-find-bar IPC to the renderer via the VM-level
+        // OpenFindBarCommand (subscribed by ApplicateViewerView). The
+        // renderer toggles its existing find bar (commit 4aee666) so a
+        // second click closes it — same semantics as Ctrl+F.
+        _findButtonIcon = BuildMagnifierIcon(ResolveBrush("MmTextSoftBrush"));
+        _findButton = BuildToolbarButton(_findButtonIcon);
+        ToolTip.SetTip(_findButton, "Find in document (Ctrl+F)");
+        _findButton.Click += OnFindButtonClick;
+
+        var rightCluster = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 2,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        rightCluster.Children.Add(_findButton);
+        rightCluster.Children.Add(_addButton);
+
         var root = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,Auto")
         };
         Grid.SetColumn(scroll, 0);
-        Grid.SetColumn(_addButton, 1);
+        Grid.SetColumn(rightCluster, 1);
         root.Children.Add(scroll);
-        root.Children.Add(_addButton);
+        root.Children.Add(rightCluster);
 
         // Bottom border separates the tabs strip from the document body
         // and gives the active tab a clear baseline to "merge" into.
@@ -154,6 +180,64 @@ internal sealed class ApplicateTabsView : UserControl
         };
     }
 
+    // Magnifier glyph at the same 12x12 footprint as the "+" icon so the
+    // two buttons line up visually. The circle sits at top-left, the
+    // handle runs to bottom-right. Stroke styling matches the existing
+    // tab strip ghost-button language (1.5 px rounded stroke, MmTextSoft
+    // brush, re-tinted by ApplyThemeColours below).
+    private static Avalonia.Controls.Shapes.Path BuildMagnifierIcon(IBrush stroke)
+    {
+        return new Avalonia.Controls.Shapes.Path
+        {
+            // Circle: center (4.5, 4.5), radius 3.5. Handle: from (7.0, 7.0)
+            // diagonal to (11.0, 11.0).
+            Data = Avalonia.Media.Geometry.Parse(
+                "M 8,4.5 A 3.5,3.5 0 1,1 1,4.5 A 3.5,3.5 0 1,1 8,4.5 Z M 7,7 L 11,11"),
+            Stroke = stroke,
+            StrokeThickness = 1.5,
+            StrokeLineCap = Avalonia.Media.PenLineCap.Round,
+            StrokeJoin = Avalonia.Media.PenLineJoin.Round,
+            Fill = Brushes.Transparent,
+            Width = 12,
+            Height = 12,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+    }
+
+    private static Button BuildToolbarButton(Avalonia.Controls.Shapes.Path icon)
+    {
+        return new Button
+        {
+            Width = 28,
+            Height = 28,
+            Padding = new Thickness(0),
+            Margin = new Thickness(0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Background = new SolidColorBrush(Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(6),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Content = icon
+        };
+    }
+
+    private void OnFindButtonClick(object? sender, RoutedEventArgs e)
+    {
+        // Route through the VM's command so the find-bar trigger surface
+        // is consistent across magnifier click, Ctrl+F keystroke (rendered
+        // inside the WebView), and any future menu entry. The viewer view
+        // subscribes to OpenFindBarRequested and sends the renderer IPC.
+        var window = TopLevel.GetTopLevel(this);
+        if (window?.DataContext is MarkMello.Presentation.ViewModels.MainWindowViewModel vm
+            && vm.OpenFindBarCommand.CanExecute(null))
+        {
+            vm.OpenFindBarCommand.Execute(null);
+        }
+    }
+
     private void OnAttached(object? sender, VisualTreeAttachmentEventArgs e)
     {
         ((INotifyCollectionChanged)_openDocsService.OpenDocuments).CollectionChanged += OnOpenDocumentsChanged;
@@ -198,8 +282,10 @@ internal sealed class ApplicateTabsView : UserControl
         }
         // Ghost "+" button has transparent bg + no border, only the icon
         // stroke is theme-dependent. Refresh in place so theme switch
-        // re-tints the + without recreating the button.
+        // re-tints the + without recreating the button. Magnifier icon
+        // follows the same pattern (sibling to "+", same stroke brush).
         _addButtonIcon.Stroke = ResolveBrush("MmTextSoftBrush");
+        _findButtonIcon.Stroke = ResolveBrush("MmTextSoftBrush");
 
         var borderBrush = ResolveBrush("MmBorderBrush");
         var activeBg = ResolveBrush("MmBackgroundBrush");

@@ -67,7 +67,13 @@ public partial class MainWindowViewModel
         nameof(AppMenuOpenFileLabel),
         nameof(AppMenuSettingsHint),
         nameof(AppMenuSettingsLabel),
+        nameof(AppMenuTocHint),
+        nameof(AppMenuTocLabel),
         nameof(AppMenuTooltip),
+        nameof(FindBarTooltip),
+        nameof(TocPanelEmpty),
+        nameof(TocPanelHeader),
+        nameof(MetaToggle),
         nameof(AppSettingsHeader),
         nameof(DirtyPromptCancel),
         nameof(DirtyPromptDiscard),
@@ -159,7 +165,13 @@ public partial class MainWindowViewModel
     public string AppMenuOpenFileLabel => _localization["AppMenuOpenFileLabel"];
     public string AppMenuSettingsHint => _localization["AppMenuSettingsHint"];
     public string AppMenuSettingsLabel => _localization["AppMenuSettingsLabel"];
+    public string AppMenuTocHint => _localization["AppMenuTocHint"];
+    public string AppMenuTocLabel => _localization["AppMenuTocLabel"];
     public string AppMenuTooltip => _localization["AppMenuTooltip"];
+    public string FindBarTooltip => _localization["FindBarTooltip"];
+    public string TocPanelEmpty => _localization["TocPanelEmpty"];
+    public string TocPanelHeader => _localization["TocPanelHeader"];
+    public string MetaToggle => _localization["MetaToggle"];
     public string AppSettingsHeader => _localization["AppSettingsHeader"];
     public string DirtyPromptCancel => _localization["DirtyPromptCancel"];
     public string DirtyPromptDiscard => _localization["DirtyPromptDiscard"];

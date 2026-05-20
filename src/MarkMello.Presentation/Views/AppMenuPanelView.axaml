@@ -75,6 +75,28 @@
                     EndPoint="1,0.5" />
 
               <Button Classes="mm-menu-item"
+                      Command="{Binding ToggleTocCommand}">
+                <Grid ColumnDefinitions="*,Auto"
+                      ColumnSpacing="12">
+                  <StackPanel Grid.Column="0"
+                              Spacing="2"
+                              HorizontalAlignment="Left">
+                    <TextBlock Classes="mm-setting-label"
+                               Text="{Binding AppMenuTocLabel}" />
+                    <TextBlock Classes="mm-setting-hint"
+                               Text="{Binding AppMenuTocHint}" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1"
+                             Classes="mm-setting-meta"
+                             Text="{Binding MetaToggle}" />
+                </Grid>
+              </Button>
+
+              <Line Classes="mm-setting-divider"
+                    StartPoint="0,0.5"
+                    EndPoint="1,0.5" />
+
+              <Button Classes="mm-menu-item"
                       Command="{Binding OpenAppSettingsCommand}">
                 <Grid ColumnDefinitions="*,Auto"
                       ColumnSpacing="12">

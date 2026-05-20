@@ -285,6 +285,8 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         if (_viewModel is not null)
         {
             _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+            _viewModel.ScrollToHeadingRequested -= OnViewModelScrollToHeadingRequested;
+            _viewModel.OpenFindBarRequested -= OnViewModelOpenFindBarRequested;
         }
 
         _viewModel = viewModel;
@@ -292,6 +294,13 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         if (_viewModel is not null)
         {
             _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+            // v0.3.2 TOC + magnifier — the shell raises these events when
+            // the user clicks a TOC row or the magnifier toolbar button.
+            // The viewer is the canonical "renderer surface owner" while
+            // visible, so we route the IPC call through this view's
+            // shared-host reference.
+            _viewModel.ScrollToHeadingRequested += OnViewModelScrollToHeadingRequested;
+            _viewModel.OpenFindBarRequested += OnViewModelOpenFindBarRequested;
         }
 
         SyncFromViewModel();
@@ -440,6 +449,12 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         _sharedHost.View.WidthDragRequested += OnHostWidthDragRequested;
         _sharedHost.View.WheelRequested += OnHostWheelRequested;
         _sharedHost.View.ViewerInteractionRequested += OnHostViewerInteractionRequested;
+        // v0.3.2 TOC — heading list and active-heading reports drive the
+        // Avalonia-side Table of Contents panel. We forward to the VM only
+        // when this view is the active consumer so edit-preview heading
+        // events do not overwrite the viewer's TOC contents.
+        _sharedHost.View.HeadingsChanged += OnHostHeadingsChanged;
+        _sharedHost.View.ActiveHeadingChanged += OnHostActiveHeadingChanged;
         _sharedHost.RendererFailed += OnHostRendererFailed;
         _hostEventsWired = true;
     }
@@ -457,8 +472,49 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         _sharedHost.View.WidthDragRequested -= OnHostWidthDragRequested;
         _sharedHost.View.WheelRequested -= OnHostWheelRequested;
         _sharedHost.View.ViewerInteractionRequested -= OnHostViewerInteractionRequested;
+        _sharedHost.View.HeadingsChanged -= OnHostHeadingsChanged;
+        _sharedHost.View.ActiveHeadingChanged -= OnHostActiveHeadingChanged;
         _sharedHost.RendererFailed -= OnHostRendererFailed;
         _hostEventsWired = false;
+    }
+
+    private void OnHostHeadingsChanged(object? sender, System.Collections.Generic.IReadOnlyList<MarkMello.Presentation.ViewModels.DocumentHeading> headings)
+    {
+        // Consumer-side filter — only the active viewer's TOC reflects the
+        // current document; edit-preview heading payloads are dropped so
+        // the user's TOC list stays anchored on the reading-mode document.
+        if (!_isAttachedToHost || _viewModel is null)
+        {
+            return;
+        }
+        _viewModel.UpdateDocumentHeadings(headings);
+    }
+
+    private void OnHostActiveHeadingChanged(object? sender, string id)
+    {
+        if (!_isAttachedToHost || _viewModel is null)
+        {
+            return;
+        }
+        _viewModel.ActiveHeadingId = id;
+    }
+
+    private void OnViewModelScrollToHeadingRequested(object? sender, string id)
+    {
+        if (_sharedHost is null)
+        {
+            return;
+        }
+        _sharedHost.View.ScrollToHeading(id);
+    }
+
+    private void OnViewModelOpenFindBarRequested(object? sender, EventArgs e)
+    {
+        if (_sharedHost is null)
+        {
+            return;
+        }
+        _sharedHost.View.OpenFindBar();
     }
 
     private void OnHostDocumentRendered(object? sender, EventArgs e)
