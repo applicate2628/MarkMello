@@ -51,12 +51,19 @@ public sealed class ApplicateMainWindow : MainWindow
         ApplicateSingleInstanceService? singleInstance = null)
         : base(viewModel, startupSmokeTestOptions, settings)
     {
+        ApplicateTrace.DiagMs("startup-applicate-window", "applicate-ctor-start");
         var viewerTemplate = new ApplicateViewerTemplate();
         DataTemplates.Insert(0, viewerTemplate);
         InstallViewerHostTemplate(viewerTemplate);
+        ApplicateTrace.DiagMs("startup-applicate-window", "install-warmup-panel-start");
         InstallSharedWebViewWarmupPanel();
+        ApplicateTrace.DiagMs("startup-applicate-window", "install-warmup-panel-end");
+        ApplicateTrace.DiagMs("startup-applicate-window", "install-tabs-start");
         InstallTabsAndWelcome();
+        ApplicateTrace.DiagMs("startup-applicate-window", "install-tabs-end");
+        ApplicateTrace.DiagMs("startup-applicate-window", "install-sibling-views-start");
         InstallSiblingMountedViews(viewModel);
+        ApplicateTrace.DiagMs("startup-applicate-window", "install-sibling-views-end");
         InstallHostShortcutBridge(viewModel);
         InstallActiveDocumentBridge(viewModel);
         InstallSingleInstanceActivationBridge(viewModel, singleInstance);
@@ -70,6 +77,7 @@ public sealed class ApplicateMainWindow : MainWindow
         Opened += (_, _) => Avalonia.Threading.Dispatcher.UIThread.Post(
             InstallStatusHintAboveWebView,
             Avalonia.Threading.DispatcherPriority.Loaded);
+        ApplicateTrace.DiagMs("startup-applicate-window", "applicate-ctor-end");
     }
 
     // Status-hint Border (Ctrl+O / Ctrl+E / Ctrl+, hotkeys at bottom-right
@@ -495,11 +503,16 @@ public sealed class ApplicateMainWindow : MainWindow
         // updates the editWorkspace's DataContext on session changes — no
         // per-toggle template materialization, no reparent.
         var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
+        ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-preview-start");
         var editPreview = new ApplicateEditPreviewView(sharedHost);
+        ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-preview-end");
+        ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-workspace-start");
         var editWorkspace = new EditWorkspaceView
         {
             DataContext = null
         };
+        ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-workspace-end");
+        ApplicateTrace.DiagMs("startup-synthetic-mount", "replace-preview-start");
         if (!editWorkspace.TryReplacePreviewDocumentView(editPreview))
         {
             // Upstream merge (5c329d8 "sync source and preview scrolling")
@@ -540,6 +553,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 parentBorder.Child = editPreview;
             }
         }
+        ApplicateTrace.DiagMs("startup-synthetic-mount", "replace-preview-end");
 
         // Add the pre-built workspace to editSlot.Children NOW. Panel.Children
         // is eager for LogicalChildren but UserControl-templated descendants
@@ -566,12 +580,17 @@ public sealed class ApplicateMainWindow : MainWindow
         // window-derived bounds settle on first user toggle when parent
         // grid arranges editSlot for the editor+preview split.
         editSlot.IsVisible = true;
+        ApplicateTrace.DiagMs("startup-synthetic-mount", "apply-template-start");
         editSlot.ApplyTemplate();
         editWorkspace.ApplyTemplate();
         editPreview.ApplyTemplate();
+        ApplicateTrace.DiagMs("startup-synthetic-mount", "apply-template-end");
+        ApplicateTrace.DiagMs("startup-synthetic-mount", "measure-arrange-start");
         editSlot.Measure(new Avalonia.Size(double.PositiveInfinity, double.PositiveInfinity));
         editSlot.Arrange(new Avalonia.Rect(0, 0, editSlot.DesiredSize.Width, editSlot.DesiredSize.Height));
+        ApplicateTrace.DiagMs("startup-synthetic-mount", "measure-arrange-end");
         editSlot.IsVisible = false;
+        ApplicateTrace.DiagMs("startup-synthetic-mount", "hide-edit-slot-end");
 
         _siblingMountBridge = new ApplicateSiblingMountBridge(
             viewModel,

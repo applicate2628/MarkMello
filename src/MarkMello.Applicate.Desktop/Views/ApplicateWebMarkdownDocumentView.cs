@@ -91,11 +91,13 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         IApplicateHtmlMarkdownRenderer renderer,
         IApplicateShellAssetBundleFactory? shellAssetFactory)
     {
+        ApplicateTrace.DiagMs("startup-webview", "webview-view-ctor-start");
         _renderer = renderer;
         _shellAssetFactory = shellAssetFactory;
         // Shell mode requires both the env-var flag AND the factory injection.
         // Missing either falls back to legacy per-document Navigate.
         _shellMode = ApplicateRendererShellMode.IsEnabled && shellAssetFactory is not null;
+        ApplicateTrace.DiagMs("startup-webview", "native-webview-ctor-start");
         _webView = new ApplicateNativeWebView
         {
             ClipToBounds = true,
@@ -105,6 +107,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
             VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch
         };
+        ApplicateTrace.DiagMs("startup-webview", "native-webview-ctor-end");
 
         _webView.EnvironmentRequested += OnEnvironmentRequested;
         _webView.NavigationStarted += OnNavigationStarted;
@@ -117,6 +120,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ClipToBounds = true;
         ActualThemeVariantChanged += OnThemeChanged;
         AddHandler(KeyDownEvent, OnWebViewKeyDown, handledEventsToo: true);
+        ApplicateTrace.DiagMs("startup-webview", "webview-view-ctor-end");
     }
 
     public MarkdownSource? Source
@@ -645,6 +649,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void OnEnvironmentRequested(object? sender, WebViewEnvironmentRequestedEventArgs e)
     {
+        ApplicateTrace.DiagMs("startup-webview", "environment-requested");
         e.EnableDevTools = false;
         if (e is WindowsWebView2EnvironmentRequestedEventArgs windows)
         {
@@ -780,6 +785,34 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                         return;
                     }
                     System.Console.Error.WriteLine($"[renderer-debug] {text}");
+                }
+                return;
+            }
+
+            if (type == "perf-mark")
+            {
+                // Round-2 perf-engineer plan item C, [renderer-perf] group.
+                // The renderer signals a milestone; the host stamps elapsed-ms
+                // against its own process-anchored Stopwatch (avoids clock-skew
+                // between renderer performance.now() and host wall clock) and
+                // forwards as `[renderer-perf] <name> ms=<elapsed>`.
+                if (document.RootElement.TryGetProperty("name", out var nameProp))
+                {
+                    var name = nameProp.GetString();
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        string extras = string.Empty;
+                        if (document.RootElement.TryGetProperty("detail", out var detailProp)
+                            && detailProp.ValueKind == JsonValueKind.String)
+                        {
+                            var detailText = detailProp.GetString();
+                            if (!string.IsNullOrEmpty(detailText))
+                            {
+                                extras = $"detail={detailText}";
+                            }
+                        }
+                        ApplicateTrace.DiagMs("renderer-perf", name, extras);
+                    }
                 }
                 return;
             }

@@ -41,6 +41,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         IApplicateHtmlMarkdownRenderer renderer,
         IApplicateShellAssetBundleFactory shellAssetFactory)
     {
+        ApplicateTrace.DiagMs("startup-webview", "shared-host-ctor-start");
         // If WebView2 runtime is missing the constructor throws here; DI
         // surfaces that failure to App startup which already handles it. The
         // runtime-missing routing through RendererFailed is reserved for a
@@ -50,6 +51,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         View = new ApplicateWebMarkdownDocumentView(renderer, shellAssetFactory);
         View.DocumentRendered += OnViewDocumentRendered;
         View.FallbackRequested += OnViewFallbackRequested;
+        ApplicateTrace.DiagMs("startup-webview", "shared-host-ctor-end");
     }
 
     public ApplicateWebMarkdownDocumentView View { get; }
@@ -91,6 +93,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         if (_currentParent is null)
         {
             parent.Children.Add(View);
+            ApplicateTrace.DiagMs("startup-webview", "warmup-parent-attached");
             _currentParent = parent;
             _state = HostState.Parked;
         }

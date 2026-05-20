@@ -11,6 +11,7 @@ using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MarkMello.Application.Abstractions;
 using MarkMello.Domain;
+using MarkMello.Presentation.Diagnostics;
 using MarkMello.Presentation.ViewModels;
 
 namespace MarkMello.Presentation.Views;
@@ -39,6 +40,7 @@ public partial class MainWindow : Window
         StartupSmokeTestOptions startupSmokeTestOptions,
         ISettingsStore settings)
     {
+        StartupDiag.DiagMs("startup-mainwindow", "base-ctor-enter");
         ArgumentNullException.ThrowIfNull(viewModel);
         ArgumentNullException.ThrowIfNull(startupSmokeTestOptions);
         ArgumentNullException.ThrowIfNull(settings);
@@ -49,9 +51,15 @@ public partial class MainWindow : Window
         DataContext = viewModel;
 
         ConfigurePlatformChrome();
+        StartupDiag.DiagMs("startup-mainwindow", "initialize-component-start");
         InitializeComponent();
+        StartupDiag.DiagMs("startup-mainwindow", "initialize-component-end");
+        StartupDiag.DiagMs("startup-mainwindow", "prepare-shell-start");
         PrepareShellForStartup();
+        StartupDiag.DiagMs("startup-mainwindow", "prepare-shell-end");
+        StartupDiag.DiagMs("startup-mainwindow", "apply-window-placement-start");
         ApplyStartupWindowPlacement();
+        StartupDiag.DiagMs("startup-mainwindow", "apply-window-placement-end");
         SyncOverlayWindowClasses();
 
         AddHandler(DragDrop.DragEnterEvent, OnDragEnter);
@@ -69,6 +77,7 @@ public partial class MainWindow : Window
         _viewModel.CloseRequested += OnViewModelCloseRequested;
         Deactivated += OnWindowDeactivated;
 
+        StartupDiag.DiagMs("startup-mainwindow", "initialize-startup-task-start");
         _startupInitializationTask = InitializeStartupAsync();
     }
 
@@ -99,6 +108,7 @@ public partial class MainWindow : Window
 
     private async void OnWindowOpened(object? sender, EventArgs e)
     {
+        StartupDiag.DiagMs("startup-first-frame", "window-opened");
         await _startupInitializationTask.ConfigureAwait(true);
         await RevealShellAfterStartupAsync().ConfigureAwait(true);
         await CompleteStartupSmokeTestAsync().ConfigureAwait(true);
@@ -112,6 +122,7 @@ public partial class MainWindow : Window
     private async Task RevealShellAfterStartupAsync()
     {
         await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Render);
+        StartupDiag.DiagMs("startup-first-frame", "dispatcher-render-barrier");
         await Task.Delay(60).ConfigureAwait(true);
         ShellRoot.Opacity = 1;
     }

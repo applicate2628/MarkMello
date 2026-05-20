@@ -67,6 +67,12 @@ type RendererMessage =
   | { type: "host-shortcut"; combo: string }
   | { type: "debug-log"; text: string }
   | { type: "debug-log"; message: string }
+  // Round-2 perf-engineer plan item C, [renderer-perf] group. The renderer
+  // posts a perf-mark whenever a startup-relevant pipeline milestone fires;
+  // the host stamps elapsed-ms against its own process-anchored Stopwatch
+  // (avoids clock-skew between renderer performance.now() and host wall clock)
+  // and re-emits as `[renderer-perf] <name> ms=<elapsed>` via ApplicateTrace.
+  | { type: "perf-mark"; name: string; detail?: string }
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number };
 
 type MinimapMode = "auto" | "on" | "off";
@@ -183,6 +189,23 @@ function postDebugLog(text: string): void {
   postHostMessage({ type: "debug-log", text });
 }
 
+// Round-2 perf-engineer plan item C, [renderer-perf] group. Bridges a
+// renderer-side pipeline milestone to the host so the host can stamp
+// elapsed-ms against its own process-anchored Stopwatch and forward to
+// the shared `[renderer-perf] <name> ms=<elapsed>` log stream. No-op when
+// the host IPC channel is missing (vitest harness, smoke fixtures).
+function postPerfMark(name: string, detail?: Record<string, unknown>): void {
+  const message: { type: "perf-mark"; name: string; detail?: string } = { type: "perf-mark", name };
+  if (detail !== undefined) {
+    try {
+      message.detail = JSON.stringify(detail);
+    } catch {
+      // Detail serialization is best-effort; the mark must still post.
+    }
+  }
+  postHostMessage(message);
+}
+
 function countFailedInSet(nodes: Iterable<HTMLElement>): number {
   let count = 0;
   for (const node of nodes) {
@@ -210,6 +233,10 @@ function renderMath(): MathReadinessController {
   // [data-tex] nodes since IO may have rendered nodes outside the frozen set.
   controller.initialVisibleReady.then(() => {
     emitMark("mm-initial-visible-ready", {
+      visibleCount: controller.initialVisibleNodes.size,
+      failedCount: countFailedInSet(controller.initialVisibleNodes),
+    });
+    postPerfMark("mm-initial-visible-ready", {
       visibleCount: controller.initialVisibleNodes.size,
       failedCount: countFailedInSet(controller.initialVisibleNodes),
     });
@@ -341,6 +368,7 @@ function postLayoutReady(): void {
     type: "layout-ready",
     ...getScrollState()
   });
+  postPerfMark("mm-layout-ready");
 }
 
 function scheduleLayoutReady(): void {
@@ -685,14 +713,17 @@ function cloneDocumentForMinimap(): HTMLElement | null {
 
 function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   emitMark("mm-minimap-refresh-start", { phase });
+  postPerfMark("mm-minimap-refresh-start", { phase });
   ensureMinimap();
   if (!minimapContent || !minimapRoot) {
     emitMark("mm-minimap-refresh-end", { phase, skipped: "no-mount" });
+    postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-mount" });
     return;
   }
   const clone = cloneDocumentForMinimap();
   if (!clone) {
     emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
+    postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
     return;
   }
   const root = document.scrollingElement ?? document.documentElement;
@@ -701,6 +732,7 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   updateMinimapVisibility(true);
   updateMinimapViewport();
   emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
+  postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
 }
 
 function shouldShowMinimap(): boolean {
@@ -1275,7 +1307,17 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
     cancelCurrentMathController: () => { currentController?.cancel(); },
     resetModuleGlobals: resetModuleGlobalsForLoadDocument,
     scrollWindowToTop: () => { window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior }); },
-    emitMark,
+    // Mirror selected renderer-side perf marks into the host's
+    // [renderer-perf] stream. Only `mm-load-document` is bridged from this
+    // path per round-2 plan item C; other marks are bridged at their own
+    // emission sites in renderer.ts so the bridging is colocated with the
+    // semantic anchor rather than centralized here.
+    emitMark: (name, detail) => {
+      emitMark(name, detail);
+      if (name === "mm-load-document") {
+        postPerfMark(name, (detail as Record<string, unknown> | undefined) ?? undefined);
+      }
+    },
     ensureChromeNodes,
     applyTheme,
     debugLog: postDebugLog,
@@ -1525,7 +1567,11 @@ document.addEventListener("securitypolicyviolation", (e) => {
 
 document.addEventListener("DOMContentLoaded", () => {
   emitMark("mm-doc-loaded");
-  requestAnimationFrame(() => emitMark("mm-doc-painted"));
+  postPerfMark("mm-doc-loaded");
+  requestAnimationFrame(() => {
+    emitMark("mm-doc-painted");
+    postPerfMark("mm-doc-painted");
+  });
   installLongTaskObserver();
   applyViewerChromeState();
   applyDocumentScrollState();

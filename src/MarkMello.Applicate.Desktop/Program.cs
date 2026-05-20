@@ -2,6 +2,7 @@ using Avalonia;
 using MarkMello.Application;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Activation;
+using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Editing;
 using MarkMello.Applicate.Desktop.Math;
 using MarkMello.Applicate.Desktop.Rendering;
@@ -22,6 +23,14 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        // Anchors ApplicateTrace.ProcessStart on the very first line of Main.
+        // Subsequent DiagMs() markers in this file and elsewhere measure
+        // elapsed ms relative to this moment (round-2 perf-engineer plan
+        // item C; the same Stopwatch shape was already proven by the
+        // existing "[startup] AppBootstrap" / "[startup] FirstWindow" lines).
+        ApplicateTrace.Touch();
+        ApplicateTrace.DiagMs("startup-pre-window", "program-main-enter");
+
         if (!ApplicateSingleInstanceService.TryCreatePrimary(out var singleInstance))
         {
             return ApplicateSingleInstanceService.ForwardActivation(args) ? 0 : 1;
@@ -32,11 +41,20 @@ internal static class Program
 
         try
         {
+            ApplicateTrace.DiagMs("startup-pre-window", "configure-services-start");
             var services = ConfigureServices(metrics, args, singleInstance);
+            ApplicateTrace.DiagMs("startup-pre-window", "configure-services-end");
             App.RegisterServices(services);
+            ApplicateTrace.DiagMs("startup-pre-window", "single-instance-start");
             singleInstance!.StartListening();
+            ApplicateTrace.DiagMs("startup-pre-window", "single-instance-end");
 
-            return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+            ApplicateTrace.DiagMs("startup-pre-window", "appbuilder-configure-start");
+            var appBuilder = BuildAvaloniaApp();
+            ApplicateTrace.DiagMs("startup-pre-window", "appbuilder-configure-end");
+
+            ApplicateTrace.DiagMs("startup-pre-window", "classic-lifetime-start");
+            return appBuilder.StartWithClassicDesktopLifetime(args);
         }
         finally
         {
