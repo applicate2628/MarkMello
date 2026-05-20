@@ -574,6 +574,7 @@
   var WIDTH_RESIZER_ALWAYS_CLASS = "mm-width-resizer-always";
   var minimapMode = "off";
   var hasReceivedHostPreferences = false;
+  var hasInitialLayoutSettled = false;
   var minimapViewportFrameRequested = false;
   var minimapRefreshTimer;
   var minimapRoot = null;
@@ -665,6 +666,8 @@
         failedCount: countFailedInSet(controller.initialVisibleNodes)
       });
       refreshMinimapContent("A");
+      hasInitialLayoutSettled = true;
+      updateWidthHandlePosition();
     });
     controller.allMathRendered.then(() => {
       const allMathNodes = Array.from(document.querySelectorAll("[data-tex]"));
@@ -837,7 +840,7 @@
     if (!widthHandleRoot) {
       return;
     }
-    widthHandleRoot.hidden = !hasReceivedHostPreferences || !viewerChromeEnabled;
+    widthHandleRoot.hidden = !hasReceivedHostPreferences || !viewerChromeEnabled || !hasInitialLayoutSettled;
     if (widthHandleRoot.hidden) {
       return;
     }
@@ -1264,6 +1267,8 @@
       if (!viewerChromeEnabled) {
         updateMinimapVisibility(true);
         updateWidthHandlePosition();
+      } else {
+        updateWidthHandlePosition();
       }
     }
     if (documentScrollChanged) {
@@ -1383,6 +1388,7 @@
     minimapDocumentHeight = 0;
     lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
     minimapSourceReady = false;
+    hasInitialLayoutSettled = false;
   }
   function ensureChromeNodes() {
     ensureMinimap();

@@ -120,6 +120,16 @@ const WIDTH_RESIZER_ALWAYS_CLASS = "mm-width-resizer-always";
 
 let minimapMode: MinimapMode = "off";
 let hasReceivedHostPreferences = false;
+// Polish #5 — width-handle stays hidden until first layout settles (initial
+// visible math reaches terminal state). Without this gate the handle reveals
+// on innerHTML swap inside `ensureChromeNodes` (called from `loadDocument.ts`)
+// BEFORE KaTeX initial-visible math finishes laying out, so its computed
+// position is based on a pre-settle `.mm-document` bounding rect; once layout
+// settles, a follow-up `updateWidthHandlePosition` call (from mode-toggle,
+// scroll, or layout-ready) moves the handle to the correct x — user-visible
+// as "ресайзер сначала появляется по центру, потом в нужное положение
+// переходит". Gate flipped once in `controller.initialVisibleReady.then(...)`.
+let hasInitialLayoutSettled = false;
 let minimapViewportFrameRequested = false;
 let minimapRefreshTimer: number | undefined;
 let minimapRoot: HTMLElement | null = null;
@@ -244,6 +254,14 @@ function renderMath(): MathReadinessController {
     // reached terminal state (heights stable), clone the document for the minimap.
     // This replaces the old katexHasRun gate without racing the rAF in queueMinimapRefresh.
     refreshMinimapContent("A");
+    // Polish #5 — first-layout-settled gate for width-handle reveal. Now that
+    // .mm-document has settled at its final width, updateWidthHandlePosition
+    // computes the correct x. Flipping this once is enough: subsequent calls
+    // (resize, scroll, mode toggle) keep position fresh; document swaps in
+    // loadDocument.ts reset hasInitialLayoutSettled back to false so the
+    // next initialVisibleReady gates again.
+    hasInitialLayoutSettled = true;
+    updateWidthHandlePosition();
   });
   controller.allMathRendered.then(() => {
     const allMathNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-tex]"));
@@ -444,7 +462,7 @@ function updateWidthHandlePosition(): void {
     return;
   }
 
-  widthHandleRoot.hidden = !hasReceivedHostPreferences || !viewerChromeEnabled;
+  widthHandleRoot.hidden = !hasReceivedHostPreferences || !viewerChromeEnabled || !hasInitialLayoutSettled;
   if (widthHandleRoot.hidden) {
     return;
   }
@@ -1087,11 +1105,19 @@ function flushPendingReadingPreferences(): void {
     // перерисовывается render"). updateMinimapVisibility is idempotent;
     // updateWidthHandlePosition reads viewerChromeEnabled for its
     // hidden flag. For the chrome=true (entering reader) direction
-    // we keep the heavy-update path because shouldShowMinimap
+    // we keep the heavy-update path for minimap (shouldShowMinimap
     // requires policy + layout signals that may not be ready in
-    // Phase A.
+    // Phase A), but call updateWidthHandlePosition synchronously on
+    // BOTH branches — without the chrome=true call the width-handle
+    // stays hidden after edit→viewer round-trip because
+    // hasInitialLayoutSettled remains true (correct, doc settled
+    // previously) yet nothing fires updateWidthHandlePosition on the
+    // chrome=true branch unless minimap visibility flips or window
+    // is resized (Codex polish-05 r1 finding).
     if (!viewerChromeEnabled) {
       updateMinimapVisibility(true);
+      updateWidthHandlePosition();
+    } else {
       updateWidthHandlePosition();
     }
   }
@@ -1262,6 +1288,14 @@ function resetModuleGlobalsForLoadDocument(): void {
   minimapDocumentHeight = 0;
   lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
   minimapSourceReady = false;
+  // Polish #5 — reset the width-handle reveal gate so the next document's
+  // initialVisibleReady has to fire again before the handle becomes visible
+  // at its (now-correct) post-settle x. Without this reset, every doc after
+  // the first would skip the gate (it stays true from the prior doc) and the
+  // pre-layout updateWidthHandlePosition call in ensureChromeNodes would
+  // briefly show the handle at the wrong x — the same jitter the gate was
+  // added to prevent, just on the second-and-subsequent doc loads.
+  hasInitialLayoutSettled = false;
 }
 
 function ensureChromeNodes(): void {
