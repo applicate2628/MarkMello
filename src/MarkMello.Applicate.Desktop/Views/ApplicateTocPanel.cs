@@ -42,8 +42,6 @@ public sealed class ApplicateTocPanel : UserControl
     private readonly TextBlock _emptyState;
     private readonly Border _rootBorder;
     private readonly Border _separator;
-    private readonly Button _hideButton;
-    private readonly Avalonia.Controls.Shapes.Path _hideIconPath;
     private MainWindowViewModel? _viewModel;
     private readonly Dictionary<string, Border> _rowsById = new(StringComparer.Ordinal);
 
@@ -103,35 +101,11 @@ public sealed class ApplicateTocPanel : UserControl
             Content = scrollContent,
         };
 
-        // Close button (X glyph) — overlay at panel top-right. Bound to
-        // MainWindowViewModel.ToggleTocCommand which flips the
-        // user-preference flag. Sits above scroll content with no header
-        // bar pushing the list down (user request 2026-05-20: "scrollbox
-        // дотянуть до верхней границы table of content").
-        _hideIconPath = new Avalonia.Controls.Shapes.Path
-        {
-            Width = 10,
-            Height = 10,
-            Stretch = Stretch.Uniform,
-            StrokeThickness = 1.4,
-            StrokeLineCap = PenLineCap.Round,
-            Data = Geometry.Parse("M 0,0 L 10,10 M 10,0 L 0,10"),
-        };
-        _hideButton = new Button
-        {
-            Width = 22,
-            Height = 22,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(0, 6, 8, 0),
-            Padding = new Thickness(0),
-            Background = Brushes.Transparent,
-            BorderThickness = new Thickness(0),
-            CornerRadius = new CornerRadius(4),
-            Content = _hideIconPath,
-            Cursor = new Cursor(StandardCursorType.Hand),
-        };
-        ToolTip.SetTip(_hideButton, "Hide table of contents");
+        // No collapse affordance inside the panel — the persistent chevron
+        // lives in the tabs row of ApplicateMainWindow and flips its glyph
+        // («‹» when open, «›» when closed) so a single control toggles
+        // visibility in both directions. Keeps the panel content area free
+        // of competing visuals over heading rows.
 
         _separator = new Border
         {
@@ -142,10 +116,8 @@ public sealed class ApplicateTocPanel : UserControl
         };
 
         var rootGrid = new Grid { UseLayoutRounding = true };
-        // Scroll fills entire panel; close button overlays at top-right;
-        // separator is the rightmost 1 px column.
+        // Scroll fills entire panel; separator is the rightmost 1 px column.
         rootGrid.Children.Add(_scroll);
-        rootGrid.Children.Add(_hideButton);
         rootGrid.Children.Add(_separator);
 
         _rootBorder = new Border
@@ -202,7 +174,6 @@ public sealed class ApplicateTocPanel : UserControl
         _rootBorder.Background = _backgroundBrush;
         _separator.Background = _borderSoftBrush;
         _emptyState.Foreground = _textSoftBrush;
-        _hideIconPath.Stroke = _textFaintBrush;
 
         // Re-tint rows in place — collection-changed handler rebuilds rows
         // when headings change, so an in-place re-tint here only fires on
@@ -248,7 +219,6 @@ public sealed class ApplicateTocPanel : UserControl
         {
             _viewModel.PropertyChanged += OnViewModelPropertyChanged;
             _viewModel.DocumentHeadings.CollectionChanged += OnHeadingsCollectionChanged;
-            _hideButton.Command = _viewModel.ToggleTocCommand;
             _emptyState.Text = _viewModel.TocPanelEmpty;
             RebuildRows(_viewModel.DocumentHeadings);
             UpdateEmptyState();

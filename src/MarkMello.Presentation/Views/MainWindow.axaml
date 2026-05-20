@@ -37,6 +37,8 @@
     <KeyBinding Gesture="Ctrl+R" Command="{Binding ReloadCommand}" />
     <KeyBinding Gesture="Cmd+R" Command="{Binding ReloadCommand}" />
     <KeyBinding Gesture="Escape" Command="{Binding ClearErrorCommand}" />
+    <KeyBinding Gesture="Ctrl+T" Command="{Binding ToggleTocCommand}" />
+    <KeyBinding Gesture="Cmd+T" Command="{Binding ToggleTocCommand}" />
   </Window.KeyBindings>
 
   <Window.Styles>

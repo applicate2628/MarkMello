@@ -1765,6 +1765,7 @@ function wireHostShortcuts(): void {
     "ctrl+shift+s",
     "ctrl+n",
     "ctrl+r",
+    "ctrl+t",
     "f5",
     "escape"
   ]);

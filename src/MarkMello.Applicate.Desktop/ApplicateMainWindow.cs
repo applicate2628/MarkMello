@@ -518,16 +518,130 @@ public sealed class ApplicateMainWindow : MainWindow
         // without a converter).
         InstallTocColumnTwoWayBinding(tocColumn, splitterColumn);
 
+        // Persistent TOC chevron — lives in the tabs row, always visible
+        // regardless of IsTocVisible state. Glyph flips between «‹» (TOC
+        // open → click to collapse) and «›» (TOC hidden → click to expand)
+        // via InstallChevronGlyphTracking. Living in the tabs row keeps it
+        // out of the WebView2 NativeControlHost area (where managed visuals
+        // can be hidden by the Win32 child window's Z-order) and gives the
+        // collapse-then-reopen flow a single anchored affordance.
+        var chevronPath = new Avalonia.Controls.Shapes.Path
+        {
+            Width = 8,
+            Height = 10,
+            Stretch = Avalonia.Media.Stretch.None,
+            StrokeThickness = 1.4,
+            StrokeLineCap = Avalonia.Media.PenLineCap.Round,
+            StrokeJoin = Avalonia.Media.PenLineJoin.Round,
+            Data = Avalonia.Media.Geometry.Parse("M 6,0 L 0,5 L 6,10"),
+        };
+        chevronPath.Bind(
+            Avalonia.Controls.Shapes.Shape.StrokeProperty,
+            chevronPath.GetResourceObservable("MmTextFaintBrush"));
+        var chevronButton = new Button
+        {
+            Width = 26,
+            Height = 26,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(4, 0, 4, 0),
+            Padding = new Thickness(0),
+            Background = Avalonia.Media.Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(4),
+            Content = chevronPath,
+            Cursor = new Cursor(StandardCursorType.Hand),
+        };
+        ToolTip.SetTip(chevronButton, "Hide table of contents (Ctrl+T)");
+        chevronButton.Bind(
+            Button.CommandProperty,
+            new Avalonia.Data.Binding(nameof(MainWindowViewModel.ToggleTocCommand)));
+
+        // Tabs row = [chevron column (Auto), tabsView column (*)]. The
+        // chevron sits at the absolute left of the document area, always
+        // visible, so collapsing the TOC does not strand the user without
+        // a re-open trigger.
+        var tabsRow = new Grid
+        {
+            UseLayoutRounding = true,
+            ColumnDefinitions = new ColumnDefinitions("Auto,*"),
+        };
+        Grid.SetColumn(chevronButton, 0);
+        Grid.SetColumn(tabsView, 1);
+        tabsRow.Children.Add(chevronButton);
+        tabsRow.Children.Add(tabsView);
+
         var grid = new Grid
         {
             RowDefinitions = new RowDefinitions("Auto,*")
         };
-        Grid.SetRow(tabsView, 0);
+        Grid.SetRow(tabsRow, 0);
         Grid.SetRow(contentGrid, 1);
-        grid.Children.Add(tabsView);
+        grid.Children.Add(tabsRow);
         grid.Children.Add(contentGrid);
 
         bodyPanel.Children.Add(grid);
+
+        InstallChevronGlyphTracking(chevronPath, chevronButton);
+    }
+
+    /// <summary>
+    /// Tracks <see cref="MainWindowViewModel.IsTocVisible"/> and flips the
+    /// chevron glyph + tooltip so the same affordance reads as "collapse to
+    /// the left" when TOC is open («‹») and "expand to the right" when TOC
+    /// is collapsed («›»). DataContext may attach asynchronously during
+    /// Window construction, so the wiring uses the same defer-on-attach
+    /// pattern as <see cref="InstallTocColumnTwoWayBinding"/>.
+    /// </summary>
+    private void InstallChevronGlyphTracking(
+        Avalonia.Controls.Shapes.Path chevronPath,
+        Button chevronButton)
+    {
+        if (DataContext is not MainWindowViewModel vm)
+        {
+            DataContextChanged += DeferredAttach;
+            return;
+        }
+
+        AttachWiring(vm);
+
+        void DeferredAttach(object? sender, System.EventArgs e)
+        {
+            if (DataContext is not MainWindowViewModel attachedVm)
+            {
+                return;
+            }
+            DataContextChanged -= DeferredAttach;
+            AttachWiring(attachedVm);
+        }
+
+        void AttachWiring(MainWindowViewModel viewModel)
+        {
+            Apply(viewModel.IsTocVisible);
+            viewModel.PropertyChanged += (_, args) =>
+            {
+                if (args.PropertyName == nameof(MainWindowViewModel.IsTocVisible))
+                {
+                    Apply(viewModel.IsTocVisible);
+                }
+            };
+        }
+
+        void Apply(bool isTocVisible)
+        {
+            // «‹» points left (collapse) when open; «›» points right (expand)
+            // when collapsed. Both glyphs are 6-px wide, 10-px tall paths
+            // drawn into the same 8x10 Path control — only Data swaps.
+            chevronPath.Data = Avalonia.Media.Geometry.Parse(
+                isTocVisible
+                    ? "M 6,0 L 0,5 L 6,10"
+                    : "M 0,0 L 6,5 L 0,10");
+            ToolTip.SetTip(
+                chevronButton,
+                isTocVisible
+                    ? "Hide table of contents (Ctrl+T)"
+                    : "Show table of contents (Ctrl+T)");
+        }
     }
 
     /// <summary>
@@ -814,6 +928,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 "ctrl+r" => viewModel.ReloadCommand,
                 "f5" => viewModel.ReloadCommand,
                 "escape" => viewModel.ClearErrorCommand,
+                "ctrl+t" => viewModel.ToggleTocCommand,
                 _ => null
             };
             if (command is not null && command.CanExecute(null))
