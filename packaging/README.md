@@ -90,6 +90,12 @@ winget install --id JRSoftware.InnoSetup --source winget
 
 ## macOS
 
+The pieces below are the upstream MarkMello packaging baseline. The Applicate
+overlay focuses on Windows for now, so the fork's release pipeline doesn't
+produce macOS bundles today — the templates are kept in tree so upstream syncs
+stay clean, and so that picking the macOS path back up later is a matter of
+wiring rather than reconstruction.
+
 - `macos/Info.plist` is a template for the signed `.app` bundle metadata.
 - `macos/MarkMello.icns` is the bundle icon generated from the shared master icon.
 - `macos/build-app-bundle.sh` assembles an unsigned `.app` bundle from a `dotnet publish` folder.
@@ -99,6 +105,11 @@ winget install --id JRSoftware.InnoSetup --source winget
 - Without an Apple Developer account, the macOS release stays unsigned and non-notarized. Users should expect Gatekeeper to require an explicit first-run approval after download.
 
 ## Linux
+
+Same story as macOS — these are upstream MarkMello's packaging assets. The
+Applicate overlay ships Windows builds for now, so no Linux AppImages roll out
+of the fork's release flow today; the templates stay alongside the upstream
+ones to keep the tree mergeable.
 
 - `linux/markmello.desktop` is the desktop entry baseline for AppImage packaging.
 - `linux/markmello.png` is the launcher icon generated from the shared master icon.

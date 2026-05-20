@@ -18,6 +18,12 @@ Applicate-specific additions are maintained as a separate overlay layer where
 possible, primarily under `src/MarkMello.Applicate.Desktop`, `tests/MarkMello.Applicate.Tests`,
 and `packaging/windows/MarkMello.Applicate.iss`.
 
+The Applicate overlay currently targets Windows — the WebView/KaTeX renderer
+pipeline is built around Microsoft Edge WebView2, and a matching native control
+isn't available on macOS or Linux yet. Upstream MarkMello continues to support
+its cross-platform packaging on its own terms; the fork's narrower scope is just
+an Applicate-overlay choice and doesn't change anything upstream.
+
 Copyright (C) 2026 Dmitry Denisenko (@applicate2628)
 
 Applicate additions are distributed under GPL-3.0 as part of this fork.
