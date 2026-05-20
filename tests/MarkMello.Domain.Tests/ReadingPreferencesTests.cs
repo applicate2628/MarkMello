@@ -13,7 +13,7 @@ public sealed class ReadingPreferencesTests
         Assert.Equal(DocumentMinimapMode.Auto, normalized.DocumentMinimapMode);
         Assert.Equal(MarkdownRendererBackend.WebView, normalized.RendererBackend);
         Assert.Equal(WidthResizerVisibility.OnHover, normalized.WidthResizerVisibility);
-        Assert.Equal(LightPaletteMode.Original, normalized.LightPalette);
+        Assert.Equal(LightPaletteMode.White, normalized.LightPalette);
     }
 
     [Fact]
@@ -35,7 +35,7 @@ public sealed class ReadingPreferencesTests
         Assert.Equal(ReadingPreferences.MinContentWidth, normalized.ContentWidth);
         Assert.Equal(DocumentMinimapMode.Auto, normalized.DocumentMinimapMode);
         Assert.Equal(WidthResizerVisibility.OnHover, normalized.WidthResizerVisibility);
-        Assert.Equal(LightPaletteMode.Original, normalized.LightPalette);
+        Assert.Equal(LightPaletteMode.White, normalized.LightPalette);
     }
 
     [Theory]

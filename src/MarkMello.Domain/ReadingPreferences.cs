@@ -19,7 +19,7 @@ public sealed record ReadingPreferences(
     DocumentMinimapMode DocumentMinimapMode = DocumentMinimapMode.Auto,
     MarkdownRendererBackend RendererBackend = MarkdownRendererBackend.WebView,
     WidthResizerVisibility WidthResizerVisibility = WidthResizerVisibility.OnHover,
-    LightPaletteMode LightPalette = LightPaletteMode.Original)
+    LightPaletteMode LightPalette = LightPaletteMode.White)
 {
     public const int MinFontSize = 14;
     public const int MaxFontSize = 24;
@@ -48,7 +48,7 @@ public sealed record ReadingPreferences(
         DocumentMinimapMode: DocumentMinimapMode.Auto,
         RendererBackend: MarkdownRendererBackend.WebView,
         WidthResizerVisibility: WidthResizerVisibility.OnHover,
-        LightPalette: LightPaletteMode.Original);
+        LightPalette: LightPaletteMode.White);
 
     /// <summary>
     /// Нормализует пользовательские настройки до безопасного и предсказуемого диапазона.

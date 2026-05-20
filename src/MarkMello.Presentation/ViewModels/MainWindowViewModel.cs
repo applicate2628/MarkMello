@@ -46,7 +46,7 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly string _aboutRepositoryUrl;
     private AppUpdatePackage? _availableUpdatePackage;
     private bool _isUpdateNotificationDismissed;
-    private ThemeMode _selectedLightPalette = ThemeMode.Light;
+    private ThemeMode _selectedLightPalette = ThemeMode.ClassicWhite;
     private ReadingPreferences _lastNotifiedReadingPreferences = ReadingPreferences.Default;
 
     public event EventHandler? CloseRequested;
@@ -117,7 +117,7 @@ public partial class MainWindowViewModel : ObservableObject
     private double _readingProgress;
 
     [ObservableProperty]
-    private ThemeMode _theme = ThemeMode.System;
+    private ThemeMode _theme = ThemeMode.ClassicWhite;
 
     [ObservableProperty]
     private ReadingPreferences _readingPreferences = ReadingPreferences.Default;

@@ -81,7 +81,7 @@ public sealed class JsonSettingsStoreTests
             var windowPlacement = await store.LoadWindowPlacementAsync();
 
             Assert.Equal(ReadingPreferences.Default, preferences);
-            Assert.Equal(ThemeMode.System, theme);
+            Assert.Equal(ThemeMode.ClassicWhite, theme);
             Assert.Equal(DocumentMinimapMode.Auto, preferences.DocumentMinimapMode);
             Assert.Equal(AppLanguage.System, language);
             Assert.Null(windowPlacement);
