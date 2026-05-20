@@ -563,6 +563,329 @@
     });
   }
 
+  // RendererWeb/src/findBar.ts
+  var FIND_BAR_CLASS = "mm-find-bar";
+  var FIND_INPUT_CLASS = "mm-find-input";
+  var FIND_COUNT_CLASS = "mm-find-count";
+  var FIND_BTN_CLASS = "mm-find-btn";
+  var FIND_DEBOUNCE_MS = 150;
+  var SKIP_TAGS = /* @__PURE__ */ new Set([
+    "SCRIPT",
+    "STYLE",
+    "NOSCRIPT",
+    "ASIDE"
+    // minimap aside
+  ]);
+  var SKIP_CLASSES = /* @__PURE__ */ new Set([
+    "mm-minimap",
+    "mm-minimap-viewport",
+    "mm-width-handle",
+    "mm-drop-overlay",
+    FIND_BAR_CLASS
+  ]);
+  function countMatchesInRoot(root, needle) {
+    if (needle.length === 0) {
+      return 0;
+    }
+    const lowered = needle.toLowerCase();
+    let total = 0;
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const el = node;
+            if (SKIP_TAGS.has(el.tagName)) {
+              return NodeFilter.FILTER_REJECT;
+            }
+            for (const cls of SKIP_CLASSES) {
+              if (el.classList.contains(cls)) {
+                return NodeFilter.FILTER_REJECT;
+              }
+            }
+            return NodeFilter.FILTER_SKIP;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+    let current = walker.nextNode();
+    while (current !== null) {
+      const text = (current.nodeValue ?? "").toLowerCase();
+      if (text.length >= lowered.length) {
+        let idx = text.indexOf(lowered);
+        while (idx !== -1) {
+          total++;
+          idx = text.indexOf(lowered, idx + lowered.length);
+        }
+      }
+      current = walker.nextNode();
+    }
+    return total;
+  }
+  function currentMatchIndex(root, needle) {
+    if (needle.length === 0) {
+      return 0;
+    }
+    const sel = window.getSelection();
+    if (sel === null || sel.rangeCount === 0) {
+      return 0;
+    }
+    const range = sel.getRangeAt(0);
+    if (range.collapsed) {
+      return 0;
+    }
+    const lowered = needle.toLowerCase();
+    let count = 0;
+    let found = false;
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const el = node;
+            if (SKIP_TAGS.has(el.tagName)) {
+              return NodeFilter.FILTER_REJECT;
+            }
+            for (const cls of SKIP_CLASSES) {
+              if (el.classList.contains(cls)) {
+                return NodeFilter.FILTER_REJECT;
+              }
+            }
+            return NodeFilter.FILTER_SKIP;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+    let current = walker.nextNode();
+    while (current !== null && !found) {
+      const text = (current.nodeValue ?? "").toLowerCase();
+      if (text.length >= lowered.length) {
+        let idx = text.indexOf(lowered);
+        while (idx !== -1) {
+          count++;
+          if (current === range.startContainer && idx === range.startOffset) {
+            found = true;
+            break;
+          }
+          idx = text.indexOf(lowered, idx + lowered.length);
+        }
+      }
+      current = walker.nextNode();
+    }
+    return found ? count : 0;
+  }
+  function createFindBar() {
+    let state2 = null;
+    function buildDom() {
+      const bar = document.createElement("div");
+      bar.className = FIND_BAR_CLASS;
+      bar.setAttribute("role", "search");
+      bar.setAttribute("aria-label", "Find in document");
+      const input = document.createElement("input");
+      input.type = "search";
+      input.className = FIND_INPUT_CLASS;
+      input.setAttribute("aria-label", "Find in document");
+      input.placeholder = "Find in document";
+      input.spellcheck = false;
+      input.autocomplete = "off";
+      const count = document.createElement("span");
+      count.className = FIND_COUNT_CLASS;
+      count.setAttribute("aria-live", "polite");
+      count.textContent = "";
+      const prevBtn = document.createElement("button");
+      prevBtn.type = "button";
+      prevBtn.className = `${FIND_BTN_CLASS} ${FIND_BTN_CLASS}-prev`;
+      prevBtn.setAttribute("aria-label", "Previous match");
+      prevBtn.title = "Previous match (Shift+Enter)";
+      prevBtn.textContent = "\u2191";
+      const nextBtn = document.createElement("button");
+      nextBtn.type = "button";
+      nextBtn.className = `${FIND_BTN_CLASS} ${FIND_BTN_CLASS}-next`;
+      nextBtn.setAttribute("aria-label", "Next match");
+      nextBtn.title = "Next match (Enter)";
+      nextBtn.textContent = "\u2193";
+      const closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.className = `${FIND_BTN_CLASS} ${FIND_BTN_CLASS}-close`;
+      closeBtn.setAttribute("aria-label", "Close find bar");
+      closeBtn.title = "Close (Esc)";
+      closeBtn.textContent = "\xD7";
+      bar.appendChild(input);
+      bar.appendChild(count);
+      bar.appendChild(prevBtn);
+      bar.appendChild(nextBtn);
+      bar.appendChild(closeBtn);
+      return {
+        bar,
+        input,
+        count,
+        prevBtn,
+        nextBtn,
+        closeBtn,
+        debounceTimer: null,
+        lastSearched: "",
+        totalMatches: 0,
+        hasNavigated: false
+      };
+    }
+    function updateCountDisplay(s) {
+      const query = s.input.value;
+      if (query.length === 0) {
+        s.count.textContent = "";
+        s.bar.classList.remove("mm-find-no-match");
+        return;
+      }
+      if (s.totalMatches === 0) {
+        s.count.textContent = "0 of 0";
+        s.bar.classList.add("mm-find-no-match");
+        return;
+      }
+      s.bar.classList.remove("mm-find-no-match");
+      if (s.hasNavigated) {
+        const idx = currentMatchIndex(document.body, s.lastSearched);
+        if (idx > 0) {
+          s.count.textContent = `${idx} of ${s.totalMatches}`;
+          return;
+        }
+      }
+      s.count.textContent = `${s.totalMatches} match${s.totalMatches === 1 ? "" : "es"}`;
+    }
+    function runSearch(s, query) {
+      s.lastSearched = query;
+      if (query.length === 0) {
+        s.totalMatches = 0;
+        s.hasNavigated = false;
+        window.getSelection()?.removeAllRanges();
+        updateCountDisplay(s);
+        return;
+      }
+      s.totalMatches = countMatchesInRoot(document.body, query);
+      s.hasNavigated = false;
+      if (s.totalMatches > 0) {
+        const main = document.querySelector("main.mm-document") ?? document.body;
+        const range = document.createRange();
+        range.setStart(main, 0);
+        range.collapse(true);
+        const sel = window.getSelection();
+        if (sel !== null) {
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+        navigate(
+          s,
+          "next",
+          /* initialPlacement */
+          true
+        );
+      } else {
+        window.getSelection()?.removeAllRanges();
+      }
+      updateCountDisplay(s);
+    }
+    function navigate(s, direction, initialPlacement = false) {
+      if (s.lastSearched.length === 0 || s.totalMatches === 0) {
+        return;
+      }
+      const find = window.find;
+      if (typeof find !== "function") {
+        return;
+      }
+      const backwards = direction === "prev";
+      find(s.lastSearched, false, backwards, true, false, false, false);
+      s.hasNavigated = true;
+      if (!initialPlacement) {
+        updateCountDisplay(s);
+      }
+    }
+    function attachListeners(s) {
+      s.input.addEventListener("input", () => {
+        const query = s.input.value;
+        if (s.debounceTimer !== null) {
+          window.clearTimeout(s.debounceTimer);
+        }
+        s.debounceTimer = window.setTimeout(() => {
+          s.debounceTimer = null;
+          runSearch(s, query);
+        }, FIND_DEBOUNCE_MS);
+      });
+      s.input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          if (s.debounceTimer !== null) {
+            window.clearTimeout(s.debounceTimer);
+            s.debounceTimer = null;
+            runSearch(s, s.input.value);
+            return;
+          }
+          navigate(s, event.shiftKey ? "prev" : "next");
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          close();
+        }
+      });
+      s.prevBtn.addEventListener("click", () => {
+        navigate(s, "prev");
+        s.input.focus();
+      });
+      s.nextBtn.addEventListener("click", () => {
+        navigate(s, "next");
+        s.input.focus();
+      });
+      s.closeBtn.addEventListener("click", () => {
+        close();
+      });
+    }
+    function open() {
+      if (state2 === null) {
+        state2 = buildDom();
+        attachListeners(state2);
+        document.body.appendChild(state2.bar);
+      } else if (state2.bar.parentNode === null) {
+        document.body.appendChild(state2.bar);
+      }
+      state2.bar.classList.add("mm-find-bar-open");
+      state2.input.focus();
+      state2.input.select();
+    }
+    function close() {
+      if (state2 === null) {
+        return;
+      }
+      if (state2.debounceTimer !== null) {
+        window.clearTimeout(state2.debounceTimer);
+        state2.debounceTimer = null;
+      }
+      state2.bar.classList.remove("mm-find-bar-open");
+      state2.input.value = "";
+      state2.lastSearched = "";
+      state2.totalMatches = 0;
+      state2.hasNavigated = false;
+      state2.count.textContent = "";
+      state2.bar.classList.remove("mm-find-no-match");
+      window.getSelection()?.removeAllRanges();
+    }
+    function toggle() {
+      if (state2 !== null && state2.bar.classList.contains("mm-find-bar-open")) {
+        close();
+      } else {
+        open();
+      }
+    }
+    return {
+      open,
+      close,
+      toggle,
+      get isOpen() {
+        return state2 !== null && state2.bar.classList.contains("mm-find-bar-open");
+      }
+    };
+  }
+
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -597,6 +920,7 @@
   var viewerChromeEnabled = false;
   var documentScrollEnabled = true;
   var wheelProxyEnabled = false;
+  var findBarController = null;
   var widthHandleRoot = null;
   var widthHandleDragging = false;
   var widthHandleStartClientX = 0;
@@ -1389,6 +1713,7 @@
     lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
     minimapSourceReady = false;
     hasInitialLayoutSettled = false;
+    findBarController?.close();
   }
   function ensureChromeNodes() {
     ensureMinimap();
@@ -1599,6 +1924,27 @@
       }
     });
   }
+  function wireFindBar() {
+    findBarController = createFindBar();
+    window.addEventListener(
+      "keydown",
+      (event) => {
+        const isFindCombo = (event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "f";
+        if (isFindCombo) {
+          event.preventDefault();
+          event.stopPropagation();
+          findBarController?.toggle();
+          return;
+        }
+        if (event.key === "Escape" && findBarController?.isOpen === true) {
+          event.preventDefault();
+          event.stopPropagation();
+          findBarController.close();
+        }
+      },
+      { capture: true }
+    );
+  }
   var contextMenuPending = false;
   function wireSaveAsPageChromeSuppress() {
     document.addEventListener("contextmenu", () => {
@@ -1638,6 +1984,7 @@
     wireViewerInteraction();
     wireWheelProxy();
     wireFileDrop();
+    wireFindBar();
     wireHostShortcuts();
     wireSaveAsPageChromeSuppress();
     postHostMessage({

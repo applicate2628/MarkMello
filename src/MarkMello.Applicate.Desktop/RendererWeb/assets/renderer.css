@@ -467,3 +467,125 @@ pre.mm-mermaid.is-rendered {
   --mm-minimap-quote: rgba(170, 130, 200, 0.35);
   --mm-minimap-hr: rgba(140, 140, 140, 0.3);
 }
+
+/* Find-in-document bar (Ctrl+F). Floats top-right; toggled via the
+ * .mm-find-bar-open class. Stays in the DOM after first open so
+ * reopen is a class flip, not a re-mount. The bar must visually
+ * defer to the document — neutral chrome surface, accent only on
+ * input focus and primary action. Sits below the minimap aside in
+ * z-order? No — minimap is left of the document, the find bar is
+ * top-right of the viewport, they do not overlap. z-index just
+ * above the drop overlay (z-index: 9999) keeps it above any
+ * print-print preview chrome. */
+.mm-find-bar {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--mm-document-background);
+  color: var(--mm-document-text);
+  border: 1px solid var(--mm-document-rule);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.08);
+  font-family: var(--mm-document-font-family-sans);
+  font-size: 13px;
+  z-index: 10000;
+  /* Save-Page-As suppression: the body class .mm-saving hides the
+   * minimap and width handle so they don't leak into the saved DOM
+   * snapshot. The find bar follows the same convention. */
+}
+
+body.mm-saving .mm-find-bar {
+  display: none !important;
+}
+
+.mm-find-bar.mm-find-bar-open {
+  display: flex;
+}
+
+.mm-find-input {
+  flex: 0 0 auto;
+  width: 220px;
+  padding: 4px 8px;
+  border: 1px solid var(--mm-document-rule);
+  border-radius: 5px;
+  background: var(--mm-document-background);
+  color: var(--mm-document-text);
+  font-family: inherit;
+  font-size: inherit;
+  outline: none;
+  /* Hide the WebKit clear-button on type="search" — it overlaps the
+   * close × button visually and isn't needed since we have our own
+   * close affordance and Esc binding. */
+  appearance: none;
+}
+
+.mm-find-input::-webkit-search-cancel-button {
+  appearance: none;
+  display: none;
+}
+
+.mm-find-input:focus {
+  border-color: var(--mm-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--mm-accent) 25%, transparent);
+}
+
+.mm-find-bar.mm-find-no-match .mm-find-input {
+  border-color: color-mix(in srgb, #d33 60%, var(--mm-document-rule));
+}
+
+.mm-find-count {
+  flex: 0 0 auto;
+  min-width: 60px;
+  color: var(--mm-document-muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.mm-find-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mm-document-text);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  /* Reset UA button background-color in dark mode */
+  appearance: none;
+}
+
+.mm-find-btn:hover {
+  background: color-mix(in srgb, var(--mm-document-text) 8%, transparent);
+}
+
+.mm-find-btn:active {
+  background: color-mix(in srgb, var(--mm-document-text) 14%, transparent);
+}
+
+.mm-find-btn:focus-visible {
+  outline: 2px solid var(--mm-accent);
+  outline-offset: -2px;
+}
+
+.mm-find-btn.mm-find-btn-close {
+  margin-left: 2px;
+  color: var(--mm-document-muted);
+  font-size: 18px;
+}
+
+.mm-find-btn.mm-find-btn-close:hover {
+  color: var(--mm-document-text);
+}

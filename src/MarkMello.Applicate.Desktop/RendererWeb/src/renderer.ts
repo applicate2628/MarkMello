@@ -18,6 +18,7 @@ import { schedulePhaseBRebuild } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
 import { createScrollCoalescer } from "./scrollCoalescer";
 import { calculateWidthHandleLeft } from "./widthHandleLayout";
+import { createFindBar, type FindBarController } from "./findBar";
 
 type KatexApi = {
   render: (
@@ -152,6 +153,11 @@ let widthResizerVisibility: WidthResizerVisibility = "on-hover";
 let viewerChromeEnabled = false;
 let documentScrollEnabled = true;
 let wheelProxyEnabled = false;
+// Find-in-document (Ctrl+F) — lazily created on first user trigger
+// (open keystroke). Module-scoped so `resetModuleGlobalsForLoadDocument`
+// can call close() on doc-swap and `wireFindBar` can install the
+// keystroke listener that toggles it.
+let findBarController: FindBarController | null = null;
 let widthHandleRoot: HTMLElement | null = null;
 let widthHandleDragging = false;
 let widthHandleStartClientX = 0;
@@ -1296,6 +1302,11 @@ function resetModuleGlobalsForLoadDocument(): void {
   // briefly show the handle at the wrong x — the same jitter the gate was
   // added to prevent, just on the second-and-subsequent doc loads.
   hasInitialLayoutSettled = false;
+  // Find bar — close on doc swap. The bar lives as a body sibling so it
+  // survives the <main> innerHTML write, but its match-state references
+  // detached nodes after the swap. Close clears state and removes
+  // the open class; the controller node stays for fast reopen.
+  findBarController?.close();
 }
 
 function ensureChromeNodes(): void {
@@ -1573,6 +1584,54 @@ function wireFileDrop(): void {
   });
 }
 
+// Ctrl+F → in-document find bar. Renderer-side MVP: pure DOM, no host
+// involvement. Limitation: the keystroke only fires when WebView2 has
+// keyboard focus; if focus is on the Avalonia chrome (title bar, tab
+// strip, etc.) the OS routes WM_KEYDOWN to Avalonia and this handler
+// never sees it. Host-level Ctrl+F forwarding is a v0.3.1 backlog
+// item — once Avalonia.Controls.WebView exposes the managed
+// CoreWebView2 surface we can either bridge host KeyBindings into the
+// WebView (same approach as `wireHostShortcuts` does for ctrl+e etc.)
+// or call CoreWebView2.FindController natively.
+//
+// We register on `window` with capture so that Esc-while-find-bar-open
+// is consumed before reaching the host-shortcuts forwarder (which
+// would otherwise post "escape" to the host and trigger the global
+// escape action). Ctrl+F is not in the host-shortcuts set, so the
+// forwarder ignores it regardless.
+function wireFindBar(): void {
+  findBarController = createFindBar();
+  window.addEventListener(
+    "keydown",
+    (event) => {
+      // Toggle on Ctrl+F / Cmd+F. Treat any modifier-combo as
+      // distinct from the bare key so e.g. Ctrl+Shift+F (potential
+      // future "find in folder") does not steal the same accelerator.
+      const isFindCombo =
+        (event.ctrlKey || event.metaKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "f";
+      if (isFindCombo) {
+        event.preventDefault();
+        event.stopPropagation();
+        findBarController?.toggle();
+        return;
+      }
+      // Escape while find bar is open → close, and prevent the host
+      // from also acting on Escape. When the bar is closed, let
+      // Escape bubble normally (host may map it to "exit edit mode"
+      // or similar).
+      if (event.key === "Escape" && findBarController?.isOpen === true) {
+        event.preventDefault();
+        event.stopPropagation();
+        findBarController.close();
+      }
+    },
+    { capture: true }
+  );
+}
+
 // Right-click → "Save Page As" snapshots the live DOM and writes it to
 // disk. `@media print` does not apply, so the minimap and width handle
 // (built by JS as direct children of <body>) leak into the saved HTML.
@@ -1628,6 +1687,10 @@ document.addEventListener("DOMContentLoaded", () => {
   wireViewerInteraction();
   wireWheelProxy();
   wireFileDrop();
+  // Find bar BEFORE host shortcuts so capture-phase Esc-while-bar-open
+  // is consumed by the find bar's handler before reaching the
+  // host-shortcuts forwarder.
+  wireFindBar();
   wireHostShortcuts();
   wireSaveAsPageChromeSuppress();
   postHostMessage({
