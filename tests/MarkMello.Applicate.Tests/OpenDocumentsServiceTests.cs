@@ -249,4 +249,98 @@ public sealed class OpenDocumentsServiceTests : IDisposable
 
         Assert.Single(service.OpenDocuments);
     }
+
+    // Multi-tab startup-scaling polish: lightweight stub tabs are added
+    // to OpenDocuments without reading the file. Source text stays empty
+    // and IsLoaded is false until EnsureLoadedAsync materializes them.
+    [Fact]
+    public async Task OpenStubAsyncAddsStubWithoutReadingFile()
+    {
+        var path = WriteTemp("stub.md", "stub body");
+        var service = new OpenDocumentsService();
+
+        var stub = await service.OpenStubAsync(path);
+
+        Assert.Single(service.OpenDocuments);
+        Assert.False(stub.IsLoaded);
+        Assert.Equal(string.Empty, stub.SourceText);
+        Assert.Null(service.ActiveDocument);
+        Assert.Equal(path, stub.FilePath);
+    }
+
+    [Fact]
+    public async Task OpenStubAsyncDoesNotRequireExistingFile()
+    {
+        // The file system check that OpenAsync performs is intentionally
+        // skipped so a stale session entry whose file has since moved
+        // does not block startup. The error surfaces when the user
+        // activates the tab and EnsureLoadedAsync fails.
+        var missing = Path.Combine(_tempRoot, "not-yet-created.md");
+        var service = new OpenDocumentsService();
+
+        var stub = await service.OpenStubAsync(missing);
+
+        Assert.Single(service.OpenDocuments);
+        Assert.False(stub.IsLoaded);
+    }
+
+    [Fact]
+    public async Task EnsureLoadedAsyncReadsContentsAndFlipsIsLoaded()
+    {
+        var path = WriteTemp("late.md", "late content");
+        var service = new OpenDocumentsService();
+        var stub = await service.OpenStubAsync(path);
+
+        await service.EnsureLoadedAsync(stub);
+
+        Assert.True(stub.IsLoaded);
+        Assert.Equal("late content", stub.SourceText);
+    }
+
+    [Fact]
+    public async Task EnsureLoadedAsyncIsNoOpOnAlreadyLoadedDocument()
+    {
+        var path = WriteTemp("loaded.md", "fresh");
+        var service = new OpenDocumentsService();
+        var doc = await service.OpenAsync(path);
+
+        // Mutate the file on disk; EnsureLoadedAsync must NOT re-read it
+        // because the document is already loaded and one-shot semantics
+        // for refresh live in UpdateSourceText / OpenPathAsync, not here.
+        File.WriteAllText(path, "changed on disk");
+        await service.EnsureLoadedAsync(doc);
+
+        Assert.True(doc.IsLoaded);
+        Assert.Equal("fresh", doc.SourceText);
+    }
+
+    [Fact]
+    public async Task OpenStubAsyncReturnsExistingDocumentForKnownPath()
+    {
+        var path = WriteTemp("repeat.md", "data");
+        var service = new OpenDocumentsService();
+        var loaded = await service.OpenAsync(path);
+
+        // A stub request for an already-loaded path returns the same
+        // OpenDocument instance and does not regress its loaded state.
+        var stubAttempt = await service.OpenStubAsync(path);
+
+        Assert.Single(service.OpenDocuments);
+        Assert.Same(loaded, stubAttempt);
+        Assert.True(stubAttempt.IsLoaded);
+    }
+
+    [Fact]
+    public async Task UpdateSourceTextFlipsStubToLoaded()
+    {
+        var path = WriteTemp("backfill.md", "disk");
+        var service = new OpenDocumentsService();
+        var stub = await service.OpenStubAsync(path);
+        Assert.False(stub.IsLoaded);
+
+        service.UpdateSourceText(stub, "fresh text");
+
+        Assert.True(stub.IsLoaded);
+        Assert.Equal("fresh text", stub.SourceText);
+    }
 }

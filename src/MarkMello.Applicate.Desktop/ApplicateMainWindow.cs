@@ -931,6 +931,36 @@ public sealed class ApplicateMainWindow : MainWindow
                     return;
                 }
 
+                // Multi-tab startup-scaling polish: if the activated tab
+                // is a lazy STUB (created by OpenStubAsync during session-
+                // restore, contents not yet read), fill its SourceText
+                // from EarlyDocumentCache or disk before anything reads
+                // it. Without this, the edit-mode branch below would
+                // publish an empty MarkdownSource into the editor and
+                // the reader branch would set VM.Document from the cache
+                // but leave the OpenDocument.SourceText stale for any
+                // later cross-source dedup checks.
+                if (!args.ActiveDocument.IsLoaded)
+                {
+                    try
+                    {
+                        await openDocs.EnsureLoadedAsync(args.ActiveDocument)
+                            .ConfigureAwait(true);
+                    }
+                    catch (System.IO.IOException)
+                    {
+                        // File became unreadable since the session
+                        // recorded it. Fall through; the reader-mode
+                        // OpenPathAsync below will surface the typed
+                        // error and either way the welcome state is
+                        // reached.
+                    }
+                    catch (System.UnauthorizedAccessException)
+                    {
+                        // Same fallthrough as IOException.
+                    }
+                }
+
                 // Edit mode path: do NOT call OpenPathAsync because its
                 // internal ApplyLoadedDocument sets IsEditMode = false,
                 // unmounting the EditWorkspace and momentarily flashing
@@ -1184,14 +1214,32 @@ public sealed class ApplicateMainWindow : MainWindow
 
             var argvPath = viewModel.Document?.Path;
 
-            // Open all saved + argv paths WITHOUT auto-activating each. The
-            // service's OpenAsync(activate: false) overload skips the
-            // SetActive side-effect so the loop does not bounce
-            // ActiveDocument between every restored file. After the loop,
-            // we Activate the chosen one exactly once. This eliminates the
-            // earlier "v0.2.x костыль" force-sync race where ActiveDocument
-            // ended up at whatever was opened last and the tabs UI drifted
-            // out of sync with VM.Document on subsequent activations.
+            // Multi-tab startup-scaling polish: determine the preferred
+            // active path UP FRONT so the restore loop knows which one
+            // single tab needs a full open (file read) and which ones
+            // can be added as lightweight stubs. Argv wins over saved
+            // active path because the user just explicitly asked for it
+            // (mirrors the existing toActivate priority further below).
+            // When no preferred path is set (legacy session without
+            // ActivePath, or saved.ActivePath empty and no argv) we fall
+            // back to FULL open for every path — the legacy behaviour —
+            // because we cannot tell which one will be activated and
+            // unloaded stubs would risk publishing empty content into
+            // the VM if an upstream change order picks one before the
+            // ensure-loaded handler runs.
+            var preferredActivePath = !string.IsNullOrWhiteSpace(argvPath)
+                ? argvPath
+                : saved.ActivePath;
+            var canUseStubs = !string.IsNullOrWhiteSpace(preferredActivePath);
+
+            // Open saved paths: the preferred-active path goes through
+            // the full OpenAsync so its contents are read into the
+            // OpenDocument right here. Non-active paths go through
+            // OpenStubAsync (no file read) so cold-startup time does
+            // not scale with N tabs. The early-document cache filled
+            // by Program.StartSessionTabsPreRead is the rendezvous
+            // for the active-doc fast path; stubs consume the cache
+            // when the user clicks them later (EnsureLoadedAsync).
             inVmMirror = true;
             try
             {
@@ -1201,9 +1249,23 @@ public sealed class ApplicateMainWindow : MainWindow
                     {
                         continue;
                     }
+
+                    var isPreferred = canUseStubs
+                        && string.Equals(
+                            path,
+                            preferredActivePath,
+                            System.StringComparison.OrdinalIgnoreCase);
+
                     try
                     {
-                        await openDocs.OpenAsync(path, activate: false).ConfigureAwait(true);
+                        if (canUseStubs && !isPreferred)
+                        {
+                            await openDocs.OpenStubAsync(path).ConfigureAwait(true);
+                        }
+                        else
+                        {
+                            await openDocs.OpenAsync(path, activate: false).ConfigureAwait(true);
+                        }
                     }
                     catch (System.IO.IOException)
                     {
@@ -1239,13 +1301,16 @@ public sealed class ApplicateMainWindow : MainWindow
             // pointed at a missing file, etc.) fall back to the first open
             // doc so the user is never left with an "active tab does not
             // match displayed file" state.
-            var preferredPath = !string.IsNullOrWhiteSpace(argvPath) ? argvPath : saved.ActivePath;
+            // (preferredActivePath was already computed above to drive the
+            // stub-vs-full-open decision in the restore loop; reused here
+            // so the activation target stays consistent with the loop's
+            // "full open" choice.)
             OpenDocument? toActivate = null;
-            if (!string.IsNullOrWhiteSpace(preferredPath))
+            if (!string.IsNullOrWhiteSpace(preferredActivePath))
             {
                 foreach (var doc in openDocs.OpenDocuments)
                 {
-                    if (string.Equals(doc.FilePath, preferredPath, System.StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(doc.FilePath, preferredActivePath, System.StringComparison.OrdinalIgnoreCase))
                     {
                         toActivate = doc;
                         break;
@@ -1259,6 +1324,37 @@ public sealed class ApplicateMainWindow : MainWindow
 
             if (toActivate is not null)
             {
+                // Multi-tab startup-scaling polish: make sure the
+                // chosen-active OpenDocument is fully loaded before
+                // anything reads its SourceText. In the happy path the
+                // restore loop above already called the full OpenAsync
+                // for the preferred path, so this is a no-op. In the
+                // fallback path (preferredActivePath was empty, missing,
+                // or refused to load and we picked OpenDocuments[0]
+                // which is a stub) the cache hit from
+                // Program.StartSessionTabsPreRead pays for the read; on
+                // a true cache miss EnsureLoadedAsync falls through to
+                // disk. The Activate below fires
+                // ActiveDocumentChanged with inVmMirror=true so the
+                // bridge handler does not re-EnsureLoadedAsync on top
+                // of this call.
+                if (!toActivate.IsLoaded)
+                {
+                    try
+                    {
+                        await openDocs.EnsureLoadedAsync(toActivate).ConfigureAwait(true);
+                    }
+                    catch (System.IO.IOException)
+                    {
+                        // Fall through; the OpenPathAsync below will
+                        // surface the typed-error to the VM.
+                    }
+                    catch (System.UnauthorizedAccessException)
+                    {
+                        // Same fallthrough as IOException.
+                    }
+                }
+
                 // Single canonical Activate — no ReferenceEquals dance because
                 // the restore loop above intentionally left ActiveDocument
                 // unchanged (likely null, unless upstream's argv-load fired

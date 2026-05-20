@@ -33,6 +33,30 @@ public interface IOpenDocumentsService
     /// </summary>
     Task<OpenDocument> OpenAsync(string filePath, bool activate = true);
 
+    /// <summary>
+    /// Add a path to <see cref="OpenDocuments"/> as a STUB tab — the file
+    /// is not read, <see cref="OpenDocument.SourceText"/> stays empty,
+    /// and <see cref="OpenDocument.IsLoaded"/> is false. Used by
+    /// session-restore for non-active tabs so cold startup does not pay
+    /// per-tab File I/O cost. The stub materializes on first activation
+    /// via <see cref="EnsureLoadedAsync"/>. Returns the existing
+    /// <see cref="OpenDocument"/> when the path is already known (loaded
+    /// or stub); does NOT change <see cref="ActiveDocument"/>.
+    /// </summary>
+    Task<OpenDocument> OpenStubAsync(string filePath);
+
+    /// <summary>
+    /// Ensure <paramref name="document"/>'s contents are loaded into
+    /// <see cref="OpenDocument.SourceText"/>. No-op when already loaded.
+    /// On miss, reads from the early-document cache first (deposited by
+    /// <c>Program.Main</c> for known session paths) and falls back to a
+    /// synchronous-on-thread-pool File.ReadAllText. Flips
+    /// <see cref="OpenDocument.IsLoaded"/> to true on success. Used by
+    /// the active-document bridge before any code path that needs the
+    /// text (edit-mode in-place apply, cross-source content match).
+    /// </summary>
+    Task EnsureLoadedAsync(OpenDocument document);
+
     void Activate(OpenDocument document);
 
     void Close(OpenDocument document);

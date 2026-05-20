@@ -74,6 +74,19 @@ internal static class Program
             //    direct instantiation of CommandLineActivation
             StartActiveDocumentPreRead(args);
 
+            // Multi-tab startup-scaling polish: also pre-read every path
+            // listed in the persisted session file (OpenPaths) on the
+            // thread pool. Deposits land in the same EarlyDocumentCache;
+            // when the user's session has N tabs, the active tab consumes
+            // its entry just like the argv path, and inactive stub-tabs
+            // (which only materialize on click) hit the cache too if the
+            // pre-read completed first. Cost on disk: O(N) bytes per
+            // session file, but all reads overlap Avalonia init / shell
+            // bootstrap. The session file is tiny JSON so reading it
+            // synchronously on the main thread is cheaper than spinning
+            // up another task just to discover the list of paths.
+            StartSessionTabsPreRead();
+
             ApplicateTrace.DiagMs("startup-pre-window", "appbuilder-configure-start");
             var appBuilder = BuildAvaloniaApp();
             ApplicateTrace.DiagMs("startup-pre-window", "appbuilder-configure-end");
@@ -152,6 +165,106 @@ internal static class Program
                 ApplicateTrace.Diag("startup-pre-window", $"perf-doc read-failed ex={ex.GetType().Name} msg={ex.Message}");
             }
         });
+    }
+
+    /// <summary>
+    /// Load the persisted session synchronously (small JSON file, sub-ms
+    /// read) and dispatch parallel thread-pool reads for every listed
+    /// path. Each read canonicalizes via <see cref="Path.GetFullPath"/>
+    /// and deposits into <see cref="EarlyDocumentCache"/>. The deposits
+    /// are fire-and-forget; the cache lookup in
+    /// <c>MainWindowViewModel.LoadDocumentAsync</c> (for the active tab)
+    /// and <c>OpenDocumentsService.EnsureLoadedAsync</c> (for stub tabs
+    /// activated by the user later) is the rendezvous. All exceptions
+    /// are swallowed so a single bad path does not poison the cold-start
+    /// path; on failure the cache stays empty for that key and the VM /
+    /// service falls through to its normal disk-read with typed-error
+    /// handling.
+    /// </summary>
+    private static void StartSessionTabsPreRead()
+    {
+        ApplicateSession session;
+        try
+        {
+            // Synchronous load — JsonApplicateSessionStore.LoadAsync is a
+            // ValueTask wrapping File.ReadAllText on a small JSON file
+            // (typically &lt;1 KB). GetAwaiter().GetResult() avoids
+            // dragging the whole Program.Main into an async path just
+            // to pull the list of paths.
+            session = new JsonApplicateSessionStore().LoadAsync()
+                .AsTask().GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            ApplicateTrace.Diag(
+                "startup-pre-window",
+                $"perf-session-prefetch load-failed ex={ex.GetType().Name}");
+            return;
+        }
+
+        var paths = session.OpenPaths;
+        if (paths is null || paths.Count == 0)
+        {
+            ApplicateTrace.DiagMs(
+                "startup-pre-window",
+                "perf-session-prefetch skipped reason=no-session-paths");
+            return;
+        }
+
+        // Snapshot the count BEFORE dispatching so the marker reflects
+        // the requested fan-out, not whatever survives racing the rest
+        // of startup. Each Task is independent; concurrent deposits to
+        // the ConcurrentDictionary inside EarlyDocumentCache are safe.
+        var dispatched = 0;
+        foreach (var rawPath in paths)
+        {
+            if (string.IsNullOrWhiteSpace(rawPath))
+            {
+                continue;
+            }
+
+            // Capture per-iteration variable for the lambda closure —
+            // C# 5+ already scopes foreach this way, but kept explicit
+            // for readability.
+            var path = rawPath;
+
+            // Fire-and-forget. The thread pool decides parallelism;
+            // typical session sizes (3-10 tabs) do not stress the pool.
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    var canonical = Path.GetFullPath(path);
+                    var content = File.ReadAllText(canonical);
+                    var source = new MarkdownSource(
+                        Path: canonical,
+                        FileName: Path.GetFileName(canonical),
+                        Content: content);
+                    EarlyDocumentCache.Deposit(canonical, source);
+                    ApplicateTrace.Diag(
+                        "startup-pre-window",
+                        $"perf-session-prefetch deposit path={canonical} bytes={content.Length}");
+                }
+                catch (Exception ex)
+                {
+                    // Swallow: the stub-tab activation path (or the
+                    // active-doc LoadDocumentAsync) re-attempts with its
+                    // own typed-error surface. A missing/locked file in
+                    // the saved session is non-fatal — the user just
+                    // gets a "file unavailable" surface when they click
+                    // the tab.
+                    ApplicateTrace.Diag(
+                        "startup-pre-window",
+                        $"perf-session-prefetch failed path={path} ex={ex.GetType().Name}");
+                }
+            });
+            dispatched++;
+        }
+
+        ApplicateTrace.DiagMs(
+            "startup-pre-window",
+            "perf-session-prefetch dispatched",
+            $"count={dispatched}");
     }
 
     private static ServiceProvider ConfigureServices(

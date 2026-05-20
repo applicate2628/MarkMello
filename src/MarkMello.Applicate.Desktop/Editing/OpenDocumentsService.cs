@@ -3,6 +3,8 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using MarkMello.Application.Diagnostics;
+using MarkMello.Domain;
 
 namespace MarkMello.Applicate.Desktop.Editing;
 
@@ -71,6 +73,66 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
         {
             _openLock.Release();
         }
+    }
+
+    public async Task<OpenDocument> OpenStubAsync(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            throw new ArgumentException("File path must not be empty.", nameof(filePath));
+        }
+
+        // No File.Exists / File.ReadAllText here — stubs are intentionally
+        // lightweight so cold startup with N session tabs does not scale
+        // with N. A missing-file check would re-introduce a per-tab
+        // synchronous I/O probe; the EnsureLoadedAsync path handles
+        // missing/unreadable files when the user activates the tab.
+        var normalized = Path.GetFullPath(filePath);
+
+        await _openLock.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            var existing = FindByPath(normalized);
+            if (existing is not null)
+            {
+                return existing;
+            }
+
+            var displayName = OpenDocument.DisplayNameFromPath(normalized);
+            var document = OpenDocument.CreateStub(normalized, displayName);
+            _openDocuments.Add(document);
+            return document;
+        }
+        finally
+        {
+            _openLock.Release();
+        }
+    }
+
+    public async Task EnsureLoadedAsync(OpenDocument document)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        if (document.IsLoaded)
+        {
+            return;
+        }
+
+        // Cache hit: Program.Main pre-read this path concurrently and
+        // deposited the source. Use it without touching disk again.
+        if (EarlyDocumentCache.TryConsume(document.FilePath, out var cached)
+            && cached is not null)
+        {
+            document.SourceText = cached.Content;
+            document.IsLoaded = true;
+            return;
+        }
+
+        // Cache miss: do the read now. ReadAllTextAsync internally
+        // dispatches to the thread pool, so the UI thread is not blocked
+        // for the duration of the file read.
+        var content = await File.ReadAllTextAsync(document.FilePath).ConfigureAwait(true);
+        document.SourceText = content;
+        document.IsLoaded = true;
     }
 
     public void Activate(OpenDocument document)
@@ -148,6 +210,11 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
 
         document.SourceText = sourceText ?? throw new ArgumentNullException(nameof(sourceText));
         document.IsModified = false;
+        // Receiving externally-sourced text counts as loaded — any stub
+        // that reaches here (e.g. the bridge mirror noticing VM.Document
+        // content differs) becomes a regular loaded document so later
+        // tab switches do not re-read from disk.
+        document.IsLoaded = true;
     }
 
     private OpenDocument? FindByPath(string normalizedPath)
