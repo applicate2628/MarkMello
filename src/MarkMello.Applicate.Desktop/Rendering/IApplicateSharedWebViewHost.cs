@@ -1,4 +1,6 @@
 using System;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia.Controls;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Views;
@@ -178,4 +180,24 @@ public interface IApplicateSharedWebViewHost
     /// route the failure to their slot's failure-view surface.
     /// </summary>
     event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
+
+    /// <summary>
+    /// Pre-warm the renderer shell at app boot so the first user
+    /// <see cref="RequestRender"/> does not pay the ~502 ms
+    /// <c>navigate-shell → shell-ready</c> gap on the user-visible critical
+    /// path (PE r2 item A). The host parks the view under the warmup panel
+    /// and stays in <c>PARKED</c> throughout — no consumer slot is touched,
+    /// no visibility is flipped. Idempotent: re-entrant calls after the
+    /// shell is already navigated return immediately. Safe to call before
+    /// any consumer has attached.
+    ///
+    /// <para>Emits diagnostic markers in the <c>startup-webview</c> group:
+    /// <c>shell-prewarm-start</c> on entry, <c>shell-prewarm-ready</c> after
+    /// <c>document-ready</c> IPC has unlocked the shell-ready TCS, or
+    /// <c>shell-prewarm-failed</c> with the exception type on failure. On
+    /// failure the lazy <see cref="ApplicateWebMarkdownDocumentView"/>
+    /// shell-init path takes over at the next user render — the failure is
+    /// not propagated past this Task.</para>
+    /// </summary>
+    Task PreWarmShellAsync(CancellationToken cancellationToken = default);
 }

@@ -1,5 +1,8 @@
 using System;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia.Controls;
+using Avalonia.Threading;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Views;
@@ -286,6 +289,52 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
     {
         ArgumentNullException.ThrowIfNull(failure);
         RendererFailed?.Invoke(this, failure);
+    }
+
+    public async Task PreWarmShellAsync(CancellationToken cancellationToken = default)
+    {
+        // Pre-warm runs on the Avalonia UI thread end-to-end. NavigateToShellAsync
+        // calls _webView.Navigate(...) which is Avalonia-controlled and must run
+        // on the UI thread; ApplicateTrace emission is thread-agnostic but we
+        // keep the whole flow on UI to avoid cross-thread state-write hazards
+        // against _shellNavigated and _shellReady.
+        //
+        // The caller (ApplicateMainWindow.Opened handler) is already on the UI
+        // thread when Opened fires, but we guard with CheckAccess+Post so any
+        // background-thread caller is normalised to UI thread automatically.
+        if (!Dispatcher.UIThread.CheckAccess())
+        {
+            await Dispatcher.UIThread.InvokeAsync(
+                () => PreWarmShellAsync(cancellationToken),
+                DispatcherPriority.Background);
+            return;
+        }
+
+        ApplicateTrace.DiagMs("startup-webview", "shell-prewarm-start");
+        try
+        {
+            await View.EnsureShellReadyAsync(cancellationToken).ConfigureAwait(true);
+            // EnsureShellReadyAsync resolves _shellReady's TCS via the
+            // document-ready IPC at OnWebMessageReceived; by the time the
+            // call returns, the shell is fully navigated AND the IPC has
+            // fired. The 502 ms navigate-shell to shell-ready gap has been
+            // paid HERE, before any user RequestRender lands.
+            ApplicateTrace.DiagMs("startup-webview", "shell-prewarm-ready");
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation is silent. The lazy QueueRenderShellAsync path
+            // owns the retry at the next user render. No marker emitted —
+            // cancellation is not a failure mode.
+        }
+        catch (Exception ex)
+        {
+            ApplicateTrace.DiagMs("startup-webview", "shell-prewarm-failed", "ex=" + ex.GetType().Name);
+            // Swallow so the host stays usable. The lazy path at
+            // QueueRenderShellAsync:521 retries the shell navigation on the
+            // next user render; if that ALSO fails it routes through
+            // FallbackRequested -> OnViewFallbackRequested -> RendererFailed.
+        }
     }
 
     private void OnViewDocumentRendered(object? sender, EventArgs e)

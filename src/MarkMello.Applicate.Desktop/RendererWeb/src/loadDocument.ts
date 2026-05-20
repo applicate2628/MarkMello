@@ -3,10 +3,22 @@ export type LoadDocumentMessage = {
   documentName?: string;
   theme?: "light" | "dark" | "classic-white";
   renderId?: number;
+  // PE r2 item G — host-provided per-document mermaid presence flag,
+  // populated from C#'s `body.HasMermaidBlock` at the IPC boundary
+  // (ApplicateWebMarkdownDocumentView.cs:557, IPC type at renderer.ts:108).
+  // Threaded down into runInitialRenderPipeline so its mermaid init/render
+  // calls skip when false. `undefined` defaults to running (backward-compat
+  // for older docs that don't carry the flag).
+  hasMermaid?: boolean;
 };
 
 export type LoadDocumentDeps = {
-  runInitialRenderPipeline: () => Promise<void>;
+  // PE r2 item G — accepts the per-document `hasMermaid` so the deps
+  // closure in renderer.ts can build InitialRenderPipelineDeps with the
+  // mermaid guard set correctly for this specific load. Omitting the arg
+  // (e.g. test harness, first-reading-preferences bootstrap) leaves the
+  // pipeline at the "run mermaid" default.
+  runInitialRenderPipeline: (hasMermaid?: boolean) => Promise<void>;
   cancelCurrentMathController: () => void;
   resetModuleGlobals: () => void;
   scrollWindowToTop: () => void;
@@ -60,7 +72,10 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
 
   // Re-run the initial render pipeline against the new body. The pipeline owns
   // math, mermaid, code-block, layout-ready, and document-ready emission.
-  void deps.runInitialRenderPipeline();
+  // PE r2 item G — thread the per-document `hasMermaid` flag down so the
+  // pipeline can skip mermaid init+render entirely for docs without mermaid
+  // blocks. Undefined defaults to running (backward-compat).
+  void deps.runInitialRenderPipeline(message.hasMermaid);
 }
 
 export function clearDocumentState(deps: LoadDocumentDeps): void {

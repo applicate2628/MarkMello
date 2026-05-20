@@ -106,12 +106,21 @@ public partial class MainWindow : Window
         // Linux: ничего не переопределяем — пусть WM рисует свой chrome.
     }
 
-    private async void OnWindowOpened(object? sender, EventArgs e)
+    private void OnWindowOpened(object? sender, EventArgs e)
     {
         StartupDiag.DiagMs("startup-first-frame", "window-opened");
-        await _startupInitializationTask.ConfigureAwait(true);
-        await RevealShellAfterStartupAsync().ConfigureAwait(true);
-        await CompleteStartupSmokeTestAsync().ConfigureAwait(true);
+
+        // CR (PE r2 §2 item 2): Decouple chrome reveal from _startupInitializationTask.
+        // Previously this method awaited the full VM init (~1.8 s) before revealing the
+        // shell, leaving the user looking at a black window. The shell is now revealed
+        // on the window's own first composite via a DispatcherPriority.Render hop, while
+        // _startupInitializationTask continues in the background. All visible bindings
+        // tolerate the pre-init NoDocument/IsWelcome state (see PE r2 §4 CR audit).
+        _ = Dispatcher.UIThread.InvokeAsync(RevealShellAfterStartupAsync, DispatcherPriority.Render);
+
+        // Smoke-exit timer is independent of VM init readiness; it just measures
+        // "window opened + delay" which is the smoke-test contract.
+        _ = CompleteStartupSmokeTestAsync();
     }
 
     private void PrepareShellForStartup()
@@ -119,12 +128,15 @@ public partial class MainWindow : Window
         ShellRoot.Opacity = 0;
     }
 
-    private async Task RevealShellAfterStartupAsync()
+    private void RevealShellAfterStartupAsync()
     {
-        await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Render);
-        StartupDiag.DiagMs("startup-first-frame", "dispatcher-render-barrier");
-        await Task.Delay(60).ConfigureAwait(true);
+        // We arrive here on the UI thread at DispatcherPriority.Render, i.e. immediately
+        // after Avalonia's first composite of the just-opened window. Record the frame
+        // marker and flip opacity in the same dispatcher tick.
+        StartupDiag.DiagMs("startup-first-frame", "first-compositor-frame");
+        StartupDiag.DiagMs("startup-first-frame", "shell-reveal-start");
         ShellRoot.Opacity = 1;
+        StartupDiag.DiagMs("startup-first-frame", "shell-reveal-end");
     }
 
     private async Task InitializeStartupAsync()

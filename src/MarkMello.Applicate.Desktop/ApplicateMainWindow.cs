@@ -58,6 +58,13 @@ public sealed class ApplicateMainWindow : MainWindow
         ApplicateTrace.DiagMs("startup-applicate-window", "install-warmup-panel-start");
         InstallSharedWebViewWarmupPanel();
         ApplicateTrace.DiagMs("startup-applicate-window", "install-warmup-panel-end");
+        // PE r2 item A: trigger pre-warm IMMEDIATELY after the warmup panel is
+        // populated so the shell asset-bundle load, file write, Navigate, and
+        // document-ready IPC can overlap with the remaining ctor work (install-
+        // tabs, install-sibling-views, WebView2 controller init) and the base
+        // class's Window-Opened firing, instead of racing the user's first
+        // RequestRender out of the Opened-event reveal at ms~1300.
+        InstallSharedWebViewPreWarm();
         ApplicateTrace.DiagMs("startup-applicate-window", "install-tabs-start");
         InstallTabsAndWelcome();
         ApplicateTrace.DiagMs("startup-applicate-window", "install-tabs-end");
@@ -1117,6 +1124,28 @@ public sealed class ApplicateMainWindow : MainWindow
             // Flush a consolidated save now that the restored set is final.
             SaveSession();
         });
+    }
+
+    // PE r2 item A — pre-warm wiring. Runs once at ctor time, right after
+    // InstallSharedWebViewWarmupPanel populated _warmupParent and parented the
+    // shared View under it. The actual Navigate is fire-and-forget (the host's
+    // PreWarmShellAsync swallows its own errors and emits diagnostic markers in
+    // the startup-webview group). The lazy QueueRenderShellAsync path retains
+    // ownership of error recovery on the next user render if pre-warm fails.
+    private void InstallSharedWebViewPreWarm()
+    {
+        var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
+        if (sharedHost is null)
+        {
+            return;
+        }
+        // The Avalonia.Controls.WebView controller initialises lazily once the
+        // View is in a realised visual subtree (warmup panel is in BodyPanel by
+        // this point). Navigate() called now queues internally and fires at
+        // environment-ready; the asset-bundle GetAsync await yields the UI
+        // thread immediately so the remaining ctor work (install-tabs, sibling-
+        // views, install-hooks) proceeds without blocking.
+        _ = sharedHost.PreWarmShellAsync();
     }
 
     private void InstallSharedWebViewWarmupPanel()

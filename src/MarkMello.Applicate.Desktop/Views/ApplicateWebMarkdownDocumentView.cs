@@ -68,6 +68,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _shellNavigated;
     private bool _shellDocumentReadyConsumed;
     private TaskCompletionSource<bool>? _shellReady;
+    // PE r2 item F: tracks the theme name most recently inlined into the
+    // generated HTML via ApplyInitialTheme. Used at OnWebMessageReceived's
+    // user-document document-ready branch to suppress redundant SendTheme()
+    // when the inlined theme already matches GetThemeName(). UI-thread-only
+    // (every ApplyInitialTheme call site runs on the Avalonia UI thread:
+    // QueueRenderShellAsync and RenderAsync are both queued via QueueRender
+    // on the UI thread). Null until first ApplyInitialTheme runs; the
+    // suppression guard treats null as "do not suppress" (safe fallback).
+    private string? _inlinedTheme;
     private bool _isWebWidthDragging;
     private long _renderSequence;
 
@@ -520,10 +529,29 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             ApplicateTrace.ModeToggle($"Web.RenderShell start id={renderId} source={source?.Path ?? "(null)"}");
             if (!_shellNavigated)
             {
+                // PE r2 item A — race-safe shell-init latch. _shellReady MUST be
+                // initialized before NavigateToShellAsync (Sonnet MUST-FIX 1: the
+                // document-ready IPC at OnWebMessageReceived calls TrySetResult
+                // and silently drops if the TCS is null; combined with the
+                // _shellDocumentReadyConsumed latch it would hang any subsequent
+                // wait on _shellReady.Task). _shellNavigated MUST be set BEFORE
+                // the await on NavigateToShellAsync so any parallel caller
+                // (pre-warm vs lazy, or rapid back-to-back RequestRenders) sees
+                // the in-flight navigation and falls through to wait on the same
+                // TCS instead of issuing a duplicate Navigate. On exception we
+                // roll back both so the next render attempt can retry.
                 _shellReady ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-                ApplicateTrace.ModeToggle($"Web.RenderShell navigate-shell id={renderId}");
-                await NavigateToShellAsync(cancellationToken).ConfigureAwait(true);
                 _shellNavigated = true;
+                ApplicateTrace.ModeToggle($"Web.RenderShell navigate-shell id={renderId}");
+                try
+                {
+                    await NavigateToShellAsync(cancellationToken).ConfigureAwait(true);
+                }
+                catch
+                {
+                    _shellNavigated = false;
+                    throw;
+                }
             }
 
             // Wait for shell's first document-ready before posting load-document.
@@ -588,7 +616,13 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             bundle.Base,
             bundle.Mermaid,
             bundle.Highlight);
-        html = ApplyInitialTheme(html, GetThemeName());
+        // PE r2 item F: capture the theme name inlined into the shell HTML so
+        // the user-document document-ready branch in OnWebMessageReceived can
+        // suppress redundant SendTheme() when the renderer's first message
+        // arrives with the same theme already applied.
+        var shellTheme = GetThemeName();
+        _inlinedTheme = shellTheme;
+        html = ApplyInitialTheme(html, shellTheme);
 
         var folder = GetGeneratedDocumentFolder();
         Directory.CreateDirectory(folder);
@@ -598,6 +632,113 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _currentGeneratedDocumentPath = shellPath;
         _isLoadingGeneratedDocument = true;
         _webView.Navigate(new Uri(shellPath));
+    }
+
+    /// <summary>
+    /// Pre-warm the renderer shell so the first user <c>RequestRender</c> does
+    /// not pay the ~502 ms <c>navigate-shell → shell-ready</c> gap on the
+    /// user-visible critical path. Idempotent: re-entrant calls after the
+    /// shell has already navigated return immediately. No-op when shell mode
+    /// is disabled (the legacy per-document <c>Navigate</c> path has no shell
+    /// to pre-warm).
+    ///
+    /// <para><b>TCS init order is load-bearing</b> (PE r2 item A, Sonnet
+    /// MUST-FIX 1). <c>_shellReady</c> MUST be created BEFORE
+    /// <see cref="NavigateToShellAsync"/> runs. Otherwise the shell's
+    /// <c>document-ready</c> IPC fires at <c>OnWebMessageReceived</c> while
+    /// <c>_shellReady</c> is still <c>null</c>, <c>_shellReady?.TrySetResult</c>
+    /// is silently dropped, AND <c>_shellDocumentReadyConsumed = true</c>
+    /// prevents the gate from re-firing — the user's later
+    /// <see cref="QueueRenderShellAsync"/> awaits <c>_shellReady.Task</c>
+    /// forever → startup hang.</para>
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation for the pre-warm I/O.
+    /// Cancelling does NOT throw past the caller's await; on failure or
+    /// cancellation the lazy <see cref="QueueRenderShellAsync"/> path
+    /// regains ownership at the next user render.</param>
+    internal async Task EnsureShellReadyAsync(CancellationToken cancellationToken)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        // Idempotency guard. Mirrors the same _shellNavigated check at
+        // QueueRenderShellAsync:521 so the pre-warm path and the lazy path
+        // converge on the same shell instance.
+        if (_shellNavigated)
+        {
+            return;
+        }
+
+        // Legacy mode has no shell to pre-warm; the path silently no-ops so
+        // the host can call EnsureShellReadyAsync unconditionally at app boot
+        // without needing to inspect shell-mode state itself.
+        if (!_shellMode || _shellAssetFactory is null)
+        {
+            return;
+        }
+
+        try
+        {
+            // Step 1 (TCS init): MUST happen before NavigateToShellAsync.
+            // See XML doc above for the silent-drop hang this prevents.
+            _shellReady ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            // Step 2 (idempotency latch — race-safe ordering): set BEFORE
+            // the await so any parallel lazy QueueRenderShellAsync (driven
+            // by the user's first RequestRender that fires while pre-warm
+            // is still awaiting bundle.GetAsync inside NavigateToShellAsync)
+            // sees the in-flight navigation and falls through to wait on
+            // the same _shellReady TCS instead of issuing a duplicate
+            // Navigate. The roll-back in the catch block restores the
+            // false latch so the lazy path can retry.
+            _shellNavigated = true;
+
+            try
+            {
+                // Step 3 (navigate): drives the asset-bundle load, HTML write,
+                // and _webView.Navigate(shellPath). The Navigate must run on
+                // the Avalonia UI thread; callers are responsible for posting
+                // the pre-warm entry through Dispatcher.UIThread when needed.
+                await NavigateToShellAsync(cancellationToken).ConfigureAwait(true);
+            }
+            catch
+            {
+                _shellNavigated = false;
+                throw;
+            }
+
+            // Step 4 (await IPC): the shell page must finish parsing and post
+            // document-ready before the user's first load-document IPC can be
+            // processed. Wait on the same TCS the lazy QueueRenderShellAsync
+            // path waits on, so by the time this method returns the user
+            // critical path is unblocked end-to-end (PE r2 §5 acceptance gate:
+            // shell-prewarm-ready must mean fully-ready, not just navigated).
+            if (_shellReady is not null)
+            {
+                using var registration = cancellationToken.Register(() => _shellReady.TrySetCanceled(cancellationToken));
+                await _shellReady.Task.ConfigureAwait(true);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Pre-warm cancelled (window closed, dispose race). Leave
+            // _shellNavigated == false so the lazy path takes over on the
+            // next user render; QueueRenderShellAsync will retry the shell
+            // navigation. _shellReady's TCS is still null-or-pending, which
+            // QueueRenderShellAsync handles by either re-initialising or
+            // awaiting the existing TCS.
+            throw;
+        }
+        catch
+        {
+            // Asset-bundle load failed, file write failed, or Navigate
+            // threw. Leave _shellNavigated == false so the lazy path retries
+            // at the next user render. The lazy path's catch routes through
+            // FallbackRequested if its own attempt also fails.
+            throw;
+        }
     }
 
     private async Task RenderAsync(MarkdownSource source, CancellationToken cancellationToken)
@@ -611,7 +752,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             string? generatedDocumentPath = null;
             try
             {
-                var html = ApplyInitialTheme(document.Html, GetThemeName());
+                // PE r2 item F: capture the theme inlined into the user-doc
+                // HTML so the document-ready branch can suppress redundant
+                // SendTheme() when the renderer's message arrives with the
+                // matching theme. Always overwrites the prior shell-theme
+                // value so the suppression compares against what's actually
+                // sitting in the user-visible document.
+                var docTheme = GetThemeName();
+                _inlinedTheme = docTheme;
+                var html = ApplyInitialTheme(document.Html, docTheme);
                 generatedDocumentPath = await WriteGeneratedDocumentAsync(html, cancellationToken)
                     .ConfigureAwait(true);
                 cancellationToken.ThrowIfCancellationRequested();
@@ -755,7 +904,34 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 }
                 _hasLoadedDocument = true;
                 BeginAwaitingLayoutReady();
-                SendTheme();
+                // PE r2 item F: skip SendTheme() when the theme already
+                // inlined into the document HTML via ApplyInitialTheme
+                // matches the current GetThemeName(). The renderer's HTML
+                // already carries data-theme=<inlined>, so a SendTheme()
+                // here would be a no-op IPC round-trip costing ~10-30 ms on
+                // the post-load critical path. _inlinedTheme is null only
+                // on cold paths where ApplyInitialTheme never ran (e.g.
+                // legacy non-shell mode racing this handler); in that case
+                // fall through to SendTheme() as the safe baseline.
+                // Shell-empty document-ready (line above, _shellMode &&
+                // !_shellDocumentReadyConsumed branch) is OUT OF SCOPE per
+                // PE r2 §6 - the shell pre-warm pays no user-visible cost.
+                // Theme changes after document load still propagate via
+                // OnThemeChanged -> SendTheme(), which is independent of
+                // this guard.
+                var currentTheme = GetThemeName();
+                if (_inlinedTheme is not null
+                    && string.Equals(_inlinedTheme, currentTheme, StringComparison.Ordinal))
+                {
+                    ApplicateTrace.Diag("perf-msg", "send-theme suppressed=true",
+                        $"inlined={_inlinedTheme} current={currentTheme}");
+                }
+                else
+                {
+                    ApplicateTrace.Diag("perf-msg", "send-theme suppressed=false",
+                        $"inlined={_inlinedTheme ?? "(null)"} current={currentTheme}");
+                    SendTheme();
+                }
                 SendMinimapPolicy();
                 SendReadingPreferences();
                 return;

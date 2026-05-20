@@ -1233,6 +1233,13 @@ function handleHostMessage(raw: unknown): void {
     if (message.renderId !== undefined) {
       loadMessage.renderId = message.renderId;
     }
+    // PE r2 item G — propagate hasMermaid from the IPC payload (host computes
+    // this from ApplicateHtmlMarkdownRenderer.RenderBodyAsync at
+    // ApplicateWebMarkdownDocumentView.cs:557). Undefined → mermaid runs by
+    // default; false → mermaid init+render are skipped in the pipeline.
+    if (message.hasMermaid !== undefined) {
+      loadMessage.hasMermaid = message.hasMermaid;
+    }
     applyLoadDocument(loadMessage, buildLoadDocumentDeps());
     return;
   }
@@ -1286,7 +1293,11 @@ function ensureChromeNodes(): void {
 
 function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
   return {
-    runInitialRenderPipeline: () => runInitialRenderPipeline({
+    // PE r2 item G — accept the per-document `hasMermaid` so the pipeline
+    // skips mermaid init+render for docs without mermaid blocks. Undefined
+    // passes through to the pipeline's `!== false` default, preserving the
+    // pre-G behavior for any caller that doesn't carry the flag.
+    runInitialRenderPipeline: (hasMermaid) => runInitialRenderPipeline({
       getCurrentTheme,
       applyTheme,
       initMermaidWithTheme,
@@ -1302,7 +1313,9 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
           type: "document-ready",
           mathCount: document.querySelectorAll("[data-tex]").length
         });
-      }
+      },
+      hasMermaid,
+      postPerfMark,
     }),
     cancelCurrentMathController: () => { currentController?.cancel(); },
     resetModuleGlobals: resetModuleGlobalsForLoadDocument,

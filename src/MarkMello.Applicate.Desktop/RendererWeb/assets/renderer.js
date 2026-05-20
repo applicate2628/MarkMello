@@ -109,11 +109,18 @@
   async function runInitialRenderPipeline(deps) {
     const theme = deps.getCurrentTheme();
     deps.applyTheme(theme);
-    deps.initMermaidWithTheme(theme);
+    const shouldRunMermaid = deps.hasMermaid !== false;
+    if (shouldRunMermaid) {
+      deps.initMermaidWithTheme(theme);
+    } else {
+      deps.postPerfMark?.("mermaid-skipped", { hasMermaid: false });
+    }
     const mathController = deps.renderMath();
-    try {
-      await deps.renderMermaid();
-    } catch {
+    if (shouldRunMermaid) {
+      try {
+        await deps.renderMermaid();
+      } catch {
+      }
     }
     deps.renderCodeBlocks();
     await mathController.initialVisibleReady;
@@ -142,7 +149,7 @@
     deps.debugLog(`load-document:swapped id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${document.documentElement.dataset.theme ?? "(none)"} firstHeading=${firstHeading}`);
     deps.ensureChromeNodes();
     deps.scrollWindowToTop();
-    void deps.runInitialRenderPipeline();
+    void deps.runInitialRenderPipeline(message.hasMermaid);
   }
   function clearDocumentState(deps) {
     const main = document.querySelector("main.mm-document");
@@ -1357,6 +1364,9 @@
       if (message.renderId !== void 0) {
         loadMessage.renderId = message.renderId;
       }
+      if (message.hasMermaid !== void 0) {
+        loadMessage.hasMermaid = message.hasMermaid;
+      }
       applyLoadDocument(loadMessage, buildLoadDocumentDeps());
       return;
     }
@@ -1383,7 +1393,11 @@
   }
   function buildLoadDocumentDeps() {
     return {
-      runInitialRenderPipeline: () => runInitialRenderPipeline({
+      // PE r2 item G — accept the per-document `hasMermaid` so the pipeline
+      // skips mermaid init+render for docs without mermaid blocks. Undefined
+      // passes through to the pipeline's `!== false` default, preserving the
+      // pre-G behavior for any caller that doesn't carry the flag.
+      runInitialRenderPipeline: (hasMermaid) => runInitialRenderPipeline({
         getCurrentTheme,
         applyTheme,
         initMermaidWithTheme,
@@ -1397,7 +1411,9 @@
             type: "document-ready",
             mathCount: document.querySelectorAll("[data-tex]").length
           });
-        }
+        },
+        hasMermaid,
+        postPerfMark
       }),
       cancelCurrentMathController: () => {
         currentController?.cancel();
