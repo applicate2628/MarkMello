@@ -6,6 +6,7 @@
 
   <Application.Styles>
     <FluentTheme />
+    <StyleInclude Source="avares://AvaloniaEdit/Themes/Fluent/AvaloniaEdit.xaml" />
     <StyleInclude Source="avares://MarkMello.Presentation/Themes/Controls.axaml" />
   </Application.Styles>
 

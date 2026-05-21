@@ -6,6 +6,10 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using AvaloniaEdit;
+using AvaloniaEdit.Document;
+using AvaloniaEdit.Rendering;
+using MarkMello.Presentation.Diagnostics;
 using MarkMello.Presentation.Editing;
 using MarkMello.Presentation.ViewModels;
 
@@ -19,8 +23,9 @@ public partial class EditWorkspaceView : UserControl
     private const int MaxScrollSyncAttachAttempts = 4;
     private const int ScrollBarDragSettleDelayMs = 120;
 
-    private TextBox? _editorTextBox;
-    private TextPresenter? _editorTextPresenter;
+    // SPIKE: source pane was a TextBox; now an AvaloniaEdit.TextEditor.
+    // Scroll-sync and format-button helpers are stubbed for this spike.
+    private TextEditor? _editorTextEditor;
     private ScrollViewer? _editorScrollViewer;
     private ScrollViewer? _previewScrollViewer;
     private MarkdownDocumentView? _previewDocumentView;
@@ -28,6 +33,8 @@ public partial class EditWorkspaceView : UserControl
     private readonly DispatcherTimer _scrollBarDragSettleTimer;
     private bool _isSynchronizingScroll;
     private ScrollViewer? _activeScrollBarDragSource;
+    private EditorSessionViewModel? _boundSession;
+    private bool _firstVisualLinesLogged;
 
     public EditWorkspaceView()
     {
@@ -58,13 +65,141 @@ public partial class EditWorkspaceView : UserControl
         RemoveHandler(PointerReleasedEvent, OnScrollBarDragPointerReleased);
         RemoveHandler(PointerCaptureLostEvent, OnScrollBarDragPointerCaptureLost);
         DetachScrollSynchronization();
+        if (_boundSession is not null)
+        {
+            _boundSession.PropertyChanged -= OnBoundSessionPropertyChanged;
+            _boundSession = null;
+        }
         base.OnDetachedFromVisualTree(e);
     }
 
+    private bool _paneSeqFirstVisibleLayoutLogged;
+
     private void OnDataContextChanged(object? sender, EventArgs e)
     {
+        StartupDiag.DiagMs(
+            "pane-seq",
+            "editview-datacontext-changed",
+            $"hasSession={(DataContext is not null)} bounds={Bounds.Width:F0}x{Bounds.Height:F0} isVisible={IsVisible} isEffectivelyVisible={IsEffectivelyVisible}");
+        // One-shot probe: log the FIRST LayoutUpdated after DataContext attach
+        // where the EditWorkspaceView has effective-visible bounds matching
+        // the edit pane (>600 width). This is "source pane is actually visible
+        // to the user" — distinct from "host-hwnd-shown" which is the WebView2
+        // preview pane visibility. Gap between the two = pane-sequencing bug.
+        if (DataContext is not null && !_paneSeqFirstVisibleLayoutLogged)
+        {
+            EventHandler? handler = null;
+            handler = (_, _) =>
+            {
+                if (_paneSeqFirstVisibleLayoutLogged)
+                {
+                    LayoutUpdated -= handler!;
+                    return;
+                }
+                if (IsEffectivelyVisible && Bounds.Width > 600)
+                {
+                    _paneSeqFirstVisibleLayoutLogged = true;
+                    LayoutUpdated -= handler!;
+                    StartupDiag.DiagMs(
+                        "pane-seq",
+                        "editview-first-visible-layout",
+                        $"bounds={Bounds.Width:F0}x{Bounds.Height:F0}");
+                }
+            };
+            LayoutUpdated += handler;
+        }
+        BindSourceTextToEditor();
         ApplySplitRatio();
         SynchronizePreviewToEditor();
+    }
+
+    private void BindSourceTextToEditor()
+    {
+        if (_boundSession is not null)
+        {
+            _boundSession.PropertyChanged -= OnBoundSessionPropertyChanged;
+            _boundSession = null;
+        }
+
+        if (DataContext is not EditorSessionViewModel session)
+        {
+            return;
+        }
+
+        _boundSession = session;
+        session.PropertyChanged += OnBoundSessionPropertyChanged;
+
+        ApplySourceTextToEditor(session.SourceText);
+    }
+
+    private void OnBoundSessionPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(EditorSessionViewModel.SourceText) || _boundSession is null)
+        {
+            return;
+        }
+
+        ApplySourceTextToEditor(_boundSession.SourceText);
+    }
+
+    private void ApplySourceTextToEditor(string? text)
+    {
+        var editor = _editorTextEditor ?? this.FindControl<TextEditor>("EditorTextEditor");
+        if (editor is null)
+        {
+            return;
+        }
+
+        // Replace whole Document — preserves AvaloniaEdit virtualization
+        // semantics and avoids partial-text-change events.
+        editor.Document = new TextDocument(text ?? string.Empty);
+
+        AttachFirstVisualLinesProbe(editor);
+    }
+
+    private void AttachFirstVisualLinesProbe(TextEditor editor)
+    {
+        if (_firstVisualLinesLogged)
+        {
+            return;
+        }
+
+        var textView = editor.TextArea?.TextView;
+        if (textView is null)
+        {
+            return;
+        }
+
+        EventHandler? layoutHandler = null;
+        layoutHandler = (_, _) =>
+        {
+            if (_firstVisualLinesLogged)
+            {
+                textView.LayoutUpdated -= layoutHandler!;
+                return;
+            }
+
+            try
+            {
+                var visualLineCount = textView.VisualLines.Count;
+                if (visualLineCount <= 0)
+                {
+                    return;
+                }
+
+                _firstVisualLinesLogged = true;
+                textView.LayoutUpdated -= layoutHandler!;
+                StartupDiag.DiagMs(
+                    "pane-seq",
+                    "editview-texteditor-first-visual-lines",
+                    $"visualLineCount={visualLineCount} textViewBounds={textView.Bounds.Width:F0}x{textView.Bounds.Height:F0} documentLines={editor.Document?.LineCount ?? 0}");
+            }
+            catch (VisualLinesInvalidException)
+            {
+                // not ready yet — wait for next LayoutUpdated
+            }
+        };
+        textView.LayoutUpdated += layoutHandler;
     }
 
     private void AttachScrollSynchronizationAsync(int attempt = 0)
@@ -81,24 +216,18 @@ public partial class EditWorkspaceView : UserControl
 
         DetachScrollSynchronization();
 
-        _editorTextBox = this.FindControl<TextBox>("EditorTextBox");
+        _editorTextEditor = this.FindControl<TextEditor>("EditorTextEditor");
         _previewScrollViewer = this.FindControl<ScrollViewer>("PreviewScrollViewer");
         _previewDocumentView = this.FindControl<MarkdownDocumentView>("PreviewDocumentView");
-        var editorVisuals = _editorTextBox?
+        var editorVisuals = _editorTextEditor?
             .GetVisualDescendants()
             .ToArray();
         _editorScrollViewer = editorVisuals?
             .OfType<ScrollViewer>()
             .FirstOrDefault();
-        _editorTextPresenter = editorVisuals?
-            .OfType<TextPresenter>()
-            .FirstOrDefault(static presenter => presenter.Name == "PART_TextPresenter")
-            ?? editorVisuals?
-                .OfType<TextPresenter>()
-                .FirstOrDefault();
 
-        if (_editorScrollViewer is null
-            || _editorTextPresenter is null
+        if (_editorTextEditor is null
+            || _editorScrollViewer is null
             || _previewScrollViewer is null
             || _previewDocumentView is null)
         {
@@ -109,6 +238,22 @@ public partial class EditWorkspaceView : UserControl
 
             return;
         }
+
+        StartupDiag.DiagMs(
+            "pane-seq",
+            "editview-texteditor-found",
+            $"editorBounds={_editorTextEditor.Bounds.Width:F0}x{_editorTextEditor.Bounds.Height:F0} attempt={attempt}");
+
+        // SPIKE: TextPresenter-based scroll-sync removed because AvaloniaEdit
+        // exposes TextView (with VisualLines) instead of TextPresenter.TextLayout.
+        // Two-pane scroll sync is non-functional in this spike — measurement
+        // only. Production migration must port HitTestPoint /
+        // HitTestTextPosition usage to AvaloniaEdit's TextView /
+        // GetVisualPosition API.
+
+        // Trace the TextEditor's first visual-lines built event — direct
+        // analog of "editview-textpresenter-shaped" for the legacy TextBox.
+        AttachFirstVisualLinesProbe(_editorTextEditor);
 
         _editorScrollViewer.PropertyChanged += OnScrollViewerPropertyChanged;
         _previewScrollViewer.PropertyChanged += OnScrollViewerPropertyChanged;
@@ -140,8 +285,7 @@ public partial class EditWorkspaceView : UserControl
             _previewDocumentView.DocumentRenderInvalidated -= OnPreviewDocumentRenderInvalidated;
         }
 
-        _editorTextBox = null;
-        _editorTextPresenter = null;
+        _editorTextEditor = null;
         _editorScrollViewer = null;
         _previewScrollViewer = null;
         _previewDocumentView = null;
@@ -228,53 +372,21 @@ public partial class EditWorkspaceView : UserControl
         SetSynchronizedVerticalOffset(_editorScrollViewer!, editorOffsetY);
     }
 
-    private bool TryGetEditorSourceLineAtViewportAnchor(out int sourceLine)
+    // SPIKE: scroll-sync is stubbed in the AvaloniaEdit spike. The native
+    // MarkdownDocumentView path that consumed these helpers is not active in
+    // Applicate (preview is WebView2 via ApplicateWebMarkdownDocumentView);
+    // restoring source↔preview sync in WebView mode requires renderer.ts +
+    // IPC wiring on the Applicate side, separate from this spike.
+    private static bool TryGetEditorSourceLineAtViewportAnchor(out int sourceLine)
     {
         sourceLine = 0;
-        if (_editorTextBox is null
-            || _editorTextPresenter is null
-            || _editorScrollViewer is null
-            || !TryGetViewportRelativeOriginY(_editorTextPresenter, _editorScrollViewer, out var presenterOriginY))
-        {
-            return false;
-        }
-
-        var text = _editorTextBox.Text ?? string.Empty;
-        var localY = Math.Clamp(
-            GetViewportAnchorY(_editorScrollViewer) - presenterOriginY,
-            0,
-            Math.Max(0, _editorTextPresenter.Bounds.Height - 1));
-        var localX = Math.Clamp(
-            ScrollSyncHitTestX,
-            0,
-            Math.Max(0, _editorTextPresenter.Bounds.Width - 1));
-
-        var hit = _editorTextPresenter.TextLayout.HitTestPoint(new Point(localX, localY));
-        var characterIndex = Math.Clamp(hit.TextPosition, 0, text.Length);
-        sourceLine = GetSourceLineFromCharacterIndex(text, characterIndex);
-        sourceLine = Math.Clamp(sourceLine, 0, Math.Max(0, CountSourceLines(text) - 1));
-        return true;
+        return false;
     }
 
-    private bool TryGetEditorVerticalOffsetForSourceLine(int sourceLine, out double offsetY)
+    private static bool TryGetEditorVerticalOffsetForSourceLine(int sourceLine, out double offsetY)
     {
         offsetY = 0;
-        if (_editorTextBox is null
-            || _editorTextPresenter is null
-            || _editorScrollViewer is null
-            || !TryGetViewportRelativeOriginY(_editorTextPresenter, _editorScrollViewer, out var presenterOriginY))
-        {
-            return false;
-        }
-
-        var text = _editorTextBox.Text ?? string.Empty;
-        var lineStartCharacterIndex = GetLineStartCharacterIndex(text, sourceLine);
-        var lineBounds = _editorTextPresenter.TextLayout.HitTestTextPosition(lineStartCharacterIndex);
-        offsetY = _editorScrollViewer.Offset.Y
-            + presenterOriginY
-            + lineBounds.Y
-            - GetViewportAnchorY(_editorScrollViewer);
-        return true;
+        return false;
     }
 
     private static bool TryGetViewportRelativeOriginY(Control control, Visual relativeTo, out double originY)
@@ -491,36 +603,9 @@ public partial class EditWorkspaceView : UserControl
 
     private void OnFormatButtonClick(object? sender, RoutedEventArgs e)
     {
-        if (DataContext is not EditorSessionViewModel session)
-        {
-            return;
-        }
-
-        if (sender is not Button button || button.Tag is not string rawKind)
-        {
-            return;
-        }
-
-        if (!Enum.TryParse<MarkdownEditorFormatKind>(rawKind, ignoreCase: true, out var kind))
-        {
-            return;
-        }
-
-        var editor = this.FindControl<TextBox>("EditorTextBox");
-        if (editor is null)
-        {
-            return;
-        }
-
-        var selectionStart = Math.Min(editor.SelectionStart, editor.SelectionEnd);
-        var selectionEnd = Math.Max(editor.SelectionStart, editor.SelectionEnd);
-        var result = MarkdownEditorFormatter.Apply(session.SourceText, kind, selectionStart, selectionEnd);
-
-        editor.Text = result.Text;
-        editor.SelectionStart = result.SelectionStart;
-        editor.SelectionEnd = result.SelectionEnd;
-        editor.CaretIndex = result.SelectionEnd;
-        editor.Focus();
+        // SPIKE: format-button helper is a no-op in this spike because the
+        // source pane no longer exposes TextBox.SelectionStart/End. Production
+        // migration must port to TextEditor.TextArea.Selection API.
     }
 
     private void OnSplitterDragCompleted(object? sender, VectorEventArgs e)
@@ -580,7 +665,7 @@ public partial class EditWorkspaceView : UserControl
     {
         Dispatcher.UIThread.Post(() =>
         {
-            var editor = this.FindControl<TextBox>("EditorTextBox");
+            var editor = this.FindControl<TextEditor>("EditorTextEditor");
             editor?.Focus();
         }, DispatcherPriority.Background);
     }

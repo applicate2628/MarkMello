@@ -339,4 +339,32 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("MarkMelloRepositoryUrl", applicateProject, StringComparison.Ordinal);
         Assert.Contains("AboutNoticeLabel", aboutXaml, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void ApplicateTocColumnAllowsHiddenStateToCollapseFully()
+    {
+        var applicateWindowCode = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "ApplicateMainWindow.cs"));
+
+        var tocColumnStart = applicateWindowCode.IndexOf(
+            "var tocColumn = new ColumnDefinition",
+            StringComparison.Ordinal);
+        var splitterColumnStart = applicateWindowCode.IndexOf(
+            "var splitterColumn = new ColumnDefinition",
+            StringComparison.Ordinal);
+
+        Assert.True(tocColumnStart >= 0, "TOC column declaration should exist.");
+        Assert.True(splitterColumnStart > tocColumnStart, "Splitter column should follow TOC column.");
+
+        var tocColumnBlock = applicateWindowCode[tocColumnStart..splitterColumnStart];
+        Assert.Contains("MinWidth = 0", tocColumnBlock, StringComparison.Ordinal);
+    }
 }

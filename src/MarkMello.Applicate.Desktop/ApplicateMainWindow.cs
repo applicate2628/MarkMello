@@ -464,7 +464,7 @@ public sealed class ApplicateMainWindow : MainWindow
         };
         var tocColumn = new ColumnDefinition(new GridLength(240, GridUnitType.Pixel))
         {
-            MinWidth = 160,
+            MinWidth = 0,
             MaxWidth = 480,
         };
         var splitterColumn = new ColumnDefinition(new GridLength(1, GridUnitType.Pixel))

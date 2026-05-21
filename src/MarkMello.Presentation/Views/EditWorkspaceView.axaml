@@ -4,9 +4,21 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:MarkMello.Presentation.ViewModels"
              xmlns:views="using:MarkMello.Presentation.Views"
+             xmlns:avaloniaEdit="https://github.com/avaloniaui/avaloniaedit"
              mc:Ignorable="d"
              x:Class="MarkMello.Presentation.Views.EditWorkspaceView"
              x:DataType="vm:EditorSessionViewModel">
+
+  <UserControl.Styles>
+    <!-- Keep AvaloniaEdit's internal ScrollViewer always-visible (no auto-hide).
+         Style-level targeting of the inner ScrollViewer avoids the cold-start
+         regression seen with attached-property inheritance from the TextEditor
+         element itself — the Style only resolves at template-apply time, not
+         as a TextEditor property change. -->
+    <Style Selector="avaloniaEdit|TextEditor /template/ ScrollViewer">
+      <Setter Property="AllowAutoHide" Value="False" />
+    </Style>
+  </UserControl.Styles>
 
   <Grid Name="EditGrid"
         ClipToBounds="True">
@@ -145,15 +157,33 @@
         </Border>
 
         <Grid Grid.Row="1">
-          <TextBox Name="EditorTextBox"
-                   Classes="mm-editor-textarea"
-                   AcceptsReturn="True"
-                   AcceptsTab="True"
-                   TextWrapping="Wrap"
-                   ScrollViewer.AllowAutoHide="False"
-                   ScrollViewer.VerticalScrollBarVisibility="Visible"
-                   ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                   Text="{Binding SourceText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+          <!-- SPIKE: source pane swapped from TextBox to AvaloniaEdit.TextEditor.
+               Binding wired in code-behind (AvaloniaEdit has no Text DP).
+               Padding lives on a wrapping Border, not on the TextEditor:
+               adding non-default properties directly on the TextEditor
+               (Padding, Background, ScrollViewer.AllowAutoHide, etc.)
+               caused a cold-start WebView2 commit regression — the
+               renderer never emitted mm-initial-visible-ready and the
+               preview HWND stayed hidden. Border-wrap is the safe shape. -->
+          <Border Padding="36,0,0,0"
+                  Background="{DynamicResource MmElevatedBackgroundBrush}">
+            <!-- Interim shape while parallel review-loop runs:
+                  left=36   → text indent inside editor pane
+                  top=0     → scrollbar reaches the top edge (no 28 px head-start)
+                  right=0   → scrollbar at the actual right edge
+                  bottom=0  → text fills bottom
+                Right/top/bottom indents will need a template-level
+                TextArea-margin path to keep both text inset AND
+                scrollbar at outer edges; the parallel review-loop is
+                evaluating that. AllowAutoHide for the scrollbar also
+                still pending (broke cold-start in earlier attempt). -->
+            <avaloniaEdit:TextEditor Name="EditorTextEditor"
+                                      Classes="mm-editor-textarea"
+                                      ShowLineNumbers="False"
+                                      WordWrap="True"
+                                      VerticalScrollBarVisibility="Visible"
+                                      HorizontalScrollBarVisibility="Disabled" />
+          </Border>
 
           <Border Classes="mm-editor-status-shell"
                   IsVisible="{Binding HasStatusMessage}"
