@@ -151,7 +151,7 @@
                    AcceptsTab="True"
                    TextWrapping="Wrap"
                    ScrollViewer.AllowAutoHide="False"
-                   ScrollViewer.VerticalScrollBarVisibility="Auto"
+                   ScrollViewer.VerticalScrollBarVisibility="Visible"
                    ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                    Text="{Binding SourceText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
