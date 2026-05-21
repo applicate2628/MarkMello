@@ -43,19 +43,59 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         {
             if (segment.IsMath)
             {
-                blocks.Add(new ApplicateMathBlock(_normalizeTex(segment.Text)));
+                blocks.Add(new ApplicateMathBlock(_normalizeTex(segment.Text))
+                {
+                    SourceSpan = new MarkdownSourceSpan(segment.StartLine, segment.EndLine)
+                });
                 continue;
             }
 
             var protectedText = ProtectInlineMath(segment.Text, _normalizeTex, out var inlineMath);
             var rendered = _inner.Render(protectedText, baseDirectory);
-            blocks.AddRange(inlineMath.Count == 0
+            var renderedBlocks = inlineMath.Count == 0
                 ? rendered.Blocks
-                : RestoreInlineMath(rendered.Blocks, inlineMath));
+                : RestoreInlineMath(rendered.Blocks, inlineMath);
+            blocks.AddRange(OffsetSourceSpans(renderedBlocks, segment.StartLine));
         }
 
         return new RenderedMarkdownDocument(blocks, baseDirectory);
     }
+
+    private static IReadOnlyList<MarkdownBlock> OffsetSourceSpans(
+        IReadOnlyList<MarkdownBlock> blocks,
+        int lineOffset)
+        => lineOffset == 0
+            ? blocks
+            : blocks.Select(block => OffsetSourceSpan(block, lineOffset)).ToList();
+
+    private static MarkdownBlock OffsetSourceSpan(MarkdownBlock block, int lineOffset)
+    {
+        var sourceSpan = OffsetSourceSpan(block.SourceSpan, lineOffset);
+        return block switch
+        {
+            MarkdownQuoteBlock quote => quote with
+            {
+                SourceSpan = sourceSpan,
+                Blocks = OffsetSourceSpans(quote.Blocks, lineOffset)
+            },
+            MarkdownListBlock list => list with
+            {
+                SourceSpan = sourceSpan,
+                Items = list.Items
+                    .Select(item => item with
+                    {
+                        Blocks = OffsetSourceSpans(item.Blocks, lineOffset)
+                    })
+                    .ToList()
+            },
+            _ => block with { SourceSpan = sourceSpan }
+        };
+    }
+
+    private static MarkdownSourceSpan? OffsetSourceSpan(MarkdownSourceSpan? sourceSpan, int lineOffset)
+        => sourceSpan is { } span
+            ? new MarkdownSourceSpan(span.StartLine + lineOffset, span.EndLine + lineOffset)
+            : null;
 
     private static string ProtectInlineMath(
         string markdown,
@@ -505,13 +545,18 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         var inMath = false;
         var inFence = false;
         var fenceMarker = string.Empty;
+        int? textStartLine = null;
+        var mathStartLine = 0;
+        var currentLine = 0;
 
         foreach (var line in ReadLinesWithEndings(markdown))
         {
+            var lineNumber = currentLine++;
             var trimmed = line.Trim();
 
             if (!inMath && TryToggleFence(trimmed, ref inFence, ref fenceMarker))
             {
+                textStartLine ??= lineNumber;
                 text.Append(line);
                 continue;
             }
@@ -520,41 +565,61 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
             {
                 if (inMath)
                 {
-                    yield return new MarkdownSegment(math.ToString().Trim(), IsMath: true);
+                    yield return new MarkdownSegment(
+                        math.ToString().Trim(),
+                        IsMath: true,
+                        mathStartLine,
+                        lineNumber);
                     math.Clear();
                     inMath = false;
                 }
                 else
                 {
-                    if (text.Length > 0)
+                    if (text.Length > 0 && textStartLine is { } startLine)
                     {
-                        yield return new MarkdownSegment(text.ToString(), IsMath: false);
+                        yield return new MarkdownSegment(
+                            text.ToString(),
+                            IsMath: false,
+                            startLine,
+                            System.Math.Max(startLine, lineNumber - 1));
                         text.Clear();
+                        textStartLine = null;
                     }
                     inMath = true;
+                    mathStartLine = lineNumber;
                 }
                 continue;
             }
 
             if (!inFence && TryReadSingleLineDisplayMath(trimmed, out var singleLineMath))
             {
-                if (text.Length > 0)
+                if (text.Length > 0 && textStartLine is { } startLine)
                 {
-                    yield return new MarkdownSegment(text.ToString(), IsMath: false);
+                    yield return new MarkdownSegment(
+                        text.ToString(),
+                        IsMath: false,
+                        startLine,
+                        System.Math.Max(startLine, lineNumber - 1));
                     text.Clear();
+                    textStartLine = null;
                 }
-                yield return new MarkdownSegment(singleLineMath, IsMath: true);
+                yield return new MarkdownSegment(singleLineMath, IsMath: true, lineNumber, lineNumber);
                 continue;
             }
 
             if (!inFence && TryReadStandaloneInlineMath(trimmed, out var standaloneInlineMath))
             {
-                if (text.Length > 0)
+                if (text.Length > 0 && textStartLine is { } startLine)
                 {
-                    yield return new MarkdownSegment(text.ToString(), IsMath: false);
+                    yield return new MarkdownSegment(
+                        text.ToString(),
+                        IsMath: false,
+                        startLine,
+                        System.Math.Max(startLine, lineNumber - 1));
                     text.Clear();
+                    textStartLine = null;
                 }
-                yield return new MarkdownSegment(standaloneInlineMath, IsMath: true);
+                yield return new MarkdownSegment(standaloneInlineMath, IsMath: true, lineNumber, lineNumber);
                 continue;
             }
 
@@ -564,19 +629,25 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
             }
             else
             {
+                textStartLine ??= lineNumber;
                 text.Append(line);
             }
         }
 
         if (inMath)
         {
+            textStartLine ??= mathStartLine;
             text.AppendLine("$$");
             text.Append(math);
         }
 
-        if (text.Length > 0)
+        if (text.Length > 0 && textStartLine is { } finalStartLine)
         {
-            yield return new MarkdownSegment(text.ToString(), IsMath: false);
+            yield return new MarkdownSegment(
+                text.ToString(),
+                IsMath: false,
+                finalStartLine,
+                System.Math.Max(finalStartLine, currentLine - 1));
         }
     }
 
@@ -670,5 +741,5 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         }
     }
 
-    private readonly record struct MarkdownSegment(string Text, bool IsMath);
+    private readonly record struct MarkdownSegment(string Text, bool IsMath, int StartLine, int EndLine);
 }

@@ -886,6 +886,114 @@
     };
   }
 
+  // RendererWeb/src/sourceLineSync.ts
+  var SOURCE_LINE_ANCHOR_SELECTOR = "[data-mm-source-line]";
+  function readSourceLineAnchors(root = document, scrollY = window.scrollY) {
+    const anchors = [];
+    for (const element of Array.from(root.querySelectorAll(SOURCE_LINE_ANCHOR_SELECTOR))) {
+      const sourceLine = parseNonNegativeInt(element.dataset["mmSourceLine"]);
+      if (sourceLine === null) {
+        continue;
+      }
+      const endLine = parseNonNegativeInt(element.dataset["mmSourceEndLine"]) ?? sourceLine;
+      anchors.push({
+        sourceLine,
+        endLine: Math.max(sourceLine, endLine),
+        top: Math.max(0, element.getBoundingClientRect().top + scrollY)
+      });
+    }
+    anchors.sort((left, right) => {
+      const sourceComparison = left.sourceLine - right.sourceLine;
+      return sourceComparison !== 0 ? sourceComparison : left.top - right.top;
+    });
+    return anchors;
+  }
+  function findScrollTopForSourceLine(anchors, sourceLine) {
+    if (anchors.length === 0 || !Number.isFinite(sourceLine)) {
+      return null;
+    }
+    const normalizedLine = Math.max(0, Math.floor(sourceLine));
+    const selectedIndex = findLastAnchorIndexAtOrBeforeLine(anchors, normalizedLine);
+    const selected = anchors[selectedIndex];
+    const next = anchors[selectedIndex + 1] ?? null;
+    if (next && normalizedLine > selected.endLine) {
+      const lineSpan = Math.max(1, next.sourceLine - selected.sourceLine);
+      const visualSpan = Math.max(0, next.top - selected.top);
+      const ratio = clamp01((normalizedLine - selected.sourceLine) / lineSpan);
+      return Math.max(0, selected.top + visualSpan * ratio);
+    }
+    if (next && normalizedLine > selected.sourceLine && normalizedLine <= selected.endLine) {
+      const lineSpan = Math.max(1, selected.endLine - selected.sourceLine);
+      const visualSpan = Math.max(0, next.top - selected.top);
+      const ratio = clamp01((normalizedLine - selected.sourceLine) / lineSpan);
+      return Math.max(0, selected.top + visualSpan * ratio);
+    }
+    return Math.max(0, selected.top);
+  }
+  function findSourceLineAtDocumentY(anchors, documentY) {
+    if (anchors.length === 0 || !Number.isFinite(documentY)) {
+      return null;
+    }
+    const normalizedY = Math.max(0, documentY);
+    const selectedIndex = findLastAnchorIndexAtOrBeforeTop(anchors, normalizedY);
+    const selected = anchors[selectedIndex];
+    const next = anchors[selectedIndex + 1] ?? null;
+    if (!next) {
+      return selected.sourceLine;
+    }
+    const visualSpan = next.top - selected.top;
+    if (visualSpan <= 1) {
+      return selected.sourceLine;
+    }
+    const targetLine = selected.endLine > selected.sourceLine ? selected.endLine : next.sourceLine;
+    const lineSpan = Math.max(0, targetLine - selected.sourceLine);
+    if (lineSpan <= 0) {
+      return selected.sourceLine;
+    }
+    const ratio = clamp01((normalizedY - selected.top) / visualSpan);
+    return selected.sourceLine + Math.round(lineSpan * ratio);
+  }
+  function findLastAnchorIndexAtOrBeforeLine(anchors, sourceLine) {
+    let low = 0;
+    let high = anchors.length - 1;
+    let result = 0;
+    while (low <= high) {
+      const mid = low + Math.floor((high - low) / 2);
+      if (anchors[mid].sourceLine <= sourceLine) {
+        result = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return result;
+  }
+  function findLastAnchorIndexAtOrBeforeTop(anchors, documentY) {
+    let low = 0;
+    let high = anchors.length - 1;
+    let result = 0;
+    while (low <= high) {
+      const mid = low + Math.floor((high - low) / 2);
+      if (anchors[mid].top <= documentY) {
+        result = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return result;
+  }
+  function parseNonNegativeInt(value) {
+    if (value === void 0 || value.trim() === "") {
+      return null;
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+  function clamp01(value) {
+    return Math.max(0, Math.min(1, value));
+  }
+
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -934,6 +1042,12 @@
   var layoutReadyTimer;
   var lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
   var minimapPolicy = null;
+  var sourceLineAnchors = [];
+  var sourceLineAnchorRefreshFrameRequested = false;
+  var previewSourceLineFrameRequested = false;
+  var suppressPreviewSourceLineEmit = false;
+  var suppressPreviewSourceLineToken = 0;
+  var lastPostedPreviewSourceLine = null;
   function applyViewerChromeState() {
     document.documentElement.dataset.mmChrome = viewerChromeEnabled ? "on" : "off";
   }
@@ -1097,7 +1211,80 @@
       topBlockIndex: findTopVisibleBlockIndex()
     });
   }
+  function refreshSourceLineAnchors() {
+    sourceLineAnchors = readSourceLineAnchors(document);
+  }
+  function queueSourceLineAnchorRefresh() {
+    if (sourceLineAnchorRefreshFrameRequested) {
+      return;
+    }
+    sourceLineAnchorRefreshFrameRequested = true;
+    window.requestAnimationFrame(() => {
+      sourceLineAnchorRefreshFrameRequested = false;
+      refreshSourceLineAnchors();
+    });
+  }
+  function scrollToSourceLine(sourceLine) {
+    if (!Number.isFinite(sourceLine) || sourceLine < 0) {
+      return;
+    }
+    if (sourceLineAnchors.length === 0) {
+      refreshSourceLineAnchors();
+    }
+    const scrollTop = findScrollTopForSourceLine(sourceLineAnchors, sourceLine);
+    if (scrollTop === null) {
+      return;
+    }
+    suppressPreviewSourceLinePost();
+    window.scrollTo({ left: 0, top: scrollTop, behavior: "instant" });
+  }
+  function suppressPreviewSourceLinePost() {
+    const token = ++suppressPreviewSourceLineToken;
+    suppressPreviewSourceLineEmit = true;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (token === suppressPreviewSourceLineToken) {
+          suppressPreviewSourceLineEmit = false;
+        }
+      });
+    });
+  }
+  function queuePreviewSourceLinePost() {
+    if (suppressPreviewSourceLineEmit || !documentScrollEnabled || previewSourceLineFrameRequested) {
+      return;
+    }
+    previewSourceLineFrameRequested = true;
+    window.requestAnimationFrame(() => {
+      previewSourceLineFrameRequested = false;
+      if (suppressPreviewSourceLineEmit || !documentScrollEnabled) {
+        return;
+      }
+      if (sourceLineAnchors.length === 0) {
+        refreshSourceLineAnchors();
+      }
+      const sourceLine = findSourceLineAtDocumentY(
+        sourceLineAnchors,
+        window.scrollY + getViewportAnchorY()
+      );
+      if (sourceLine === null || sourceLine === lastPostedPreviewSourceLine) {
+        return;
+      }
+      lastPostedPreviewSourceLine = sourceLine;
+      postHostMessage({ type: "preview-source-line", sourceLine });
+    });
+  }
+  function getViewportAnchorY() {
+    const viewportHeight = Math.max(0, window.innerHeight);
+    if (viewportHeight <= 0) {
+      return 24;
+    }
+    if (viewportHeight <= 48) {
+      return viewportHeight * 0.5;
+    }
+    return Math.max(24, Math.min(viewportHeight * 0.38, viewportHeight - 24));
+  }
   function postLayoutReady() {
+    refreshSourceLineAnchors();
     postScroll();
     postHostMessage({
       type: "layout-ready",
@@ -1778,6 +1965,10 @@
       }
       return;
     }
+    if (message.type === "scroll-to-source-line") {
+      scrollToSourceLine(message.sourceLine);
+      return;
+    }
     if (message.type === "open-find-bar") {
       findBarController?.toggle();
       return;
@@ -1825,16 +2016,21 @@
       return;
     }
     if (message.type === "mode-settle-probe") {
+      postPerfMark("mm-mode-settle-probe-received");
       if (modeToggleProbeFrameRequested) {
+        postPerfMark("mm-mode-settle-probe-duplicate");
         return;
       }
       modeToggleProbeFrameRequested = true;
       window.requestAnimationFrame(() => {
+        postPerfMark("mm-mode-settle-first-raf");
         window.requestAnimationFrame(() => {
+          postPerfMark("mm-mode-settle-second-raf");
           modeToggleProbeFrameRequested = false;
           updateWidthHandlePosition();
           updateMinimapVisibility();
           updateMinimapViewport();
+          postPerfMark("mm-mode-settle-pre-ack");
           postHostMessage({ type: "mode-toggle-settled" });
         });
       });
@@ -1856,6 +2052,11 @@
       activeHeadingObserver = null;
     }
     lastPostedActiveHeadingId = null;
+    sourceLineAnchors = [];
+    sourceLineAnchorRefreshFrameRequested = false;
+    previewSourceLineFrameRequested = false;
+    suppressPreviewSourceLineEmit = false;
+    lastPostedPreviewSourceLine = null;
   }
   function ensureChromeNodes() {
     ensureMinimap();
@@ -1864,6 +2065,7 @@
     updateWidthHandlePosition();
     refreshMinimapContent("A");
     extractAndPostHeadings();
+    refreshSourceLineAnchors();
   }
   function buildLoadDocumentDeps() {
     return {
@@ -2143,13 +2345,17 @@
           return;
         }
         queueMinimapRefreshAfterLayoutSettles();
+        queueSourceLineAnchorRefresh();
         scheduleResizeReactions();
         window.requestAnimationFrame(postScroll);
       });
       resizeObserver.observe(documentElement);
       resizeObserver.observe(document.body);
     }
-    document.fonts?.ready.then(() => queueMinimapRefreshAfterLayoutSettles()).catch(() => void 0);
+    document.fonts?.ready.then(() => {
+      queueMinimapRefreshAfterLayoutSettles();
+      queueSourceLineAnchorRefresh();
+    }).catch(() => void 0);
   });
   var queuePostScroll = createScrollCoalescer({
     postScroll: () => {
@@ -2162,10 +2368,12 @@
   });
   document.addEventListener("scroll", () => {
     queuePostScroll();
+    queuePreviewSourceLinePost();
   }, { passive: true });
   window.addEventListener("message", (event) => handleHostMessage(event.data));
   window.addEventListener("resize", () => {
     scheduleResizeReactions();
+    queueSourceLineAnchorRefresh();
   });
   window.__mmPerfReport = getReport;
   window.__mmFpsSampler = getFpsSampler();

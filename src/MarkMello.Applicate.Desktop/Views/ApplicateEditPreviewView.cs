@@ -18,11 +18,12 @@ using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Domain;
 using MarkMello.Presentation.ViewModels;
+using MarkMello.Presentation.Views;
 using SysMath = System.Math;
 
 namespace MarkMello.Applicate.Desktop.Views;
 
-internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
+internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollSyncPreview, IDisposable
 {
     // F-02 fix: horizontal sides come from
     // ApplicateDocumentLayout.CalculatePreviewDocumentPadding ->
@@ -85,6 +86,10 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
     // and tab-switches keep it true.
     private bool _hasValidSlotBounds;
 
+    public event EventHandler? SourceLineScrollSyncPreviewRendered;
+
+    public event EventHandler<SourceLineScrollSyncEventArgs>? PreviewSourceLineChanged;
+
     public ApplicateEditPreviewView(IApplicateSharedWebViewHost? sharedHost)
     {
         _sharedHost = sharedHost;
@@ -140,6 +145,20 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             return;
         }
         ApplicateTrace.ModeToggle($"_webSlot.{e.Property.Name}: {e.OldValue} -> {e.NewValue}");
+        if (e.Property == Visual.BoundsProperty)
+        {
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "webslot-bounds-changed",
+                $"oldBounds={(e.OldValue as Rect?)?.Width:F0}x{(e.OldValue as Rect?)?.Height:F0} newBounds={_webSlot.Bounds.Width:F0}x{_webSlot.Bounds.Height:F0}");
+        }
+        else
+        {
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "webslot-visible-changed",
+                $"isVisible={_webSlot.IsVisible}");
+        }
 
         // After permanent attach is complete, slot resize events (window
         // resize, splitter drag, sidebar toggle) still need to flow into the
@@ -742,6 +761,10 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
 
     private void OnEffectiveVisibilityChanged()
     {
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "editpreview-effvis-changed",
+            $"isEffectivelyVisible={IsEffectivelyVisible} webSlotBounds={_webSlot.Bounds.Width:F0}x{_webSlot.Bounds.Height:F0} hasHost={_sharedHost is not null}");
         if (_sharedHost is null)
         {
             return;
@@ -882,6 +905,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         _sharedHost.View.DocumentRendered += OnSharedDocumentRendered;
         _sharedHost.View.ViewerInteractionRequested += OnSharedViewerInteractionRequested;
         _sharedHost.View.ScrollStateChanged += OnSharedScrollStateChanged;
+        _sharedHost.View.PreviewSourceLineChanged += OnSharedPreviewSourceLineChanged;
         _sharedHost.RendererFailed += OnSharedRendererFailed;
         _hostEventsWired = true;
     }
@@ -896,6 +920,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         _sharedHost.View.DocumentRendered -= OnSharedDocumentRendered;
         _sharedHost.View.ViewerInteractionRequested -= OnSharedViewerInteractionRequested;
         _sharedHost.View.ScrollStateChanged -= OnSharedScrollStateChanged;
+        _sharedHost.View.PreviewSourceLineChanged -= OnSharedPreviewSourceLineChanged;
         _sharedHost.RendererFailed -= OnSharedRendererFailed;
         _hostEventsWired = false;
     }
@@ -915,11 +940,22 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
         ForwardPreviewScrollToEditor(e.ProgressPercent);
     }
 
+    private void OnSharedPreviewSourceLineChanged(object? sender, ApplicateWebPreviewSourceLineEventArgs e)
+    {
+        if (!_isAttachedToHost)
+        {
+            return;
+        }
+
+        PreviewSourceLineChanged?.Invoke(this, new SourceLineScrollSyncEventArgs(e.SourceLine));
+    }
+
     private void OnSharedDocumentRendered(object? sender, EventArgs e)
     {
         ApplicateTrace.ModeToggle("SharedView Rendered (edit-preview)");
         // Render committed: hide any visible failure overlay.
         _failureView.IsVisible = false;
+        SourceLineScrollSyncPreviewRendered?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnSharedRendererFailed(object? sender, ApplicateRendererFailureEvent e)
@@ -1023,6 +1059,16 @@ internal sealed class ApplicateEditPreviewView : UserControl, IDisposable
             ImageSourceResolver: _session.ImageSourceResolver,
             AvailableContentWidth: widths.WebColumnWidth);
         _sharedHost.RequestRender(source, request);
+    }
+
+    public void ScrollToSourceLine(int sourceLine)
+    {
+        if (!_isAttachedToHost || _sharedHost is null || sourceLine < 0)
+        {
+            return;
+        }
+
+        _sharedHost.View.ScrollToSourceLine(sourceLine);
     }
 
     private MarkdownSource? BuildCurrentSource()

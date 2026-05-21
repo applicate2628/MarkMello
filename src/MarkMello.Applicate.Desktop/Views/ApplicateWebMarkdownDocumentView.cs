@@ -190,6 +190,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     public event EventHandler? ViewerInteractionRequested;
 
+    public event EventHandler<ApplicateWebPreviewSourceLineEventArgs>? PreviewSourceLineChanged;
+
     public event EventHandler? FallbackRequested;
 
     /// <summary>
@@ -1107,6 +1109,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 return;
             }
 
+            if (type == "preview-source-line")
+            {
+                HandlePreviewSourceLineMessage(document.RootElement);
+                return;
+            }
+
             if (type == "mode-toggle-settled")
             {
                 // Renderer ack to the host-sent mode-settle-probe. Two rAFs
@@ -1322,6 +1330,19 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         HeadingsChanged?.Invoke(this, headings);
     }
 
+    private void HandlePreviewSourceLineMessage(JsonElement root)
+    {
+        if (!root.TryGetProperty("sourceLine", out var lineProperty)
+            || lineProperty.ValueKind != JsonValueKind.Number
+            || !lineProperty.TryGetInt32(out var sourceLine)
+            || sourceLine < 0)
+        {
+            return;
+        }
+
+        PreviewSourceLineChanged?.Invoke(this, new ApplicateWebPreviewSourceLineEventArgs(sourceLine));
+    }
+
     /// <summary>
     /// Send a <c>scroll-to-heading</c> IPC message to the renderer. The
     /// renderer looks up the element by id and smoothly scrolls it into view.
@@ -1336,6 +1357,16 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         PostRendererMessage(new { type = "scroll-to-heading", id = headingId });
+    }
+
+    public void ScrollToSourceLine(int sourceLine)
+    {
+        if (sourceLine < 0)
+        {
+            return;
+        }
+
+        PostRendererMessage(new { type = "scroll-to-source-line", sourceLine });
     }
 
     /// <summary>
@@ -1815,6 +1846,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     /// </summary>
     internal void RequestModeToggleSettleProbe()
     {
+        ApplicateTrace.DiagMs("pane-seq", "host-revealgate-probe-sent");
         PostRendererMessage(new { type = "mode-settle-probe" });
     }
 
@@ -2008,6 +2040,11 @@ public sealed class ApplicateWebMinimapStateEventArgs(
     public bool Visible { get; } = visible;
 
     public double ReservedWidth { get; } = reservedWidth;
+}
+
+public sealed class ApplicateWebPreviewSourceLineEventArgs(int sourceLine) : EventArgs
+{
+    public int SourceLine { get; } = sourceLine;
 }
 
 public enum ApplicateWebWidthDragPhase

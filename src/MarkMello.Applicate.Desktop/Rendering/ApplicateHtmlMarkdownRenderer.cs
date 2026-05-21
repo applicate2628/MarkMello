@@ -127,12 +127,12 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
                 await RenderHeadingAsync(context, heading, blockIndex).ConfigureAwait(false);
                 break;
             case MarkdownParagraphBlock paragraph:
-                context.Html.Append("<p").Append(BlockDataAttributes(blockIndex, kind)).Append('>');
+                context.Html.Append("<p").Append(BlockDataAttributes(blockIndex, kind, paragraph.SourceSpan)).Append('>');
                 await RenderInlinesAsync(context, paragraph.Inlines).ConfigureAwait(false);
                 context.Html.AppendLine("</p>");
                 break;
             case MarkdownQuoteBlock quote:
-                context.Html.Append("<blockquote").Append(BlockDataAttributes(blockIndex, kind)).AppendLine(">");
+                context.Html.Append("<blockquote").Append(BlockDataAttributes(blockIndex, kind, quote.SourceSpan)).AppendLine(">");
                 foreach (var child in quote.Blocks)
                 {
                     await RenderBlockAsync(context, child).ConfigureAwait(false);
@@ -144,7 +144,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
                 await RenderListAsync(context, list, blockIndex, kind).ConfigureAwait(false);
                 break;
             case MarkdownHorizontalRuleBlock:
-                context.Html.Append("<hr").Append(BlockDataAttributes(blockIndex, kind)).AppendLine(">");
+                context.Html.Append("<hr").Append(BlockDataAttributes(blockIndex, kind, block.SourceSpan)).AppendLine(">");
                 break;
             case MarkdownCodeBlock code:
                 RenderCodeBlock(context, code, blockIndex, kind);
@@ -153,7 +153,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
                 await RenderTableAsync(context, table, blockIndex, kind).ConfigureAwait(false);
                 break;
             case MarkdownImageBlock image:
-                await RenderImageBlockAsync(context, image.Url, image.AltText, image.Title, image.Width, image.Height, blockIndex, kind).ConfigureAwait(false);
+                await RenderImageBlockAsync(context, image.Url, image.AltText, image.Title, image.Width, image.Height, blockIndex, kind, image.SourceSpan).ConfigureAwait(false);
                 break;
             case ApplicateMathBlock math:
                 RenderMathBlock(context, math, blockIndex, kind);
@@ -161,8 +161,26 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         }
     }
 
-    private static string BlockDataAttributes(int blockIndex, string kind)
-        => $" data-mm-block-index=\"{blockIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)}\" data-mm-block-kind=\"{kind}\"";
+    private static string BlockDataAttributes(int blockIndex, string kind, MarkdownSourceSpan? sourceSpan)
+    {
+        var attributes = new StringBuilder()
+            .Append(" data-mm-block-index=\"")
+            .Append(blockIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .Append("\" data-mm-block-kind=\"")
+            .Append(kind)
+            .Append('"');
+        if (sourceSpan is { } span)
+        {
+            attributes
+                .Append(" data-mm-source-line=\"")
+                .Append(span.StartLine.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                .Append("\" data-mm-source-end-line=\"")
+                .Append(span.EndLine.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                .Append('"');
+        }
+
+        return attributes.ToString();
+    }
 
     private static async Task RenderHeadingAsync(RenderContext context, MarkdownHeadingBlock heading, int blockIndex)
     {
@@ -173,7 +191,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         context.PlainText.AppendLine(text);
 
         context.Html.Append("<h").Append(level)
-            .Append(BlockDataAttributes(blockIndex, "heading"))
+            .Append(BlockDataAttributes(blockIndex, "heading", heading.SourceSpan))
             .Append(" id=\"").Append(HtmlAttribute(anchor)).Append("\">");
         await RenderInlinesAsync(context, heading.Inlines).ConfigureAwait(false);
         context.Html.Append("</h").Append(level).AppendLine(">");
@@ -182,7 +200,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
     private static async Task RenderListAsync(RenderContext context, MarkdownListBlock list, int blockIndex, string kind)
     {
         var tag = list.IsOrdered ? "ol" : "ul";
-        context.Html.Append('<').Append(tag).Append(BlockDataAttributes(blockIndex, kind)).AppendLine(">");
+        context.Html.Append('<').Append(tag).Append(BlockDataAttributes(blockIndex, kind, list.SourceSpan)).AppendLine(">");
         foreach (var item in list.Items)
         {
             context.Html.AppendLine("<li>");
@@ -202,7 +220,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         context.PlainText.AppendLine(code.Code);
 
         var infoHead = (code.Info ?? string.Empty).Trim().Split(' ')[0].ToLowerInvariant();
-        var blockAttrs = BlockDataAttributes(blockIndex, kind);
+        var blockAttrs = BlockDataAttributes(blockIndex, kind, code.SourceSpan);
 
         if (string.Equals(infoHead, "mermaid", StringComparison.Ordinal))
         {
@@ -224,7 +242,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
 
     private static async Task RenderTableAsync(RenderContext context, MarkdownTableBlock table, int blockIndex, string kind)
     {
-        context.Html.Append("<table").Append(BlockDataAttributes(blockIndex, kind)).AppendLine(">");
+        context.Html.Append("<table").Append(BlockDataAttributes(blockIndex, kind, table.SourceSpan)).AppendLine(">");
         if (table.Header.Count > 0)
         {
             context.Html.AppendLine("<thead><tr>");
@@ -263,16 +281,17 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         double? width,
         double? height,
         int blockIndex,
-        string kind)
+        string kind,
+        MarkdownSourceSpan? sourceSpan)
     {
         var src = await TryResolveImageDataUriAsync(context, url).ConfigureAwait(false);
         if (src is null)
         {
-            RenderImagePlaceholder(context, altText, blockIndex, kind);
+            RenderImagePlaceholder(context, altText, blockIndex, kind, sourceSpan);
             return;
         }
 
-        context.Html.Append("<figure").Append(BlockDataAttributes(blockIndex, kind)).Append("><img src=\"").Append(HtmlAttribute(src)).Append('"');
+        context.Html.Append("<figure").Append(BlockDataAttributes(blockIndex, kind, sourceSpan)).Append("><img src=\"").Append(HtmlAttribute(src)).Append('"');
         AppendImageAttributes(context.Html, altText, title, width, height);
         context.Html.Append('>');
         if (!string.IsNullOrWhiteSpace(altText))
@@ -287,7 +306,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
     {
         context.PlainText.AppendLine(math.Tex);
         context.Html.Append("<div class=\"math-display\"")
-            .Append(BlockDataAttributes(blockIndex, kind))
+            .Append(BlockDataAttributes(blockIndex, kind, math.SourceSpan))
             .Append(" data-tex=\"")
             .Append(HtmlAttribute(math.Tex))
             .AppendLine("\"></div>");
@@ -426,9 +445,9 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         }
     }
 
-    private static void RenderImagePlaceholder(RenderContext context, string? altText, int blockIndex, string kind)
+    private static void RenderImagePlaceholder(RenderContext context, string? altText, int blockIndex, string kind, MarkdownSourceSpan? sourceSpan)
         => context.Html.Append("<figure class=\"image-placeholder\"")
-            .Append(BlockDataAttributes(blockIndex, kind))
+            .Append(BlockDataAttributes(blockIndex, kind, sourceSpan))
             .Append("><figcaption>")
             .Append(HtmlText(altText ?? "image"))
             .AppendLine("</figcaption></figure>");

@@ -19,6 +19,12 @@ import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSa
 import { createScrollCoalescer } from "./scrollCoalescer";
 import { calculateWidthHandleLeft } from "./widthHandleLayout";
 import { createFindBar, type FindBarController } from "./findBar";
+import {
+  findScrollTopForSourceLine,
+  findSourceLineAtDocumentY,
+  readSourceLineAnchors,
+  type SourceLineAnchor
+} from "./sourceLineSync";
 
 type KatexApi = {
   render: (
@@ -76,6 +82,7 @@ type RendererMessage =
   | { type: "perf-mark"; name: string; detail?: string }
   | { type: "headings-updated"; headings: ReadonlyArray<{ id: string; level: number; text: string }> }
   | { type: "active-heading-changed"; id: string }
+  | { type: "preview-source-line"; sourceLine: number }
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number }
   // Mode-toggle reveal gate (2026-05-20). Posted in response to a host-sent
   // `mode-settle-probe` message after two requestAnimationFrame ticks elapse —
@@ -119,6 +126,7 @@ type HostMessage =
   | { type: "load-document"; html: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number }
   | { type: "clear-document" }
   | { type: "scroll-to-heading"; id: string }
+  | { type: "scroll-to-source-line"; sourceLine: number }
   | { type: "open-find-bar" }
   | { type: "host-scrollbar"; active: boolean }
   // Host-sent probe (2026-05-20). The host sends this after Avalonia
@@ -214,6 +222,12 @@ let lastPostedMinimapState: PostedMinimapState = { hasPosted: false, visible: fa
 // gates on this so the renderer cannot make a minimap decision against
 // stale literals that drifted from C#.
 let minimapPolicy: MinimapPolicy | null = null;
+let sourceLineAnchors: SourceLineAnchor[] = [];
+let sourceLineAnchorRefreshFrameRequested = false;
+let previewSourceLineFrameRequested = false;
+let suppressPreviewSourceLineEmit = false;
+let suppressPreviewSourceLineToken = 0;
+let lastPostedPreviewSourceLine: number | null = null;
 
 function applyViewerChromeState(): void {
   document.documentElement.dataset.mmChrome = viewerChromeEnabled ? "on" : "off";
@@ -424,7 +438,95 @@ function postScroll(): void {
   });
 }
 
+function refreshSourceLineAnchors(): void {
+  sourceLineAnchors = readSourceLineAnchors(document);
+}
+
+function queueSourceLineAnchorRefresh(): void {
+  if (sourceLineAnchorRefreshFrameRequested) {
+    return;
+  }
+
+  sourceLineAnchorRefreshFrameRequested = true;
+  window.requestAnimationFrame(() => {
+    sourceLineAnchorRefreshFrameRequested = false;
+    refreshSourceLineAnchors();
+  });
+}
+
+function scrollToSourceLine(sourceLine: number): void {
+  if (!Number.isFinite(sourceLine) || sourceLine < 0) {
+    return;
+  }
+
+  if (sourceLineAnchors.length === 0) {
+    refreshSourceLineAnchors();
+  }
+
+  const scrollTop = findScrollTopForSourceLine(sourceLineAnchors, sourceLine);
+  if (scrollTop === null) {
+    return;
+  }
+
+  suppressPreviewSourceLinePost();
+  window.scrollTo({ left: 0, top: scrollTop, behavior: "instant" as ScrollBehavior });
+}
+
+function suppressPreviewSourceLinePost(): void {
+  const token = ++suppressPreviewSourceLineToken;
+  suppressPreviewSourceLineEmit = true;
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      if (token === suppressPreviewSourceLineToken) {
+        suppressPreviewSourceLineEmit = false;
+      }
+    });
+  });
+}
+
+function queuePreviewSourceLinePost(): void {
+  if (suppressPreviewSourceLineEmit || !documentScrollEnabled || previewSourceLineFrameRequested) {
+    return;
+  }
+
+  previewSourceLineFrameRequested = true;
+  window.requestAnimationFrame(() => {
+    previewSourceLineFrameRequested = false;
+    if (suppressPreviewSourceLineEmit || !documentScrollEnabled) {
+      return;
+    }
+
+    if (sourceLineAnchors.length === 0) {
+      refreshSourceLineAnchors();
+    }
+
+    const sourceLine = findSourceLineAtDocumentY(
+      sourceLineAnchors,
+      window.scrollY + getViewportAnchorY());
+    if (sourceLine === null || sourceLine === lastPostedPreviewSourceLine) {
+      return;
+    }
+
+    lastPostedPreviewSourceLine = sourceLine;
+    postHostMessage({ type: "preview-source-line", sourceLine });
+  });
+}
+
+function getViewportAnchorY(): number {
+  const viewportHeight = Math.max(0, window.innerHeight);
+  if (viewportHeight <= 0) {
+    return 24;
+  }
+
+  if (viewportHeight <= 48) {
+    return viewportHeight * 0.5;
+  }
+
+  return Math.max(24, Math.min(viewportHeight * 0.38, viewportHeight - 24));
+}
+
 function postLayoutReady(): void {
+  refreshSourceLineAnchors();
   postScroll();
   postHostMessage({
     type: "layout-ready",
@@ -1430,6 +1532,11 @@ function handleHostMessage(raw: unknown): void {
     return;
   }
 
+  if (message.type === "scroll-to-source-line") {
+    scrollToSourceLine(message.sourceLine);
+    return;
+  }
+
   if (message.type === "open-find-bar") {
     // Magnifier toolbar button — open the same find bar the Ctrl+F
     // keystroke would open. Toggle, so a second magnifier click closes it.
@@ -1495,29 +1602,22 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "mode-settle-probe") {
-    // Mode-toggle reveal gate (2026-05-20). The host sends this after Avalonia
-    // UpdateLayout has settled the slot bounds but BEFORE the WebView2 HWND
-    // is made visible on the Commit fast-path (Ctrl+E same-document reparent).
-    // Schedule two rAFs so CSS reflow on the new bounds has propagated and one
-    // paint has happened, refresh chrome positions, then post the ack so the
-    // host can flip the HWND visible without the user seeing the renderer
-    // mid-reflow. The host pairs this with a short timeout fallback, so a
-    // dropped or delayed ack does not hang the toggle.
+    postPerfMark("mm-mode-settle-probe-received");
     if (modeToggleProbeFrameRequested) {
+      postPerfMark("mm-mode-settle-probe-duplicate");
       return;
     }
 
     modeToggleProbeFrameRequested = true;
     window.requestAnimationFrame(() => {
+      postPerfMark("mm-mode-settle-first-raf");
       window.requestAnimationFrame(() => {
+        postPerfMark("mm-mode-settle-second-raf");
         modeToggleProbeFrameRequested = false;
-        // Refresh chrome positions against the new bounds while we hold the
-        // synchronous-layout cost anyway. Idempotent with the canonical
-        // resize/observer paths; firing here makes the chrome correct in the
-        // very first paint that follows the HWND show.
         updateWidthHandlePosition();
         updateMinimapVisibility();
         updateMinimapViewport();
+        postPerfMark("mm-mode-settle-pre-ack");
         postHostMessage({ type: "mode-toggle-settled" });
       });
     });
@@ -1559,6 +1659,11 @@ function resetModuleGlobalsForLoadDocument(): void {
     activeHeadingObserver = null;
   }
   lastPostedActiveHeadingId = null;
+  sourceLineAnchors = [];
+  sourceLineAnchorRefreshFrameRequested = false;
+  previewSourceLineFrameRequested = false;
+  suppressPreviewSourceLineEmit = false;
+  lastPostedPreviewSourceLine = null;
 }
 
 function ensureChromeNodes(): void {
@@ -1592,6 +1697,7 @@ function ensureChromeNodes(): void {
   // anchor ids from MarkdownHeadingAnchorSlugger drive scroll-to-heading
   // round-trips back from the host.
   extractAndPostHeadings();
+  refreshSourceLineAnchors();
 }
 
 function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
@@ -1979,6 +2085,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       // 100ms-debounced rebuild path stays as-is — it's already coarse.
       queueMinimapRefreshAfterLayoutSettles();
+      queueSourceLineAnchorRefresh();
       // Synchronous-layout reads (updateWidthHandlePosition reads
       // getBoundingClientRect) plus the viewport refresh are coalesced into
       // a single rAF via scheduleResizeReactions, so a fast window-edge drag
@@ -1990,7 +2097,10 @@ document.addEventListener("DOMContentLoaded", () => {
     resizeObserver.observe(document.body);
   }
 
-  document.fonts?.ready.then(() => queueMinimapRefreshAfterLayoutSettles()).catch(() => undefined);
+  document.fonts?.ready.then(() => {
+    queueMinimapRefreshAfterLayoutSettles();
+    queueSourceLineAnchorRefresh();
+  }).catch(() => undefined);
 });
 
 const queuePostScroll = createScrollCoalescer({
@@ -2003,6 +2113,7 @@ const queuePostScroll = createScrollCoalescer({
 
 document.addEventListener("scroll", () => {
   queuePostScroll();
+  queuePreviewSourceLinePost();
 }, { passive: true });
 
 window.addEventListener("message", (event) => handleHostMessage(event.data));
@@ -2012,6 +2123,7 @@ window.addEventListener("message", (event) => handleHostMessage(event.data));
 // browser-native and is not affected by this debounce.
 window.addEventListener("resize", () => {
   scheduleResizeReactions();
+  queueSourceLineAnchorRefresh();
 });
 
 (window as unknown as { __mmPerfReport: typeof getReport; __mmFpsSampler: ReturnType<typeof getFpsSampler> }).__mmPerfReport = getReport;

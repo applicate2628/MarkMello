@@ -171,6 +171,46 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
+    public async Task RenderEmitsSourceLineMetadataForScrollSync()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        const string sourceText = "# Title\n\nFirst paragraph.\n";
+        var source = new MarkdownSource("blocks.md", "blocks.md", sourceText);
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        Assert.Contains("data-mm-source-line=\"0\" data-mm-source-end-line=\"0\"", document.Html);
+        Assert.Contains("data-mm-source-line=\"2\" data-mm-source-end-line=\"2\"", document.Html);
+    }
+
+    [Fact]
+    public async Task RenderKeepsSourceLineMetadataAcrossDisplayMathSegments()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        var displayDelimiter = new string('$', 2);
+        var sourceText = "# Title\n\n"
+            + displayDelimiter
+            + "\nx^2\n"
+            + displayDelimiter
+            + "\n\nAfter math.\n";
+        var source = new MarkdownSource("math.md", "math.md", sourceText);
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        Assert.Contains("data-mm-source-line=\"0\" data-mm-source-end-line=\"0\"", document.Html);
+        Assert.Contains("data-mm-source-line=\"2\" data-mm-source-end-line=\"4\"", document.Html);
+        Assert.Contains("data-mm-source-line=\"6\" data-mm-source-end-line=\"6\"", document.Html);
+    }
+
+    [Fact]
     public async Task RenderDoesNotEmitExternalImageUrls()
     {
         var renderer = new ApplicateHtmlMarkdownRenderer();
