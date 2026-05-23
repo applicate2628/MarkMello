@@ -308,12 +308,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        // F-09 fix: subscribe only to canonical preferences source
-        // (ReadingPreferences) — the deleted DocumentReadingPreferences
-        // ghost copy is no longer published, and SyncFromViewModel always
-        // reads ReadingPreferences directly.
-        if (e.PropertyName is nameof(MainWindowViewModel.RenderedDocument)
-            or nameof(MainWindowViewModel.Document)
+        if (e.PropertyName is nameof(MainWindowViewModel.Document)
             or nameof(MainWindowViewModel.DocumentColumnMaxWidth)
             or nameof(MainWindowViewModel.ReadingPreferences))
         {

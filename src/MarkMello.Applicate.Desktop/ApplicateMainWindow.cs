@@ -1107,13 +1107,29 @@ public sealed class ApplicateMainWindow : MainWindow
                     return;
                 }
 
-                // Reader-mode tab switch: full reload, preserve edit flag
-                // is a defensive no-op here because we already gated above.
+                // Reader-mode tab switch: the open-doc service already owns
+                // the activated tab's text once EnsureLoadedAsync succeeds.
+                // Apply it in-place so every activation avoids the
+                // OpenPathAsync disk/read pipeline; keep OpenPathAsync only
+                // as the typed-error fallback when a restored stub could not
+                // be materialized.
                 var wasEditMode = viewModel.IsEditMode;
                 inServiceLoad = true;
                 try
                 {
-                    await viewModel.OpenPathAsync(newPath).ConfigureAwait(true);
+                    if (args.ActiveDocument.IsLoaded)
+                    {
+                        var nextSource = new MarkdownSource(
+                            args.ActiveDocument.FilePath,
+                            args.ActiveDocument.DisplayName,
+                            args.ActiveDocument.SourceText);
+                        viewModel.ApplyOpenedDocumentInPlace(nextSource);
+                    }
+                    else
+                    {
+                        await viewModel.OpenPathAsync(newPath).ConfigureAwait(true);
+                    }
+
                     if (wasEditMode
                         && !viewModel.IsEditMode
                         && viewModel.ToggleEditModeCommand.CanExecute(null))
