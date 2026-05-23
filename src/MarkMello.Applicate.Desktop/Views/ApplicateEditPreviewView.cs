@@ -14,6 +14,7 @@ using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using AvaloniaEdit;
 using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Domain;
@@ -65,7 +66,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     private EditorSessionViewModel? _session;
     private ScrollViewer? _hostScrollViewer;
     private ScrollBarVisibility? _hostScrollViewerVerticalMode;
-    private TextBox? _editorTextBox;
+    private TextEditor? _editorTextEditor;
     private ScrollViewer? _editorScrollViewer;
     private TextBox? _dropTargetTextBox;
     private bool _isAttachedToHost;
@@ -283,7 +284,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
 
     private void EnsureEditorWiring()
     {
-        if (_editorTextBox is not null && _editorScrollViewer is not null)
+        if (_editorTextEditor is not null && _editorScrollViewer is not null)
         {
             return;
         }
@@ -294,15 +295,15 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
             return;
         }
 
-        var textBox = topLevel.GetVisualDescendants()
-            .OfType<TextBox>()
-            .FirstOrDefault(static tb => string.Equals(tb.Name, "EditorTextBox", StringComparison.Ordinal));
-        if (textBox is null)
+        var editor = topLevel.GetVisualDescendants()
+            .OfType<TextEditor>()
+            .FirstOrDefault(static editor => string.Equals(editor.Name, "EditorTextEditor", StringComparison.Ordinal));
+        if (editor is null)
         {
             return;
         }
 
-        var scrollViewer = textBox.GetVisualDescendants()
+        var scrollViewer = editor.GetVisualDescendants()
             .OfType<ScrollViewer>()
             .FirstOrDefault();
         if (scrollViewer is null)
@@ -310,7 +311,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
             return;
         }
 
-        _editorTextBox = textBox;
+        _editorTextEditor = editor;
         _editorScrollViewer = scrollViewer;
         _editorScrollViewer.ScrollChanged += OnEditorScrollChanged;
     }
@@ -322,7 +323,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
             _editorScrollViewer.ScrollChanged -= OnEditorScrollChanged;
         }
         _editorScrollViewer = null;
-        _editorTextBox = null;
+        _editorTextEditor = null;
     }
 
     private static readonly string[] MarkdownInsertExtensions =
