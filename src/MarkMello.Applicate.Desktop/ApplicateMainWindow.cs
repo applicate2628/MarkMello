@@ -1021,6 +1021,22 @@ public sealed class ApplicateMainWindow : MainWindow
         var inServiceLoad = false;
         var inVmMirror = false;
 
+        static double NormalizeScrollProgress(double progress)
+            => double.IsFinite(progress) ? System.Math.Clamp(progress, 0, 100) : 0;
+
+        void ApplyOpenedDocumentInPlaceWithScroll(OpenDocument activeDocument)
+        {
+            var progress = NormalizeScrollProgress(activeDocument.ScrollProgressPercent);
+            var nextSource = new MarkdownSource(
+                activeDocument.FilePath,
+                activeDocument.DisplayName,
+                activeDocument.SourceText);
+
+            viewModel.ReadingProgress = progress;
+            viewModel.ApplyOpenedDocumentInPlace(nextSource);
+            viewModel.ReadingProgress = progress;
+        }
+
         openDocs.ActiveDocumentChanged += (_, args) =>
         {
             if (inVmMirror)
@@ -1091,14 +1107,10 @@ public sealed class ApplicateMainWindow : MainWindow
                 // "tabs and file don't match" desync (user-reported).
                 if (viewModel.IsEditMode && viewModel.EditorSession is not null)
                 {
-                    var nextSource = new MarkdownSource(
-                        args.ActiveDocument.FilePath,
-                        args.ActiveDocument.DisplayName,
-                        args.ActiveDocument.SourceText);
                     inServiceLoad = true;
                     try
                     {
-                        viewModel.ApplyOpenedDocumentInPlace(nextSource);
+                        ApplyOpenedDocumentInPlaceWithScroll(args.ActiveDocument);
                     }
                     finally
                     {
@@ -1119,11 +1131,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 {
                     if (args.ActiveDocument.IsLoaded)
                     {
-                        var nextSource = new MarkdownSource(
-                            args.ActiveDocument.FilePath,
-                            args.ActiveDocument.DisplayName,
-                            args.ActiveDocument.SourceText);
-                        viewModel.ApplyOpenedDocumentInPlace(nextSource);
+                        ApplyOpenedDocumentInPlaceWithScroll(args.ActiveDocument);
                     }
                     else
                     {
@@ -1146,6 +1154,16 @@ public sealed class ApplicateMainWindow : MainWindow
 
         viewModel.PropertyChanged += (_, args) =>
         {
+            if (args.PropertyName == nameof(MainWindowViewModel.ReadingProgress))
+            {
+                var active = openDocs.ActiveDocument;
+                if (active is not null)
+                {
+                    openDocs.UpdateState(active, active.EditorCaret, viewModel.ReadingProgress);
+                }
+                return;
+            }
+
             if (args.PropertyName != nameof(MainWindowViewModel.Document))
             {
                 return;

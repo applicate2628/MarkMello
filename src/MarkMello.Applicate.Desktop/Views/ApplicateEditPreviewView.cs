@@ -75,6 +75,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     private bool _syncEnabled;
     private DateTime _ignoreEditorScrollUntil;
     private DateTime _ignorePreviewScrollUntil;
+    private double? _pendingScrollRestoreProgress;
     // EP-A startup gate. Mirrors ApplicateViewerView._hasValidBounds. The
     // FIRST render after edit-preview becomes visible would otherwise fire
     // while _webSlot.Bounds is still 0x0 (Avalonia hasn't measured the
@@ -955,6 +956,21 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
 
     private void OnSharedScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)
     {
+        if (!_isAttachedToHost)
+        {
+            return;
+        }
+
+        if (_pendingScrollRestoreProgress.HasValue)
+        {
+            return;
+        }
+
+        if (_viewModel is not null)
+        {
+            _viewModel.ReadingProgress = e.ProgressPercent;
+        }
+
         if (!_syncEnabled)
         {
             return;
@@ -1000,9 +1016,19 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
 
     private void OnSharedDocumentRendered(object? sender, EventArgs e)
     {
+        var restoreProgress = _pendingScrollRestoreProgress;
+        _pendingScrollRestoreProgress = null;
         ApplicateTrace.ModeToggle("SharedView Rendered (edit-preview)");
         // Render committed: hide any visible failure overlay.
         _failureView.IsVisible = false;
+        if (restoreProgress.HasValue && _isAttachedToHost && _sharedHost is not null)
+        {
+            _sharedHost.View.ScrollToProgress(restoreProgress.Value);
+            if (_viewModel is not null)
+            {
+                _viewModel.ReadingProgress = restoreProgress.Value;
+            }
+        }
         SourceLineScrollSyncPreviewRendered?.Invoke(this, EventArgs.Empty);
     }
 
@@ -1015,9 +1041,11 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         // The single source of truth for "active consumer" is _isAttachedToHost.
         if (!_isAttachedToHost)
         {
+            _pendingScrollRestoreProgress = null;
             return;
         }
 
+        _pendingScrollRestoreProgress = null;
         _failureView.ShowFailure(
             e,
             retry: e.Kind == ApplicateRendererFailureKind.DocumentRenderFailed ? RetryCurrentRender : null);
@@ -1116,8 +1144,16 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
             ReadingPreferences: CreateWebPreviewPreferences(_session.ReadingPreferences),
             ImageSourceResolver: _session.ImageSourceResolver,
             AvailableContentWidth: widths.WebColumnWidth);
+
+        var restoreProgress = NormalizeReadingProgress(_viewModel?.ReadingProgress ?? 0);
+        var shouldRestoreScroll = restoreProgress > 0
+            && !_sharedHost.View.HasLoadedDocumentForSource(source);
+        _pendingScrollRestoreProgress = shouldRestoreScroll ? restoreProgress : null;
         _sharedHost.RequestRender(source, request);
     }
+
+    private static double NormalizeReadingProgress(double progress)
+        => double.IsFinite(progress) ? SysMath.Clamp(progress, 0, 100) : 0;
 
     public void ScrollToSourceLine(int sourceLine)
     {

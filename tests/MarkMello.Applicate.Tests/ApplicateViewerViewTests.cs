@@ -83,6 +83,20 @@ public sealed class ApplicateViewerViewTests
         Assert.DoesNotContain("nameof(MainWindowViewModel.RenderedDocument)", handler, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void ViewerRestoresReadingProgressAfterDocumentRender()
+    {
+        var codeBehind = ReadViewerCodeBehind();
+        var issueRender = ExtractMethodBody(codeBehind, "private void IssueRenderRequest()");
+        var scrollHandler = ExtractMethodBody(codeBehind, "private void OnHostScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)");
+        var renderedHandler = ExtractMethodBody(codeBehind, "private void OnHostDocumentRendered(object? sender, EventArgs e)");
+
+        Assert.Contains("_pendingScrollRestoreProgress", issueRender, StringComparison.Ordinal);
+        Assert.Contains("_pendingScrollRestoreProgress.HasValue", scrollHandler, StringComparison.Ordinal);
+        Assert.Contains("_sharedHost.View.ScrollToProgress(restoreProgress.Value);", renderedHandler, StringComparison.Ordinal);
+        Assert.Contains("_viewModel.ReadingProgress = restoreProgress.Value;", renderedHandler, StringComparison.Ordinal);
+    }
+
     private static string ReadViewerCodeBehind()
         => File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,

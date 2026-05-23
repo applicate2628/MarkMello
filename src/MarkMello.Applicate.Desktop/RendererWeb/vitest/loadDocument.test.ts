@@ -29,6 +29,32 @@ describe("applyLoadDocument", () => {
     expect(main?.innerHTML).not.toContain("old");
   });
 
+  it("uses cached processed html when cache key resolves", () => {
+    const fragment = document.createDocumentFragment();
+    const cached = document.createElement("p");
+    cached.dataset["processed"] = "true";
+    cached.textContent = "cached";
+    fragment.append(cached);
+
+    const deps = makeDeps({
+      getCachedDocumentFragment: vi.fn(() => fragment),
+      setCurrentDocumentCacheKey: vi.fn(),
+      completeCachedDocumentLoad: vi.fn(),
+    });
+
+    applyLoadDocument({ html: "<p>raw</p>", documentName: "doc.md", cacheKey: "doc-cache" }, deps);
+
+    const main = document.querySelector("main.mm-document");
+    expect(main?.innerHTML).toContain("data-processed=\"true\"");
+    expect(main?.innerHTML).not.toContain("<p>raw</p>");
+    expect(deps.setCurrentDocumentCacheKey).toHaveBeenCalledWith("doc-cache");
+    expect(deps.emitMark).toHaveBeenCalledWith(
+      "mm-load-document-cache-hit",
+      expect.objectContaining({ documentName: "doc.md" }));
+    expect(deps.runInitialRenderPipeline).not.toHaveBeenCalled();
+    expect(deps.completeCachedDocumentLoad).toHaveBeenCalledTimes(1);
+  });
+
   it("calls cancelCurrentMathController before resetModuleGlobals", () => {
     const order: string[] = [];
     const deps = makeDeps({

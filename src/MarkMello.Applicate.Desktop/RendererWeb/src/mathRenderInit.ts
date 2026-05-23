@@ -59,8 +59,12 @@ export function renderMath(deps: RenderMathDeps): MathReadinessController {
   }
 
   // 1. Reserve display-math placeholders synchronously (no layout shift later).
-  //    Inline math intentionally has no placeholder reservation.
-  mathNodes.forEach(reserveMathPlaceholder);
+  //    Inline math intentionally has no placeholder reservation. Cached DOM
+  //    can already contain terminal KaTeX nodes; those keep their natural
+  //    rendered height and must not re-enter the initial-ready wait set.
+  mathNodes
+    .filter(node => !isTerminalMathState(node.dataset["mmMathRendered"]))
+    .forEach(reserveMathPlaceholder);
 
   // 2. Build queue with rAF yield and performance.now timing.
   const queue = new MathRenderQueue({
@@ -77,6 +81,10 @@ export function renderMath(deps: RenderMathDeps): MathReadinessController {
   const viewportHeight = window.innerHeight;
   const initialVisibleNodes = new Set<HTMLElement>();
   for (const node of mathNodes) {
+    if (isTerminalMathState(node.dataset["mmMathRendered"])) {
+      continue;
+    }
+
     const visEl = getVisibilityElement(node);
     const rect = visEl.getBoundingClientRect();
     const tex = node.dataset["tex"] ?? "";

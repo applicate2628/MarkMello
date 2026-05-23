@@ -43,6 +43,20 @@ public sealed class ApplicateEditPreviewSyncTests
         Assert.Contains("_sharedHost.View.ScrollToHeading(id)", handler, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void EditPreviewPreservesReadingProgressAcrossPreviewRerender()
+    {
+        var codeBehind = ReadEditPreviewCodeBehind();
+        var applyRender = ExtractMethodBody(codeBehind, "private void ApplyWebPreviewSource()");
+        var scrollHandler = ExtractMethodBody(codeBehind, "private void OnSharedScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)");
+        var renderedHandler = ExtractMethodBody(codeBehind, "private void OnSharedDocumentRendered(object? sender, EventArgs e)");
+
+        Assert.Contains("_pendingScrollRestoreProgress", applyRender, StringComparison.Ordinal);
+        Assert.Contains("_viewModel.ReadingProgress = e.ProgressPercent;", scrollHandler, StringComparison.Ordinal);
+        Assert.Contains("_pendingScrollRestoreProgress.HasValue", scrollHandler, StringComparison.Ordinal);
+        Assert.Contains("_sharedHost.View.ScrollToProgress(restoreProgress.Value);", renderedHandler, StringComparison.Ordinal);
+    }
+
     private static string ReadEditPreviewCodeBehind()
         => File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,

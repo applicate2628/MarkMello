@@ -3,6 +3,7 @@ export type LoadDocumentMessage = {
   documentName?: string;
   theme?: "light" | "dark" | "classic-white";
   renderId?: number;
+  cacheKey?: string;
   // PE r2 item G — host-provided per-document mermaid presence flag,
   // populated from C#'s `body.HasMermaidBlock` at the IPC boundary
   // (ApplicateWebMarkdownDocumentView.cs:557, IPC type at renderer.ts:108).
@@ -23,9 +24,13 @@ export type LoadDocumentDeps = {
   resetModuleGlobals: () => void;
   scrollWindowToTop: () => void;
   emitMark: (name: string, detail?: Record<string, unknown>) => void;
-  ensureChromeNodes: () => void;
+  ensureChromeNodes: (useCachedDocumentState?: boolean) => void;
   applyTheme: (theme: "light" | "dark" | "classic-white") => void;
   debugLog: (text: string) => void;
+  preserveCurrentDocumentCache?: () => void;
+  getCachedDocumentFragment?: (cacheKey: string) => DocumentFragment | undefined;
+  setCurrentDocumentCacheKey?: (cacheKey: string | null) => void;
+  completeCachedDocumentLoad?: () => void;
 };
 
 export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocumentDeps): void {
@@ -45,17 +50,34 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
   // that observers will resolve from the about-to-be-discarded DOM nodes.
   // Failing to cancel keeps frozen initialVisibleNodes pointing into the
   // detached subtree, producing phantom math marks against the previous doc.
+  deps.preserveCurrentDocumentCache?.();
   deps.cancelCurrentMathController();
   deps.resetModuleGlobals();
   if (message.theme) {
     deps.applyTheme(message.theme);
   }
 
+  const cachedFragment = message.cacheKey
+    ? deps.getCachedDocumentFragment?.(message.cacheKey)
+    : undefined;
+  if (cachedFragment !== undefined) {
+    deps.emitMark("mm-load-document-cache-hit", {
+      documentName: message.documentName ?? "",
+      nodeCount: cachedFragment.childNodes.length,
+      renderId: message.renderId ?? null,
+    });
+  }
+
   // Body swap (single innerHTML write). Minimap aside / width-handle / drop-overlay
   // are siblings of <main> under <body>, so they survive this swap. Their event
   // wiring (document-bound + window-bound listeners from wireLinks / wireFileDrop
   // etc.) survives too because the swap does not touch document or window.
-  main.innerHTML = message.html;
+  if (cachedFragment !== undefined) {
+    main.replaceChildren(cachedFragment);
+  } else {
+    main.innerHTML = message.html;
+  }
+  deps.setCurrentDocumentCacheKey?.(message.cacheKey ?? null);
   const firstHeading = main.querySelector("h1,h2,h3")?.textContent?.trim().replace(/\s+/g, " ").slice(0, 120) ?? "";
   deps.debugLog(`load-document:swapped id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${document.documentElement.dataset.theme ?? "(none)"} firstHeading=${firstHeading}`);
 
@@ -64,7 +86,7 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
   // contents on its Phase A/B rebuild). The ensureChromeNodes() callback wraps
   // ensureMinimap() / ensureWidthHandle() / ensureDropOverlay() so they recreate
   // detached nodes if a previous call accidentally removed them.
-  deps.ensureChromeNodes();
+  deps.ensureChromeNodes(cachedFragment !== undefined);
 
   // Reset scroll to top — host owns scroll restore via subsequent
   // scroll-to-progress message after document-ready.
@@ -75,6 +97,11 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
   // PE r2 item G — thread the per-document `hasMermaid` flag down so the
   // pipeline can skip mermaid init+render entirely for docs without mermaid
   // blocks. Undefined defaults to running (backward-compat).
+  if (cachedFragment !== undefined && deps.completeCachedDocumentLoad) {
+    deps.completeCachedDocumentLoad();
+    return;
+  }
+
   void deps.runInitialRenderPipeline(message.hasMermaid);
 }
 
@@ -84,6 +111,7 @@ export function clearDocumentState(deps: LoadDocumentDeps): void {
   deps.debugLog("clear-document");
   deps.cancelCurrentMathController();
   deps.resetModuleGlobals();
+  deps.setCurrentDocumentCacheKey?.(null);
   if (main) {
     main.innerHTML = "";
   }

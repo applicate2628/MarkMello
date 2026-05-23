@@ -223,11 +223,108 @@ let lastPostedMinimapState: PostedMinimapState = { hasPosted: false, visible: fa
 // stale literals that drifted from C#.
 let minimapPolicy: MinimapPolicy | null = null;
 let sourceLineAnchors: SourceLineAnchor[] = [];
-let sourceLineAnchorRefreshFrameRequested = false;
 let previewSourceLineFrameRequested = false;
 let suppressPreviewSourceLineEmit = false;
-let suppressPreviewSourceLineToken = 0;
+let suppressPreviewSourceLineSequence = 0;
 let lastPostedPreviewSourceLine: number | null = null;
+const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
+type ProcessedDocumentCacheEntry = {
+  fragment: DocumentFragment;
+  nodeCount: number;
+  layoutState: CachedLayoutState;
+  headings: HeadingPayload[];
+};
+
+type HeadingPayload = {
+  id: string;
+  level: number;
+  text: string;
+};
+
+type CachedLayoutState = {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+  topBlockIndex: number | null;
+};
+
+const processedDocumentCache = new Map<string, ProcessedDocumentCacheEntry>();
+let currentDocumentCacheKey: string | null = null;
+let restoredCachedLayoutState: CachedLayoutState | null = null;
+let restoredCachedHeadings: HeadingPayload[] | null = null;
+let lastExtractedHeadings: HeadingPayload[] = [];
+let lastKnownLayoutState: CachedLayoutState = {
+  scrollTop: 0,
+  scrollHeight: 0,
+  clientHeight: 0,
+  topBlockIndex: null,
+};
+
+function hashDocumentHtml(html: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < html.length; index++) {
+    hash ^= html.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function createProcessedDocumentCacheKey(html: string, theme: RendererTheme, hasMermaid?: boolean): string | undefined {
+  if (hasMermaid === true) {
+    return undefined;
+  }
+  return `${theme}|${html.length}|${hashDocumentHtml(html)}`;
+}
+
+function getCachedProcessedDocumentFragment(cacheKey: string): DocumentFragment | undefined {
+  const cached = processedDocumentCache.get(cacheKey);
+  if (cached === undefined) {
+    return undefined;
+  }
+
+  processedDocumentCache.delete(cacheKey);
+  restoredCachedLayoutState = { ...cached.layoutState };
+  restoredCachedHeadings = cached.headings.map(heading => ({ ...heading }));
+  return cached.fragment;
+}
+
+function setCurrentProcessedDocumentCacheKey(cacheKey: string | null): void {
+  currentDocumentCacheKey = cacheKey;
+}
+
+function preserveCurrentProcessedDocument(): void {
+  if (!currentDocumentCacheKey || !initialRenderPipelineCompleted) {
+    return;
+  }
+
+  const main = document.querySelector<HTMLElement>("main.mm-document");
+  if (!main || main.childNodes.length === 0) {
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  const nodes = Array.from(main.childNodes);
+  fragment.append(...nodes);
+  processedDocumentCache.delete(currentDocumentCacheKey);
+  processedDocumentCache.set(currentDocumentCacheKey, {
+    fragment,
+    nodeCount: nodes.length,
+    layoutState: { ...lastKnownLayoutState },
+    headings: lastExtractedHeadings.map(heading => ({ ...heading })),
+  });
+  while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
+    const oldest = processedDocumentCache.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    processedDocumentCache.delete(oldest);
+  }
+  currentDocumentCacheKey = null;
+  postPerfMark("mm-document-cache-store", {
+    entries: processedDocumentCache.size,
+    nodeCount: nodes.length,
+  });
+}
 
 function applyViewerChromeState(): void {
   document.documentElement.dataset.mmChrome = viewerChromeEnabled ? "on" : "off";
@@ -430,28 +527,19 @@ function findTopVisibleBlockIndex(): number | null {
 }
 
 function postScroll(): void {
+  const scrollState = getScrollState();
+  const topBlockIndex = findTopVisibleBlockIndex();
+  lastKnownLayoutState = { ...scrollState, topBlockIndex };
   recordScrollIpc();
   postHostMessage({
     type: "scroll",
-    ...getScrollState(),
-    topBlockIndex: findTopVisibleBlockIndex()
+    ...scrollState,
+    topBlockIndex
   });
 }
 
 function refreshSourceLineAnchors(): void {
   sourceLineAnchors = readSourceLineAnchors(document);
-}
-
-function queueSourceLineAnchorRefresh(): void {
-  if (sourceLineAnchorRefreshFrameRequested) {
-    return;
-  }
-
-  sourceLineAnchorRefreshFrameRequested = true;
-  window.requestAnimationFrame(() => {
-    sourceLineAnchorRefreshFrameRequested = false;
-    refreshSourceLineAnchors();
-  });
 }
 
 function scrollToSourceLine(sourceLine: number): void {
@@ -473,11 +561,11 @@ function scrollToSourceLine(sourceLine: number): void {
 }
 
 function suppressPreviewSourceLinePost(): void {
-  const token = ++suppressPreviewSourceLineToken;
+  const sequence = ++suppressPreviewSourceLineSequence;
   suppressPreviewSourceLineEmit = true;
   window.requestAnimationFrame(() => {
     window.requestAnimationFrame(() => {
-      if (token === suppressPreviewSourceLineToken) {
+      if (sequence === suppressPreviewSourceLineSequence) {
         suppressPreviewSourceLineEmit = false;
       }
     });
@@ -526,13 +614,41 @@ function getViewportAnchorY(): number {
 }
 
 function postLayoutReady(): void {
-  refreshSourceLineAnchors();
-  postScroll();
+  const scrollState = getScrollState();
+  const topBlockIndex = findTopVisibleBlockIndex();
+  lastKnownLayoutState = { ...scrollState, topBlockIndex };
+  recordScrollIpc();
+  postHostMessage({
+    type: "scroll",
+    ...scrollState,
+    topBlockIndex
+  });
   postHostMessage({
     type: "layout-ready",
-    ...getScrollState()
+    ...scrollState
   });
   postPerfMark("mm-layout-ready");
+}
+
+function postCachedLayoutReady(): void {
+  const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
+  restoredCachedLayoutState = null;
+  lastKnownLayoutState = { ...layoutState };
+  recordScrollIpc();
+  postHostMessage({
+    type: "scroll",
+    scrollTop: layoutState.scrollTop,
+    scrollHeight: layoutState.scrollHeight,
+    clientHeight: layoutState.clientHeight,
+    topBlockIndex: layoutState.topBlockIndex
+  });
+  postHostMessage({
+    type: "layout-ready",
+    scrollTop: layoutState.scrollTop,
+    scrollHeight: layoutState.scrollHeight,
+    clientHeight: layoutState.clientHeight
+  });
+  postPerfMark("mm-layout-ready", { cached: true });
 }
 
 function scheduleLayoutReady(): void {
@@ -914,6 +1030,7 @@ function extractAndPostHeadings(): void {
   const main = document.querySelector<HTMLElement>("main.mm-document");
   if (!main) {
     postHostMessage({ type: "headings-updated", headings: [] });
+    lastExtractedHeadings = [];
     lastPostedActiveHeadingId = null;
     return;
   }
@@ -935,10 +1052,39 @@ function extractAndPostHeadings(): void {
       const text = (node.textContent ?? "").trim();
       return { id, level, text };
     })
-    .filter((h): h is { id: string; level: number; text: string } => h !== null);
+    .filter((h): h is HeadingPayload => h !== null);
 
+  lastExtractedHeadings = headings.map(heading => ({ ...heading }));
   postHostMessage({ type: "headings-updated", headings });
   rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
+}
+
+function postCachedHeadings(): void {
+  const headings = restoredCachedHeadings ?? [];
+  restoredCachedHeadings = null;
+  lastExtractedHeadings = headings.map(heading => ({ ...heading }));
+  postHostMessage({ type: "headings-updated", headings });
+  if (activeHeadingObserver) {
+    activeHeadingObserver.disconnect();
+    activeHeadingObserver = null;
+  }
+  lastPostedActiveHeadingId = null;
+  const rebuildGeneration = layoutReadyGeneration;
+  window.setTimeout(() => {
+    if (rebuildGeneration !== layoutReadyGeneration) {
+      return;
+    }
+
+    const main = document.querySelector<HTMLElement>("main.mm-document");
+    if (!main) {
+      return;
+    }
+
+    const nodes = Array.from(
+      main.querySelectorAll<HTMLHeadingElement>("h1, h2, h3, h4, h5, h6")
+    );
+    rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
+  }, 750);
 }
 
 function rebuildActiveHeadingObserver(headingNodes: HTMLHeadingElement[]): void {
@@ -1592,6 +1738,13 @@ function handleHostMessage(raw: unknown): void {
     if (message.hasMermaid !== undefined) {
       loadMessage.hasMermaid = message.hasMermaid;
     }
+    const cacheKey = createProcessedDocumentCacheKey(
+      message.html,
+      message.theme ?? getCurrentTheme(),
+      message.hasMermaid);
+    if (cacheKey !== undefined) {
+      loadMessage.cacheKey = cacheKey;
+    }
     applyLoadDocument(loadMessage, buildLoadDocumentDeps());
     return;
   }
@@ -1629,6 +1782,13 @@ function resetModuleGlobalsForLoadDocument(): void {
   initialRenderPipelineCompleted = false;
   currentController?.cancel();
   currentController = null;
+  restoredCachedLayoutState = null;
+  restoredCachedHeadings = null;
+  ++layoutReadyGeneration;
+  if (layoutReadyTimer !== undefined) {
+    window.clearTimeout(layoutReadyTimer);
+    layoutReadyTimer = undefined;
+  }
   // INCREMENT, not reset-to-0 — invalidates in-flight mermaid render callbacks
   // that compare against the old generation token. Resetting to 0 would let a
   // stale callback whose generation === 0 pass the check, painting an
@@ -1660,13 +1820,12 @@ function resetModuleGlobalsForLoadDocument(): void {
   }
   lastPostedActiveHeadingId = null;
   sourceLineAnchors = [];
-  sourceLineAnchorRefreshFrameRequested = false;
   previewSourceLineFrameRequested = false;
   suppressPreviewSourceLineEmit = false;
   lastPostedPreviewSourceLine = null;
 }
 
-function ensureChromeNodes(): void {
+function ensureChromeNodes(useCachedDocumentState = false): void {
   ensureMinimap();
   ensureWidthHandle();
   ensureDropOverlay();
@@ -1696,8 +1855,11 @@ function ensureChromeNodes(): void {
   // the host so the host-side Table of Contents panel populates. Stable
   // anchor ids from MarkdownHeadingAnchorSlugger drive scroll-to-heading
   // round-trips back from the host.
-  extractAndPostHeadings();
-  refreshSourceLineAnchors();
+  if (useCachedDocumentState) {
+    postCachedHeadings();
+  } else {
+    extractAndPostHeadings();
+  }
 }
 
 function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
@@ -1706,26 +1868,28 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
     // skips mermaid init+render for docs without mermaid blocks. Undefined
     // passes through to the pipeline's `!== false` default, preserving the
     // pre-G behavior for any caller that doesn't carry the flag.
-    runInitialRenderPipeline: (hasMermaid) => runInitialRenderPipeline({
-      getCurrentTheme,
-      applyTheme,
-      initMermaidWithTheme,
-      renderMath,
-      renderMermaid,
-      renderCodeBlocks,
-      scheduleLayoutReady: () => {
-        initialRenderPipelineCompleted = true;
-        scheduleLayoutReady();
-        // Re-emit document-ready so the host's _hasLoadedDocument state
-        // machine restarts for the new document.
-        postHostMessage({
-          type: "document-ready",
-          mathCount: document.querySelectorAll("[data-tex]").length
-        });
-      },
-      hasMermaid,
-      postPerfMark,
-    }),
+    runInitialRenderPipeline: async (hasMermaid) => {
+      await runInitialRenderPipeline({
+        getCurrentTheme,
+        applyTheme,
+        initMermaidWithTheme,
+        renderMath,
+        renderMermaid,
+        renderCodeBlocks,
+        scheduleLayoutReady: () => {
+          initialRenderPipelineCompleted = true;
+          scheduleLayoutReady();
+          // Re-emit document-ready so the host's _hasLoadedDocument state
+          // machine restarts for the new document.
+          postHostMessage({
+            type: "document-ready",
+            mathCount: document.querySelectorAll("[data-tex]").length
+          });
+        },
+        hasMermaid,
+        postPerfMark,
+      });
+    },
     cancelCurrentMathController: () => { currentController?.cancel(); },
     resetModuleGlobals: resetModuleGlobalsForLoadDocument,
     scrollWindowToTop: () => { window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior }); },
@@ -1736,13 +1900,25 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
     // semantic anchor rather than centralized here.
     emitMark: (name, detail) => {
       emitMark(name, detail);
-      if (name === "mm-load-document") {
+      if (name === "mm-load-document" || name === "mm-load-document-cache-hit") {
         postPerfMark(name, (detail as Record<string, unknown> | undefined) ?? undefined);
       }
     },
     ensureChromeNodes,
     applyTheme,
     debugLog: postDebugLog,
+    preserveCurrentDocumentCache: preserveCurrentProcessedDocument,
+    getCachedDocumentFragment: getCachedProcessedDocumentFragment,
+    setCurrentDocumentCacheKey: setCurrentProcessedDocumentCacheKey,
+    completeCachedDocumentLoad: () => {
+      initialRenderPipelineCompleted = true;
+      hasInitialLayoutSettled = true;
+      postHostMessage({
+        type: "document-ready",
+        mathCount: document.querySelectorAll("[data-tex]").length
+      });
+      postCachedLayoutReady();
+    },
   };
 }
 
@@ -2085,7 +2261,6 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       // 100ms-debounced rebuild path stays as-is — it's already coarse.
       queueMinimapRefreshAfterLayoutSettles();
-      queueSourceLineAnchorRefresh();
       // Synchronous-layout reads (updateWidthHandlePosition reads
       // getBoundingClientRect) plus the viewport refresh are coalesced into
       // a single rAF via scheduleResizeReactions, so a fast window-edge drag
@@ -2099,7 +2274,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.fonts?.ready.then(() => {
     queueMinimapRefreshAfterLayoutSettles();
-    queueSourceLineAnchorRefresh();
   }).catch(() => undefined);
 });
 
@@ -2123,7 +2297,6 @@ window.addEventListener("message", (event) => handleHostMessage(event.data));
 // browser-native and is not affected by this debounce.
 window.addEventListener("resize", () => {
   scheduleResizeReactions();
-  queueSourceLineAnchorRefresh();
 });
 
 (window as unknown as { __mmPerfReport: typeof getReport; __mmFpsSampler: ReturnType<typeof getFpsSampler> }).__mmPerfReport = getReport;

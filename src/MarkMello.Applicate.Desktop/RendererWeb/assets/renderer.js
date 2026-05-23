@@ -139,16 +139,34 @@
       renderId: message.renderId ?? null
     });
     deps.debugLog(`load-document:start id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${message.theme ?? "(none)"} currentTheme=${document.documentElement.dataset.theme ?? "(none)"} htmlLength=${message.html.length}`);
+    deps.preserveCurrentDocumentCache?.();
     deps.cancelCurrentMathController();
     deps.resetModuleGlobals();
     if (message.theme) {
       deps.applyTheme(message.theme);
     }
-    main.innerHTML = message.html;
+    const cachedFragment = message.cacheKey ? deps.getCachedDocumentFragment?.(message.cacheKey) : void 0;
+    if (cachedFragment !== void 0) {
+      deps.emitMark("mm-load-document-cache-hit", {
+        documentName: message.documentName ?? "",
+        nodeCount: cachedFragment.childNodes.length,
+        renderId: message.renderId ?? null
+      });
+    }
+    if (cachedFragment !== void 0) {
+      main.replaceChildren(cachedFragment);
+    } else {
+      main.innerHTML = message.html;
+    }
+    deps.setCurrentDocumentCacheKey?.(message.cacheKey ?? null);
     const firstHeading = main.querySelector("h1,h2,h3")?.textContent?.trim().replace(/\s+/g, " ").slice(0, 120) ?? "";
     deps.debugLog(`load-document:swapped id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${document.documentElement.dataset.theme ?? "(none)"} firstHeading=${firstHeading}`);
-    deps.ensureChromeNodes();
+    deps.ensureChromeNodes(cachedFragment !== void 0);
     deps.scrollWindowToTop();
+    if (cachedFragment !== void 0 && deps.completeCachedDocumentLoad) {
+      deps.completeCachedDocumentLoad();
+      return;
+    }
     void deps.runInitialRenderPipeline(message.hasMermaid);
   }
   function clearDocumentState(deps) {
@@ -157,6 +175,7 @@
     deps.debugLog("clear-document");
     deps.cancelCurrentMathController();
     deps.resetModuleGlobals();
+    deps.setCurrentDocumentCacheKey?.(null);
     if (main) {
       main.innerHTML = "";
     }
@@ -425,7 +444,7 @@
         isCancelled: () => false
       };
     }
-    mathNodes.forEach(reserveMathPlaceholder);
+    mathNodes.filter((node) => !isTerminalMathState(node.dataset["mmMathRendered"])).forEach(reserveMathPlaceholder);
     const queue = new MathRenderQueue({
       katex,
       timeBudgetMs: 7,
@@ -435,6 +454,9 @@
     const viewportHeight = window.innerHeight;
     const initialVisibleNodes = /* @__PURE__ */ new Set();
     for (const node of mathNodes) {
+      if (isTerminalMathState(node.dataset["mmMathRendered"])) {
+        continue;
+      }
       const visEl = getVisibilityElement(node);
       const rect = visEl.getBoundingClientRect();
       const tex = node.dataset["tex"] ?? "";
@@ -1043,11 +1065,80 @@
   var lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
   var minimapPolicy = null;
   var sourceLineAnchors = [];
-  var sourceLineAnchorRefreshFrameRequested = false;
   var previewSourceLineFrameRequested = false;
   var suppressPreviewSourceLineEmit = false;
-  var suppressPreviewSourceLineToken = 0;
+  var suppressPreviewSourceLineSequence = 0;
   var lastPostedPreviewSourceLine = null;
+  var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
+  var processedDocumentCache = /* @__PURE__ */ new Map();
+  var currentDocumentCacheKey = null;
+  var restoredCachedLayoutState = null;
+  var restoredCachedHeadings = null;
+  var lastExtractedHeadings = [];
+  var lastKnownLayoutState = {
+    scrollTop: 0,
+    scrollHeight: 0,
+    clientHeight: 0,
+    topBlockIndex: null
+  };
+  function hashDocumentHtml(html) {
+    let hash = 2166136261;
+    for (let index = 0; index < html.length; index++) {
+      hash ^= html.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
+  }
+  function createProcessedDocumentCacheKey(html, theme, hasMermaid) {
+    if (hasMermaid === true) {
+      return void 0;
+    }
+    return `${theme}|${html.length}|${hashDocumentHtml(html)}`;
+  }
+  function getCachedProcessedDocumentFragment(cacheKey) {
+    const cached = processedDocumentCache.get(cacheKey);
+    if (cached === void 0) {
+      return void 0;
+    }
+    processedDocumentCache.delete(cacheKey);
+    restoredCachedLayoutState = { ...cached.layoutState };
+    restoredCachedHeadings = cached.headings.map((heading) => ({ ...heading }));
+    return cached.fragment;
+  }
+  function setCurrentProcessedDocumentCacheKey(cacheKey) {
+    currentDocumentCacheKey = cacheKey;
+  }
+  function preserveCurrentProcessedDocument() {
+    if (!currentDocumentCacheKey || !initialRenderPipelineCompleted) {
+      return;
+    }
+    const main = document.querySelector("main.mm-document");
+    if (!main || main.childNodes.length === 0) {
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    const nodes = Array.from(main.childNodes);
+    fragment.append(...nodes);
+    processedDocumentCache.delete(currentDocumentCacheKey);
+    processedDocumentCache.set(currentDocumentCacheKey, {
+      fragment,
+      nodeCount: nodes.length,
+      layoutState: { ...lastKnownLayoutState },
+      headings: lastExtractedHeadings.map((heading) => ({ ...heading }))
+    });
+    while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
+      const oldest = processedDocumentCache.keys().next().value;
+      if (oldest === void 0) {
+        break;
+      }
+      processedDocumentCache.delete(oldest);
+    }
+    currentDocumentCacheKey = null;
+    postPerfMark("mm-document-cache-store", {
+      entries: processedDocumentCache.size,
+      nodeCount: nodes.length
+    });
+  }
   function applyViewerChromeState() {
     document.documentElement.dataset.mmChrome = viewerChromeEnabled ? "on" : "off";
   }
@@ -1204,25 +1295,18 @@
     return Number.isFinite(lastParsed) ? lastParsed : null;
   }
   function postScroll() {
+    const scrollState = getScrollState();
+    const topBlockIndex = findTopVisibleBlockIndex();
+    lastKnownLayoutState = { ...scrollState, topBlockIndex };
     recordScrollIpc();
     postHostMessage({
       type: "scroll",
-      ...getScrollState(),
-      topBlockIndex: findTopVisibleBlockIndex()
+      ...scrollState,
+      topBlockIndex
     });
   }
   function refreshSourceLineAnchors() {
     sourceLineAnchors = readSourceLineAnchors(document);
-  }
-  function queueSourceLineAnchorRefresh() {
-    if (sourceLineAnchorRefreshFrameRequested) {
-      return;
-    }
-    sourceLineAnchorRefreshFrameRequested = true;
-    window.requestAnimationFrame(() => {
-      sourceLineAnchorRefreshFrameRequested = false;
-      refreshSourceLineAnchors();
-    });
   }
   function scrollToSourceLine(sourceLine) {
     if (!Number.isFinite(sourceLine) || sourceLine < 0) {
@@ -1239,11 +1323,11 @@
     window.scrollTo({ left: 0, top: scrollTop, behavior: "instant" });
   }
   function suppressPreviewSourceLinePost() {
-    const token = ++suppressPreviewSourceLineToken;
+    const sequence = ++suppressPreviewSourceLineSequence;
     suppressPreviewSourceLineEmit = true;
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
-        if (token === suppressPreviewSourceLineToken) {
+        if (sequence === suppressPreviewSourceLineSequence) {
           suppressPreviewSourceLineEmit = false;
         }
       });
@@ -1284,13 +1368,40 @@
     return Math.max(24, Math.min(viewportHeight * 0.38, viewportHeight - 24));
   }
   function postLayoutReady() {
-    refreshSourceLineAnchors();
-    postScroll();
+    const scrollState = getScrollState();
+    const topBlockIndex = findTopVisibleBlockIndex();
+    lastKnownLayoutState = { ...scrollState, topBlockIndex };
+    recordScrollIpc();
+    postHostMessage({
+      type: "scroll",
+      ...scrollState,
+      topBlockIndex
+    });
     postHostMessage({
       type: "layout-ready",
-      ...getScrollState()
+      ...scrollState
     });
     postPerfMark("mm-layout-ready");
+  }
+  function postCachedLayoutReady() {
+    const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
+    restoredCachedLayoutState = null;
+    lastKnownLayoutState = { ...layoutState };
+    recordScrollIpc();
+    postHostMessage({
+      type: "scroll",
+      scrollTop: layoutState.scrollTop,
+      scrollHeight: layoutState.scrollHeight,
+      clientHeight: layoutState.clientHeight,
+      topBlockIndex: layoutState.topBlockIndex
+    });
+    postHostMessage({
+      type: "layout-ready",
+      scrollTop: layoutState.scrollTop,
+      scrollHeight: layoutState.scrollHeight,
+      clientHeight: layoutState.clientHeight
+    });
+    postPerfMark("mm-layout-ready", { cached: true });
   }
   function scheduleLayoutReady() {
     const generation = ++layoutReadyGeneration;
@@ -1553,6 +1664,7 @@
     const main = document.querySelector("main.mm-document");
     if (!main) {
       postHostMessage({ type: "headings-updated", headings: [] });
+      lastExtractedHeadings = [];
       lastPostedActiveHeadingId = null;
       return;
     }
@@ -1572,8 +1684,34 @@
       const text = (node.textContent ?? "").trim();
       return { id, level, text };
     }).filter((h) => h !== null);
+    lastExtractedHeadings = headings.map((heading) => ({ ...heading }));
     postHostMessage({ type: "headings-updated", headings });
     rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
+  }
+  function postCachedHeadings() {
+    const headings = restoredCachedHeadings ?? [];
+    restoredCachedHeadings = null;
+    lastExtractedHeadings = headings.map((heading) => ({ ...heading }));
+    postHostMessage({ type: "headings-updated", headings });
+    if (activeHeadingObserver) {
+      activeHeadingObserver.disconnect();
+      activeHeadingObserver = null;
+    }
+    lastPostedActiveHeadingId = null;
+    const rebuildGeneration = layoutReadyGeneration;
+    window.setTimeout(() => {
+      if (rebuildGeneration !== layoutReadyGeneration) {
+        return;
+      }
+      const main = document.querySelector("main.mm-document");
+      if (!main) {
+        return;
+      }
+      const nodes = Array.from(
+        main.querySelectorAll("h1, h2, h3, h4, h5, h6")
+      );
+      rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
+    }, 750);
   }
   function rebuildActiveHeadingObserver(headingNodes) {
     if (activeHeadingObserver) {
@@ -2008,6 +2146,14 @@
       if (message.hasMermaid !== void 0) {
         loadMessage.hasMermaid = message.hasMermaid;
       }
+      const cacheKey = createProcessedDocumentCacheKey(
+        message.html,
+        message.theme ?? getCurrentTheme(),
+        message.hasMermaid
+      );
+      if (cacheKey !== void 0) {
+        loadMessage.cacheKey = cacheKey;
+      }
       applyLoadDocument(loadMessage, buildLoadDocumentDeps());
       return;
     }
@@ -2041,6 +2187,13 @@
     initialRenderPipelineCompleted = false;
     currentController?.cancel();
     currentController = null;
+    restoredCachedLayoutState = null;
+    restoredCachedHeadings = null;
+    ++layoutReadyGeneration;
+    if (layoutReadyTimer !== void 0) {
+      window.clearTimeout(layoutReadyTimer);
+      layoutReadyTimer = void 0;
+    }
     ++mermaidRenderGeneration;
     minimapDocumentHeight = 0;
     lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
@@ -2053,19 +2206,21 @@
     }
     lastPostedActiveHeadingId = null;
     sourceLineAnchors = [];
-    sourceLineAnchorRefreshFrameRequested = false;
     previewSourceLineFrameRequested = false;
     suppressPreviewSourceLineEmit = false;
     lastPostedPreviewSourceLine = null;
   }
-  function ensureChromeNodes() {
+  function ensureChromeNodes(useCachedDocumentState = false) {
     ensureMinimap();
     ensureWidthHandle();
     ensureDropOverlay();
     updateWidthHandlePosition();
     refreshMinimapContent("A");
-    extractAndPostHeadings();
-    refreshSourceLineAnchors();
+    if (useCachedDocumentState) {
+      postCachedHeadings();
+    } else {
+      extractAndPostHeadings();
+    }
   }
   function buildLoadDocumentDeps() {
     return {
@@ -2073,24 +2228,26 @@
       // skips mermaid init+render for docs without mermaid blocks. Undefined
       // passes through to the pipeline's `!== false` default, preserving the
       // pre-G behavior for any caller that doesn't carry the flag.
-      runInitialRenderPipeline: (hasMermaid) => runInitialRenderPipeline({
-        getCurrentTheme,
-        applyTheme,
-        initMermaidWithTheme,
-        renderMath: renderMath2,
-        renderMermaid,
-        renderCodeBlocks,
-        scheduleLayoutReady: () => {
-          initialRenderPipelineCompleted = true;
-          scheduleLayoutReady();
-          postHostMessage({
-            type: "document-ready",
-            mathCount: document.querySelectorAll("[data-tex]").length
-          });
-        },
-        hasMermaid,
-        postPerfMark
-      }),
+      runInitialRenderPipeline: async (hasMermaid) => {
+        await runInitialRenderPipeline({
+          getCurrentTheme,
+          applyTheme,
+          initMermaidWithTheme,
+          renderMath: renderMath2,
+          renderMermaid,
+          renderCodeBlocks,
+          scheduleLayoutReady: () => {
+            initialRenderPipelineCompleted = true;
+            scheduleLayoutReady();
+            postHostMessage({
+              type: "document-ready",
+              mathCount: document.querySelectorAll("[data-tex]").length
+            });
+          },
+          hasMermaid,
+          postPerfMark
+        });
+      },
       cancelCurrentMathController: () => {
         currentController?.cancel();
       },
@@ -2105,13 +2262,25 @@
       // semantic anchor rather than centralized here.
       emitMark: (name, detail) => {
         emitMark(name, detail);
-        if (name === "mm-load-document") {
+        if (name === "mm-load-document" || name === "mm-load-document-cache-hit") {
           postPerfMark(name, detail ?? void 0);
         }
       },
       ensureChromeNodes,
       applyTheme,
-      debugLog: postDebugLog
+      debugLog: postDebugLog,
+      preserveCurrentDocumentCache: preserveCurrentProcessedDocument,
+      getCachedDocumentFragment: getCachedProcessedDocumentFragment,
+      setCurrentDocumentCacheKey: setCurrentProcessedDocumentCacheKey,
+      completeCachedDocumentLoad: () => {
+        initialRenderPipelineCompleted = true;
+        hasInitialLayoutSettled = true;
+        postHostMessage({
+          type: "document-ready",
+          mathCount: document.querySelectorAll("[data-tex]").length
+        });
+        postCachedLayoutReady();
+      }
     };
   }
   function wireLinks() {
@@ -2345,7 +2514,6 @@
           return;
         }
         queueMinimapRefreshAfterLayoutSettles();
-        queueSourceLineAnchorRefresh();
         scheduleResizeReactions();
         window.requestAnimationFrame(postScroll);
       });
@@ -2354,7 +2522,6 @@
     }
     document.fonts?.ready.then(() => {
       queueMinimapRefreshAfterLayoutSettles();
-      queueSourceLineAnchorRefresh();
     }).catch(() => void 0);
   });
   var queuePostScroll = createScrollCoalescer({
@@ -2373,7 +2540,6 @@
   window.addEventListener("message", (event) => handleHostMessage(event.data));
   window.addEventListener("resize", () => {
     scheduleResizeReactions();
-    queueSourceLineAnchorRefresh();
   });
   window.__mmPerfReport = getReport;
   window.__mmFpsSampler = getFpsSampler();

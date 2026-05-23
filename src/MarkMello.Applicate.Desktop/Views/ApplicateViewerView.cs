@@ -67,6 +67,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private double? _manualContentWidth;
     private double _lastViewModelContentWidth;
     private double _lastReadingProgress;
+    private double? _pendingScrollRestoreProgress;
     // F-04 fix: initialize to 0.0; SyncFromViewModel is the sole writer.
     // The previous 144.0 default was a phantom value mirroring the
     // edit-preview's hardcoded padding sum; it was always overwritten
@@ -324,6 +325,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
             _manualContentWidth = null;
             _lastViewModelContentWidth = 0;
             _lastReadingProgress = 0;
+            _pendingScrollRestoreProgress = null;
             _webMinimapReservedWidth = 0;
             _column.MaxWidth = double.PositiveInfinity;
             return;
@@ -334,7 +336,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         {
             _lastDocumentSource = _viewModel.Document;
             _webMinimapReservedWidth = 0;
-            _lastReadingProgress = 0;
+            _lastReadingProgress = NormalizeReadingProgress(_viewModel.ReadingProgress);
             // A document switch means any previously displayed failure view
             // is stale. Clear it so the failure overlay does not linger over
             // the new document's first paint.
@@ -394,6 +396,10 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
             ImageSourceResolver: _viewModel.ImageSourceResolver,
             AvailableContentWidth: CalculateDocumentColumnWidthForWebSurface());
 
+        var restoreProgress = NormalizeReadingProgress(_viewModel.ReadingProgress);
+        var shouldRestoreScroll = restoreProgress > 0
+            && !_sharedHost.View.HasLoadedDocumentForSource(_viewModel.Document);
+        _pendingScrollRestoreProgress = shouldRestoreScroll ? restoreProgress : null;
         _sharedHost.RequestRender(_viewModel.Document, request);
     }
 
@@ -514,11 +520,20 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
     private void OnHostDocumentRendered(object? sender, EventArgs e)
     {
+        var restoreProgress = _pendingScrollRestoreProgress;
+        _pendingScrollRestoreProgress = null;
         _viewModel?.MarkReadableDocumentRendered();
         // Any prior failure view dismissed on successful render — the host
         // committed the slot to IsVisible=true, and a stale failure overlay
         // beneath the now-visible WebView would block input.
         _failureView.IsVisible = false;
+
+        if (restoreProgress.HasValue && _sharedHost is not null && _viewModel is not null)
+        {
+            _sharedHost.View.ScrollToProgress(restoreProgress.Value);
+            _lastReadingProgress = restoreProgress.Value;
+            _viewModel.ReadingProgress = restoreProgress.Value;
+        }
     }
 
     private void OnHostRendererFailed(object? sender, ApplicateRendererFailureEvent e)
@@ -530,9 +545,11 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         // The single source of truth for "active consumer" is _isAttachedToHost.
         if (!_isAttachedToHost)
         {
+            _pendingScrollRestoreProgress = null;
             return;
         }
 
+        _pendingScrollRestoreProgress = null;
         _failureView.ShowFailure(
             e,
             retry: e.Kind == ApplicateRendererFailureKind.DocumentRenderFailed ? RetryCurrentRender : null);
@@ -715,10 +732,18 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
                 - ViewportHorizontalGutter);
     }
 
+    private static double NormalizeReadingProgress(double progress)
+        => double.IsFinite(progress) ? SysMath.Clamp(progress, 0, 100) : 0;
+
     private void OnHostScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)
     {
         if (_viewModel is not null)
         {
+            if (_pendingScrollRestoreProgress.HasValue)
+            {
+                return;
+            }
+
             _lastReadingProgress = e.ProgressPercent;
             _viewModel.ReadingProgress = _lastReadingProgress;
         }

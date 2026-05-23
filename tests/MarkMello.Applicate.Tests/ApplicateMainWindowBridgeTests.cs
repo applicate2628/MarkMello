@@ -12,11 +12,25 @@ public sealed class ApplicateMainWindowBridgeTests
         var readerBranch = ExtractFromMarker(bridge, "// Reader-mode tab switch");
 
         Assert.Contains("args.ActiveDocument.IsLoaded", readerBranch, StringComparison.Ordinal);
-        Assert.Contains("viewModel.ApplyOpenedDocumentInPlace(nextSource);", readerBranch, StringComparison.Ordinal);
+        Assert.Contains("ApplyOpenedDocumentInPlaceWithScroll(args.ActiveDocument);", readerBranch, StringComparison.Ordinal);
 
-        var inPlaceIndex = readerBranch.IndexOf("viewModel.ApplyOpenedDocumentInPlace(nextSource);", StringComparison.Ordinal);
+        var inPlaceIndex = readerBranch.IndexOf("ApplyOpenedDocumentInPlaceWithScroll(args.ActiveDocument);", StringComparison.Ordinal);
         var fallbackIndex = readerBranch.IndexOf("await viewModel.OpenPathAsync(newPath).ConfigureAwait(true);", StringComparison.Ordinal);
         Assert.True(fallbackIndex > inPlaceIndex, "OpenPathAsync should remain only after the loaded-source fast path.");
+    }
+
+    [Fact]
+    public void ActiveDocumentBridgePersistsAndRestoresReadingProgress()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var applyHelper = ExtractMethodBody(bridge, "void ApplyOpenedDocumentInPlaceWithScroll(OpenDocument activeDocument)");
+
+        Assert.Contains("nameof(MainWindowViewModel.ReadingProgress)", bridge, StringComparison.Ordinal);
+        Assert.Contains("openDocs.UpdateState(active, active.EditorCaret, viewModel.ReadingProgress);", bridge, StringComparison.Ordinal);
+        Assert.Contains("activeDocument.ScrollProgressPercent", applyHelper, StringComparison.Ordinal);
+        Assert.Contains("viewModel.ReadingProgress = progress;", applyHelper, StringComparison.Ordinal);
+        Assert.Contains("viewModel.ApplyOpenedDocumentInPlace(nextSource);", applyHelper, StringComparison.Ordinal);
     }
 
     private static string ReadMainWindowCodeBehind()
