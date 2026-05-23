@@ -58,6 +58,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _awaitingLayoutReady;
     private bool _hasLayoutReady;
     private bool _hasMinimapState;
+    private bool _lastLayoutReadyWasCached;
     private bool _disposed;
     private double _scrollTop;
     private double _scrollHeight;
@@ -223,6 +224,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     internal bool HasLoadedDocumentForSource(MarkdownSource? source)
         => _hasLoadedDocument && !_awaitingLayoutReady && Equals(Source, source);
+
+    internal bool LastLayoutReadyWasCached => _lastLayoutReadyWasCached;
 
     internal void UpdateInputs(
         MarkdownSource? source,
@@ -527,6 +530,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _awaitingLayoutReady = false;
         _hasLayoutReady = false;
         _hasMinimapState = false;
+        _lastLayoutReadyWasCached = false;
         _scrollTop = 0;
         _scrollHeight = 0;
         _clientHeight = 0;
@@ -970,6 +974,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
             if (IsLayoutReadyMessage(document.RootElement))
             {
+                _lastLayoutReadyWasCached = ReadBoolean(document.RootElement, "cached");
                 HandleScrollMessage(document.RootElement);
                 _hasLayoutReady = true;
                 CompleteLayoutReady();
@@ -1898,6 +1903,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         => root.TryGetProperty(name, out var property) && property.TryGetDouble(out var value) && double.IsFinite(value)
             ? value
             : 0;
+
+    private static bool ReadBoolean(JsonElement root, string name)
+        => root.TryGetProperty(name, out var property)
+           && property.ValueKind is JsonValueKind.True or JsonValueKind.False
+           && property.GetBoolean();
 
     private static bool TryReadWidthDragPhase(string? phase, out ApplicateWebWidthDragPhase result)
     {

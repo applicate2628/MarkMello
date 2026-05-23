@@ -30,6 +30,7 @@ export type LoadDocumentDeps = {
   preserveCurrentDocumentCache?: () => void;
   getCachedDocumentFragment?: (cacheKey: string) => DocumentFragment | undefined;
   setCurrentDocumentCacheKey?: (cacheKey: string | null) => void;
+  restoreCachedScrollPosition?: () => void;
   completeCachedDocumentLoad?: () => void;
 };
 
@@ -88,9 +89,13 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
   // detached nodes if a previous call accidentally removed them.
   deps.ensureChromeNodes(cachedFragment !== undefined);
 
-  // Reset scroll to top — host owns scroll restore via subsequent
-  // scroll-to-progress message after document-ready.
-  deps.scrollWindowToTop();
+  if (cachedFragment !== undefined) {
+    deps.restoreCachedScrollPosition?.();
+  } else {
+    // Cold load starts at top. Cached loads restore their previous scroll
+    // before layout-ready so the host never reveals the document at 0 first.
+    deps.scrollWindowToTop();
+  }
 
   // Re-run the initial render pipeline against the new body. The pipeline owns
   // math, mermaid, code-block, layout-ready, and document-ready emission.

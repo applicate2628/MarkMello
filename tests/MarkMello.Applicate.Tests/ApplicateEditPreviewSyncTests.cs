@@ -53,7 +53,8 @@ public sealed class ApplicateEditPreviewSyncTests
 
         Assert.Contains("_pendingScrollRestoreProgress", applyRender, StringComparison.Ordinal);
         Assert.Contains("_viewModel.ReadingProgress = e.ProgressPercent;", scrollHandler, StringComparison.Ordinal);
-        Assert.Contains("_pendingScrollRestoreProgress.HasValue", scrollHandler, StringComparison.Ordinal);
+        Assert.Contains("_pendingScrollRestoreProgress.HasValue && !_sharedHost.View.LastLayoutReadyWasCached", scrollHandler, StringComparison.Ordinal);
+        Assert.Contains("!_sharedHost.View.LastLayoutReadyWasCached", renderedHandler, StringComparison.Ordinal);
         Assert.Contains("_sharedHost.View.ScrollToProgress(restoreProgress.Value);", renderedHandler, StringComparison.Ordinal);
     }
 

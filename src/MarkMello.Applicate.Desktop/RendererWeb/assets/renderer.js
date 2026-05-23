@@ -162,7 +162,11 @@
     const firstHeading = main.querySelector("h1,h2,h3")?.textContent?.trim().replace(/\s+/g, " ").slice(0, 120) ?? "";
     deps.debugLog(`load-document:swapped id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${document.documentElement.dataset.theme ?? "(none)"} firstHeading=${firstHeading}`);
     deps.ensureChromeNodes(cachedFragment !== void 0);
-    deps.scrollWindowToTop();
+    if (cachedFragment !== void 0) {
+      deps.restoreCachedScrollPosition?.();
+    } else {
+      deps.scrollWindowToTop();
+    }
     if (cachedFragment !== void 0 && deps.completeCachedDocumentLoad) {
       deps.completeCachedDocumentLoad();
       return;
@@ -1435,8 +1439,10 @@
     postPerfMark("mm-layout-ready");
   }
   function postCachedLayoutReady() {
-    const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
     restoredCachedLayoutState = null;
+    const scrollState = getScrollState();
+    const topBlockIndex = findTopVisibleBlockIndex();
+    const layoutState = { ...scrollState, topBlockIndex };
     lastKnownLayoutState = { ...layoutState };
     recordScrollIpc();
     postHostMessage({
@@ -1450,9 +1456,18 @@
       type: "layout-ready",
       scrollTop: layoutState.scrollTop,
       scrollHeight: layoutState.scrollHeight,
-      clientHeight: layoutState.clientHeight
+      clientHeight: layoutState.clientHeight,
+      cached: true
     });
     postPerfMark("mm-layout-ready", { cached: true });
+  }
+  function restoreCachedScrollPosition() {
+    const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
+    window.scrollTo({
+      left: 0,
+      top: layoutState.scrollTop,
+      behavior: "instant"
+    });
   }
   function scheduleLayoutReady() {
     const generation = ++layoutReadyGeneration;
@@ -2371,6 +2386,7 @@
       preserveCurrentDocumentCache: preserveCurrentProcessedDocument,
       getCachedDocumentFragment: getCachedProcessedDocumentFragment,
       setCurrentDocumentCacheKey: setCurrentProcessedDocumentCacheKey,
+      restoreCachedScrollPosition,
       completeCachedDocumentLoad: () => {
         initialRenderPipelineCompleted = true;
         hasInitialLayoutSettled = true;

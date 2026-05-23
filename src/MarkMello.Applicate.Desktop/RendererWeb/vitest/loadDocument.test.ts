@@ -55,6 +55,28 @@ describe("applyLoadDocument", () => {
     expect(deps.completeCachedDocumentLoad).toHaveBeenCalledTimes(1);
   });
 
+  it("restores cached scroll before completing a cached document load", () => {
+    const fragment = document.createDocumentFragment();
+    const cached = document.createElement("p");
+    cached.textContent = "cached";
+    fragment.append(cached);
+
+    const order: string[] = [];
+    const scrollWindowToTop = vi.fn(() => { order.push("top"); });
+    const deps = makeDeps({
+      getCachedDocumentFragment: vi.fn(() => fragment),
+      ensureChromeNodes: () => { order.push("chrome"); },
+      scrollWindowToTop,
+      restoreCachedScrollPosition: () => { order.push("restore"); },
+      completeCachedDocumentLoad: () => { order.push("complete"); },
+    });
+
+    applyLoadDocument({ html: "<p>raw</p>", documentName: "doc.md", cacheKey: "doc-cache" }, deps);
+
+    expect(scrollWindowToTop).not.toHaveBeenCalled();
+    expect(order).toEqual(["chrome", "restore", "complete"]);
+  });
+
   it("calls cancelCurrentMathController before resetModuleGlobals", () => {
     const order: string[] = [];
     const deps = makeDeps({

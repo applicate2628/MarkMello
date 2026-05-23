@@ -528,7 +528,10 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         // beneath the now-visible WebView would block input.
         _failureView.IsVisible = false;
 
-        if (restoreProgress.HasValue && _sharedHost is not null && _viewModel is not null)
+        if (restoreProgress.HasValue
+            && _sharedHost is not null
+            && _viewModel is not null
+            && !_sharedHost.View.LastLayoutReadyWasCached)
         {
             _sharedHost.View.ScrollToProgress(restoreProgress.Value);
             _lastReadingProgress = restoreProgress.Value;
@@ -737,9 +740,14 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
     private void OnHostScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)
     {
+        if (_sharedHost is null)
+        {
+            return;
+        }
+
         if (_viewModel is not null)
         {
-            if (_pendingScrollRestoreProgress.HasValue)
+            if (_pendingScrollRestoreProgress.HasValue && !_sharedHost.View.LastLayoutReadyWasCached)
             {
                 return;
             }

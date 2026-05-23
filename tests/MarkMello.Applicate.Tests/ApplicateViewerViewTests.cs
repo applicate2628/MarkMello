@@ -92,7 +92,8 @@ public sealed class ApplicateViewerViewTests
         var renderedHandler = ExtractMethodBody(codeBehind, "private void OnHostDocumentRendered(object? sender, EventArgs e)");
 
         Assert.Contains("_pendingScrollRestoreProgress", issueRender, StringComparison.Ordinal);
-        Assert.Contains("_pendingScrollRestoreProgress.HasValue", scrollHandler, StringComparison.Ordinal);
+        Assert.Contains("_pendingScrollRestoreProgress.HasValue && !_sharedHost.View.LastLayoutReadyWasCached", scrollHandler, StringComparison.Ordinal);
+        Assert.Contains("!_sharedHost.View.LastLayoutReadyWasCached", renderedHandler, StringComparison.Ordinal);
         Assert.Contains("_sharedHost.View.ScrollToProgress(restoreProgress.Value);", renderedHandler, StringComparison.Ordinal);
         Assert.Contains("_viewModel.ReadingProgress = restoreProgress.Value;", renderedHandler, StringComparison.Ordinal);
     }

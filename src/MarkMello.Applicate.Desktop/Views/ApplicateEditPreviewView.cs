@@ -956,12 +956,12 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
 
     private void OnSharedScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)
     {
-        if (!_isAttachedToHost)
+        if (!_isAttachedToHost || _sharedHost is null)
         {
             return;
         }
 
-        if (_pendingScrollRestoreProgress.HasValue)
+        if (_pendingScrollRestoreProgress.HasValue && !_sharedHost.View.LastLayoutReadyWasCached)
         {
             return;
         }
@@ -1021,7 +1021,10 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         ApplicateTrace.ModeToggle("SharedView Rendered (edit-preview)");
         // Render committed: hide any visible failure overlay.
         _failureView.IsVisible = false;
-        if (restoreProgress.HasValue && _isAttachedToHost && _sharedHost is not null)
+        if (restoreProgress.HasValue
+            && _isAttachedToHost
+            && _sharedHost is not null
+            && !_sharedHost.View.LastLayoutReadyWasCached)
         {
             _sharedHost.View.ScrollToProgress(restoreProgress.Value);
             if (_viewModel is not null)

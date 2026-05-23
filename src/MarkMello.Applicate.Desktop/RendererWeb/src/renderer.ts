@@ -67,7 +67,7 @@ type RendererWindow = Window & {
 
 type RendererMessage =
   | { type: "document-ready"; mathCount: number }
-  | { type: "layout-ready"; scrollTop: number; scrollHeight: number; clientHeight: number }
+  | { type: "layout-ready"; scrollTop: number; scrollHeight: number; clientHeight: number; cached?: boolean }
   | { type: "link-clicked"; href: string; button: number; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }
   | { type: "minimap-state"; visible: boolean; reservedWidth: number }
   | { type: "scroll"; scrollTop: number; scrollHeight: number; clientHeight: number; topBlockIndex: number | null }
@@ -647,8 +647,10 @@ function postLayoutReady(): void {
 }
 
 function postCachedLayoutReady(): void {
-  const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
   restoredCachedLayoutState = null;
+  const scrollState = getScrollState();
+  const topBlockIndex = findTopVisibleBlockIndex();
+  const layoutState = { ...scrollState, topBlockIndex };
   lastKnownLayoutState = { ...layoutState };
   recordScrollIpc();
   postHostMessage({
@@ -662,9 +664,19 @@ function postCachedLayoutReady(): void {
     type: "layout-ready",
     scrollTop: layoutState.scrollTop,
     scrollHeight: layoutState.scrollHeight,
-    clientHeight: layoutState.clientHeight
+    clientHeight: layoutState.clientHeight,
+    cached: true
   });
   postPerfMark("mm-layout-ready", { cached: true });
+}
+
+function restoreCachedScrollPosition(): void {
+  const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
+  window.scrollTo({
+    left: 0,
+    top: layoutState.scrollTop,
+    behavior: "instant" as ScrollBehavior,
+  });
 }
 
 function scheduleLayoutReady(): void {
@@ -1968,6 +1980,7 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
     preserveCurrentDocumentCache: preserveCurrentProcessedDocument,
     getCachedDocumentFragment: getCachedProcessedDocumentFragment,
     setCurrentDocumentCacheKey: setCurrentProcessedDocumentCacheKey,
+    restoreCachedScrollPosition,
     completeCachedDocumentLoad: () => {
       initialRenderPipelineCompleted = true;
       hasInitialLayoutSettled = true;
