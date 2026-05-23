@@ -2078,7 +2078,7 @@
       scrollFromMinimapClientY(event.clientY);
     }
   }
-  function queueMinimapViewportUpdate() {
+  function queueMinimapViewportUpdate(perfMarkName) {
     if (minimapViewportFrameRequested) {
       return;
     }
@@ -2087,6 +2087,16 @@
       minimapViewportFrameRequested = false;
       updateMinimapVisibility();
       updateMinimapViewport();
+      if (perfMarkName) {
+        postPerfMark(perfMarkName);
+      }
+    });
+  }
+  function queueModeSettleChromeRefresh() {
+    window.requestAnimationFrame(() => {
+      updateWidthHandlePosition();
+      updateMinimapVisibility();
+      queueMinimapViewportUpdate("mm-mode-settle-deferred-minimap-viewport");
     });
   }
   function queueMinimapRefreshAfterLayoutSettles() {
@@ -2315,11 +2325,8 @@
         window.requestAnimationFrame(() => {
           postPerfMark("mm-mode-settle-second-raf");
           modeToggleProbeFrameRequested = false;
-          updateWidthHandlePosition();
-          updateMinimapVisibility();
-          updateMinimapViewport();
-          postPerfMark("mm-mode-settle-pre-ack");
           postHostMessage({ type: "mode-toggle-settled" });
+          queueModeSettleChromeRefresh();
         });
       });
       return;

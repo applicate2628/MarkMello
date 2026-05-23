@@ -138,10 +138,9 @@ type HostMessage =
   // UpdateLayout has settled the slot bounds but BEFORE making the WebView2
   // HWND visible on the Commit fast-path (Ctrl+E same-document reparent).
   // The renderer schedules two requestAnimationFrame ticks so CSS reflow has
-  // propagated and one paint has happened, refreshes chrome positions
-  // (width handle + minimap viewport) against the new bounds, then posts
-  // `mode-toggle-settled` back. The host then reveals the HWND, so the user
-  // never observes the renderer mid-reflow.
+  // propagated and one paint has happened, then posts `mode-toggle-settled`
+  // back. Layout-dependent chrome refreshes are deferred after the ack so
+  // they cannot hold the host on a blank reveal gate.
   | { type: "mode-settle-probe" }
   | { type: "mode-reveal-prepare"; durationMs?: number }
   | { type: "mode-reveal-start"; durationMs?: number };
@@ -1531,7 +1530,7 @@ function handleMinimapPointerUp(event: PointerEvent): void {
   }
 }
 
-function queueMinimapViewportUpdate(): void {
+function queueMinimapViewportUpdate(perfMarkName?: string): void {
   if (minimapViewportFrameRequested) {
     return;
   }
@@ -1541,6 +1540,17 @@ function queueMinimapViewportUpdate(): void {
     minimapViewportFrameRequested = false;
     updateMinimapVisibility();
     updateMinimapViewport();
+    if (perfMarkName) {
+      postPerfMark(perfMarkName);
+    }
+  });
+}
+
+function queueModeSettleChromeRefresh(): void {
+  window.requestAnimationFrame(() => {
+    updateWidthHandlePosition();
+    updateMinimapVisibility();
+    queueMinimapViewportUpdate("mm-mode-settle-deferred-minimap-viewport");
   });
 }
 
@@ -1889,11 +1899,8 @@ function handleHostMessage(raw: unknown): void {
       window.requestAnimationFrame(() => {
         postPerfMark("mm-mode-settle-second-raf");
         modeToggleProbeFrameRequested = false;
-        updateWidthHandlePosition();
-        updateMinimapVisibility();
-        updateMinimapViewport();
-        postPerfMark("mm-mode-settle-pre-ack");
         postHostMessage({ type: "mode-toggle-settled" });
+        queueModeSettleChromeRefresh();
       });
     });
     return;
