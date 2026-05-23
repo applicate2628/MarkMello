@@ -1734,7 +1734,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             ?? Avalonia.Application.Current?.ActualThemeVariant;
         return variant == ThemeVariant.Dark
             ? "dark"
-            : Equals(variant?.Key, AvaloniaThemeService.ClassicWhiteThemeVariantKey)
+            : ReadingPreferences.LightPalette == LightPaletteMode.White
+                || Equals(variant?.Key, AvaloniaThemeService.ClassicWhiteThemeVariantKey)
                 ? "classic-white"
                 : "light";
     }

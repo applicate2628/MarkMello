@@ -17,7 +17,7 @@ public sealed class JsonSettingsStore : ISettingsStore
 
     private bool _isLoaded;
     private ReadingPreferences _preferences = ReadingPreferences.Default;
-    private ThemeMode _theme = ThemeMode.ClassicWhite;
+    private ThemeMode _theme = ThemeMode.System;
     private AppLanguage _language = AppLanguage.System;
     private WindowPlacement? _windowPlacement;
 
@@ -158,7 +158,7 @@ public sealed class JsonSettingsStore : ISettingsStore
         }
         catch
         {
-            _theme = ThemeMode.ClassicWhite;
+            _theme = ThemeMode.System;
             _preferences = ReadingPreferences.Default;
             _language = AppLanguage.System;
             _windowPlacement = null;
@@ -202,7 +202,7 @@ public sealed class JsonSettingsStore : ISettingsStore
         {
             ThemeMode.Light => ThemeMode.Light,
             ThemeMode.Dark => ThemeMode.Dark,
-            ThemeMode.ClassicWhite => ThemeMode.ClassicWhite,
+            ThemeMode.ClassicWhite => ThemeMode.Light,
             _ => ThemeMode.System
         };
 

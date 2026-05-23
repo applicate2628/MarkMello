@@ -754,26 +754,40 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public void ReadingPaletteSelectionDefaultsToOriginalLightPalette()
+    public void ReadingPaletteSelectionDefaultsToWhitePalette()
     {
         var harness = CreateHarness();
 
-        Assert.True(harness.ViewModel.IsOriginalPaletteSelected);
-        Assert.False(harness.ViewModel.IsWhitePaletteSelected);
+        Assert.False(harness.ViewModel.IsOriginalPaletteSelected);
+        Assert.True(harness.ViewModel.IsWhitePaletteSelected);
     }
 
     [Fact]
-    public void WhitePaletteSelectionPersistsClassicWhiteLightTheme()
+    public void WhitePaletteSelectionPersistsLightPaletteWithoutChangingThemeMode()
     {
         var harness = CreateHarness();
 
         harness.ViewModel.IsWhitePaletteSelected = true;
 
         Assert.Equal(LightPaletteMode.White, harness.ViewModel.ReadingPreferences.LightPalette);
-        Assert.Equal(ThemeMode.ClassicWhite, harness.Settings.Theme);
-        Assert.Equal(ThemeMode.ClassicWhite, harness.ViewModel.Theme);
+        Assert.Equal(ThemeMode.System, harness.Settings.Theme);
+        Assert.Equal(ThemeMode.System, harness.ViewModel.Theme);
         Assert.False(harness.ViewModel.IsOriginalPaletteSelected);
         Assert.True(harness.ViewModel.IsWhitePaletteSelected);
+    }
+
+    [Fact]
+    public void OriginalPaletteSelectionPersistsLightPaletteWithoutChangingThemeMode()
+    {
+        var harness = CreateHarness();
+
+        harness.ViewModel.IsOriginalPaletteSelected = true;
+
+        Assert.Equal(LightPaletteMode.Original, harness.ViewModel.ReadingPreferences.LightPalette);
+        Assert.Equal(ThemeMode.System, harness.Settings.Theme);
+        Assert.Equal(ThemeMode.System, harness.ViewModel.Theme);
+        Assert.True(harness.ViewModel.IsOriginalPaletteSelected);
+        Assert.False(harness.ViewModel.IsWhitePaletteSelected);
     }
 
     [Fact]
@@ -792,7 +806,7 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public void ThemeToggleReturnsFromDarkToSelectedLightPalette()
+    public void ThemeToggleReturnsFromDarkToLightThemeWhileKeepingSelectedPalette()
     {
         var harness = CreateHarness();
 
@@ -806,8 +820,8 @@ public sealed class MainWindowViewModelTests
 
         harness.ViewModel.CycleThemeCommand.Execute(null);
 
-        Assert.Equal(ThemeMode.ClassicWhite, harness.Settings.Theme);
-        Assert.Equal(ThemeMode.ClassicWhite, harness.ViewModel.Theme);
+        Assert.Equal(ThemeMode.Light, harness.Settings.Theme);
+        Assert.Equal(ThemeMode.Light, harness.ViewModel.Theme);
         Assert.False(harness.ViewModel.IsOriginalPaletteSelected);
         Assert.True(harness.ViewModel.IsWhitePaletteSelected);
     }

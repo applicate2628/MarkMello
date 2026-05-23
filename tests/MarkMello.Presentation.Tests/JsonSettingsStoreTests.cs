@@ -45,7 +45,7 @@ public sealed class JsonSettingsStoreTests
     }
 
     [Fact]
-    public async Task SaveAndLoadRoundTripsClassicWhiteTheme()
+    public async Task SaveAndLoadMigratesLegacyClassicWhiteThemeToLight()
     {
         var rootDirectory = CreateTempDirectory();
         try
@@ -57,7 +57,7 @@ public sealed class JsonSettingsStoreTests
             var reloadedStore = new JsonSettingsStore(rootDirectory);
             var theme = await reloadedStore.LoadThemeAsync();
 
-            Assert.Equal(ThemeMode.ClassicWhite, theme);
+            Assert.Equal(ThemeMode.Light, theme);
         }
         finally
         {
@@ -81,7 +81,7 @@ public sealed class JsonSettingsStoreTests
             var windowPlacement = await store.LoadWindowPlacementAsync();
 
             Assert.Equal(ReadingPreferences.Default, preferences);
-            Assert.Equal(ThemeMode.ClassicWhite, theme);
+            Assert.Equal(ThemeMode.System, theme);
             Assert.Equal(DocumentMinimapMode.Auto, preferences.DocumentMinimapMode);
             Assert.Equal(AppLanguage.System, language);
             Assert.Null(windowPlacement);

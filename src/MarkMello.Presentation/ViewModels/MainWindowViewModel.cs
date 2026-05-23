@@ -46,7 +46,7 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly string _aboutRepositoryUrl;
     private AppUpdatePackage? _availableUpdatePackage;
     private bool _isUpdateNotificationDismissed;
-    private ThemeMode _selectedLightPalette = ThemeMode.ClassicWhite;
+    private LightPaletteMode _selectedLightPalette = LightPaletteMode.White;
     private ReadingPreferences _lastNotifiedReadingPreferences = ReadingPreferences.Default;
 
     public event EventHandler? CloseRequested;
@@ -117,7 +117,7 @@ public partial class MainWindowViewModel : ObservableObject
     private double _readingProgress;
 
     [ObservableProperty]
-    private ThemeMode _theme = ThemeMode.ClassicWhite;
+    private ThemeMode _theme = ThemeMode.System;
 
     [ObservableProperty]
     private ReadingPreferences _readingPreferences = ReadingPreferences.Default;
@@ -238,7 +238,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     public bool IsOriginalPaletteSelected
     {
-        get => _selectedLightPalette != ThemeMode.ClassicWhite;
+        get => _selectedLightPalette != LightPaletteMode.White;
         set
         {
             if (!value)
@@ -253,7 +253,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     public bool IsWhitePaletteSelected
     {
-        get => _selectedLightPalette == ThemeMode.ClassicWhite;
+        get => _selectedLightPalette == LightPaletteMode.White;
         set
         {
             if (!value)
@@ -683,7 +683,7 @@ public partial class MainWindowViewModel : ObservableObject
     public async Task InitializeAsync()
     {
         ReadingPreferences = await _settings.LoadPreferencesAsync().ConfigureAwait(true);
-        _selectedLightPalette = GetThemeModeForLightPalette(ReadingPreferences.LightPalette);
+        _selectedLightPalette = ReadingPreferences.LightPalette;
 
         var savedLanguage = await _settings.LoadLanguageAsync().ConfigureAwait(true);
         ApplyLanguageSelection(savedLanguage, persist: false);
@@ -848,7 +848,7 @@ public partial class MainWindowViewModel : ObservableObject
     {
         var next = EffectiveTheme != ThemeMode.Dark
             ? ThemeMode.Dark
-            : _selectedLightPalette;
+            : ThemeMode.Light;
 
         ApplyThemeSelection(next);
     }
@@ -1306,7 +1306,7 @@ public partial class MainWindowViewModel : ObservableObject
 
         if (oldValue.LightPalette != value.LightPalette)
         {
-            _selectedLightPalette = GetThemeModeForLightPalette(value.LightPalette);
+            _selectedLightPalette = value.LightPalette;
             OnPropertyChanged(nameof(IsOriginalPaletteSelected));
             OnPropertyChanged(nameof(IsWhitePaletteSelected));
         }
@@ -1725,35 +1725,20 @@ public partial class MainWindowViewModel : ObservableObject
 
     private void ApplyTheme(ThemeMode mode)
     {
-        if (mode is ThemeMode.Light or ThemeMode.ClassicWhite)
-        {
-            _selectedLightPalette = mode;
-        }
-
         Theme = mode;
-        _themeService.Apply(mode);
+        _themeService.Apply(mode, ReadingPreferences.LightPalette);
         EffectiveTheme = _themeService.GetEffectiveTheme();
     }
 
     private void ApplyLightPalette(LightPaletteMode palette)
     {
-        var nextLightTheme = GetThemeModeForLightPalette(palette);
-        _selectedLightPalette = nextLightTheme;
+        _selectedLightPalette = palette;
         ApplyReadingPreferences(ReadingPreferences with { LightPalette = palette });
-
-        if (EffectiveTheme != ThemeMode.Dark)
-        {
-            ApplyThemeSelection(nextLightTheme);
-        }
-        else
-        {
-            OnPropertyChanged(nameof(IsOriginalPaletteSelected));
-            OnPropertyChanged(nameof(IsWhitePaletteSelected));
-        }
+        _themeService.Apply(Theme, palette);
+        EffectiveTheme = _themeService.GetEffectiveTheme();
+        OnPropertyChanged(nameof(IsOriginalPaletteSelected));
+        OnPropertyChanged(nameof(IsWhitePaletteSelected));
     }
-
-    private static ThemeMode GetThemeModeForLightPalette(LightPaletteMode palette)
-        => palette == LightPaletteMode.White ? ThemeMode.ClassicWhite : ThemeMode.Light;
 
     private void ApplyReadingPreferences(ReadingPreferences preferences)
     {

@@ -16,11 +16,11 @@ public sealed class AvaloniaThemeService : IThemeService
     public static readonly ThemeVariant ClassicWhiteThemeVariant =
         new(ClassicWhiteThemeVariantKey, ThemeVariant.Light);
 
-    public void Apply(ThemeMode mode)
+    public void Apply(ThemeMode mode, LightPaletteMode lightPalette)
     {
         var variant = mode switch
         {
-            ThemeMode.Light => ThemeVariant.Light,
+            ThemeMode.Light => GetLightVariant(lightPalette),
             ThemeMode.Dark => ThemeVariant.Dark,
             ThemeMode.ClassicWhite => ClassicWhiteThemeVariant,
             _ => ThemeVariant.Default
@@ -58,4 +58,9 @@ public sealed class AvaloniaThemeService : IThemeService
             app.RequestedThemeVariant = variant;
         }
     }
+
+    private static ThemeVariant GetLightVariant(LightPaletteMode lightPalette)
+        => lightPalette == LightPaletteMode.White
+            ? ClassicWhiteThemeVariant
+            : ThemeVariant.Light;
 }

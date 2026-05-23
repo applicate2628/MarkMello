@@ -9,7 +9,7 @@ namespace MarkMello.Application.Abstractions;
 public interface IThemeService
 {
     /// <summary>Применить тему к Application.RequestedThemeVariant.</summary>
-    void Apply(ThemeMode mode);
+    void Apply(ThemeMode mode, LightPaletteMode lightPalette);
 
     /// <summary>
     /// Возвращает фактически активную тему после применения RequestedThemeVariant.

@@ -127,10 +127,14 @@ internal sealed class RecordingThemeService : IThemeService
 
     public ThemeMode EffectiveTheme { get; private set; } = ThemeMode.Light;
 
-    public void Apply(ThemeMode mode)
+    public void Apply(ThemeMode mode, LightPaletteMode lightPalette)
     {
         AppliedTheme = mode;
-        EffectiveTheme = mode == ThemeMode.System ? ThemeMode.Light : mode;
+        EffectiveTheme = mode == ThemeMode.System
+            ? ThemeMode.Light
+            : mode == ThemeMode.Light && lightPalette == LightPaletteMode.White
+                ? ThemeMode.ClassicWhite
+                : mode;
     }
 
     public ThemeMode GetEffectiveTheme() => EffectiveTheme;

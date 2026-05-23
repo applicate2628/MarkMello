@@ -609,7 +609,7 @@ public partial class MainWindowViewModel
         {
             ThemeMode.Light => ThemeMode.Light,
             ThemeMode.Dark => ThemeMode.Dark,
-            ThemeMode.ClassicWhite => ThemeMode.ClassicWhite,
+            ThemeMode.ClassicWhite => ThemeMode.Light,
             _ => ThemeMode.System
         };
 
