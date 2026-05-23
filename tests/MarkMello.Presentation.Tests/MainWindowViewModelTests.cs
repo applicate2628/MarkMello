@@ -740,6 +740,38 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void ModeSwitchSmoothSettingsUpdateReadingPreferences()
+    {
+        var harness = CreateHarness();
+
+        harness.ViewModel.IsModeSwitchSmoothEnabled = false;
+        harness.ViewModel.ModeSwitchSmoothDurationSetting = 260;
+
+        Assert.False(harness.ViewModel.ReadingPreferences.ModeSwitchSmoothEnabled);
+        Assert.Equal(260, harness.ViewModel.ReadingPreferences.ModeSwitchSmoothDurationMs);
+        Assert.False(harness.ViewModel.IsModeSwitchSmoothEnabled);
+        Assert.True(harness.ViewModel.IsModeSwitchSmoothDisabled);
+        Assert.Equal(260, harness.ViewModel.ModeSwitchSmoothDurationSetting);
+        Assert.Equal("260 ms", harness.ViewModel.ModeSwitchSmoothDurationLabel);
+
+        harness.ViewModel.IsModeSwitchSmoothEnabled = true;
+
+        Assert.True(harness.ViewModel.IsModeSwitchSmoothEnabled);
+        Assert.False(harness.ViewModel.IsModeSwitchSmoothDisabled);
+    }
+
+    [Fact]
+    public void ModeSwitchSmoothDurationRoundsToPreferenceStep()
+    {
+        var harness = CreateHarness();
+
+        harness.ViewModel.ModeSwitchSmoothDurationSetting = 173;
+
+        Assert.Equal(180, harness.ViewModel.ReadingPreferences.ModeSwitchSmoothDurationMs);
+        Assert.Equal("180 ms", harness.ViewModel.ModeSwitchSmoothDurationLabel);
+    }
+
+    [Fact]
     public void LanguageOptionsKeepsStableItemReferencesBetweenLocalizationChanges()
     {
         var harness = CreateHarness();

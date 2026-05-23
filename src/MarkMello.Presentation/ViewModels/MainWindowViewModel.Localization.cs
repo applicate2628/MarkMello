@@ -109,6 +109,12 @@ public partial class MainWindowViewModel
         nameof(ReadingMinimapLabel),
         nameof(ReadingMinimapOff),
         nameof(ReadingMinimapOn),
+        nameof(ReadingModeSmoothDurationHint),
+        nameof(ReadingModeSmoothDurationLabel),
+        nameof(ReadingModeSmoothHint),
+        nameof(ReadingModeSmoothLabel),
+        nameof(ReadingModeSmoothOff),
+        nameof(ReadingModeSmoothOn),
         nameof(ReadingPaletteHint),
         nameof(ReadingPaletteLabel),
         nameof(ReadingPaletteOriginal),
@@ -207,6 +213,12 @@ public partial class MainWindowViewModel
     public string ReadingMinimapLabel => _localization["ReadingMinimapLabel"];
     public string ReadingMinimapOff => _localization["ReadingMinimapOff"];
     public string ReadingMinimapOn => _localization["ReadingMinimapOn"];
+    public string ReadingModeSmoothDurationHint => _localization["ReadingModeSmoothDurationHint"];
+    public string ReadingModeSmoothDurationLabel => _localization["ReadingModeSmoothDurationLabel"];
+    public string ReadingModeSmoothHint => _localization["ReadingModeSmoothHint"];
+    public string ReadingModeSmoothLabel => _localization["ReadingModeSmoothLabel"];
+    public string ReadingModeSmoothOff => _localization["ReadingModeSmoothOff"];
+    public string ReadingModeSmoothOn => _localization["ReadingModeSmoothOn"];
     public string ReadingPaletteHint => _localization["ReadingPaletteHint"];
     public string ReadingPaletteLabel => _localization["ReadingPaletteLabel"];
     public string ReadingPaletteOriginal => _localization["ReadingPaletteOriginal"];

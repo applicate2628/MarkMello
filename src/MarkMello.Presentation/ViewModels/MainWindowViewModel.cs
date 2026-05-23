@@ -568,6 +568,54 @@ public partial class MainWindowViewModel : ObservableObject
         }
     }
 
+    public bool IsModeSwitchSmoothEnabled
+    {
+        get => ReadingPreferences.ModeSwitchSmoothEnabled;
+        set
+        {
+            if (ReadingPreferences.ModeSwitchSmoothEnabled == value)
+            {
+                return;
+            }
+
+            ApplyReadingPreferences(ReadingPreferences with { ModeSwitchSmoothEnabled = value });
+        }
+    }
+
+    public bool IsModeSwitchSmoothDisabled
+    {
+        get => !ReadingPreferences.ModeSwitchSmoothEnabled;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsModeSwitchSmoothDisabled));
+                return;
+            }
+
+            IsModeSwitchSmoothEnabled = false;
+        }
+    }
+
+    public double ModeSwitchSmoothDurationSetting
+    {
+        get => ReadingPreferences.ModeSwitchSmoothDurationMs;
+        set
+        {
+            var durationMs = (int)Math.Round(
+                value / ReadingPreferences.ModeSwitchSmoothDurationStepMs,
+                MidpointRounding.AwayFromZero) * ReadingPreferences.ModeSwitchSmoothDurationStepMs;
+
+            if (ReadingPreferences.ModeSwitchSmoothDurationMs == durationMs)
+            {
+                return;
+            }
+
+            ApplyReadingPreferences(ReadingPreferences with { ModeSwitchSmoothDurationMs = durationMs });
+        }
+    }
+
+    public string ModeSwitchSmoothDurationLabel => $"{ReadingPreferences.ModeSwitchSmoothDurationMs} ms";
 
     public DocumentMinimapMode SelectedDocumentMinimapMode
     {
@@ -1287,6 +1335,18 @@ public partial class MainWindowViewModel : ObservableObject
             OnPropertyChanged(nameof(SelectedWidthResizerVisibility));
             OnPropertyChanged(nameof(IsWidthResizerAlwaysSelected));
             OnPropertyChanged(nameof(IsWidthResizerOnHoverSelected));
+        }
+
+        if (oldValue.ModeSwitchSmoothEnabled != value.ModeSwitchSmoothEnabled)
+        {
+            OnPropertyChanged(nameof(IsModeSwitchSmoothEnabled));
+            OnPropertyChanged(nameof(IsModeSwitchSmoothDisabled));
+        }
+
+        if (oldValue.ModeSwitchSmoothDurationMs != value.ModeSwitchSmoothDurationMs)
+        {
+            OnPropertyChanged(nameof(ModeSwitchSmoothDurationSetting));
+            OnPropertyChanged(nameof(ModeSwitchSmoothDurationLabel));
         }
 
         if (oldValue.DocumentMinimapMode != value.DocumentMinimapMode)

@@ -440,6 +440,30 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _webView.IsVisible = isVisible;
     }
 
+    internal void PrepareNativeRendererForReveal(TimeSpan duration)
+    {
+        PostRendererMessage(new
+        {
+            type = "mode-reveal-prepare",
+            durationMs = ToRendererDurationMs(duration)
+        });
+    }
+
+    internal void RevealNativeRenderer(TimeSpan duration)
+    {
+        PostRendererMessage(new
+        {
+            type = "mode-reveal-start",
+            durationMs = ToRendererDurationMs(duration)
+        });
+    }
+
+    private static int ToRendererDurationMs(TimeSpan duration)
+        => (int)SysMath.Clamp(
+            SysMath.Round(duration.TotalMilliseconds, MidpointRounding.AwayFromZero),
+            ReadingPreferences.MinModeSwitchSmoothDurationMs,
+            ReadingPreferences.MaxModeSwitchSmoothDurationMs);
+
     private sealed class ReparentScope : IDisposable
     {
         private readonly ApplicateWebMarkdownDocumentView _owner;

@@ -42,4 +42,19 @@ describe("handleHostMessage(load-document)", () => {
 
     expect(document.documentElement.dataset.theme).toBe("dark");
   });
+
+  it("prepares and starts mode reveal on the renderer document", () => {
+    const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+
+    load({ type: "mode-reveal-prepare", durationMs: 240 });
+
+    expect(main.style.opacity).toBe("0");
+    expect(main.style.transition).toBe("none");
+
+    load({ type: "mode-reveal-start", durationMs: 240 });
+
+    expect(main.style.opacity).toBe("1");
+    expect(main.style.transition).toContain("opacity 240ms");
+  });
 });

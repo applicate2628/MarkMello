@@ -1,6 +1,8 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia;
+using Avalonia.Animation;
 using Avalonia.Controls;
 using Avalonia.Threading;
 using MarkMello.Application.Abstractions;
@@ -57,6 +59,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
     // OR stale-generation supersede — whichever fires first.
     private EventHandler? _activeSettleHandler;
     private DispatcherTimer? _settleFallbackTimer;
+    private TimeSpan _pendingRevealDuration;
 
     // Fallback floor for the reveal gate. PE-budget-aware: 150ms total round
     // trip covers IPC send + 2 rAFs (~16ms each at 60fps) + paint + return IPC
@@ -148,7 +151,12 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         var previousParent = _currentParent;
         ApplicateTrace.ModeToggle(
             $"SharedHost.AttachTo target.Bounds={target.Bounds} previous={(previousParent is null ? "(null)" : previousParent.GetType().Name)}");
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "host-attachto-start",
+            $"targetBounds={target.Bounds.Width:F0}x{target.Bounds.Height:F0} previous={(previousParent is null ? "null" : previousParent.GetType().Name)} hasEverCommitted={_hasEverCommitted}");
         var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        PrepareTargetForReveal(target);
 
         // Anti-airspace-leak (RESTORED 2026-05-19 — c8c48c2 wiring inadvertently
         // removed by 354fa86 refactor "remove View.MinHeight writes from consumers";
@@ -185,6 +193,10 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         ReleaseSettleSubscription();
         var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         ApplicateTrace.ModeToggle($"SharedHost.AttachTo done elapsed={elapsedMs:F2}ms");
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "host-attachto-end",
+            $"reparentMs={elapsedMs:F2} targetIsVisible={target.IsVisible} reparented={_reparentedThisCycle}");
 
         // EP-02 ROLLED BACK 2026-05-19 06:24: setting target.IsVisible=false
         // here regressed render visibility because Commit() never fired in
@@ -250,6 +262,10 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         if (previousParent is not null && !previousParent.IsVisible)
         {
             previousParent.IsVisible = true;
+        }
+        if (previousParent is not null && !ReferenceEquals(previousParent, _warmupParent))
+        {
+            previousParent.Opacity = 1.0;
         }
 
         _state = HostState.Parked;
@@ -443,6 +459,11 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
 
     private void Commit()
     {
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "host-commit-enter",
+            $"parent={(_currentParent is null ? "null" : _currentParent.GetType().Name)} reparented={_reparentedThisCycle} hasEverCommitted={_hasEverCommitted} viewBounds={View.Bounds.Width:F0}x{View.Bounds.Height:F0}");
+
         if (_currentParent is not null
             && !ReferenceEquals(_currentParent, _warmupParent))
         {
@@ -474,10 +495,14 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         // legacy immediate-show: the HWND's backing store already paints the
         // correct bounds, there is no reflow window to wait through.
         var armRevealGate = _reparentedThisCycle && _hasEverCommitted;
+        var modeSwitchDuration = CurrentModeSwitchDuration();
         _reparentedThisCycle = false;
 
         if (armRevealGate)
         {
+            ApplicateTrace.DiagMs("pane-seq", "host-commit-armed-revealgate");
+            _pendingRevealDuration = modeSwitchDuration;
+            View.PrepareNativeRendererForReveal(modeSwitchDuration);
             BeginRevealAfterSettle();
         }
         else
@@ -490,7 +515,11 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
             // own coord conversion). Both reverted; immediate Avalonia show is
             // the proven working path. Residual cold-edit ~70 ms HWND-bounds-lag
             // is tracked in work-items/queue/2026-05-19-transactional-mode-toggle.md.
+            ApplicateTrace.DiagMs("pane-seq", "host-commit-immediate-hwnd-show");
             View.SetNativeWebViewVisibility(true);
+            View.RevealNativeRenderer(TimeSpan.Zero);
+            RevealCurrentParent(modeSwitchDuration);
+            ApplicateTrace.DiagMs("pane-seq", "host-hwnd-shown", "path=immediate");
         }
 
         _state = HostState.Committed;
@@ -553,22 +582,68 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
     private void OnRevealSettled(object? sender, EventArgs e)
     {
         ApplicateTrace.ModeToggle($"SharedHost.RevealGate ack gen={_activeGeneration}");
+        ApplicateTrace.DiagMs("pane-seq", "host-revealgate-completed", "path=ipc-ack");
         CompleteReveal();
     }
 
     private void OnSettleFallbackTick(object? sender, EventArgs e)
     {
         ApplicateTrace.ModeToggle($"SharedHost.RevealGate fallback gen={_activeGeneration}");
+        ApplicateTrace.DiagMs("pane-seq", "host-revealgate-completed", "path=fallback-timer");
         CompleteReveal();
     }
 
     private void CompleteReveal()
     {
+        var duration = _pendingRevealDuration;
+        _pendingRevealDuration = TimeSpan.Zero;
         ReleaseSettleSubscription();
         // Show the HWND now that the renderer has finished reflowing (or the
         // fallback timer elapsed). The state machine has already advanced to
         // Committed in Commit() above; this is just the deferred visual reveal.
         View.SetNativeWebViewVisibility(true);
+        View.RevealNativeRenderer(duration);
+        RevealCurrentParent(duration);
+        ApplicateTrace.DiagMs("pane-seq", "host-hwnd-shown", "path=deferred-after-settle");
+    }
+
+    private static void PrepareTargetForReveal(Panel target)
+    {
+        target.Transitions = null;
+        target.Opacity = 0.0;
+    }
+
+    private TimeSpan CurrentModeSwitchDuration()
+    {
+        var preferences = _failureRequest?.ReadingPreferences ?? ReadingPreferences.Default;
+        return ApplicateMotion.ModeSwitchDuration(preferences);
+    }
+
+    private void RevealCurrentParent(TimeSpan duration)
+    {
+        if (_currentParent is null || ReferenceEquals(_currentParent, _warmupParent))
+        {
+            return;
+        }
+
+        if (duration == TimeSpan.Zero)
+        {
+            _currentParent.Transitions = null;
+        }
+        else
+        {
+            _currentParent.Transitions =
+            [
+                new DoubleTransition
+                {
+                    Property = Visual.OpacityProperty,
+                    Duration = duration,
+                    Easing = ApplicateMotion.Easing
+                }
+            ];
+        }
+
+        _currentParent.Opacity = 1.0;
     }
 
     private void ReleaseSettleSubscription()
@@ -661,6 +736,7 @@ internal sealed class ApplicateSharedWebViewHostStateMachine
 
         var previousParent = _currentParent;
         _currentParent = target;
+        target.Opacity = 0.0;
         target.IsVisible = false;
         CurrentState = State.Switching;
 
@@ -669,6 +745,7 @@ internal sealed class ApplicateSharedWebViewHostStateMachine
             && !previousParent.IsVisible)
         {
             previousParent.IsVisible = true;
+            previousParent.Opacity = 1.0;
         }
     }
 
@@ -682,9 +759,13 @@ internal sealed class ApplicateSharedWebViewHostStateMachine
 
         var previousParent = _currentParent;
         _currentParent = _warmupParent;
-        if (previousParent is not null && !previousParent.IsVisible)
+        if (previousParent is not null)
         {
-            previousParent.IsVisible = true;
+            if (!previousParent.IsVisible)
+            {
+                previousParent.IsVisible = true;
+            }
+            previousParent.Opacity = 1.0;
         }
         CurrentState = State.Parked;
     }
@@ -723,6 +804,7 @@ internal sealed class ApplicateSharedWebViewHostStateMachine
             && !ReferenceEquals(_currentParent, _warmupParent))
         {
             _currentParent.IsVisible = true;
+            _currentParent.Opacity = 1.0;
         }
         CurrentState = State.Committed;
         return true;

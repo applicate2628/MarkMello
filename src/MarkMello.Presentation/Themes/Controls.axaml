@@ -516,6 +516,10 @@
     </Setter>
   </Style>
 
+  <Style Selector="Slider.mm-settings-slider:disabled">
+    <Setter Property="Opacity" Value="0.45" />
+  </Style>
+
   <Style Selector="RepeatButton.mm-settings-slider-hitarea">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />

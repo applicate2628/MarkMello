@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Threading.Tasks;
+using MarkMello.Domain;
 
 namespace MarkMello.Applicate.Tests.Fakes;
 
@@ -9,6 +10,7 @@ internal sealed class FakeMainWindowVm : INotifyPropertyChanged
     private bool _isEditMode;
     private object? _editorSession;
     private object? _document;
+    private ReadingPreferences _readingPreferences = ReadingPreferences.Default;
 
     public bool IsViewer
     {
@@ -32,6 +34,12 @@ internal sealed class FakeMainWindowVm : INotifyPropertyChanged
     {
         get => _document;
         set { if (!ReferenceEquals(_document, value)) { _document = value; Fire(nameof(Document)); } }
+    }
+
+    public ReadingPreferences ReadingPreferences
+    {
+        get => _readingPreferences;
+        set { if (_readingPreferences != value) { _readingPreferences = value; Fire(nameof(ReadingPreferences)); } }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

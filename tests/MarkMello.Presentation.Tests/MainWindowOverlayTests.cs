@@ -171,6 +171,17 @@ public sealed class MainWindowOverlayTests
             "MarkMello.Presentation",
             "Views",
             "ReadingSettingsPanelView.axaml"));
+        var controlsTheme = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Themes",
+            "Controls.axaml"));
         var appUpdates = File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,
             "..",
@@ -194,6 +205,14 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("Text=\"{Binding ReadingPaletteLabel}\"", readingSettings, StringComparison.Ordinal);
         Assert.Contains("IsChecked=\"{Binding IsOriginalPaletteSelected}\"", readingSettings, StringComparison.Ordinal);
         Assert.Contains("IsChecked=\"{Binding IsWhitePaletteSelected}\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding ReadingModeSmoothLabel}\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("IsChecked=\"{Binding IsModeSwitchSmoothEnabled}\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("IsChecked=\"{Binding IsModeSwitchSmoothDisabled}\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding ReadingModeSmoothOff}\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("Value=\"{Binding ModeSwitchSmoothDurationSetting, Mode=TwoWay}\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding ModeSwitchSmoothDurationLabel}\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("Slider.mm-settings-slider:disabled", controlsTheme, StringComparison.Ordinal);
+        Assert.Contains("<Setter Property=\"Opacity\" Value=\"0.45\" />", controlsTheme, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding CheckForUpdatesCommand}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding DownloadUpdateCommand}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding OpenDownloadedUpdateCommand}\"", appUpdates, StringComparison.Ordinal);

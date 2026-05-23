@@ -2,6 +2,7 @@ using System;
 using Avalonia;
 using Avalonia.Animation.Easings;
 using Avalonia.Styling;
+using MarkMello.Domain;
 
 namespace MarkMello.Applicate.Desktop.Views;
 
@@ -29,6 +30,14 @@ internal static class ApplicateMotion
     public static TimeSpan Slow => Resolve("MmDurationSlow", TimeSpan.FromMilliseconds(280));
 
     public static Easing Easing => ResolveEasing("MmEasingStandard");
+
+    public static TimeSpan ModeSwitchDuration(ReadingPreferences preferences)
+    {
+        var normalized = ReadingPreferences.Normalize(preferences);
+        return normalized.ModeSwitchSmoothEnabled
+            ? TimeSpan.FromMilliseconds(normalized.ModeSwitchSmoothDurationMs)
+            : TimeSpan.Zero;
+    }
 
     private static TimeSpan Resolve(string key, TimeSpan fallback)
     {

@@ -14,6 +14,14 @@ namespace MarkMello.Applicate.Tests;
 /// </summary>
 public sealed class ApplicateSharedWebViewHostStateMachineTests
 {
+    private static readonly string HostSourcePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..",
+        "src",
+        "MarkMello.Applicate.Desktop",
+        "Rendering",
+        "ApplicateSharedWebViewHost.cs");
+
     [Fact]
     public void NewMachineStartsParked()
     {
@@ -55,6 +63,31 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
             Assert.Equal(ApplicateSharedWebViewHostStateMachine.State.Switching, sm.CurrentState);
             Assert.Same(slot, sm.CurrentParent);
             Assert.False(slot.IsVisible);
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public void AttachToKeepsTargetTransparentUntilDocumentRendered()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var sm = new ApplicateSharedWebViewHostStateMachine();
+            var warmup = new Panel();
+            var viewer = new Panel { IsVisible = true, Opacity = 1.0 };
+            var edit = new Panel { IsVisible = true, Opacity = 1.0 };
+            sm.SetWarmupParent(warmup);
+
+            sm.AttachTo(viewer);
+            Assert.Equal(0.0, viewer.Opacity);
+            Assert.True(sm.ApplyDocumentRendered(sm.RequestRender()));
+            Assert.Equal(1.0, viewer.Opacity);
+
+            sm.AttachTo(edit);
+
+            Assert.Equal(0.0, edit.Opacity);
+            Assert.True(sm.ApplyDocumentRendered(sm.RequestRender()));
+            Assert.Equal(1.0, edit.Opacity);
         }, CancellationToken.None);
     }
 
@@ -196,5 +229,33 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
             Assert.Same(warmup, sm.CurrentParent);
             Assert.True(slot.IsVisible);
         }, CancellationToken.None);
+    }
+
+    [Fact]
+    public void SharedHostOwnsRevealFadeAfterRendererSettle()
+    {
+        var source = File.ReadAllText(HostSourcePath);
+
+        Assert.Contains("PrepareTargetForReveal", source, StringComparison.Ordinal);
+        Assert.Contains("RevealCurrentParent", source, StringComparison.Ordinal);
+        Assert.Contains("ApplicateMotion.ModeSwitchDuration", source, StringComparison.Ordinal);
+        Assert.True(
+            source.IndexOf("RevealCurrentParent", StringComparison.Ordinal)
+            > source.IndexOf("View.SetNativeWebViewVisibility(true)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SharedHostFadesRendererDocumentInsideNativeWebView()
+    {
+        var source = File.ReadAllText(HostSourcePath);
+
+        Assert.Contains("PrepareNativeRendererForReveal", source, StringComparison.Ordinal);
+        Assert.Contains("RevealNativeRenderer", source, StringComparison.Ordinal);
+        Assert.True(
+            source.IndexOf("View.PrepareNativeRendererForReveal", StringComparison.Ordinal)
+            < source.IndexOf("View.SetNativeWebViewVisibility(true)", StringComparison.Ordinal));
+        Assert.True(
+            source.IndexOf("View.RevealNativeRenderer", StringComparison.Ordinal)
+            > source.IndexOf("View.SetNativeWebViewVisibility(true)", StringComparison.Ordinal));
     }
 }

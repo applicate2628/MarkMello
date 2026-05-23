@@ -11,6 +11,8 @@ namespace MarkMello.Domain;
 /// <param name="RendererBackend">Механизм рендеринга Markdown-документа.</param>
 /// <param name="WidthResizerVisibility">Когда показывать визуальную линию изменения ширины.</param>
 /// <param name="LightPalette">Вариант светлой палитры документа.</param>
+/// <param name="ModeSwitchSmoothEnabled">Включена ли плавная смена режимов чтение/редактирование.</param>
+/// <param name="ModeSwitchSmoothDurationMs">Длительность плавной смены режимов в миллисекундах.</param>
 public sealed record ReadingPreferences(
     FontFamilyMode FontFamily,
     int FontSize,
@@ -19,7 +21,9 @@ public sealed record ReadingPreferences(
     DocumentMinimapMode DocumentMinimapMode = DocumentMinimapMode.Auto,
     MarkdownRendererBackend RendererBackend = MarkdownRendererBackend.WebView,
     WidthResizerVisibility WidthResizerVisibility = WidthResizerVisibility.OnHover,
-    LightPaletteMode LightPalette = LightPaletteMode.White)
+    LightPaletteMode LightPalette = LightPaletteMode.White,
+    bool ModeSwitchSmoothEnabled = true,
+    int ModeSwitchSmoothDurationMs = ReadingPreferences.DefaultModeSwitchSmoothDurationMs)
 {
     public const int MinFontSize = 14;
     public const int MaxFontSize = 24;
@@ -32,6 +36,10 @@ public sealed record ReadingPreferences(
     public const int MinContentWidth = NarrowContentWidth;
     public const int MaxContentWidth = 1280;
     public const int ContentWidthStep = 20;
+    public const int MinModeSwitchSmoothDurationMs = 0;
+    public const int MaxModeSwitchSmoothDurationMs = 600;
+    public const int ModeSwitchSmoothDurationStepMs = 20;
+    public const int DefaultModeSwitchSmoothDurationMs = 180;
 
     private const int LegacyNarrowContentWidth = 580;
     private const int LegacyMediumContentWidth = 720;
@@ -48,7 +56,9 @@ public sealed record ReadingPreferences(
         DocumentMinimapMode: DocumentMinimapMode.Auto,
         RendererBackend: MarkdownRendererBackend.WebView,
         WidthResizerVisibility: WidthResizerVisibility.OnHover,
-        LightPalette: LightPaletteMode.White);
+        LightPalette: LightPaletteMode.White,
+        ModeSwitchSmoothEnabled: true,
+        ModeSwitchSmoothDurationMs: DefaultModeSwitchSmoothDurationMs);
 
     /// <summary>
     /// Нормализует пользовательские настройки до безопасного и предсказуемого диапазона.
@@ -80,6 +90,7 @@ public sealed record ReadingPreferences(
         var lightPalette = Enum.IsDefined(preferences.LightPalette)
             ? preferences.LightPalette
             : Default.LightPalette;
+        var modeSwitchSmoothDurationMs = NormalizeModeSwitchSmoothDuration(preferences.ModeSwitchSmoothDurationMs);
 
         return new ReadingPreferences(
             fontFamily,
@@ -89,7 +100,9 @@ public sealed record ReadingPreferences(
             documentMinimapMode,
             rendererBackend,
             widthResizerVisibility,
-            lightPalette);
+            lightPalette,
+            preferences.ModeSwitchSmoothEnabled,
+            modeSwitchSmoothDurationMs);
     }
 
     public ReadingPreferences Normalize() => Normalize(this);
@@ -119,5 +132,14 @@ public sealed record ReadingPreferences(
         var clamped = Math.Clamp(migrated, MinContentWidth, MaxContentWidth);
         var rounded = (int)Math.Round(clamped / (double)ContentWidthStep, MidpointRounding.AwayFromZero) * ContentWidthStep;
         return Math.Clamp(rounded, MinContentWidth, MaxContentWidth);
+    }
+
+    private static int NormalizeModeSwitchSmoothDuration(int value)
+    {
+        var clamped = Math.Clamp(value, MinModeSwitchSmoothDurationMs, MaxModeSwitchSmoothDurationMs);
+        var rounded = (int)Math.Round(
+            clamped / (double)ModeSwitchSmoothDurationStepMs,
+            MidpointRounding.AwayFromZero) * ModeSwitchSmoothDurationStepMs;
+        return Math.Clamp(rounded, MinModeSwitchSmoothDurationMs, MaxModeSwitchSmoothDurationMs);
     }
 }

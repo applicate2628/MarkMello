@@ -142,7 +142,9 @@ type HostMessage =
   // (width handle + minimap viewport) against the new bounds, then posts
   // `mode-toggle-settled` back. The host then reveals the HWND, so the user
   // never observes the renderer mid-reflow.
-  | { type: "mode-settle-probe" };
+  | { type: "mode-settle-probe" }
+  | { type: "mode-reveal-prepare"; durationMs?: number }
+  | { type: "mode-reveal-start"; durationMs?: number };
 
 const hostWindow = window as RendererWindow;
 const MINIMAP_CLASS = "mm-minimap";
@@ -152,6 +154,7 @@ const MINIMAP_REFRESH_DEBOUNCE_MS = 100;
 const WIDTH_HANDLE_CLASS = "mm-width-handle";
 const WIDTH_HANDLE_DRAGGING_CLASS = "mm-dragging";
 const WIDTH_RESIZER_ALWAYS_CLASS = "mm-width-resizer-always";
+const MODE_REVEAL_EASING = "cubic-bezier(0.215, 0.61, 0.355, 1)";
 
 let minimapMode: MinimapMode = "off";
 let hasReceivedHostPreferences = false;
@@ -354,6 +357,45 @@ function applyDocumentScrollState(): void {
     // and renderer agree on the starting offset.
     window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior });
   }
+}
+
+function clampModeRevealDuration(durationMs: unknown): number {
+  return typeof durationMs === "number" && Number.isFinite(durationMs)
+    ? Math.max(0, Math.min(600, Math.round(durationMs)))
+    : 0;
+}
+
+function getModeRevealTarget(): HTMLElement | null {
+  return document.querySelector<HTMLElement>("main.mm-document");
+}
+
+function prepareModeReveal(durationMs: unknown): void {
+  const target = getModeRevealTarget();
+  if (!target) {
+    return;
+  }
+
+  const duration = clampModeRevealDuration(durationMs);
+  target.style.transition = "none";
+  target.style.opacity = duration > 0 ? "0" : "1";
+}
+
+function startModeReveal(durationMs: unknown): void {
+  const target = getModeRevealTarget();
+  if (!target) {
+    return;
+  }
+
+  const duration = clampModeRevealDuration(durationMs);
+  if (duration <= 0) {
+    target.style.transition = "none";
+    target.style.opacity = "1";
+    return;
+  }
+
+  void target.offsetWidth;
+  target.style.transition = `opacity ${duration}ms ${MODE_REVEAL_EASING}`;
+  target.style.opacity = "1";
 }
 
 function postHostMessage(message: RendererMessage): void {
@@ -1854,6 +1896,16 @@ function handleHostMessage(raw: unknown): void {
         postHostMessage({ type: "mode-toggle-settled" });
       });
     });
+    return;
+  }
+
+  if (message.type === "mode-reveal-prepare") {
+    prepareModeReveal(message.durationMs);
+    return;
+  }
+
+  if (message.type === "mode-reveal-start") {
+    startModeReveal(message.durationMs);
     return;
   }
 }

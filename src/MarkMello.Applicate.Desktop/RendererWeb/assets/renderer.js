@@ -1070,6 +1070,7 @@
   var WIDTH_HANDLE_CLASS = "mm-width-handle";
   var WIDTH_HANDLE_DRAGGING_CLASS = "mm-dragging";
   var WIDTH_RESIZER_ALWAYS_CLASS = "mm-width-resizer-always";
+  var MODE_REVEAL_EASING = "cubic-bezier(0.215, 0.61, 0.355, 1)";
   var minimapMode = "off";
   var hasReceivedHostPreferences = false;
   var hasInitialLayoutSettled = false;
@@ -1202,6 +1203,36 @@
     if (!documentScrollEnabled) {
       window.scrollTo({ left: 0, top: 0, behavior: "instant" });
     }
+  }
+  function clampModeRevealDuration(durationMs) {
+    return typeof durationMs === "number" && Number.isFinite(durationMs) ? Math.max(0, Math.min(600, Math.round(durationMs))) : 0;
+  }
+  function getModeRevealTarget() {
+    return document.querySelector("main.mm-document");
+  }
+  function prepareModeReveal(durationMs) {
+    const target = getModeRevealTarget();
+    if (!target) {
+      return;
+    }
+    const duration = clampModeRevealDuration(durationMs);
+    target.style.transition = "none";
+    target.style.opacity = duration > 0 ? "0" : "1";
+  }
+  function startModeReveal(durationMs) {
+    const target = getModeRevealTarget();
+    if (!target) {
+      return;
+    }
+    const duration = clampModeRevealDuration(durationMs);
+    if (duration <= 0) {
+      target.style.transition = "none";
+      target.style.opacity = "1";
+      return;
+    }
+    void target.offsetWidth;
+    target.style.transition = `opacity ${duration}ms ${MODE_REVEAL_EASING}`;
+    target.style.opacity = "1";
   }
   function postHostMessage(message) {
     const serialized = JSON.stringify(message);
@@ -2291,6 +2322,14 @@
           postHostMessage({ type: "mode-toggle-settled" });
         });
       });
+      return;
+    }
+    if (message.type === "mode-reveal-prepare") {
+      prepareModeReveal(message.durationMs);
+      return;
+    }
+    if (message.type === "mode-reveal-start") {
+      startModeReveal(message.durationMs);
       return;
     }
   }

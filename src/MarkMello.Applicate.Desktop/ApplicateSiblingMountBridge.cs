@@ -2,9 +2,12 @@ using System;
 using System.ComponentModel;
 using System.Threading;
 using Avalonia;
+using Avalonia.Animation;
 using Avalonia.Controls;
 using Avalonia.Threading;
 using MarkMello.Applicate.Desktop.Diagnostics;
+using MarkMello.Applicate.Desktop.Views;
+using MarkMello.Domain;
 using MarkMello.Presentation.ViewModels;
 
 namespace MarkMello.Applicate.Desktop;
@@ -19,6 +22,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
     private readonly Func<bool> _getIsEditMode;
     private readonly Func<object?> _getEditorSession;
     private readonly Func<object?> _getDocument;
+    private readonly Func<ReadingPreferences> _getReadingPreferences;
     private volatile bool _disposed;
     private int _reconcilePending;
 
@@ -31,6 +35,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         Func<bool> getIsEditMode,
         Func<object?> getEditorSession,
         Func<object?> getDocument,
+        Func<ReadingPreferences> getReadingPreferences,
         object viewerContent)
     {
         _vm = vm;
@@ -41,7 +46,12 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         _getIsEditMode = getIsEditMode;
         _getEditorSession = getEditorSession;
         _getDocument = getDocument;
+        _getReadingPreferences = getReadingPreferences;
         _viewerSlot.Content = viewerContent;
+        InstallModeSwitchFades(_getReadingPreferences());
+        _viewerSlot.Opacity = 0.0;
+        _editSlot.Opacity = 0.0;
+        _editContent.Opacity = 0.0;
 
         // editContent is the pre-built EditWorkspaceView + EditPreviewView
         // already added to editSlot.Children by the caller (Panel children
@@ -78,7 +88,8 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
             nameof(MainWindowViewModel.IsViewer)
             or nameof(MainWindowViewModel.IsEditMode)
             or nameof(MainWindowViewModel.EditorSession)
-            or nameof(MainWindowViewModel.Document)))
+            or nameof(MainWindowViewModel.Document)
+            or nameof(MainWindowViewModel.ReadingPreferences)))
         {
             return;
         }
@@ -121,6 +132,8 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         var isEdit = _getIsEditMode();
         var session = _getEditorSession();
         var document = _getDocument();
+        var readingPreferences = _getReadingPreferences();
+        InstallModeSwitchFades(readingPreferences);
 
         // Triple-gate: viewer mode AND not editing AND document still exists.
         // The `document is not null` clause closes the close-file parasitic-
@@ -133,9 +146,17 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
 
         ApplicateTrace.ModeToggle(
             $"Reconcile in: isViewer={isViewer} isEdit={isEdit} session={(session is not null)} document={(document is not null)} -> viewerVis={viewerVisible} editVis={editVisible}");
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "bridge-reconcile-enter",
+            $"viewerVis={viewerVisible} editVis={editVisible} editSlotPrev={_editSlot.IsVisible}");
 
         ApplySlotState(_viewerSlot, viewerVisible);
         ApplySlotState(_editSlot, editVisible);
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "bridge-edit-slot-applied",
+            $"editSlotIsVisible={_editSlot.IsVisible} editSlotBounds={_editSlot.Bounds.Width:F0}x{_editSlot.Bounds.Height:F0}");
 
         // Drive editContent.Opacity together with editSlot.IsVisible so the
         // Avalonia chrome (source pane, toolbar) fades in/out at the same
@@ -167,10 +188,38 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
     private static void ApplySlotState(Control slot, bool visible)
     {
         slot.IsVisible = visible;
+        slot.Opacity = visible ? 1.0 : 0.0;
         slot.IsEnabled = visible;
         slot.IsHitTestVisible = visible;
         slot.IsTabStop = visible;
         slot.Focusable = visible;
+    }
+
+    private void InstallModeSwitchFades(ReadingPreferences preferences)
+    {
+        InstallModeSwitchFade(_viewerSlot, preferences);
+        InstallModeSwitchFade(_editSlot, preferences);
+        InstallModeSwitchFade(_editContent, preferences);
+    }
+
+    private static void InstallModeSwitchFade(Control control, ReadingPreferences preferences)
+    {
+        var duration = ApplicateMotion.ModeSwitchDuration(preferences);
+        if (duration == TimeSpan.Zero)
+        {
+            control.Transitions = null;
+            return;
+        }
+
+        control.Transitions =
+        [
+            new DoubleTransition
+            {
+                Property = Visual.OpacityProperty,
+                Duration = duration,
+                Easing = ApplicateMotion.Easing
+            }
+        ];
     }
 
     public void Dispose()

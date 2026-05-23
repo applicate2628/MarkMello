@@ -896,6 +896,7 @@ public sealed class ApplicateMainWindow : MainWindow
             () => viewModel.IsEditMode,
             () => viewModel.EditorSession,
             () => viewModel.Document,
+            () => viewModel.ReadingPreferences,
             viewerContent: viewModel);
 
         Closed += OnApplicateMainWindowClosed;

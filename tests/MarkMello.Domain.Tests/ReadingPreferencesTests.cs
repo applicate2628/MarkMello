@@ -14,6 +14,8 @@ public sealed class ReadingPreferencesTests
         Assert.Equal(MarkdownRendererBackend.WebView, normalized.RendererBackend);
         Assert.Equal(WidthResizerVisibility.OnHover, normalized.WidthResizerVisibility);
         Assert.Equal(LightPaletteMode.White, normalized.LightPalette);
+        Assert.True(normalized.ModeSwitchSmoothEnabled);
+        Assert.Equal(ReadingPreferences.DefaultModeSwitchSmoothDurationMs, normalized.ModeSwitchSmoothDurationMs);
     }
 
     [Fact]
@@ -25,7 +27,8 @@ public sealed class ReadingPreferencesTests
             LineHeight: 0.2,
             ContentWidth: 517,
             DocumentMinimapMode: (DocumentMinimapMode)42,
-            LightPalette: (LightPaletteMode)42);
+            LightPalette: (LightPaletteMode)42,
+            ModeSwitchSmoothDurationMs: 9999);
 
         var normalized = ReadingPreferences.Normalize(candidate);
 
@@ -36,6 +39,7 @@ public sealed class ReadingPreferencesTests
         Assert.Equal(DocumentMinimapMode.Auto, normalized.DocumentMinimapMode);
         Assert.Equal(WidthResizerVisibility.OnHover, normalized.WidthResizerVisibility);
         Assert.Equal(LightPaletteMode.White, normalized.LightPalette);
+        Assert.Equal(ReadingPreferences.MaxModeSwitchSmoothDurationMs, normalized.ModeSwitchSmoothDurationMs);
     }
 
     [Theory]
@@ -108,5 +112,29 @@ public sealed class ReadingPreferencesTests
         var normalized = ReadingPreferences.Normalize(candidate);
 
         Assert.Equal(mode, normalized.LightPalette);
+    }
+
+    [Theory]
+    [InlineData(-10, ReadingPreferences.MinModeSwitchSmoothDurationMs)]
+    [InlineData(170, 180)]
+    [InlineData(9999, ReadingPreferences.MaxModeSwitchSmoothDurationMs)]
+    public void NormalizeClampsAndRoundsModeSwitchSmoothDuration(int candidateDuration, int expectedDuration)
+    {
+        var candidate = ReadingPreferences.Default with { ModeSwitchSmoothDurationMs = candidateDuration };
+
+        var normalized = ReadingPreferences.Normalize(candidate);
+
+        Assert.Equal(expectedDuration, normalized.ModeSwitchSmoothDurationMs);
+    }
+
+    [Fact]
+    public void NormalizePreservesModeSwitchSmoothDisabled()
+    {
+        var candidate = ReadingPreferences.Default with { ModeSwitchSmoothEnabled = false };
+
+        var normalized = ReadingPreferences.Normalize(candidate);
+
+        Assert.False(normalized.ModeSwitchSmoothEnabled);
+        Assert.Equal(ReadingPreferences.DefaultModeSwitchSmoothDurationMs, normalized.ModeSwitchSmoothDurationMs);
     }
 }

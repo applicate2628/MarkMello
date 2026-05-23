@@ -272,6 +272,58 @@
                 </Border>
               </StackPanel>
 
+              <StackPanel Spacing="0">
+                <Line Classes="mm-setting-divider"
+                      StartPoint="0,0.5"
+                      EndPoint="1,0.5" />
+                <Border Classes="mm-setting-row">
+                  <Grid ColumnDefinitions="Auto,*"
+                        ColumnSpacing="12">
+                    <StackPanel Grid.Column="0"
+                                Spacing="2"
+                                VerticalAlignment="Center">
+                      <TextBlock Classes="mm-setting-label"
+                                 Text="{Binding ReadingModeSmoothLabel}" />
+                      <TextBlock Classes="mm-setting-hint"
+                                 Text="{Binding ReadingModeSmoothHint}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1"
+                                Spacing="8"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center">
+                      <Border Classes="mm-segmented"
+                              HorizontalAlignment="Right">
+                        <StackPanel Orientation="Horizontal"
+                                    Spacing="1">
+                          <ToggleButton Classes="mm-segmented-item"
+                                        IsChecked="{Binding IsModeSwitchSmoothEnabled}">
+                            <TextBlock Text="{Binding ReadingModeSmoothOn}" />
+                          </ToggleButton>
+                          <ToggleButton Classes="mm-segmented-item"
+                                        IsChecked="{Binding IsModeSwitchSmoothDisabled}">
+                            <TextBlock Text="{Binding ReadingModeSmoothOff}" />
+                          </ToggleButton>
+                        </StackPanel>
+                      </Border>
+                      <StackPanel Orientation="Horizontal"
+                                  Spacing="10"
+                                  VerticalAlignment="Center">
+                        <Slider Classes="mm-settings-slider"
+                                Width="118"
+                                Minimum="0"
+                                Maximum="600"
+                                TickFrequency="20"
+                                IsSnapToTickEnabled="True"
+                                IsEnabled="{Binding IsModeSwitchSmoothEnabled}"
+                                Value="{Binding ModeSwitchSmoothDurationSetting, Mode=TwoWay}" />
+                        <TextBlock Classes="mm-slider-value"
+                                   Text="{Binding ModeSwitchSmoothDurationLabel}" />
+                      </StackPanel>
+                    </StackPanel>
+                  </Grid>
+                </Border>
+              </StackPanel>
+
               <!-- Applicate fork: renderer toggle row hidden because
                    WebView is the only renderer the Applicate-side build
                    supports (the native Avalonia backend was removed in

@@ -20,7 +20,9 @@ public sealed class JsonSettingsStoreTests
                 DocumentMinimapMode.On,
                 MarkdownRendererBackend.WebView,
                 WidthResizerVisibility.Always,
-                LightPaletteMode.White);
+                LightPaletteMode.White,
+                ModeSwitchSmoothEnabled: false,
+                ModeSwitchSmoothDurationMs: 260);
 
             await store.SavePreferencesAsync(expectedPreferences);
             await store.SaveThemeAsync(ThemeMode.Dark);
@@ -224,6 +226,42 @@ public sealed class JsonSettingsStoreTests
             var preferences = await store.LoadPreferencesAsync();
 
             Assert.Equal(WidthResizerVisibility.OnHover, preferences.WidthResizerVisibility);
+        }
+        finally
+        {
+            DeleteDirectory(rootDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task LoadUsesDefaultModeSwitchSmoothSettingsWhenLegacySettingsHaveNoSmoothFields()
+    {
+        var rootDirectory = CreateTempDirectory();
+        const string json = """
+        {
+          "theme": "Light",
+          "preferences": {
+            "fontFamily": "Serif",
+            "fontSize": 18,
+            "lineHeight": 1.7,
+            "contentWidth": 820,
+            "documentMinimapMode": "Auto",
+            "rendererBackend": "WebView",
+            "widthResizerVisibility": "OnHover",
+            "lightPalette": "White"
+          }
+        }
+        """;
+
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(rootDirectory, "settings.json"), json);
+
+            var store = new JsonSettingsStore(rootDirectory);
+            var preferences = await store.LoadPreferencesAsync();
+
+            Assert.True(preferences.ModeSwitchSmoothEnabled);
+            Assert.Equal(ReadingPreferences.DefaultModeSwitchSmoothDurationMs, preferences.ModeSwitchSmoothDurationMs);
         }
         finally
         {
