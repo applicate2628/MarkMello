@@ -11,17 +11,19 @@ namespace MarkMello.Presentation.ViewModels;
 /// <c>headings-updated</c> IPC; the Applicate-side host view forwards the
 /// list into <see cref="DocumentHeadings"/>. The shell binds a column to
 /// this collection and exposes <see cref="IsTocVisible"/> as the
-/// composite visibility predicate (viewer mode AND user preference AND
+/// composite visibility predicate (open viewer surface AND user preference AND
 /// non-empty headings).
 ///
 /// <para>Architectural note: the TOC lives at the shell level rather than
 /// inside the renderer because the user wants a panel that spans the full
-/// content-area height with its own scroll, resizable column, and that
-/// hides in edit mode. A renderer-side TOC could not satisfy any of those
-/// requirements without competing with the document body for layout.</para>
+/// content-area height with its own scroll and resizable column. A
+/// renderer-side TOC could not satisfy those requirements without competing
+/// with the document body for layout.</para>
 /// </summary>
 public partial class MainWindowViewModel
 {
+    private string? _pendingScrollToHeadingId;
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsTocVisible))]
     [NotifyPropertyChangedFor(nameof(HasDocumentHeadings))]
@@ -55,13 +57,12 @@ public partial class MainWindowViewModel
 
     /// <summary>
     /// True when the TOC column should be visible. Composite predicate:
-    /// the active document must be a viewer (not edit mode), the user
+    /// the active document must have a viewer surface, the user
     /// must not have hidden the TOC, and the renderer must have reported
     /// at least one heading for the current document.
     /// </summary>
     public bool IsTocVisible
         => IsViewer
-           && !IsEditMode
            && IsTocPreferredVisible
            && DocumentHeadings.Count > 0;
 
@@ -97,7 +98,33 @@ public partial class MainWindowViewModel
         {
             return;
         }
+        ActiveHeadingId = headingId;
+        _pendingScrollToHeadingId = headingId;
         ScrollToHeadingRequested?.Invoke(this, headingId);
+    }
+
+    /// <summary>
+    /// Apply the renderer's current active heading unless a user-initiated TOC
+    /// click is still scrolling toward its requested target. Smooth scrolling
+    /// can pass intermediate headings through the active-zone observer; those
+    /// transient ids must not steal the visual selection from the row the user
+    /// explicitly clicked.
+    /// </summary>
+    public void UpdateActiveHeadingFromRenderer(string? headingId)
+    {
+        if (string.IsNullOrEmpty(headingId))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(_pendingScrollToHeadingId)
+            && !string.Equals(headingId, _pendingScrollToHeadingId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _pendingScrollToHeadingId = null;
+        ActiveHeadingId = headingId;
     }
 
     /// <summary>
@@ -147,6 +174,7 @@ public partial class MainWindowViewModel
         // Clear active heading id when the document changes; the
         // renderer's IntersectionObserver emits a fresh active-heading-
         // changed shortly after this on its first scroll.
+        _pendingScrollToHeadingId = null;
         ActiveHeadingId = string.Empty;
     }
 

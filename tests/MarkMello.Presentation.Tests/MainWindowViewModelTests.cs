@@ -129,6 +129,61 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task TableOfContentsRemainsVisibleInEditModeWhenDocumentHasHeadings()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "one.md");
+        harness.Loader.Sources[path] = CreateSource(path, "# Intro");
+
+        await harness.ViewModel.OpenPathAsync(path);
+        harness.ViewModel.UpdateDocumentHeadings([
+            new DocumentHeading("intro", 1, "Intro", 0),
+        ]);
+
+        Assert.True(harness.ViewModel.IsTocVisible);
+
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+
+        Assert.True(harness.ViewModel.IsViewer);
+        Assert.True(harness.ViewModel.IsEditMode);
+        Assert.True(harness.ViewModel.IsTocVisible);
+    }
+
+    [Fact]
+    public void ScrollToHeadingCommandImmediatelyMovesActiveHeadingSelection()
+    {
+        var harness = CreateHarness();
+        harness.ViewModel.UpdateDocumentHeadings([
+            new DocumentHeading("intro", 1, "Intro", 0),
+            new DocumentHeading("details", 2, "Details", 12),
+        ]);
+
+        harness.ViewModel.ScrollToHeadingCommand.Execute("details");
+
+        Assert.Equal("details", harness.ViewModel.ActiveHeadingId);
+    }
+
+    [Fact]
+    public void RendererActiveHeadingDoesNotOverridePendingTocClickUntilRequestedHeadingArrives()
+    {
+        var harness = CreateHarness();
+        harness.ViewModel.UpdateDocumentHeadings([
+            new DocumentHeading("intro", 1, "Intro", 0),
+            new DocumentHeading("details", 2, "Details", 12),
+        ]);
+
+        harness.ViewModel.ScrollToHeadingCommand.Execute("details");
+        harness.ViewModel.UpdateActiveHeadingFromRenderer("intro");
+
+        Assert.Equal("details", harness.ViewModel.ActiveHeadingId);
+
+        harness.ViewModel.UpdateActiveHeadingFromRenderer("details");
+        harness.ViewModel.UpdateActiveHeadingFromRenderer("intro");
+
+        Assert.Equal("intro", harness.ViewModel.ActiveHeadingId);
+    }
+
+    [Fact]
     public async Task ReadableDocumentMetricIsMarkedOnlyAfterViewReportsRender()
     {
         var harness = CreateHarness();

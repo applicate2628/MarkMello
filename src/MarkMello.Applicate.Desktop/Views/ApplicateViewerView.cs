@@ -496,7 +496,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         {
             return;
         }
-        _viewModel.ActiveHeadingId = id;
+        _viewModel.UpdateActiveHeadingFromRenderer(id);
     }
 
     private void OnViewModelScrollToHeadingRequested(object? sender, string id)

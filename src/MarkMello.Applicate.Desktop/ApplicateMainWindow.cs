@@ -450,7 +450,7 @@ public sealed class ApplicateMainWindow : MainWindow
         // document content, spans the full content-area height, and has
         // its own ScrollViewer so mouse-wheel input scrolls the TOC
         // independently of the document. Visibility is composite-bound
-        // (IsTocVisible = IsViewer AND !IsEditMode AND user-pref AND has
+        // (IsTocVisible = IsViewer AND user-pref AND has
         // headings). The GridSplitter binds two-way to TocColumnWidth on
         // the VM so the user's resize survives layout passes. When the
         // TOC is hidden the entire toc-column collapses to zero width via

@@ -1203,8 +1203,9 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(IsAppOverlayOpen));
         OnPropertyChanged(nameof(HasOpenOverlay));
         OnPropertyChanged(nameof(ActiveDocumentContent));
-        // IsTocVisible composite predicate excludes edit mode; refresh on
-        // every toggle so the column slides in/out with the mode change.
+        // IsTocVisible no longer hides edit mode, but mode transitions can
+        // still change chrome around the TOC; refresh the composite predicate
+        // so bindings stay in sync.
         OnPropertyChanged(nameof(IsTocVisible));
         UpdateCommandStates();
     }

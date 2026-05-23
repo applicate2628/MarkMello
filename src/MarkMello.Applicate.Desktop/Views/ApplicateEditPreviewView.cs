@@ -69,6 +69,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     private TextEditor? _editorTextEditor;
     private ScrollViewer? _editorScrollViewer;
     private TextBox? _dropTargetTextBox;
+    private MainWindowViewModel? _viewModel;
     private bool _isAttachedToHost;
     private bool _hostEventsWired;
     private bool _syncEnabled;
@@ -694,6 +695,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         // DocumentRendered/Failure subscriptions are idempotent and survive
         // viewer↔edit transitions.
         WireSharedHostEvents();
+        AttachViewModel(TopLevel.GetTopLevel(this)?.DataContext as MainWindowViewModel);
 
         AttachSession(DataContext as EditorSessionViewModel);
         UpdateHostScrollMode();
@@ -709,6 +711,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         RestoreHostScrollMode();
         TeardownEditorDropWiring();
         TeardownEditorWiring();
+        AttachViewModel(null);
         AttachSession(null);
         _webRenderTimer.Stop();
         _resizeContentWidthTimer.Stop();
@@ -907,6 +910,8 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         _sharedHost.View.ViewerInteractionRequested += OnSharedViewerInteractionRequested;
         _sharedHost.View.ScrollStateChanged += OnSharedScrollStateChanged;
         _sharedHost.View.PreviewSourceLineChanged += OnSharedPreviewSourceLineChanged;
+        _sharedHost.View.HeadingsChanged += OnSharedHeadingsChanged;
+        _sharedHost.View.ActiveHeadingChanged += OnSharedActiveHeadingChanged;
         _sharedHost.RendererFailed += OnSharedRendererFailed;
         _hostEventsWired = true;
     }
@@ -922,8 +927,30 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         _sharedHost.View.ViewerInteractionRequested -= OnSharedViewerInteractionRequested;
         _sharedHost.View.ScrollStateChanged -= OnSharedScrollStateChanged;
         _sharedHost.View.PreviewSourceLineChanged -= OnSharedPreviewSourceLineChanged;
+        _sharedHost.View.HeadingsChanged -= OnSharedHeadingsChanged;
+        _sharedHost.View.ActiveHeadingChanged -= OnSharedActiveHeadingChanged;
         _sharedHost.RendererFailed -= OnSharedRendererFailed;
         _hostEventsWired = false;
+    }
+
+    private void AttachViewModel(MainWindowViewModel? viewModel)
+    {
+        if (ReferenceEquals(_viewModel, viewModel))
+        {
+            return;
+        }
+
+        if (_viewModel is not null)
+        {
+            _viewModel.ScrollToHeadingRequested -= OnViewModelScrollToHeadingRequested;
+        }
+
+        _viewModel = viewModel;
+
+        if (_viewModel is not null)
+        {
+            _viewModel.ScrollToHeadingRequested += OnViewModelScrollToHeadingRequested;
+        }
     }
 
     private void OnSharedScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)
@@ -949,6 +976,26 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         }
 
         PreviewSourceLineChanged?.Invoke(this, new SourceLineScrollSyncEventArgs(e.SourceLine));
+    }
+
+    private void OnSharedHeadingsChanged(object? sender, System.Collections.Generic.IReadOnlyList<DocumentHeading> headings)
+    {
+        if (!_isAttachedToHost || _viewModel is null)
+        {
+            return;
+        }
+
+        _viewModel.UpdateDocumentHeadings(headings);
+    }
+
+    private void OnSharedActiveHeadingChanged(object? sender, string id)
+    {
+        if (!_isAttachedToHost || _viewModel is null)
+        {
+            return;
+        }
+
+        _viewModel.UpdateActiveHeadingFromRenderer(id);
     }
 
     private void OnSharedDocumentRendered(object? sender, EventArgs e)
@@ -984,6 +1031,16 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         {
             viewModel.CloseOverlayCommand.Execute(null);
         }
+    }
+
+    private void OnViewModelScrollToHeadingRequested(object? sender, string id)
+    {
+        if (!_isAttachedToHost || _sharedHost is null)
+        {
+            return;
+        }
+
+        _sharedHost.View.ScrollToHeading(id);
     }
 
     private void QueueWebPreviewRender(bool immediate)
