@@ -25,6 +25,11 @@ import {
   readSourceLineAnchors,
   type SourceLineAnchor
 } from "./sourceLineSync";
+import {
+  captureMinimapSnapshot,
+  restoreMinimapSnapshot,
+  type CachedMinimapSnapshot
+} from "./minimapCache";
 
 type KatexApi = {
   render: (
@@ -233,6 +238,7 @@ type ProcessedDocumentCacheEntry = {
   nodeCount: number;
   layoutState: CachedLayoutState;
   headings: HeadingPayload[];
+  minimapSnapshot: CachedMinimapSnapshot | null;
 };
 
 type HeadingPayload = {
@@ -252,6 +258,7 @@ const processedDocumentCache = new Map<string, ProcessedDocumentCacheEntry>();
 let currentDocumentCacheKey: string | null = null;
 let restoredCachedLayoutState: CachedLayoutState | null = null;
 let restoredCachedHeadings: HeadingPayload[] | null = null;
+let restoredCachedMinimapSnapshot: CachedMinimapSnapshot | null = null;
 let lastExtractedHeadings: HeadingPayload[] = [];
 let lastKnownLayoutState: CachedLayoutState = {
   scrollTop: 0,
@@ -285,6 +292,7 @@ function getCachedProcessedDocumentFragment(cacheKey: string): DocumentFragment 
   processedDocumentCache.delete(cacheKey);
   restoredCachedLayoutState = { ...cached.layoutState };
   restoredCachedHeadings = cached.headings.map(heading => ({ ...heading }));
+  restoredCachedMinimapSnapshot = cached.minimapSnapshot;
   return cached.fragment;
 }
 
@@ -305,12 +313,20 @@ function preserveCurrentProcessedDocument(): void {
   const fragment = document.createDocumentFragment();
   const nodes = Array.from(main.childNodes);
   fragment.append(...nodes);
+  const minimapSnapshot = captureMinimapSnapshot({
+    ownerDocument: document,
+    minimapContent,
+    minimapViewport,
+    documentHeight: minimapDocumentHeight,
+    lastPostedState: lastPostedMinimapState,
+  });
   processedDocumentCache.delete(currentDocumentCacheKey);
   processedDocumentCache.set(currentDocumentCacheKey, {
     fragment,
     nodeCount: nodes.length,
     layoutState: { ...lastKnownLayoutState },
     headings: lastExtractedHeadings.map(heading => ({ ...heading })),
+    minimapSnapshot,
   });
   while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
     const oldest = processedDocumentCache.keys().next().value;
@@ -1013,6 +1029,58 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   updateMinimapViewport();
   emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
   postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
+}
+
+function postCachedMinimapState(state: PostedMinimapState): void {
+  ensureMinimap();
+  if (!minimapRoot) {
+    return;
+  }
+
+  const visible = state.hasPosted && state.visible;
+  const reservedWidth = visible ? Math.max(0, state.reservedWidth) : 0;
+  minimapRoot.hidden = !visible;
+  document.body.classList.toggle(MINIMAP_VISIBLE_CLASS, visible);
+  lastPostedMinimapState = { hasPosted: true, visible, reservedWidth };
+  postHostMessage({ type: "minimap-state", visible, reservedWidth });
+}
+
+function restoreCachedMinimapContent(): boolean {
+  const snapshot = restoredCachedMinimapSnapshot;
+  restoredCachedMinimapSnapshot = null;
+  if (!snapshot) {
+    return false;
+  }
+
+  ensureMinimap();
+  const restored = restoreMinimapSnapshot(snapshot, { minimapContent, minimapViewport });
+  if (!restored) {
+    return false;
+  }
+
+  minimapDocumentHeight = restored.documentHeight;
+  minimapSourceReady = true;
+  postCachedMinimapState(restored.lastPostedState);
+  emitMark("mm-minimap-cache-hit", {
+    documentHeight: restored.documentHeight,
+    nodeCount: restored.contentNodeCount,
+  });
+  postPerfMark("mm-minimap-cache-hit", {
+    documentHeight: restored.documentHeight,
+    nodeCount: restored.contentNodeCount,
+  });
+
+  const refreshGeneration = layoutReadyGeneration;
+  window.requestAnimationFrame(() => {
+    if (refreshGeneration !== layoutReadyGeneration) {
+      return;
+    }
+
+    updateMinimapVisibility(true);
+    updateMinimapViewport();
+    updateWidthHandlePosition();
+  });
+  return true;
 }
 
 // Avalonia-side Table of Contents (v0.3.2) — the renderer scans the active
@@ -1784,6 +1852,7 @@ function resetModuleGlobalsForLoadDocument(): void {
   currentController = null;
   restoredCachedLayoutState = null;
   restoredCachedHeadings = null;
+  restoredCachedMinimapSnapshot = null;
   ++layoutReadyGeneration;
   if (layoutReadyTimer !== undefined) {
     window.clearTimeout(layoutReadyTimer);
@@ -1832,24 +1901,13 @@ function ensureChromeNodes(useCachedDocumentState = false): void {
   // Width-handle X depends on the new .mm-document bounding rect after innerHTML
   // swap; ensureWidthHandle only ensures the node exists.
   updateWidthHandlePosition();
-  // SYNCHRONOUS per-document minimap source rebuild. loadDocument.ts:55 calls
-  // ensureChromeNodes right after main.innerHTML swap and BEFORE the async
-  // runInitialRenderPipeline. Verified 2026-05-19: F-04 multi-fire from C#
-  // sends two load-documents per tab click, each calls cancelCurrentMathController
-  // and resetModuleGlobals (which sets minimapSourceReady=false). Both async
-  // pipelines hang at `await mathController.initialVisibleReady` (controller
-  // cancelled mid-flight), never reach scheduleLayoutReady, so the async
-  // refresh (in scheduleLayoutReady callback) never runs. Without this sync
-  // call, minimapSourceReady stays false forever after tab switch → minimap
-  // hidden. Initial launch was unaffected because module-init's own
-  // controller.initialVisibleReady.then(refreshMinimapContent) wiring at
-  // boot fires once and seeds the state; only subsequent loads were broken.
-  // Position-after-host-preferences arrival: at initial launch the host has
-  // already sent reading-preferences by the time the FIRST load-document
-  // arrives (theme + minimap-policy + reading-preferences all fire before
-  // load-document per ApplicateWebMarkdownDocumentView shell-ready handler),
-  // so chrome/mode are populated when this call fires.
-  refreshMinimapContent("A");
+  // Cold path still needs a synchronous Phase A seed because cancelled async
+  // pipelines may never reach initialVisibleReady. Cache hits carry the already
+  // rendered minimap DOM, so restore it here and defer geometry reconciliation
+  // out of the cache-hit layout-ready path.
+  if (!useCachedDocumentState || !restoreCachedMinimapContent()) {
+    refreshMinimapContent("A");
+  }
   // v0.3.2 — TOC migrated from renderer-side panel (deleted 4aee666) to
   // Avalonia. Scan headings after each chrome rebuild and push the list to
   // the host so the host-side Table of Contents panel populates. Stable

@@ -159,18 +159,11 @@ public partial class MainWindowViewModel
     {
         ArgumentNullException.ThrowIfNull(headings);
 
-        // ObservableCollection<T> raises CollectionChanged but NOT
-        // PropertyChanged for our derived properties (IsTocVisible,
-        // HasDocumentHeadings). Replace via clear+add inside one notification
-        // so the GridSplitter / column visibility binding fires once after
-        // the collection is fully populated.
-        DocumentHeadings.Clear();
-        foreach (var heading in headings)
-        {
-            DocumentHeadings.Add(heading);
-        }
-        OnPropertyChanged(nameof(IsTocVisible));
-        OnPropertyChanged(nameof(HasDocumentHeadings));
+        // Replace the collection wholesale so the TOC panel rebuilds rows once
+        // via DocumentHeadings PropertyChanged. Mutating the existing
+        // ObservableCollection per heading makes the panel handle N
+        // CollectionChanged events and rebuild all rows on every item.
+        DocumentHeadings = new ObservableCollection<DocumentHeading>(headings);
         // Clear active heading id when the document changes; the
         // renderer's IntersectionObserver emits a fresh active-heading-
         // changed shortly after this on its first scroll.

@@ -1016,6 +1016,47 @@
     return Math.max(0, Math.min(1, value));
   }
 
+  // RendererWeb/src/minimapCache.ts
+  function captureMinimapSnapshot(input) {
+    if (!input.minimapContent || input.minimapContent.childNodes.length === 0) {
+      return null;
+    }
+    const nodes = Array.from(input.minimapContent.childNodes);
+    const content = input.ownerDocument.createDocumentFragment();
+    content.append(...nodes);
+    return {
+      content,
+      documentHeight: input.documentHeight,
+      lastPostedState: { ...input.lastPostedState },
+      contentStyle: {
+        width: input.minimapContent.style.width,
+        transform: input.minimapContent.style.transform
+      },
+      viewportStyle: {
+        height: input.minimapViewport?.style.height ?? "",
+        transform: input.minimapViewport?.style.transform ?? ""
+      }
+    };
+  }
+  function restoreMinimapSnapshot(snapshot, input) {
+    if (!input.minimapContent) {
+      return null;
+    }
+    const contentNodeCount = snapshot.content.childNodes.length;
+    input.minimapContent.replaceChildren(snapshot.content);
+    input.minimapContent.style.width = snapshot.contentStyle.width;
+    input.minimapContent.style.transform = snapshot.contentStyle.transform;
+    if (input.minimapViewport) {
+      input.minimapViewport.style.height = snapshot.viewportStyle.height;
+      input.minimapViewport.style.transform = snapshot.viewportStyle.transform;
+    }
+    return {
+      contentNodeCount,
+      documentHeight: snapshot.documentHeight,
+      lastPostedState: { ...snapshot.lastPostedState }
+    };
+  }
+
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -1074,6 +1115,7 @@
   var currentDocumentCacheKey = null;
   var restoredCachedLayoutState = null;
   var restoredCachedHeadings = null;
+  var restoredCachedMinimapSnapshot = null;
   var lastExtractedHeadings = [];
   var lastKnownLayoutState = {
     scrollTop: 0,
@@ -1103,6 +1145,7 @@
     processedDocumentCache.delete(cacheKey);
     restoredCachedLayoutState = { ...cached.layoutState };
     restoredCachedHeadings = cached.headings.map((heading) => ({ ...heading }));
+    restoredCachedMinimapSnapshot = cached.minimapSnapshot;
     return cached.fragment;
   }
   function setCurrentProcessedDocumentCacheKey(cacheKey) {
@@ -1119,12 +1162,20 @@
     const fragment = document.createDocumentFragment();
     const nodes = Array.from(main.childNodes);
     fragment.append(...nodes);
+    const minimapSnapshot = captureMinimapSnapshot({
+      ownerDocument: document,
+      minimapContent,
+      minimapViewport,
+      documentHeight: minimapDocumentHeight,
+      lastPostedState: lastPostedMinimapState
+    });
     processedDocumentCache.delete(currentDocumentCacheKey);
     processedDocumentCache.set(currentDocumentCacheKey, {
       fragment,
       nodeCount: nodes.length,
       layoutState: { ...lastKnownLayoutState },
-      headings: lastExtractedHeadings.map((heading) => ({ ...heading }))
+      headings: lastExtractedHeadings.map((heading) => ({ ...heading })),
+      minimapSnapshot
     });
     while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
       const oldest = processedDocumentCache.keys().next().value;
@@ -1658,6 +1709,51 @@
     emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
     postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
   }
+  function postCachedMinimapState(state2) {
+    ensureMinimap();
+    if (!minimapRoot) {
+      return;
+    }
+    const visible = state2.hasPosted && state2.visible;
+    const reservedWidth = visible ? Math.max(0, state2.reservedWidth) : 0;
+    minimapRoot.hidden = !visible;
+    document.body.classList.toggle(MINIMAP_VISIBLE_CLASS, visible);
+    lastPostedMinimapState = { hasPosted: true, visible, reservedWidth };
+    postHostMessage({ type: "minimap-state", visible, reservedWidth });
+  }
+  function restoreCachedMinimapContent() {
+    const snapshot = restoredCachedMinimapSnapshot;
+    restoredCachedMinimapSnapshot = null;
+    if (!snapshot) {
+      return false;
+    }
+    ensureMinimap();
+    const restored = restoreMinimapSnapshot(snapshot, { minimapContent, minimapViewport });
+    if (!restored) {
+      return false;
+    }
+    minimapDocumentHeight = restored.documentHeight;
+    minimapSourceReady = true;
+    postCachedMinimapState(restored.lastPostedState);
+    emitMark("mm-minimap-cache-hit", {
+      documentHeight: restored.documentHeight,
+      nodeCount: restored.contentNodeCount
+    });
+    postPerfMark("mm-minimap-cache-hit", {
+      documentHeight: restored.documentHeight,
+      nodeCount: restored.contentNodeCount
+    });
+    const refreshGeneration = layoutReadyGeneration;
+    window.requestAnimationFrame(() => {
+      if (refreshGeneration !== layoutReadyGeneration) {
+        return;
+      }
+      updateMinimapVisibility(true);
+      updateMinimapViewport();
+      updateWidthHandlePosition();
+    });
+    return true;
+  }
   var activeHeadingObserver = null;
   var lastPostedActiveHeadingId = null;
   function extractAndPostHeadings() {
@@ -2189,6 +2285,7 @@
     currentController = null;
     restoredCachedLayoutState = null;
     restoredCachedHeadings = null;
+    restoredCachedMinimapSnapshot = null;
     ++layoutReadyGeneration;
     if (layoutReadyTimer !== void 0) {
       window.clearTimeout(layoutReadyTimer);
@@ -2215,7 +2312,9 @@
     ensureWidthHandle();
     ensureDropOverlay();
     updateWidthHandlePosition();
-    refreshMinimapContent("A");
+    if (!useCachedDocumentState || !restoreCachedMinimapContent()) {
+      refreshMinimapContent("A");
+    }
     if (useCachedDocumentState) {
       postCachedHeadings();
     } else {

@@ -184,6 +184,31 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void UpdateDocumentHeadingsReplacesCollectionInsteadOfMutatingPerHeading()
+    {
+        var harness = CreateHarness();
+        var originalCollection = harness.ViewModel.DocumentHeadings;
+        var originalCollectionChanges = 0;
+        originalCollection.CollectionChanged += (_, _) => originalCollectionChanges++;
+
+        var propertyChanges = new List<string?>();
+        harness.ViewModel.PropertyChanged += (_, e) => propertyChanges.Add(e.PropertyName);
+
+        var headings = Enumerable.Range(1, 50)
+            .Select(index => new DocumentHeading($"h{index}", 2, $"Heading {index}", 12))
+            .ToArray();
+
+        harness.ViewModel.UpdateDocumentHeadings(headings);
+
+        Assert.NotSame(originalCollection, harness.ViewModel.DocumentHeadings);
+        Assert.Equal(0, originalCollectionChanges);
+        Assert.Equal(headings, harness.ViewModel.DocumentHeadings);
+        Assert.Contains(nameof(MainWindowViewModel.DocumentHeadings), propertyChanges);
+        Assert.Contains(nameof(MainWindowViewModel.IsTocVisible), propertyChanges);
+        Assert.Contains(nameof(MainWindowViewModel.HasDocumentHeadings), propertyChanges);
+    }
+
+    [Fact]
     public async Task ReadableDocumentMetricIsMarkedOnlyAfterViewReportsRender()
     {
         var harness = CreateHarness();
