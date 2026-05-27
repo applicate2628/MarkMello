@@ -41,6 +41,12 @@ node_modules/
 work-items/
 docs/superpowers/
 
+# Local agent/tool state
+.mcp.json
+.playwright-mcp/
+.serena/
+.vite/
+
 # Other
 .editorconfig
 .codex-tmp/
