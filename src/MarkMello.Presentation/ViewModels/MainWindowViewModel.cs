@@ -179,6 +179,10 @@ public partial class MainWindowViewModel : ObservableObject
     private bool _isDownloadingUpdate;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsAlwaysOnTopDisabled))]
+    private bool _isAlwaysOnTop;
+
+    [ObservableProperty]
     private string _updateStatusTitle = string.Empty;
 
     [ObservableProperty]
@@ -321,6 +325,21 @@ public partial class MainWindowViewModel : ObservableObject
     public bool IsUpdateNotificationVisible
         => !_isUpdateNotificationDismissed
            && _updateStatus is UpdateStatusSnapshot.UpdateAvailableState or UpdateStatusSnapshot.DownloadReadyState;
+
+    public bool IsAlwaysOnTopDisabled
+    {
+        get => !IsAlwaysOnTop;
+        set
+        {
+            if (!value)
+            {
+                OnPropertyChanged(nameof(IsAlwaysOnTopDisabled));
+                return;
+            }
+
+            IsAlwaysOnTop = false;
+        }
+    }
 
     public string CheckForUpdatesLabel => IsCheckingForUpdates ? _localization["UpdateChecking"] : _localization["UpdateCheckNow"];
 

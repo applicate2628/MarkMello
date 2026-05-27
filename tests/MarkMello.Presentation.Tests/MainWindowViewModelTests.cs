@@ -723,6 +723,25 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void AlwaysOnTopSelectionUpdatesWindowBindingState()
+    {
+        var harness = CreateHarness();
+
+        Assert.False(harness.ViewModel.IsAlwaysOnTop);
+        Assert.True(harness.ViewModel.IsAlwaysOnTopDisabled);
+
+        harness.ViewModel.IsAlwaysOnTop = true;
+
+        Assert.True(harness.ViewModel.IsAlwaysOnTop);
+        Assert.False(harness.ViewModel.IsAlwaysOnTopDisabled);
+
+        harness.ViewModel.IsAlwaysOnTopDisabled = true;
+
+        Assert.False(harness.ViewModel.IsAlwaysOnTop);
+        Assert.True(harness.ViewModel.IsAlwaysOnTopDisabled);
+    }
+
+    [Fact]
     public void RendererPreferenceChangeDoesNotNotifyUnrelatedReadingSettingButtons()
     {
         var harness = CreateHarness();

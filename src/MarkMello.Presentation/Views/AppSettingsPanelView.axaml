@@ -71,6 +71,40 @@
                     StartPoint="0,0.5"
                     EndPoint="1,0.5" />
 
+              <Border Classes="mm-setting-row">
+                <Grid ColumnDefinitions="Auto,*"
+                      ColumnSpacing="12">
+                  <StackPanel Grid.Column="0"
+                              Spacing="2"
+                              VerticalAlignment="Center">
+                    <TextBlock Classes="mm-setting-label"
+                               Text="{Binding AlwaysOnTopLabel}" />
+                    <TextBlock Classes="mm-setting-hint"
+                               Text="{Binding AlwaysOnTopHint}" />
+                  </StackPanel>
+                  <Border Grid.Column="1"
+                          Classes="mm-segmented"
+                          HorizontalAlignment="Right"
+                          VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal"
+                                Spacing="1">
+                      <ToggleButton Classes="mm-segmented-item"
+                                    IsChecked="{Binding IsAlwaysOnTop}">
+                        <TextBlock Text="{Binding AlwaysOnTopOn}" />
+                      </ToggleButton>
+                      <ToggleButton Classes="mm-segmented-item"
+                                    IsChecked="{Binding IsAlwaysOnTopDisabled}">
+                        <TextBlock Text="{Binding AlwaysOnTopOff}" />
+                      </ToggleButton>
+                    </StackPanel>
+                  </Border>
+                </Grid>
+              </Border>
+
+              <Line Classes="mm-setting-divider"
+                    StartPoint="0,0.5"
+                    EndPoint="1,0.5" />
+
               <Button Classes="mm-menu-item"
                       Command="{Binding OpenAboutCommand}">
                 <Grid ColumnDefinitions="*,Auto"

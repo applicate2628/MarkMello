@@ -60,6 +60,10 @@ public partial class MainWindowViewModel
         nameof(AboutRepositoryLabel),
         nameof(AboutVersionHint),
         nameof(AboutVersionLabel),
+        nameof(AlwaysOnTopHint),
+        nameof(AlwaysOnTopLabel),
+        nameof(AlwaysOnTopOff),
+        nameof(AlwaysOnTopOn),
         nameof(AppMenuCloseFileHint),
         nameof(AppMenuCloseFileLabel),
         nameof(AppMenuHeader),
@@ -164,6 +168,10 @@ public partial class MainWindowViewModel
     public string AboutRepositoryLabel => _localization["AboutRepositoryLabel"];
     public string AboutVersionHint => _localization["AboutVersionHint"];
     public string AboutVersionLabel => _localization["AboutVersionLabel"];
+    public string AlwaysOnTopHint => _localization["AlwaysOnTopHint"];
+    public string AlwaysOnTopLabel => _localization["AlwaysOnTopLabel"];
+    public string AlwaysOnTopOff => _localization["AlwaysOnTopOff"];
+    public string AlwaysOnTopOn => _localization["AlwaysOnTopOn"];
     public string AppMenuCloseFileHint => _localization["AppMenuCloseFileHint"];
     public string AppMenuCloseFileLabel => _localization["AppMenuCloseFileLabel"];
     public string AppMenuHeader => _localization["AppMenuHeader"];

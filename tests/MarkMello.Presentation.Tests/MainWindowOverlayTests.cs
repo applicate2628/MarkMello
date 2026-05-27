@@ -234,6 +234,9 @@ public sealed class MainWindowOverlayTests
         Assert.DoesNotContain("Height=\"300\"", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("RowDefinitions=\"*,Auto,104\"", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("ItemsSource=\"{Binding ThemeOptions}\"", appSettings, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding AlwaysOnTopLabel}\"", appSettings, StringComparison.Ordinal);
+        Assert.Contains("IsChecked=\"{Binding IsAlwaysOnTop}\"", appSettings, StringComparison.Ordinal);
+        Assert.Contains("IsChecked=\"{Binding IsAlwaysOnTopDisabled}\"", appSettings, StringComparison.Ordinal);
         Assert.DoesNotContain("Text=\"{Binding UpdatesLabel}\"", appSettings, StringComparison.Ordinal);
         Assert.DoesNotContain("Command=\"{Binding CheckForUpdatesCommand}\"", appSettings, StringComparison.Ordinal);
     }
