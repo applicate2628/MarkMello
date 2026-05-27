@@ -35,7 +35,7 @@ internal static class ApplicateDocumentLayout
     /// so the test and the runtime layouts collapse to the same width when
     /// the resource lookup succeeds.
     /// </summary>
-    public const double DefaultScrollBarSize = 14.0;
+    public const double DefaultScrollBarSize = 12.0;
 
     /// <summary>
     /// Lower bound for the user-controlled document content width. The

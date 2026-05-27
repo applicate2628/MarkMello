@@ -48,8 +48,8 @@ body.mm-saving div.mm-width-handle {
   --mm-minimap-accent: color-mix(in srgb, var(--mm-accent, #d46d3d) 88%, transparent);
   --mm-width-handle-hit-area: 24px;
   --mm-width-handle-idle-track: 2px;
-  --mm-width-handle-hover-track: 5px;
-  --mm-width-handle-drag-track: 7px;
+  --mm-width-handle-hover-track: 2px;
+  --mm-width-handle-drag-track: 2px;
   --mm-document-text: #1d1d1f;
   --mm-document-muted: #5f6368;
   --mm-document-background: #fcfaf6;
@@ -210,6 +210,7 @@ body {
   background: var(--mm-document-background);
   color: var(--mm-document-text);
   font: var(--mm-document-font-size) / var(--mm-document-line-height) var(--mm-document-font-family);
+  font-weight: 400;
 }
 
 .mm-document {

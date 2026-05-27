@@ -30,6 +30,25 @@ public sealed class ApplicateDocumentLayoutTests
     }
 
     [Fact]
+    public void ScrollBarThemeAndFallbackUseTwelveDipWidth()
+    {
+        var theme = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Themes",
+            "ApplicateScrollBars.axaml"));
+
+        Assert.Equal(12.0, ApplicateDocumentLayout.DefaultScrollBarSize);
+        Assert.Contains("<sys:Double x:Key=\"ScrollBarSize\">12</sys:Double>", theme, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CalculatePreviewDocumentPaddingSplitsCanonicalHorizontalPaddingSymmetrically()
     {
         // F-02 fix: edit-preview reads the same canonical horizontal padding

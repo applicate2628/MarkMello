@@ -324,6 +324,26 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
+    public async Task BundledRendererCssKeepsWidthHandleTrackCloseToTocSplitter()
+    {
+        var css = await new ApplicateWebAssetEmbedder()
+            .ReadTextAssetAsync("renderer.css", CancellationToken.None);
+
+        Assert.Contains("--mm-width-handle-idle-track: 2px;", css, StringComparison.Ordinal);
+        Assert.Contains("--mm-width-handle-hover-track: 2px;", css, StringComparison.Ordinal);
+        Assert.Contains("--mm-width-handle-drag-track: 2px;", css, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BundledRendererCssPinsBodyTextToRegularWeight()
+    {
+        var css = await new ApplicateWebAssetEmbedder()
+            .ReadTextAssetAsync("renderer.css", CancellationToken.None);
+
+        Assert.Contains("font-weight: 400;", css, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RenderedWebDocumentStartsWithRendererChromeHiddenUntilHostPreferencesArrive()
     {
         var renderer = new ApplicateHtmlMarkdownRenderer(new ApplicateWebAssetEmbedder());

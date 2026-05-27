@@ -7,7 +7,7 @@
        Always visible, faint track, gray theme thumb, arrows kept. -->
 
   <Styles.Resources>
-    <sys:Double x:Key="ScrollBarSize">14</sys:Double>
+    <sys:Double x:Key="ScrollBarSize">12</sys:Double>
   </Styles.Resources>
 
   <Style Selector="ScrollBar">
