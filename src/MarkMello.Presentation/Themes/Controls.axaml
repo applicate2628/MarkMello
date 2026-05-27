@@ -440,6 +440,67 @@
     <Setter Property="Foreground" Value="{DynamicResource MmTextBrush}" />
   </Style>
 
+  <Style Selector="RadioButton.mm-segmented-item">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="CornerRadius" Value="4" />
+    <Setter Property="Padding" Value="10,4" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="Foreground" Value="{DynamicResource MmTextSoftBrush}" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <ContentPresenter Name="PART_ContentPresenter"
+                          Background="{TemplateBinding Background}"
+                          BorderBrush="{TemplateBinding BorderBrush}"
+                          BorderThickness="{TemplateBinding BorderThickness}"
+                          CornerRadius="{TemplateBinding CornerRadius}"
+                          Padding="{TemplateBinding Padding}"
+                          Content="{TemplateBinding Content}"
+                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+      </ControlTemplate>
+    </Setter>
+  </Style>
+  <Style Selector="RadioButton.mm-segmented-item /template/ ContentPresenter">
+    <Setter Property="BoxShadow" Value="0 0 0 0 Transparent" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BoxShadowsTransition Property="BoxShadow"
+                              Duration="{DynamicResource MmDurationFast}"
+                              Easing="{DynamicResource MmEasingStandard}" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="RadioButton.mm-segmented-item:pointerover">
+    <Setter Property="Foreground" Value="{DynamicResource MmTextBrush}" />
+  </Style>
+  <Style Selector="RadioButton.mm-segmented-item:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="RadioButton.mm-segmented-item:checked">
+    <Setter Property="Foreground" Value="{DynamicResource MmTextBrush}" />
+  </Style>
+  <Style Selector="RadioButton.mm-segmented-item:checked TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource MmTextBrush}" />
+  </Style>
+  <Style Selector="RadioButton.mm-segmented-item:checked /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource MmElevatedBackgroundBrush}" />
+    <Setter Property="BoxShadow" Value="0 1 2 0 #0D000000" />
+  </Style>
+  <Style Selector="RadioButton.mm-segmented-item:checked:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource MmElevatedBackgroundBrush}" />
+    <Setter Property="BoxShadow" Value="0 1 2 0 #0D000000" />
+  </Style>
+  <Style Selector="RadioButton.mm-segmented-item:checked:pointerover TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource MmTextBrush}" />
+  </Style>
+
   <Style Selector="ComboBox.mm-settings-select">
     <Setter Property="Height" Value="32" />
     <Setter Property="MinHeight" Value="32" />

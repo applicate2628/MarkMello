@@ -262,6 +262,40 @@ public sealed class MainWindowOverlayTests
     }
 
     [Fact]
+    public void ReadingSettingsUsesRadioSegmentsForExclusiveChoices()
+    {
+        var readingSettings = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "ReadingSettingsPanelView.axaml"));
+        var controlsTheme = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Themes",
+            "Controls.axaml"));
+
+        Assert.DoesNotContain("<ToggleButton Classes=\"mm-segmented-item\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("<RadioButton Classes=\"mm-segmented-item\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("GroupName=\"ReadingPalette\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("GroupName=\"ReadingSmooth\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("Style Selector=\"RadioButton.mm-segmented-item\"", controlsTheme, StringComparison.Ordinal);
+        Assert.Contains("Style Selector=\"RadioButton.mm-segmented-item:checked", controlsTheme, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void MainWindowContainsTopLevelUpdateNotification()
     {
         var xaml = File.ReadAllText(Path.Combine(

@@ -46,14 +46,16 @@
                           HorizontalAlignment="Right">
                     <StackPanel Orientation="Horizontal"
                                 Spacing="1">
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsOriginalPaletteSelected}">
+                      <RadioButton Classes="mm-segmented-item"
+                                   GroupName="ReadingPalette"
+                                   IsChecked="{Binding IsOriginalPaletteSelected}">
                         <TextBlock Text="{Binding ReadingPaletteOriginal}" />
-                      </ToggleButton>
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsWhitePaletteSelected}">
+                      </RadioButton>
+                      <RadioButton Classes="mm-segmented-item"
+                                   GroupName="ReadingPalette"
+                                   IsChecked="{Binding IsWhitePaletteSelected}">
                         <TextBlock Text="{Binding ReadingPaletteWhite}" />
-                      </ToggleButton>
+                      </RadioButton>
                     </StackPanel>
                   </Border>
                 </Grid>
@@ -79,18 +81,21 @@
                           HorizontalAlignment="Right">
                     <StackPanel Orientation="Horizontal"
                                 Spacing="1">
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsSerifFontSelected}">
+                      <RadioButton Classes="mm-segmented-item"
+                                   GroupName="ReadingFont"
+                                   IsChecked="{Binding IsSerifFontSelected}">
                         <TextBlock Text="{Binding ReadingFontSerif}" />
-                      </ToggleButton>
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsSansFontSelected}">
+                      </RadioButton>
+                      <RadioButton Classes="mm-segmented-item"
+                                   GroupName="ReadingFont"
+                                   IsChecked="{Binding IsSansFontSelected}">
                         <TextBlock Text="{Binding ReadingFontSans}" />
-                      </ToggleButton>
-                      <ToggleButton Classes="mm-segmented-item"
-                                    IsChecked="{Binding IsMonoFontSelected}">
+                      </RadioButton>
+                      <RadioButton Classes="mm-segmented-item"
+                                   GroupName="ReadingFont"
+                                   IsChecked="{Binding IsMonoFontSelected}">
                         <TextBlock Text="{Binding ReadingFontMono}" />
-                      </ToggleButton>
+                      </RadioButton>
                     </StackPanel>
                   </Border>
                 </Grid>
@@ -180,18 +185,21 @@
                             HorizontalAlignment="Right">
                       <StackPanel Orientation="Horizontal"
                                   Spacing="1">
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsNarrowWidthSelected}">
+                        <RadioButton Classes="mm-segmented-item"
+                                     GroupName="ReadingWidth"
+                                     IsChecked="{Binding IsNarrowWidthSelected}">
                           <TextBlock Text="{Binding ReadingWidthNarrow}" />
-                        </ToggleButton>
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsMediumWidthSelected}">
+                        </RadioButton>
+                        <RadioButton Classes="mm-segmented-item"
+                                     GroupName="ReadingWidth"
+                                     IsChecked="{Binding IsMediumWidthSelected}">
                           <TextBlock Text="{Binding ReadingWidthMedium}" />
-                        </ToggleButton>
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsWideWidthSelected}">
+                        </RadioButton>
+                        <RadioButton Classes="mm-segmented-item"
+                                     GroupName="ReadingWidth"
+                                     IsChecked="{Binding IsWideWidthSelected}">
                           <TextBlock Text="{Binding ReadingWidthWide}" />
-                        </ToggleButton>
+                        </RadioButton>
                       </StackPanel>
                     </Border>
                   </Grid>
@@ -219,14 +227,16 @@
                             HorizontalAlignment="Right">
                       <StackPanel Orientation="Horizontal"
                                   Spacing="1">
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsWidthResizerOnHoverSelected}">
+                        <RadioButton Classes="mm-segmented-item"
+                                     GroupName="ReadingResizer"
+                                     IsChecked="{Binding IsWidthResizerOnHoverSelected}">
                           <TextBlock Text="{Binding ReadingResizerOnHover}" />
-                        </ToggleButton>
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsWidthResizerAlwaysSelected}">
+                        </RadioButton>
+                        <RadioButton Classes="mm-segmented-item"
+                                     GroupName="ReadingResizer"
+                                     IsChecked="{Binding IsWidthResizerAlwaysSelected}">
                           <TextBlock Text="{Binding ReadingResizerAlways}" />
-                        </ToggleButton>
+                        </RadioButton>
                       </StackPanel>
                     </Border>
                   </Grid>
@@ -254,18 +264,21 @@
                             HorizontalAlignment="Right">
                       <StackPanel Orientation="Horizontal"
                                   Spacing="1">
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsDocumentMinimapAutoSelected}">
+                        <RadioButton Classes="mm-segmented-item"
+                                     GroupName="ReadingMinimap"
+                                     IsChecked="{Binding IsDocumentMinimapAutoSelected}">
                           <TextBlock Text="{Binding ReadingMinimapAuto}" />
-                        </ToggleButton>
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsDocumentMinimapOnSelected}">
+                        </RadioButton>
+                        <RadioButton Classes="mm-segmented-item"
+                                     GroupName="ReadingMinimap"
+                                     IsChecked="{Binding IsDocumentMinimapOnSelected}">
                           <TextBlock Text="{Binding ReadingMinimapOn}" />
-                        </ToggleButton>
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsDocumentMinimapOffSelected}">
+                        </RadioButton>
+                        <RadioButton Classes="mm-segmented-item"
+                                     GroupName="ReadingMinimap"
+                                     IsChecked="{Binding IsDocumentMinimapOffSelected}">
                           <TextBlock Text="{Binding ReadingMinimapOff}" />
-                        </ToggleButton>
+                        </RadioButton>
                       </StackPanel>
                     </Border>
                   </Grid>
@@ -295,14 +308,16 @@
                               HorizontalAlignment="Right">
                         <StackPanel Orientation="Horizontal"
                                     Spacing="1">
-                          <ToggleButton Classes="mm-segmented-item"
-                                        IsChecked="{Binding IsModeSwitchSmoothEnabled}">
+                          <RadioButton Classes="mm-segmented-item"
+                                       GroupName="ReadingSmooth"
+                                       IsChecked="{Binding IsModeSwitchSmoothEnabled}">
                             <TextBlock Text="{Binding ReadingModeSmoothOn}" />
-                          </ToggleButton>
-                          <ToggleButton Classes="mm-segmented-item"
-                                        IsChecked="{Binding IsModeSwitchSmoothDisabled}">
+                          </RadioButton>
+                          <RadioButton Classes="mm-segmented-item"
+                                       GroupName="ReadingSmooth"
+                                       IsChecked="{Binding IsModeSwitchSmoothDisabled}">
                             <TextBlock Text="{Binding ReadingModeSmoothOff}" />
-                          </ToggleButton>
+                          </RadioButton>
                         </StackPanel>
                       </Border>
                       <StackPanel Orientation="Horizontal"
@@ -354,14 +369,16 @@
                             HorizontalAlignment="Right">
                       <StackPanel Orientation="Horizontal"
                                   Spacing="1">
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsNativeRendererSelected}">
+                        <RadioButton Classes="mm-segmented-item"
+                                     GroupName="ReadingRenderer"
+                                     IsChecked="{Binding IsNativeRendererSelected}">
                           <TextBlock Text="{Binding ReadingRendererNative}" />
-                        </ToggleButton>
-                        <ToggleButton Classes="mm-segmented-item"
-                                      IsChecked="{Binding IsWebViewRendererSelected}">
+                        </RadioButton>
+                        <RadioButton Classes="mm-segmented-item"
+                                     GroupName="ReadingRenderer"
+                                     IsChecked="{Binding IsWebViewRendererSelected}">
                           <TextBlock Text="{Binding ReadingRendererWebView}" />
-                        </ToggleButton>
+                        </RadioButton>
                       </StackPanel>
                     </Border>
                   </Grid>
