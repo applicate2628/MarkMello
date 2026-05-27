@@ -480,6 +480,7 @@ public sealed class ApplicateMainWindow : MainWindow
             ResizeDirection = GridResizeDirection.Columns,
             ResizeBehavior = GridResizeBehavior.PreviousAndNext,
         };
+        AttachSplitterDraggingHighlight(tocSplitter);
 
         var contentGrid = new Grid
         {
@@ -583,6 +584,32 @@ public sealed class ApplicateMainWindow : MainWindow
         bodyPanel.Children.Add(grid);
 
         InstallChevronGlyphTracking(chevronPath, chevronButton);
+    }
+
+    private static void AttachSplitterDraggingHighlight(GridSplitter splitter)
+    {
+        splitter.DragStarted += OnSplitterDragStarted;
+        splitter.DragCompleted += OnSplitterDragCompleted;
+        splitter.PointerCaptureLost += OnSplitterPointerCaptureLost;
+    }
+
+    private static void OnSplitterDragStarted(object? sender, VectorEventArgs e)
+        => SetSplitterDraggingState(sender, isDragging: true);
+
+    private static void OnSplitterDragCompleted(object? sender, VectorEventArgs e)
+        => SetSplitterDraggingState(sender, isDragging: false);
+
+    private static void OnSplitterPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        SetSplitterDraggingState(sender, isDragging: false);
+    }
+
+    private static void SetSplitterDraggingState(object? sender, bool isDragging)
+    {
+        if (sender is Control control)
+        {
+            control.Classes.Set("dragging", isDragging);
+        }
     }
 
     /// <summary>

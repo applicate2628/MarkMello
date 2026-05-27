@@ -423,4 +423,27 @@ public sealed class MainWindowOverlayTests
         var tocColumnBlock = applicateWindowCode[tocColumnStart..splitterColumnStart];
         Assert.Contains("MinWidth = 0", tocColumnBlock, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void ApplicateTocSplitterKeepsDraggingHighlightWhileDragged()
+    {
+        var applicateWindowCode = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "ApplicateMainWindow.cs"));
+
+        Assert.Contains("AttachSplitterDraggingHighlight(tocSplitter);", applicateWindowCode, StringComparison.Ordinal);
+        Assert.Contains("splitter.DragStarted +=", applicateWindowCode, StringComparison.Ordinal);
+        Assert.Contains("splitter.DragCompleted +=", applicateWindowCode, StringComparison.Ordinal);
+        Assert.Contains("splitter.PointerCaptureLost +=", applicateWindowCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("InputElement.PointerPressedEvent", applicateWindowCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("InputElement.PointerReleasedEvent", applicateWindowCode, StringComparison.Ordinal);
+        Assert.Contains("control.Classes.Set(\"dragging\", isDragging);", applicateWindowCode, StringComparison.Ordinal);
+    }
 }
