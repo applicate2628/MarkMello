@@ -90,12 +90,12 @@ type RendererMessage =
   | { type: "preview-source-line"; sourceLine: number }
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number }
   // Mode-toggle reveal gate (2026-05-20). Posted in response to a host-sent
-  // `mode-settle-probe` message after two requestAnimationFrame ticks elapse —
-  // i.e. once CSS reflow on the new slot bounds has propagated and a paint has
-  // committed. The host uses this to defer `SetNativeWebViewVisibility(true)`
-  // on the Commit fast-path (Ctrl+E mode toggle within the same document), so
-  // the user never sees the HWND repainted at the old document width before
-  // the renderer catches up.
+  // `mode-settle-probe` message after the renderer has applied pending reading
+  // preferences and let layout chrome such as the minimap paint at the new slot
+  // bounds. The host uses this
+  // to defer `SetNativeWebViewVisibility(true)` on the Commit fast-path
+  // (Ctrl+E mode toggle within the same document), so the user never sees the
+  // HWND repainted at the old document width before the renderer catches up.
   | { type: "mode-toggle-settled" };
 
 type MinimapMode = "auto" | "on" | "off";
@@ -137,11 +137,28 @@ type HostMessage =
   // Host-sent probe (2026-05-20). The host sends this after Avalonia
   // UpdateLayout has settled the slot bounds but BEFORE making the WebView2
   // HWND visible on the Commit fast-path (Ctrl+E same-document reparent).
-  // The renderer schedules two requestAnimationFrame ticks so CSS reflow has
-  // propagated and one paint has happened, then posts `mode-toggle-settled`
-  // back. Layout-dependent chrome refreshes are deferred after the ack so
-  // they cannot hold the host on a blank reveal gate.
-  | { type: "mode-settle-probe" }
+  // The renderer applies any pending reading preferences, schedules at least
+  // two requestAnimationFrame ticks so CSS reflow has propagated and one paint
+  // has happened, then posts `mode-toggle-settled` back after layout-dependent
+  // chrome has been refreshed. If chrome visibility changes during that
+  // refresh, the ack waits one more paint. This keeps the host reveal behind
+  // the final minimap/width-handle geometry instead of exposing one frame at
+  // the previous text width.
+  | {
+      type: "mode-settle-probe";
+      fontSize?: number;
+      lineHeight?: number;
+      maxWidth?: number;
+      minMaxWidth?: number;
+      minimapMode?: MinimapMode;
+      fontFamily?: FontFamilyMode;
+      viewerChromeEnabled?: boolean;
+      documentScrollEnabled?: boolean;
+      wheelProxyEnabled?: boolean;
+      widthResizerVisibility?: WidthResizerVisibility;
+      viewportWidth?: number;
+      viewportHeight?: number;
+    }
   | { type: "mode-reveal-prepare"; durationMs?: number }
   | { type: "mode-reveal-start"; durationMs?: number };
 
@@ -154,6 +171,8 @@ const WIDTH_HANDLE_CLASS = "mm-width-handle";
 const WIDTH_HANDLE_DRAGGING_CLASS = "mm-dragging";
 const WIDTH_RESIZER_ALWAYS_CLASS = "mm-width-resizer-always";
 const MODE_REVEAL_EASING = "cubic-bezier(0.215, 0.61, 0.355, 1)";
+const MODE_SETTLE_VIEWPORT_TOLERANCE = 2;
+const MODE_SETTLE_VIEWPORT_MAX_FRAMES = 18;
 
 let minimapMode: MinimapMode = "off";
 let hasReceivedHostPreferences = false;
@@ -183,8 +202,9 @@ let minimapRefreshTimer: number | undefined;
 let resizeReactFrameRequested = false;
 // Mode-toggle reveal gate (2026-05-20). Set to a one-shot resolver when the
 // host's `mode-settle-probe` message lands; cleared after the renderer posts
-// `mode-toggle-settled` back. Two rAFs separate the probe from the response so
-// CSS reflow on any new slot bounds has propagated and one paint has happened.
+// `mode-toggle-settled` back. At least two rAFs separate the probe from the
+// response so CSS reflow on any new slot bounds has propagated and one paint
+// has happened after minimap visibility settles.
 let modeToggleProbeFrameRequested = false;
 let minimapRoot: HTMLElement | null = null;
 let minimapContent: HTMLElement | null = null;
@@ -376,7 +396,9 @@ function prepareModeReveal(durationMs: unknown): void {
 
   const duration = clampModeRevealDuration(durationMs);
   target.style.transition = "none";
-  target.style.opacity = duration > 0 ? "0" : "1";
+  target.style.opacity = "1";
+  target.style.transform = duration > 0 ? "translateY(4px)" : "";
+  target.style.willChange = duration > 0 ? "transform" : "";
 }
 
 function startModeReveal(durationMs: unknown): void {
@@ -389,12 +411,22 @@ function startModeReveal(durationMs: unknown): void {
   if (duration <= 0) {
     target.style.transition = "none";
     target.style.opacity = "1";
+    target.style.transform = "";
+    target.style.willChange = "";
     return;
   }
 
   void target.offsetWidth;
-  target.style.transition = `opacity ${duration}ms ${MODE_REVEAL_EASING}`;
+  target.style.transition = `transform ${duration}ms ${MODE_REVEAL_EASING}`;
   target.style.opacity = "1";
+  target.style.transform = "translateY(0)";
+  window.setTimeout(() => {
+    if (target.style.transition.includes("transform")) {
+      target.style.transition = "";
+      target.style.transform = "";
+      target.style.willChange = "";
+    }
+  }, duration);
 }
 
 function postHostMessage(message: RendererMessage): void {
@@ -1326,10 +1358,10 @@ function shouldShowMinimap(): boolean {
     && documentHeight >= viewportHeight * minimapPolicy.minScrollableViewportRatio;
 }
 
-function updateMinimapVisibility(forcePostState = false): void {
+function updateMinimapVisibility(forcePostState = false): boolean {
   ensureMinimap();
   if (!minimapRoot) {
-    return;
+    return false;
   }
 
   const wasVisible = !minimapRoot.hidden;
@@ -1350,9 +1382,11 @@ function updateMinimapVisibility(forcePostState = false): void {
   // updateWidthHandlePosition here closes that gap; idempotent with the
   // ResizeObserver fallback, costs one forced layout when (and only when)
   // visibility actually transitioned.
-  if (wasVisible !== visible || hadClass !== visible) {
+  const changed = wasVisible !== visible || hadClass !== visible;
+  if (changed) {
     updateWidthHandlePosition();
   }
+  return changed;
 }
 
 function getCurrentMinimapReservedWidth(): number {
@@ -1546,14 +1580,6 @@ function queueMinimapViewportUpdate(perfMarkName?: string): void {
   });
 }
 
-function queueModeSettleChromeRefresh(): void {
-  window.requestAnimationFrame(() => {
-    updateWidthHandlePosition();
-    updateMinimapVisibility();
-    queueMinimapViewportUpdate("mm-mode-settle-deferred-minimap-viewport");
-  });
-}
-
 function queueMinimapRefreshAfterLayoutSettles(): void {
   window.clearTimeout(minimapRefreshTimer);
   minimapRefreshTimer = window.setTimeout(() => {
@@ -1628,7 +1654,7 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
   if (typeof message.minMaxWidth === "number" && Number.isFinite(message.minMaxWidth) && message.minMaxWidth > 0) {
     hostMinMaxWidth = message.minMaxWidth;
   }
-  pendingReadingPreferences = {
+  const next: AppliedReadingPreferences = {
     fontFamily: normalizeFontFamilyMode(message.fontFamily),
     fontSize: message.fontSize,
     lineHeight: message.lineHeight,
@@ -1639,6 +1665,13 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
     wheelProxyEnabled: message.wheelProxyEnabled ?? false,
     widthResizerVisibility: normalizeWidthResizerVisibility(message.widthResizerVisibility),
   };
+  pendingReadingPreferences = next;
+  if (!next.viewerChromeEnabled) {
+    viewerChromeEnabled = false;
+    applyViewerChromeState();
+    updateMinimapVisibility(true);
+    updateWidthHandlePosition();
+  }
   if (applyPrefsFrameRequested) return;
   applyPrefsFrameRequested = true;
   requestAnimationFrame(flushPendingReadingPreferences);
@@ -1888,21 +1921,63 @@ function handleHostMessage(raw: unknown): void {
 
   if (message.type === "mode-settle-probe") {
     postPerfMark("mm-mode-settle-probe-received");
+    applyModeSettleProbePreferences(message);
     if (modeToggleProbeFrameRequested) {
       postPerfMark("mm-mode-settle-probe-duplicate");
       return;
     }
 
+    flushPendingReadingPreferences();
     modeToggleProbeFrameRequested = true;
-    window.requestAnimationFrame(() => {
+    const postModeToggleSettleAck = () => {
+      postPerfMark("mm-mode-settle-chrome-ready");
+      modeToggleProbeFrameRequested = false;
+      postHostMessage({ type: "mode-toggle-settled" });
+    };
+    const completeModeToggleSettleAfterPaint = () => {
+      updateMinimapViewport();
+      updateWidthHandlePosition();
+      window.requestAnimationFrame(() => {
+        postPerfMark("mm-mode-settle-post-chrome-paint");
+        postModeToggleSettleAck();
+      });
+    };
+
+    const settleAfterViewportReady = (attempt: number) => {
+      if (!isModeSettleViewportReady(message) && attempt < MODE_SETTLE_VIEWPORT_MAX_FRAMES) {
+        postPerfMark("mm-mode-settle-viewport-wait", {
+          attempt,
+          width: window.innerWidth,
+          height: window.innerHeight,
+          expectedWidth: message.viewportWidth,
+          expectedHeight: message.viewportHeight,
+        });
+        window.requestAnimationFrame(() => settleAfterViewportReady(attempt + 1));
+        return;
+      }
+
       postPerfMark("mm-mode-settle-first-raf");
+      flushPendingReadingPreferences();
+      updateMinimapVisibility();
+      updateMinimapViewport();
+      updateWidthHandlePosition();
+
+      if (!viewerChromeEnabled) {
+        completeModeToggleSettleAfterPaint();
+        return;
+      }
+
       window.requestAnimationFrame(() => {
         postPerfMark("mm-mode-settle-second-raf");
-        modeToggleProbeFrameRequested = false;
-        postHostMessage({ type: "mode-toggle-settled" });
-        queueModeSettleChromeRefresh();
+        flushPendingReadingPreferences();
+        updateMinimapVisibility();
+        updateMinimapViewport();
+        updateWidthHandlePosition();
+        completeModeToggleSettleAfterPaint();
       });
-    });
+    };
+
+    window.requestAnimationFrame(() => settleAfterViewportReady(0));
     return;
   }
 
@@ -1915,6 +1990,58 @@ function handleHostMessage(raw: unknown): void {
     startModeReveal(message.durationMs);
     return;
   }
+}
+
+function isModeSettleViewportReady(message: Extract<HostMessage, { type: "mode-settle-probe" }>): boolean {
+  const widthReady = typeof message.viewportWidth !== "number"
+    || !Number.isFinite(message.viewportWidth)
+    || message.viewportWidth <= 0
+    || Math.abs(window.innerWidth - message.viewportWidth) <= MODE_SETTLE_VIEWPORT_TOLERANCE;
+  const heightReady = typeof message.viewportHeight !== "number"
+    || !Number.isFinite(message.viewportHeight)
+    || message.viewportHeight <= 0
+    || Math.abs(window.innerHeight - message.viewportHeight) <= MODE_SETTLE_VIEWPORT_TOLERANCE;
+  return widthReady && heightReady;
+}
+
+function applyModeSettleProbePreferences(message: Extract<HostMessage, { type: "mode-settle-probe" }>): void {
+  if (
+    typeof message.fontSize !== "number" ||
+    typeof message.lineHeight !== "number" ||
+    typeof message.maxWidth !== "number" ||
+    message.minimapMode === undefined
+  ) {
+    return;
+  }
+
+  const preferences: Extract<HostMessage, { type: "reading-preferences" }> = {
+    type: "reading-preferences",
+    fontSize: message.fontSize,
+    lineHeight: message.lineHeight,
+    maxWidth: message.maxWidth,
+    minimapMode: message.minimapMode,
+  };
+
+  if (message.minMaxWidth !== undefined) {
+    preferences.minMaxWidth = message.minMaxWidth;
+  }
+  if (message.fontFamily !== undefined) {
+    preferences.fontFamily = message.fontFamily;
+  }
+  if (message.viewerChromeEnabled !== undefined) {
+    preferences.viewerChromeEnabled = message.viewerChromeEnabled;
+  }
+  if (message.documentScrollEnabled !== undefined) {
+    preferences.documentScrollEnabled = message.documentScrollEnabled;
+  }
+  if (message.wheelProxyEnabled !== undefined) {
+    preferences.wheelProxyEnabled = message.wheelProxyEnabled;
+  }
+  if (message.widthResizerVisibility !== undefined) {
+    preferences.widthResizerVisibility = message.widthResizerVisibility;
+  }
+
+  applyReadingPreferences(preferences);
 }
 
 function resetModuleGlobalsForLoadDocument(): void {
@@ -2170,6 +2297,17 @@ function setDropOverlayVisible(visible: boolean): void {
 // the in-WebView behavior so the user can use shortcuts without first
 // clicking back into the title bar.
 function wireHostShortcuts(): void {
+  let editModeShortcutDown = false;
+  let editModeShortcutResetTimer: number | undefined;
+  const resetEditModeShortcut = () => {
+    editModeShortcutDown = false;
+    window.clearTimeout(editModeShortcutResetTimer);
+  };
+  const keepEditModeShortcutHeld = () => {
+    editModeShortcutDown = true;
+    window.clearTimeout(editModeShortcutResetTimer);
+    editModeShortcutResetTimer = window.setTimeout(resetEditModeShortcut, 1000);
+  };
   const hostShortcuts = new Set<string>([
     "ctrl+e",
     "ctrl+o",
@@ -2196,10 +2334,29 @@ function wireHostShortcuts(): void {
       }
       event.preventDefault();
       event.stopPropagation();
+      if (combo === "ctrl+e") {
+        if (editModeShortcutDown || event.repeat) {
+          keepEditModeShortcutHeld();
+          return;
+        }
+
+        keepEditModeShortcutHeld();
+      }
       postHostMessage({ type: "host-shortcut", combo });
     },
     { capture: true }
   );
+  window.addEventListener(
+    "keyup",
+    (event) => {
+      const key = event.key.toLowerCase();
+      if (key === "e" || (!event.ctrlKey && !event.metaKey)) {
+        resetEditModeShortcut();
+      }
+    },
+    { capture: true }
+  );
+  window.addEventListener("blur", resetEditModeShortcut);
 }
 
 function wireFileDrop(): void {

@@ -78,6 +78,13 @@ public sealed record ApplicateRendererFailureEvent(
     DateTime Timestamp,
     Exception? Exception = null);
 
+internal interface IApplicateModeRevealSignal
+{
+    event EventHandler? RevealCompleted;
+
+    void SuppressNativeRendererForModeSwitch();
+}
+
 /// <summary>
 /// Owns the single application-wide WebView2-backed document view.
 ///

@@ -54,16 +54,19 @@ describe("handleHostMessage(load-document)", () => {
 
     load({ type: "mode-reveal-prepare", durationMs: 240 });
 
-    expect(main.style.opacity).toBe("0");
+    expect(main.style.opacity).toBe("1");
+    expect(main.style.transform).toBe("translateY(4px)");
+    expect(main.style.willChange).toBe("transform");
     expect(main.style.transition).toBe("none");
 
     load({ type: "mode-reveal-start", durationMs: 240 });
 
     expect(main.style.opacity).toBe("1");
-    expect(main.style.transition).toContain("opacity 240ms");
+    expect(main.style.transform).toBe("translateY(0)");
+    expect(main.style.transition).toContain("transform 240ms");
   });
 
-  it("acks mode settle before deferred minimap viewport work", () => {
+  it("acks mode settle after chrome viewport work", () => {
     const rafCallbacks: FrameRequestCallback[] = [];
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       rafCallbacks.push(callback);
@@ -83,31 +86,44 @@ describe("handleHostMessage(load-document)", () => {
 
     const settledIndex = messages.findIndex((message: { type?: string } | null) =>
       message?.type === "mode-toggle-settled");
-    const deferredIndex = messages.findIndex((message: { type?: string; name?: string } | null) =>
-      message?.type === "perf-mark" && message.name === "mm-mode-settle-deferred-minimap-viewport");
+    const chromeReadyIndex = messages.findIndex((message: { type?: string; name?: string } | null) =>
+      message?.type === "perf-mark" && message.name === "mm-mode-settle-chrome-ready");
 
     expect(settledIndex).toBeGreaterThanOrEqual(0);
-    expect(deferredIndex).toBeGreaterThan(settledIndex);
+    expect(chromeReadyIndex).toBeGreaterThanOrEqual(0);
+    expect(settledIndex).toBeGreaterThan(chromeReadyIndex);
   });
 
-  it("keeps mode-settle ack before layout-dependent chrome refreshes", () => {
+  it("keeps mode-settle ack behind layout-dependent chrome refreshes", () => {
     const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
     const handlerStart = source.indexOf('if (message.type === "mode-settle-probe")');
     const handlerEnd = source.indexOf('if (message.type === "mode-reveal-prepare")');
     const handler = source.slice(handlerStart, handlerEnd);
+    const ackStart = handler.indexOf("const postModeToggleSettleAck = () => {");
+    const paintGateStart = handler.indexOf("const completeModeToggleSettleAfterPaint = () => {");
+    const paintGate = handler.slice(paintGateStart, handler.indexOf("window.requestAnimationFrame", paintGateStart + 1));
+    const paintCallback = handler.slice(handler.indexOf("window.requestAnimationFrame", paintGateStart + 1), handler.indexOf("};", paintGateStart));
+    const chromeReadyIndex = handler.indexOf('postPerfMark("mm-mode-settle-chrome-ready");');
     const ackIndex = handler.indexOf('postHostMessage({ type: "mode-toggle-settled" });');
+    const paintMarkIndex = handler.indexOf('postPerfMark("mm-mode-settle-post-chrome-paint");');
+    const paintCallbackMarkIndex = paintCallback.indexOf('postPerfMark("mm-mode-settle-post-chrome-paint");');
+    const paintCallbackAckCallIndex = paintCallback.indexOf("postModeToggleSettleAck();");
+    const visibilityRefreshIndex = handler.indexOf("updateMinimapVisibility();");
+    const paintGateCallIndex = handler.indexOf("completeModeToggleSettleAfterPaint();");
 
     expect(handlerStart).toBeGreaterThanOrEqual(0);
     expect(handlerEnd).toBeGreaterThan(handlerStart);
+    expect(ackStart).toBeGreaterThanOrEqual(0);
+    expect(paintGateStart).toBeGreaterThan(ackStart);
+    expect(chromeReadyIndex).toBeGreaterThanOrEqual(0);
     expect(ackIndex).toBeGreaterThanOrEqual(0);
-    for (const layoutCall of [
-      "updateWidthHandlePosition();",
-      "updateMinimapVisibility();",
-      'queueMinimapViewportUpdate("mm-mode-settle-deferred-minimap-viewport");'
-    ]) {
-      const callIndex = handler.indexOf(layoutCall);
-      expect(callIndex === -1 || callIndex > ackIndex).toBe(true);
-    }
-    expect(handler.indexOf("queueModeSettleChromeRefresh();")).toBeGreaterThan(ackIndex);
+    expect(chromeReadyIndex).toBeLessThan(ackIndex);
+    expect(paintMarkIndex).toBeGreaterThan(paintGateStart);
+    expect(paintCallbackMarkIndex).toBeGreaterThanOrEqual(0);
+    expect(paintCallbackAckCallIndex).toBeGreaterThan(paintCallbackMarkIndex);
+    expect(visibilityRefreshIndex).toBeGreaterThanOrEqual(0);
+    expect(paintGateCallIndex).toBeGreaterThan(visibilityRefreshIndex);
+    expect(paintGate).toContain("updateMinimapViewport();");
+    expect(paintGate).toContain("updateWidthHandlePosition();");
   });
 });

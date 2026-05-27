@@ -235,27 +235,120 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     public void SharedHostOwnsRevealFadeAfterRendererSettle()
     {
         var source = File.ReadAllText(HostSourcePath);
+        var completeReveal = ExtractMethodBody(
+            source,
+            source.IndexOf("private void CompleteReveal()", StringComparison.Ordinal));
 
         Assert.Contains("PrepareTargetForReveal", source, StringComparison.Ordinal);
         Assert.Contains("RevealCurrentParent", source, StringComparison.Ordinal);
         Assert.Contains("ApplicateMotion.ModeSwitchDuration", source, StringComparison.Ordinal);
+        Assert.Contains("CompleteNativeWebViewHiddenPaint", completeReveal, StringComparison.Ordinal);
         Assert.True(
-            source.IndexOf("RevealCurrentParent", StringComparison.Ordinal)
-            > source.IndexOf("View.SetNativeWebViewVisibility(true)", StringComparison.Ordinal));
+            completeReveal.IndexOf("RevealCurrentParent", StringComparison.Ordinal)
+            > completeReveal.IndexOf("View.CompleteNativeWebViewHiddenPaint", StringComparison.Ordinal));
     }
 
     [Fact]
     public void SharedHostFadesRendererDocumentInsideNativeWebView()
     {
         var source = File.ReadAllText(HostSourcePath);
+        var completeReveal = ExtractMethodBody(
+            source,
+            source.IndexOf("private void CompleteReveal()", StringComparison.Ordinal));
 
         Assert.Contains("PrepareNativeRendererForReveal", source, StringComparison.Ordinal);
+        Assert.Contains("PrepareNativeWebViewForHiddenPaint", source, StringComparison.Ordinal);
+        Assert.Contains("CompleteNativeWebViewHiddenPaint", source, StringComparison.Ordinal);
         Assert.Contains("RevealNativeRenderer", source, StringComparison.Ordinal);
         Assert.True(
             source.IndexOf("View.PrepareNativeRendererForReveal", StringComparison.Ordinal)
-            < source.IndexOf("View.SetNativeWebViewVisibility(true)", StringComparison.Ordinal));
+            < source.IndexOf("View.PrepareNativeWebViewForHiddenPaint", StringComparison.Ordinal));
         Assert.True(
-            source.IndexOf("View.RevealNativeRenderer", StringComparison.Ordinal)
-            > source.IndexOf("View.SetNativeWebViewVisibility(true)", StringComparison.Ordinal));
+            source.IndexOf("View.PrepareNativeWebViewForHiddenPaint", StringComparison.Ordinal)
+            < source.IndexOf("BeginRevealAfterSettle", StringComparison.Ordinal));
+        Assert.True(
+            completeReveal.IndexOf("View.RevealNativeRenderer", StringComparison.Ordinal)
+            > completeReveal.IndexOf("View.CompleteNativeWebViewHiddenPaint", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void RevealGateRehidesNativeWindowAfterLayoutBeforeOffscreenPrepaint()
+    {
+        var source = File.ReadAllText(HostSourcePath);
+        var commit = ExtractMethodBody(
+            source,
+            source.IndexOf("private void Commit()", StringComparison.Ordinal));
+
+        Assert.Contains("View.SetNativeWebViewVisibility(false);", commit, StringComparison.Ordinal);
+        Assert.True(
+            commit.IndexOf("_currentParent.UpdateLayout();", StringComparison.Ordinal)
+            < commit.IndexOf("View.SetNativeWebViewVisibility(false);", StringComparison.Ordinal));
+        Assert.True(
+            commit.IndexOf("View.SetNativeWebViewVisibility(false);", StringComparison.Ordinal)
+            < commit.IndexOf("View.PrepareNativeWebViewForHiddenPaint();", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AttachToParksNativeWindowOffscreenBeforeReparent()
+    {
+        var source = File.ReadAllText(HostSourcePath);
+        var attachTo = ExtractMethodBody(
+            source,
+            source.IndexOf("public void AttachTo(Panel target, ApplicateWebMountIntent intent)", StringComparison.Ordinal));
+
+        Assert.Contains("View.ParkNativeWebViewForReparent();", attachTo, StringComparison.Ordinal);
+        Assert.True(
+            attachTo.IndexOf("View.ParkNativeWebViewForReparent();", StringComparison.Ordinal)
+            < attachTo.IndexOf("using (View.BeginIntentionalReparent())", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AttachToRehidesNativeWindowAfterTargetVisibilityReturns()
+    {
+        var source = File.ReadAllText(HostSourcePath);
+        var attachTo = ExtractMethodBody(
+            source,
+            source.IndexOf("public void AttachTo(Panel target, ApplicateWebMountIntent intent)", StringComparison.Ordinal));
+        var visibilityRestore = attachTo.IndexOf("target.IsVisible = _hasEverCommitted;", StringComparison.Ordinal);
+        var postRestoreHide = attachTo.IndexOf("View.SetNativeWebViewVisibility(false);", visibilityRestore, StringComparison.Ordinal);
+
+        Assert.True(visibilityRestore >= 0);
+        Assert.True(postRestoreHide > visibilityRestore);
+    }
+
+    [Fact]
+    public void RevealGateFallbackStaysBehindRendererPostChromeSettleBudget()
+    {
+        var source = File.ReadAllText(HostSourcePath);
+
+        Assert.Contains("TimeSpan.FromMilliseconds(500)", source, StringComparison.Ordinal);
+        Assert.Contains("post-chrome", source, StringComparison.Ordinal);
+    }
+
+    private static string ExtractMethodBody(string source, int methodStart)
+    {
+        Assert.True(methodStart >= 0);
+
+        var bodyStart = source.IndexOf('{', methodStart);
+        Assert.True(bodyStart >= 0);
+
+        var depth = 0;
+        for (var index = bodyStart; index < source.Length; index++)
+        {
+            if (source[index] == '{')
+            {
+                depth++;
+            }
+            else if (source[index] == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return source[bodyStart..(index + 1)];
+                }
+            }
+        }
+
+        throw new InvalidOperationException("Could not find method body.");
     }
 }

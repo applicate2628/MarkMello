@@ -43,6 +43,7 @@ public sealed class ApplicateMainWindow : MainWindow
 
     private Panel? _tabsContentPanel;
     private ApplicateSiblingMountBridge? _siblingMountBridge;
+    private bool _editModeHotkeyDown;
 
     public ApplicateMainWindow(
         MainWindowViewModel viewModel,
@@ -79,6 +80,8 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallUnifiedScrollBarStyle();
         InstallEditModeDragSuppression(viewModel);
         InstallApplicateRendererPolicy(viewModel);
+        RemoveInheritedEditModeKeyBindings();
+        InstallEditModeHotkeyRepeatGate(viewModel);
         InstallTabHotkeys();
         Opened += (_, _) => Title = $"{Title} [Applicate overlay]";
         Opened += (_, _) => Avalonia.Threading.Dispatcher.UIThread.Post(
@@ -154,6 +157,72 @@ public sealed class ApplicateMainWindow : MainWindow
         openDocs.Activate(target);
         e.Handled = true;
     }
+
+    private void InstallEditModeHotkeyRepeatGate(MainWindowViewModel viewModel)
+    {
+        AddHandler(
+            KeyDownEvent,
+            (_, e) => OnEditModeHotkeyKeyDown(viewModel, e),
+            RoutingStrategies.Tunnel,
+            handledEventsToo: true);
+        AddHandler(
+            KeyUpEvent,
+            OnEditModeHotkeyKeyUp,
+            RoutingStrategies.Tunnel,
+            handledEventsToo: true);
+    }
+
+    private void RemoveInheritedEditModeKeyBindings()
+    {
+        for (var index = KeyBindings.Count - 1; index >= 0; index--)
+        {
+            if (KeyBindings[index].Gesture is { Key: Key.E } gesture
+                && HasEditModeHotkeyModifier(gesture.KeyModifiers)
+                && !gesture.KeyModifiers.HasFlag(KeyModifiers.Alt)
+                && !gesture.KeyModifiers.HasFlag(KeyModifiers.Shift))
+            {
+                KeyBindings.RemoveAt(index);
+            }
+        }
+    }
+
+    private void OnEditModeHotkeyKeyDown(MainWindowViewModel viewModel, KeyEventArgs e)
+    {
+        if (!IsEditModeHotkey(e))
+        {
+            return;
+        }
+
+        e.Handled = true;
+        if (_editModeHotkeyDown)
+        {
+            return;
+        }
+
+        _editModeHotkeyDown = true;
+        if (viewModel.ToggleEditModeCommand.CanExecute(null))
+        {
+            viewModel.ToggleEditModeCommand.Execute(null);
+        }
+    }
+
+    private void OnEditModeHotkeyKeyUp(object? sender, KeyEventArgs e)
+    {
+        if (e.Key is Key.E or Key.LeftCtrl or Key.RightCtrl or Key.LWin or Key.RWin
+            || !HasEditModeHotkeyModifier(e.KeyModifiers))
+        {
+            _editModeHotkeyDown = false;
+        }
+    }
+
+    private static bool IsEditModeHotkey(KeyEventArgs e)
+        => e.Key == Key.E
+           && HasEditModeHotkeyModifier(e.KeyModifiers)
+           && !e.KeyModifiers.HasFlag(KeyModifiers.Alt)
+           && !e.KeyModifiers.HasFlag(KeyModifiers.Shift);
+
+    private static bool HasEditModeHotkeyModifier(KeyModifiers modifiers)
+        => modifiers.HasFlag(KeyModifiers.Control) || modifiers.HasFlag(KeyModifiers.Meta);
 
     private void InstallStatusHintAboveWebView()
     {
@@ -924,7 +993,9 @@ public sealed class ApplicateMainWindow : MainWindow
             () => viewModel.EditorSession,
             () => viewModel.Document,
             () => viewModel.ReadingPreferences,
-            viewerContent: viewModel);
+            viewerContent: viewModel,
+            modeRevealSignal: sharedHost as IApplicateModeRevealSignal,
+            modeRevealCoverHost: siblingPanel);
 
         Closed += OnApplicateMainWindowClosed;
     }

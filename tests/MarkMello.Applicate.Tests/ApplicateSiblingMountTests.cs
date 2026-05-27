@@ -9,6 +9,7 @@ using Avalonia.Animation;
 using Avalonia.Headless;
 using Avalonia.Threading;
 using MarkMello.Applicate.Desktop;
+using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Tests.Fakes;
 using MarkMello.Domain;
 using Xunit;
@@ -28,12 +29,14 @@ public sealed class ApplicateSiblingMountTests
         FakeMainWindowVm vm,
         ContentControl viewer,
         Panel edit,
-        Control editContent) =>
+        Control editContent,
+        FakeModeRevealSignal? modeRevealSignal = null) =>
         new(vm, viewer, edit, editContent,
             () => vm.IsViewer, () => vm.IsEditMode,
             () => vm.EditorSession, () => vm.Document,
             () => vm.ReadingPreferences,
-            viewerContent: vm);
+            viewerContent: vm,
+            modeRevealSignal: modeRevealSignal);
 
     [Fact]
     public void OpeningDocumentInReaderModeShowsViewerSlot()
@@ -133,6 +136,167 @@ public sealed class ApplicateSiblingMountTests
             Assert.Equal(0.0, editSlot.Opacity);
             Assert.False(editSlot.IsHitTestVisible);
         }, CancellationToken.None);
+    }
+
+    [Fact]
+    public void ModeSwitchUsesOnlyViewerAsOutgoingCoverUntilSharedHostRevealCompletes()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var sessionRef = new object();
+            var vm = new FakeMainWindowVm
+            {
+                IsViewer = true,
+                Document = new object()
+            };
+            var viewerSlot = new ContentControl();
+            var editSlot = new Grid();
+            var editContent = new ContentControl();
+            var revealSignal = new FakeModeRevealSignal();
+            editSlot.Children.Add(editContent);
+            using var bridge = MakeBridge(vm, viewerSlot, editSlot, editContent, revealSignal);
+
+            Assert.True(viewerSlot.IsVisible);
+            Assert.False(editSlot.IsVisible);
+
+            vm.EditorSession = sessionRef;
+            vm.IsEditMode = true;
+
+            Assert.True(viewerSlot.IsVisible);
+            Assert.Equal(1.0, viewerSlot.Opacity);
+            Assert.False(viewerSlot.IsHitTestVisible);
+            Assert.True(editSlot.IsVisible);
+            Assert.Equal(0.0, editSlot.Opacity);
+            Assert.False(editSlot.IsHitTestVisible);
+
+            revealSignal.RaiseRevealCompleted();
+
+            Assert.False(viewerSlot.IsVisible);
+            Assert.True(editSlot.IsVisible);
+            Assert.Equal(1.0, editSlot.Opacity);
+            Assert.True(editSlot.IsHitTestVisible);
+
+            vm.IsEditMode = false;
+
+            Assert.True(viewerSlot.IsVisible);
+            Assert.Equal(1.0, viewerSlot.Opacity);
+            Assert.False(viewerSlot.IsHitTestVisible);
+            Assert.False(editSlot.IsVisible);
+            Assert.Equal(0.0, editSlot.Opacity);
+            Assert.False(editSlot.IsHitTestVisible);
+            Assert.Equal(0.0, editContent.Opacity);
+
+            revealSignal.RaiseRevealCompleted();
+
+            Assert.True(viewerSlot.IsVisible);
+            Assert.Equal(1.0, viewerSlot.Opacity);
+            Assert.True(viewerSlot.IsHitTestVisible);
+            Assert.False(editSlot.IsVisible);
+            Assert.Equal(0.0, editContent.Opacity);
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public void ModeSwitchSuppressesNativeRendererBeforeSlotVisibilityChanges()
+    {
+        var source = File.ReadAllText(BridgeSourcePath);
+        var reconcile = ExtractMethodBody(
+            source,
+            source.IndexOf("private void Reconcile()", StringComparison.Ordinal));
+
+        Assert.True(
+            reconcile.IndexOf("_modeRevealSignal.SuppressNativeRendererForModeSwitch();", StringComparison.Ordinal)
+            < reconcile.IndexOf("ApplySlotState(", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ModeSwitchCoverUsesPopupTopLevelForNativeWebViewAirspace()
+    {
+        var source = File.ReadAllText(BridgeSourcePath);
+
+        Assert.Contains("new Popup", source, StringComparison.Ordinal);
+        Assert.Contains("ShouldUseOverlayLayer = false", source, StringComparison.Ordinal);
+        Assert.Contains("Placement = PlacementMode.Center", source, StringComparison.Ordinal);
+        Assert.Contains("_modeRevealCoverHost.Children.Add(_modeRevealCoverPopup)", source, StringComparison.Ordinal);
+        Assert.Contains("_modeRevealCoverPopup.IsOpen = true", source, StringComparison.Ordinal);
+        Assert.Contains("bridge-cover-cancelled", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("_modeRevealCoverHost.Children.Add(_modeRevealCover)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ModeSwitchRequestsNativeRendererSuppressionInBothDirections()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var sessionRef = new object();
+            var vm = new FakeMainWindowVm
+            {
+                IsViewer = true,
+                Document = new object()
+            };
+            var viewerSlot = new ContentControl();
+            var editSlot = new Grid();
+            var editContent = new ContentControl();
+            var revealSignal = new FakeModeRevealSignal();
+            editSlot.Children.Add(editContent);
+            using var bridge = MakeBridge(vm, viewerSlot, editSlot, editContent, revealSignal);
+
+            vm.EditorSession = sessionRef;
+            vm.IsEditMode = true;
+            Assert.Equal(1, revealSignal.SuppressNativeRendererCallCount);
+
+            revealSignal.RaiseRevealCompleted();
+            vm.IsEditMode = false;
+            Assert.Equal(2, revealSignal.SuppressNativeRendererCallCount);
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ModeSwitchCoverFallsBackWhenSharedHostRevealDoesNotArrive()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        await session.Dispatch(async () =>
+        {
+            var sessionRef = new object();
+            var vm = new FakeMainWindowVm
+            {
+                IsViewer = true,
+                Document = new object()
+            };
+            var viewerSlot = new ContentControl();
+            var editSlot = new Grid();
+            var editContent = new ContentControl();
+            var revealSignal = new FakeModeRevealSignal();
+            editSlot.Children.Add(editContent);
+            using var bridge = MakeBridge(vm, viewerSlot, editSlot, editContent, revealSignal);
+
+            vm.EditorSession = sessionRef;
+            vm.IsEditMode = true;
+
+            Assert.True(viewerSlot.IsVisible);
+            Assert.False(viewerSlot.IsHitTestVisible);
+            Assert.True(editSlot.IsVisible);
+            Assert.False(editSlot.IsHitTestVisible);
+
+            await Task.Delay(750);
+
+            Assert.False(viewerSlot.IsVisible);
+            Assert.True(editSlot.IsVisible);
+            Assert.True(editSlot.IsHitTestVisible);
+        }, CancellationToken.None);
+    }
+
+    private sealed class FakeModeRevealSignal : IApplicateModeRevealSignal
+    {
+        public int SuppressNativeRendererCallCount { get; private set; }
+
+        public event EventHandler? RevealCompleted;
+
+        public void SuppressNativeRendererForModeSwitch() => SuppressNativeRendererCallCount++;
+
+        public void RaiseRevealCompleted() => RevealCompleted?.Invoke(this, EventArgs.Empty);
     }
 
     [Fact]
@@ -336,6 +500,33 @@ public sealed class ApplicateSiblingMountTests
 
     private static void AssertOpacityTransition(Control control)
         => AssertOpacityTransition(control, TimeSpan.FromMilliseconds(180));
+
+    private static string ExtractMethodBody(string source, int methodStart)
+    {
+        Assert.True(methodStart >= 0);
+
+        var bodyStart = source.IndexOf('{', methodStart);
+        Assert.True(bodyStart >= 0);
+
+        var depth = 0;
+        for (var index = bodyStart; index < source.Length; index++)
+        {
+            if (source[index] == '{')
+            {
+                depth++;
+            }
+            else if (source[index] == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return source[bodyStart..(index + 1)];
+                }
+            }
+        }
+
+        throw new InvalidOperationException("Could not find method body.");
+    }
 
     private static void AssertOpacityTransition(Control control, TimeSpan expectedDuration)
     {

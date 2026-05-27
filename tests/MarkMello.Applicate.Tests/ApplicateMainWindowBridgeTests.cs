@@ -33,6 +33,25 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("viewModel.ApplyOpenedDocumentInPlace(nextSource);", applyHelper, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void EditModeHotkeyIsEdgeTriggeredSoHeldCtrlEDoesNotFloodModeSwitches()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var constructor = ExtractMethodBody(codeBehind, "public ApplicateMainWindow(");
+        var keyDown = ExtractMethodBody(codeBehind, "private void OnEditModeHotkeyKeyDown(");
+        var keyUp = ExtractMethodBody(codeBehind, "private void OnEditModeHotkeyKeyUp(");
+        var removeBindings = ExtractMethodBody(codeBehind, "private void RemoveInheritedEditModeKeyBindings()");
+
+        Assert.Contains("RemoveInheritedEditModeKeyBindings();", constructor, StringComparison.Ordinal);
+        Assert.Contains("InstallEditModeHotkeyRepeatGate(viewModel);", constructor, StringComparison.Ordinal);
+        Assert.Contains("RoutingStrategies.Tunnel", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("KeyBindings.RemoveAt(index);", removeBindings, StringComparison.Ordinal);
+        Assert.Contains("_editModeHotkeyDown", keyDown, StringComparison.Ordinal);
+        Assert.Contains("e.Handled = true;", keyDown, StringComparison.Ordinal);
+        Assert.Contains("return;", keyDown, StringComparison.Ordinal);
+        Assert.Contains("_editModeHotkeyDown = false;", keyUp, StringComparison.Ordinal);
+    }
+
     private static string ReadMainWindowCodeBehind()
         => File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,

@@ -1071,6 +1071,8 @@
   var WIDTH_HANDLE_DRAGGING_CLASS = "mm-dragging";
   var WIDTH_RESIZER_ALWAYS_CLASS = "mm-width-resizer-always";
   var MODE_REVEAL_EASING = "cubic-bezier(0.215, 0.61, 0.355, 1)";
+  var MODE_SETTLE_VIEWPORT_TOLERANCE = 2;
+  var MODE_SETTLE_VIEWPORT_MAX_FRAMES = 18;
   var minimapMode = "off";
   var hasReceivedHostPreferences = false;
   var hasInitialLayoutSettled = false;
@@ -1217,7 +1219,9 @@
     }
     const duration = clampModeRevealDuration(durationMs);
     target.style.transition = "none";
-    target.style.opacity = duration > 0 ? "0" : "1";
+    target.style.opacity = "1";
+    target.style.transform = duration > 0 ? "translateY(4px)" : "";
+    target.style.willChange = duration > 0 ? "transform" : "";
   }
   function startModeReveal(durationMs) {
     const target = getModeRevealTarget();
@@ -1228,11 +1232,21 @@
     if (duration <= 0) {
       target.style.transition = "none";
       target.style.opacity = "1";
+      target.style.transform = "";
+      target.style.willChange = "";
       return;
     }
     void target.offsetWidth;
-    target.style.transition = `opacity ${duration}ms ${MODE_REVEAL_EASING}`;
+    target.style.transition = `transform ${duration}ms ${MODE_REVEAL_EASING}`;
     target.style.opacity = "1";
+    target.style.transform = "translateY(0)";
+    window.setTimeout(() => {
+      if (target.style.transition.includes("transform")) {
+        target.style.transition = "";
+        target.style.transform = "";
+        target.style.willChange = "";
+      }
+    }, duration);
   }
   function postHostMessage(message) {
     const serialized = JSON.stringify(message);
@@ -1939,7 +1953,7 @@
   function updateMinimapVisibility(forcePostState = false) {
     ensureMinimap();
     if (!minimapRoot) {
-      return;
+      return false;
     }
     const wasVisible = !minimapRoot.hidden;
     const hadClass = document.body.classList.contains(MINIMAP_VISIBLE_CLASS);
@@ -1947,9 +1961,11 @@
     minimapRoot.hidden = !visible;
     document.body.classList.toggle(MINIMAP_VISIBLE_CLASS, visible);
     postMinimapState(visible, forcePostState);
-    if (wasVisible !== visible || hadClass !== visible) {
+    const changed = wasVisible !== visible || hadClass !== visible;
+    if (changed) {
       updateWidthHandlePosition();
     }
+    return changed;
   }
   function getCurrentMinimapReservedWidth() {
     if (!minimapRoot || minimapRoot.hidden) {
@@ -2092,13 +2108,6 @@
       }
     });
   }
-  function queueModeSettleChromeRefresh() {
-    window.requestAnimationFrame(() => {
-      updateWidthHandlePosition();
-      updateMinimapVisibility();
-      queueMinimapViewportUpdate("mm-mode-settle-deferred-minimap-viewport");
-    });
-  }
   function queueMinimapRefreshAfterLayoutSettles() {
     window.clearTimeout(minimapRefreshTimer);
     minimapRefreshTimer = window.setTimeout(() => {
@@ -2134,7 +2143,7 @@
     if (typeof message.minMaxWidth === "number" && Number.isFinite(message.minMaxWidth) && message.minMaxWidth > 0) {
       hostMinMaxWidth = message.minMaxWidth;
     }
-    pendingReadingPreferences = {
+    const next = {
       fontFamily: normalizeFontFamilyMode(message.fontFamily),
       fontSize: message.fontSize,
       lineHeight: message.lineHeight,
@@ -2145,6 +2154,13 @@
       wheelProxyEnabled: message.wheelProxyEnabled ?? false,
       widthResizerVisibility: normalizeWidthResizerVisibility(message.widthResizerVisibility)
     };
+    pendingReadingPreferences = next;
+    if (!next.viewerChromeEnabled) {
+      viewerChromeEnabled = false;
+      applyViewerChromeState();
+      updateMinimapVisibility(true);
+      updateWidthHandlePosition();
+    }
     if (applyPrefsFrameRequested) return;
     applyPrefsFrameRequested = true;
     requestAnimationFrame(flushPendingReadingPreferences);
@@ -2315,20 +2331,57 @@
     }
     if (message.type === "mode-settle-probe") {
       postPerfMark("mm-mode-settle-probe-received");
+      applyModeSettleProbePreferences(message);
       if (modeToggleProbeFrameRequested) {
         postPerfMark("mm-mode-settle-probe-duplicate");
         return;
       }
+      flushPendingReadingPreferences();
       modeToggleProbeFrameRequested = true;
-      window.requestAnimationFrame(() => {
+      const postModeToggleSettleAck = () => {
+        postPerfMark("mm-mode-settle-chrome-ready");
+        modeToggleProbeFrameRequested = false;
+        postHostMessage({ type: "mode-toggle-settled" });
+      };
+      const completeModeToggleSettleAfterPaint = () => {
+        updateMinimapViewport();
+        updateWidthHandlePosition();
+        window.requestAnimationFrame(() => {
+          postPerfMark("mm-mode-settle-post-chrome-paint");
+          postModeToggleSettleAck();
+        });
+      };
+      const settleAfterViewportReady = (attempt) => {
+        if (!isModeSettleViewportReady(message) && attempt < MODE_SETTLE_VIEWPORT_MAX_FRAMES) {
+          postPerfMark("mm-mode-settle-viewport-wait", {
+            attempt,
+            width: window.innerWidth,
+            height: window.innerHeight,
+            expectedWidth: message.viewportWidth,
+            expectedHeight: message.viewportHeight
+          });
+          window.requestAnimationFrame(() => settleAfterViewportReady(attempt + 1));
+          return;
+        }
         postPerfMark("mm-mode-settle-first-raf");
+        flushPendingReadingPreferences();
+        updateMinimapVisibility();
+        updateMinimapViewport();
+        updateWidthHandlePosition();
+        if (!viewerChromeEnabled) {
+          completeModeToggleSettleAfterPaint();
+          return;
+        }
         window.requestAnimationFrame(() => {
           postPerfMark("mm-mode-settle-second-raf");
-          modeToggleProbeFrameRequested = false;
-          postHostMessage({ type: "mode-toggle-settled" });
-          queueModeSettleChromeRefresh();
+          flushPendingReadingPreferences();
+          updateMinimapVisibility();
+          updateMinimapViewport();
+          updateWidthHandlePosition();
+          completeModeToggleSettleAfterPaint();
         });
-      });
+      };
+      window.requestAnimationFrame(() => settleAfterViewportReady(0));
       return;
     }
     if (message.type === "mode-reveal-prepare") {
@@ -2339,6 +2392,42 @@
       startModeReveal(message.durationMs);
       return;
     }
+  }
+  function isModeSettleViewportReady(message) {
+    const widthReady = typeof message.viewportWidth !== "number" || !Number.isFinite(message.viewportWidth) || message.viewportWidth <= 0 || Math.abs(window.innerWidth - message.viewportWidth) <= MODE_SETTLE_VIEWPORT_TOLERANCE;
+    const heightReady = typeof message.viewportHeight !== "number" || !Number.isFinite(message.viewportHeight) || message.viewportHeight <= 0 || Math.abs(window.innerHeight - message.viewportHeight) <= MODE_SETTLE_VIEWPORT_TOLERANCE;
+    return widthReady && heightReady;
+  }
+  function applyModeSettleProbePreferences(message) {
+    if (typeof message.fontSize !== "number" || typeof message.lineHeight !== "number" || typeof message.maxWidth !== "number" || message.minimapMode === void 0) {
+      return;
+    }
+    const preferences = {
+      type: "reading-preferences",
+      fontSize: message.fontSize,
+      lineHeight: message.lineHeight,
+      maxWidth: message.maxWidth,
+      minimapMode: message.minimapMode
+    };
+    if (message.minMaxWidth !== void 0) {
+      preferences.minMaxWidth = message.minMaxWidth;
+    }
+    if (message.fontFamily !== void 0) {
+      preferences.fontFamily = message.fontFamily;
+    }
+    if (message.viewerChromeEnabled !== void 0) {
+      preferences.viewerChromeEnabled = message.viewerChromeEnabled;
+    }
+    if (message.documentScrollEnabled !== void 0) {
+      preferences.documentScrollEnabled = message.documentScrollEnabled;
+    }
+    if (message.wheelProxyEnabled !== void 0) {
+      preferences.wheelProxyEnabled = message.wheelProxyEnabled;
+    }
+    if (message.widthResizerVisibility !== void 0) {
+      preferences.widthResizerVisibility = message.widthResizerVisibility;
+    }
+    applyReadingPreferences(preferences);
   }
   function resetModuleGlobalsForLoadDocument() {
     initialRenderPipelineCompleted = false;
@@ -2527,6 +2616,17 @@
     }
   }
   function wireHostShortcuts() {
+    let editModeShortcutDown = false;
+    let editModeShortcutResetTimer;
+    const resetEditModeShortcut = () => {
+      editModeShortcutDown = false;
+      window.clearTimeout(editModeShortcutResetTimer);
+    };
+    const keepEditModeShortcutHeld = () => {
+      editModeShortcutDown = true;
+      window.clearTimeout(editModeShortcutResetTimer);
+      editModeShortcutResetTimer = window.setTimeout(resetEditModeShortcut, 1e3);
+    };
     const hostShortcuts = /* @__PURE__ */ new Set([
       "ctrl+e",
       "ctrl+o",
@@ -2548,10 +2648,28 @@
         }
         event.preventDefault();
         event.stopPropagation();
+        if (combo === "ctrl+e") {
+          if (editModeShortcutDown || event.repeat) {
+            keepEditModeShortcutHeld();
+            return;
+          }
+          keepEditModeShortcutHeld();
+        }
         postHostMessage({ type: "host-shortcut", combo });
       },
       { capture: true }
     );
+    window.addEventListener(
+      "keyup",
+      (event) => {
+        const key = event.key.toLowerCase();
+        if (key === "e" || !event.ctrlKey && !event.metaKey) {
+          resetEditModeShortcut();
+        }
+      },
+      { capture: true }
+    );
+    window.addEventListener("blur", resetEditModeShortcut);
   }
   function wireFileDrop() {
     document.addEventListener("dragenter", (event) => {

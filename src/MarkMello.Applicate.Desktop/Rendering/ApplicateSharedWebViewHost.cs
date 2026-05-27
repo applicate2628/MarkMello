@@ -13,7 +13,7 @@ using MarkMello.Domain;
 namespace MarkMello.Applicate.Desktop.Rendering;
 
 /// <inheritdoc cref="IApplicateSharedWebViewHost"/>
-public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
+public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IApplicateModeRevealSignal
 {
     private Panel? _warmupParent;
     private Panel? _currentParent;
@@ -61,14 +61,14 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
     private DispatcherTimer? _settleFallbackTimer;
     private TimeSpan _pendingRevealDuration;
 
-    // Fallback floor for the reveal gate. PE-budget-aware: 150ms total round
-    // trip covers IPC send + 2 rAFs (~16ms each at 60fps) + paint + return IPC
-    // (~5-30ms typical). User-perceived ceiling per dispatch: prior baseline
-    // mode-toggle p95 must not regress by more than 50ms. A 150ms ceiling
-    // means worst-case toggle latency rises by ~150ms, but worst case fires
-    // only when the renderer is paused (long mermaid render, GC) — typical
-    // ack lands inside one full frame (~16-32ms).
-    private static readonly TimeSpan SettleFallbackTimeout = TimeSpan.FromMilliseconds(150);
+    // Fallback floor for the reveal gate. This is a safety net only: the
+    // renderer IPC ack is authoritative because it lands after pending
+    // preferences, minimap/body chrome, and one post-chrome paint at the new
+    // slot bounds. The 2026-05-24 trace showed the old 150 ms timer firing
+    // 8 ms before that ack on a large document, revealing the renderer at the
+    // pre-minimap width. Keep the fallback comfortably behind the normal ack
+    // path so it only covers a dropped/stalled renderer response.
+    private static readonly TimeSpan SettleFallbackTimeout = TimeSpan.FromMilliseconds(500);
 
     public ApplicateSharedWebViewHost(
         IApplicateHtmlMarkdownRenderer renderer,
@@ -169,7 +169,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         //
         // The HWND stays hidden until Commit() shows it after UpdateLayout has
         // settled View.Bounds onto the new parent.
-        View.SetNativeWebViewVisibility(false);
+        View.ParkNativeWebViewForReparent();
 
         using (View.BeginIntentionalReparent())
         {
@@ -189,7 +189,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         // AttachTo to a different panel supersedes it — cancel the wait so
         // the older probe's ack cannot flip visibility against the new slot.
         // (Re-arming for the new slot happens at the next Commit; until then
-        // SetNativeWebViewVisibility(false) above keeps the HWND hidden.)
+        // ParkNativeWebViewForReparent() above keeps the HWND hidden.)
         ReleaseSettleSubscription();
         var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         ApplicateTrace.ModeToggle($"SharedHost.AttachTo done elapsed={elapsedMs:F2}ms");
@@ -216,6 +216,16 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         // blank. Hiding the symptom is also kostyl per AGENTS no-kostyl rule.
         // Architectural fix needed — see follow-up discussion on this branch.
         target.IsVisible = _hasEverCommitted;
+        if (_hasEverCommitted)
+        {
+            // Setting the new target visible is still required so edit and
+            // viewer consumers can issue their RequestRender fast path, but
+            // NativeControlHost may immediately reshow the reparented child
+            // HWND at the previous slot bounds. Re-hide it inside AttachTo
+            // itself; Commit will perform the settled offscreen prepaint and
+            // final reveal after layout.
+            View.SetNativeWebViewVisibility(false);
+        }
 
         // State machine: always SWITCHING after AttachTo. The next
         // RequestRender → DocumentRendered → Commit cycle clears it back to
@@ -337,6 +347,14 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
     }
 
     public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
+
+    public event EventHandler? RevealCompleted;
+
+    public void SuppressNativeRendererForModeSwitch()
+    {
+        ApplicateTrace.ModeToggle($"SharedHost.SuppressNativeRendererForModeSwitch gen={_activeGeneration}");
+        View.ParkNativeWebViewForReparent();
+    }
 
     /// <summary>
     /// Test seam for raising the failure event without a real WebView2 fault.
@@ -464,6 +482,10 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
             "host-commit-enter",
             $"parent={(_currentParent is null ? "null" : _currentParent.GetType().Name)} reparented={_reparentedThisCycle} hasEverCommitted={_hasEverCommitted} viewBounds={View.Bounds.Width:F0}x{View.Bounds.Height:F0}");
 
+        var armRevealGate = _reparentedThisCycle && _hasEverCommitted;
+        var modeSwitchDuration = CurrentModeSwitchDuration();
+        _reparentedThisCycle = false;
+
         if (_currentParent is not null
             && !ReferenceEquals(_currentParent, _warmupParent))
         {
@@ -479,6 +501,15 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
             // parent's (narrower) position. UpdateLayout is the
             // synchronous-layout path Avalonia exposes for exactly this case.
             _currentParent.UpdateLayout();
+
+            if (armRevealGate)
+            {
+                // NativeControlHost can reshow the child HWND while the
+                // previously hidden slot is made visible for layout. Re-hide
+                // after UpdateLayout so the reveal-gated path never leaks the
+                // visible-location paint before the offscreen prepaint step.
+                View.SetNativeWebViewVisibility(false);
+            }
         }
 
         // Reveal-gate decision (2026-05-20). Only arm the gate when:
@@ -494,15 +525,12 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         // Pure same-source/same-panel Commit (no reparent) also keeps the
         // legacy immediate-show: the HWND's backing store already paints the
         // correct bounds, there is no reflow window to wait through.
-        var armRevealGate = _reparentedThisCycle && _hasEverCommitted;
-        var modeSwitchDuration = CurrentModeSwitchDuration();
-        _reparentedThisCycle = false;
-
         if (armRevealGate)
         {
             ApplicateTrace.DiagMs("pane-seq", "host-commit-armed-revealgate");
             _pendingRevealDuration = modeSwitchDuration;
             View.PrepareNativeRendererForReveal(modeSwitchDuration);
+            View.PrepareNativeWebViewForHiddenPaint();
             BeginRevealAfterSettle();
         }
         else
@@ -520,6 +548,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
             View.RevealNativeRenderer(TimeSpan.Zero);
             RevealCurrentParent(modeSwitchDuration);
             ApplicateTrace.DiagMs("pane-seq", "host-hwnd-shown", "path=immediate");
+            RaiseRevealCompleted();
         }
 
         _state = HostState.Committed;
@@ -540,19 +569,20 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
     /// <summary>
     /// Reveal-gate sequence (2026-05-20). After Commit's UpdateLayout has
     /// settled the slot bounds, send a probe to the renderer; the renderer
-    /// schedules two requestAnimationFrame ticks (so CSS reflow on the new
-    /// slot bounds has propagated and one paint has happened) and posts
+    /// schedules requestAnimationFrame ticks (so CSS reflow on the new slot
+    /// bounds has propagated and a chrome-ready paint has happened) and posts
     /// <c>mode-toggle-settled</c> back, which routes through
     /// <see cref="ApplicateWebMarkdownDocumentView.ModeToggleSettled"/> to
     /// <see cref="OnRevealSettled"/>. A <see cref="DispatcherTimer"/> floor
     /// ensures the toggle never hangs on a dropped ack.
     ///
     /// <para>Why both: the IPC ack is the authoritative signal that the
-    /// renderer has finished reflowing to the new bounds; the timer is a
-    /// safety net for paths where the renderer is unavailable (shell
-    /// pre-warm in flight) or temporarily stalled (heavy mermaid render,
-    /// long-running GC). Both targets call <see cref="CompleteReveal"/>
-    /// which unsubscribes, stops the timer, and flips HWND visibility.</para>
+    /// renderer has finished reflowing to the new bounds while the native
+    /// WebView HWND is prepainted offscreen; the timer is a safety net for
+    /// paths where the renderer is unavailable (shell pre-warm in flight) or
+    /// temporarily stalled (heavy mermaid render, long-running GC). Both
+    /// targets call <see cref="CompleteReveal"/> which unsubscribes, stops the
+    /// timer, and restores the HWND to its final slot.</para>
     /// </summary>
     private void BeginRevealAfterSettle()
     {
@@ -601,11 +631,14 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
         // Show the HWND now that the renderer has finished reflowing (or the
         // fallback timer elapsed). The state machine has already advanced to
         // Committed in Commit() above; this is just the deferred visual reveal.
-        View.SetNativeWebViewVisibility(true);
+        View.CompleteNativeWebViewHiddenPaint();
         View.RevealNativeRenderer(duration);
         RevealCurrentParent(duration);
         ApplicateTrace.DiagMs("pane-seq", "host-hwnd-shown", "path=deferred-after-settle");
+        RaiseRevealCompleted();
     }
+
+    private void RaiseRevealCompleted() => RevealCompleted?.Invoke(this, EventArgs.Empty);
 
     private static void PrepareTargetForReveal(Panel target)
     {

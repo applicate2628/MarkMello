@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text;
 using Avalonia;
@@ -25,6 +26,7 @@ namespace MarkMello.Applicate.Desktop.Views;
 public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 {
     private const double MaxRendererReportedMinimapReservedWidth = 2000;
+    private const int NativeOffscreenMargin = 512;
 
     public static readonly StyledProperty<MarkdownSource?> SourceProperty =
         AvaloniaProperty.Register<ApplicateWebMarkdownDocumentView, MarkdownSource?>(nameof(Source));
@@ -82,6 +84,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private string? _inlinedTheme;
     private bool _isWebWidthDragging;
     private long _renderSequence;
+    private NativeWindowPlacement? _pendingNativeHiddenPaintPlacement;
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -343,9 +346,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             _mainWindowViewModel = null;
 
             // On intentional reparent (shared-host AttachTo), the host owns
-            // _webView.IsVisible — specifically it sets visibility to false
+            // _webView.IsVisible — specifically it parks the native HWND
             // BEFORE the reparent as anti-airspace-leak (see
-            // ApplicateSharedWebViewHost.AttachTo: SetNativeWebViewVisibility(false)).
+            // ApplicateSharedWebViewHost.AttachTo: ParkNativeWebViewForReparent()).
             // Restoring to true here unconditionally would undo that hide and
             // expose the HWND at previous bounds during the layout-pass gap.
             // The same `_intentionalReparentDepth == 0` guard governs
@@ -437,7 +440,306 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     internal void SetNativeWebViewVisibility(bool isVisible)
     {
         ApplicateTrace.ModeToggle($"SetNativeWebViewVisibility({isVisible}) viewId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this):X8} wrapper.Bounds={_webView.Bounds}");
+        SetNativeWebViewWindowVisibility(isVisible);
+    }
+
+    internal void ParkNativeWebViewForReparent()
+    {
+        ApplicateTrace.ModeToggle($"ParkNativeWebViewForReparent viewId={System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this):X8} wrapper.Bounds={_webView.Bounds}");
+
+        if (!OperatingSystem.IsWindows())
+        {
+            SetNativeWebViewVisibility(false);
+            return;
+        }
+
+        var handle = _webView.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
+        if (handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        if (!TryCaptureNativeWebViewPlacement(handle, out var placement))
+        {
+            SetNativeWebViewWindowVisibility(false);
+            return;
+        }
+
+        _pendingNativeHiddenPaintPlacement = null;
+        var offscreenX = CalculateNativeOffscreenX(handle, placement.Width);
+        var flags = NativeMethods.SwpNoZOrder
+            | NativeMethods.SwpNoActivate
+            | NativeMethods.SwpNoOwnerZOrder
+            | NativeMethods.SwpNoCopyBits;
+        SetNativeWebViewTreeVisibility(handle, isVisible: false);
+        var moved = NativeMethods.SetWindowPos(
+            handle,
+            IntPtr.Zero,
+            offscreenX,
+            placement.Y,
+            placement.Width,
+            placement.Height,
+            flags);
+        ApplicateTrace.ModeToggle(
+            $"ParkNativeWebViewForReparent moved={moved} saved={placement.X},{placement.Y},{placement.Width}x{placement.Height} offscreenX={offscreenX}");
+    }
+
+    private void SetNativeWebViewWindowVisibility(bool isVisible)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var handle = _webView.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
+            if (handle == IntPtr.Zero)
+            {
+                return;
+            }
+
+            if (isVisible)
+            {
+                SyncNativeWebViewWindowSize(handle);
+            }
+            else
+            {
+                _pendingNativeHiddenPaintPlacement = null;
+            }
+
+            SetNativeWebViewTreeVisibility(handle, isVisible);
+            return;
+        }
+
+        // Non-Windows fallback: preserve the old control-level visibility path
+        // where there is no HWND airspace race to hide directly.
         _webView.IsVisible = isVisible;
+    }
+
+    internal void PrepareNativeWebViewForHiddenPaint()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var handle = _webView.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
+        if (handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        SyncNativeWebViewWindowSize(handle);
+        if (!TryCaptureNativeWebViewPlacement(handle, out var placement))
+        {
+            return;
+        }
+
+        _pendingNativeHiddenPaintPlacement = placement;
+        var offscreenX = CalculateNativeOffscreenX(handle, placement.Width);
+        var flags = NativeMethods.SwpNoZOrder
+            | NativeMethods.SwpNoActivate
+            | NativeMethods.SwpNoOwnerZOrder
+            | NativeMethods.SwpNoCopyBits;
+        SyncNativeWebViewChildTree(handle);
+        var moved = NativeMethods.SetWindowPos(
+            handle,
+            IntPtr.Zero,
+            offscreenX,
+            placement.Y,
+            placement.Width,
+            placement.Height,
+            flags);
+        SetNativeWebViewTreeVisibility(handle, isVisible: true);
+        ApplicateTrace.ModeToggle(
+            $"PrepareNativeWebViewForHiddenPaint moved={moved} saved={placement.X},{placement.Y},{placement.Width}x{placement.Height} offscreenX={offscreenX}");
+    }
+
+    internal void CompleteNativeWebViewHiddenPaint()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            SetNativeWebViewVisibility(true);
+            return;
+        }
+
+        var handle = _webView.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
+        if (handle == IntPtr.Zero || _pendingNativeHiddenPaintPlacement is not { } placement)
+        {
+            SetNativeWebViewVisibility(true);
+            return;
+        }
+
+        _pendingNativeHiddenPaintPlacement = null;
+        SetNativeWebViewTreeVisibility(handle, isVisible: false);
+        // Do not copy the offscreen backing store into the visible slot. The
+        // 2026-05-24 frame capture showed WebView2 can expose one fragmented
+        // text frame when Windows preserves those bits during the move back.
+        // Force a normal repaint at the settled bounds instead.
+        var flags = NativeMethods.SwpNoZOrder
+            | NativeMethods.SwpNoActivate
+            | NativeMethods.SwpNoOwnerZOrder
+            | NativeMethods.SwpNoCopyBits;
+        var restored = NativeMethods.SetWindowPos(
+            handle,
+            IntPtr.Zero,
+            placement.X,
+            placement.Y,
+            placement.Width,
+            placement.Height,
+            flags);
+        SyncNativeWebViewChildTree(handle);
+        SetNativeWebViewTreeVisibility(handle, isVisible: true);
+        ApplicateTrace.ModeToggle(
+            $"CompleteNativeWebViewHiddenPaint restored={restored} saved={placement.X},{placement.Y},{placement.Width}x{placement.Height}");
+    }
+
+    private void SyncNativeWebViewWindowSize(IntPtr handle)
+    {
+        var bounds = _webView.Bounds;
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+        {
+            return;
+        }
+
+        var scaling = TopLevel.GetTopLevel(_webView)?.RenderScaling ?? 1.0;
+        var width = SysMath.Max(1, (int)SysMath.Round(bounds.Width * scaling, MidpointRounding.AwayFromZero));
+        var height = SysMath.Max(1, (int)SysMath.Round(bounds.Height * scaling, MidpointRounding.AwayFromZero));
+        var flags = NativeMethods.SwpNoMove
+            | NativeMethods.SwpNoZOrder
+            | NativeMethods.SwpNoActivate
+            | NativeMethods.SwpNoOwnerZOrder
+            | NativeMethods.SwpNoCopyBits;
+        var ok = NativeMethods.SetWindowPos(handle, IntPtr.Zero, 0, 0, width, height, flags);
+        SyncNativeWebViewChildTree(handle);
+        var parent = NativeMethods.GetParent(handle);
+        _ = NativeMethods.GetWindowRect(handle, out var rect);
+        ApplicateTrace.ModeToggle(
+            $"SyncNativeWebViewWindowSize ok={ok} dips={bounds.Width:F1}x{bounds.Height:F1} scale={scaling:F2} px={width}x{height} parent=0x{parent.ToInt64():X} rect={rect.Left},{rect.Top},{rect.Right},{rect.Bottom}");
+    }
+
+    private static void SetNativeWebViewTreeVisibility(IntPtr root, bool isVisible)
+    {
+        if (root == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var windows = EnumerateNativeDescendants(root);
+        if (isVisible)
+        {
+            _ = NativeMethods.ShowWindow(root, NativeMethods.SwShow);
+            foreach (var child in windows)
+            {
+                _ = NativeMethods.ShowWindow(child, NativeMethods.SwShow);
+            }
+            return;
+        }
+
+        for (var index = windows.Count - 1; index >= 0; index--)
+        {
+            _ = NativeMethods.ShowWindow(windows[index], NativeMethods.SwHide);
+        }
+        _ = NativeMethods.ShowWindow(root, NativeMethods.SwHide);
+    }
+
+    private static void SyncNativeWebViewChildTree(IntPtr root)
+    {
+        if (root == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var syncedCount = SyncNativeWebViewDirectChildren(root);
+        if (syncedCount > 0)
+        {
+            ApplicateTrace.ModeToggle($"SyncNativeWebViewChildTree synced={syncedCount}");
+        }
+    }
+
+    private static int SyncNativeWebViewDirectChildren(IntPtr parent)
+    {
+        var syncedCount = 0;
+        foreach (var child in EnumerateDirectNativeChildren(parent))
+        {
+            if (NativeMethods.GetClientRect(parent, out var parentClient))
+            {
+                var width = SysMath.Max(1, parentClient.Right - parentClient.Left);
+                var height = SysMath.Max(1, parentClient.Bottom - parentClient.Top);
+                var flags = NativeMethods.SwpNoZOrder
+                    | NativeMethods.SwpNoActivate
+                    | NativeMethods.SwpNoOwnerZOrder
+                    | NativeMethods.SwpNoCopyBits;
+                if (NativeMethods.SetWindowPos(child, IntPtr.Zero, 0, 0, width, height, flags))
+                {
+                    syncedCount++;
+                }
+            }
+
+            syncedCount += SyncNativeWebViewDirectChildren(child);
+        }
+
+        return syncedCount;
+    }
+
+    private static List<IntPtr> EnumerateNativeDescendants(IntPtr root)
+    {
+        var descendants = new List<IntPtr>();
+        NativeMethods.EnumChildWindows(
+            root,
+            (windowHandle, _) =>
+            {
+                descendants.Add(windowHandle);
+                return true;
+            },
+            IntPtr.Zero);
+        return descendants;
+    }
+
+    private static List<IntPtr> EnumerateDirectNativeChildren(IntPtr parent)
+    {
+        var children = new List<IntPtr>();
+        NativeMethods.EnumChildWindows(
+            parent,
+            (windowHandle, _) =>
+            {
+                if (NativeMethods.GetParent(windowHandle) == parent)
+                {
+                    children.Add(windowHandle);
+                }
+                return true;
+            },
+            IntPtr.Zero);
+        return children;
+    }
+
+    private static bool TryCaptureNativeWebViewPlacement(IntPtr handle, out NativeWindowPlacement placement)
+    {
+        placement = default;
+        var parent = NativeMethods.GetParent(handle);
+        if (parent == IntPtr.Zero || !NativeMethods.GetWindowRect(handle, out var rect))
+        {
+            return false;
+        }
+
+        var topLeft = new NativePoint(rect.Left, rect.Top);
+        if (!NativeMethods.ScreenToClient(parent, ref topLeft))
+        {
+            return false;
+        }
+
+        var width = SysMath.Max(1, rect.Right - rect.Left);
+        var height = SysMath.Max(1, rect.Bottom - rect.Top);
+        placement = new NativeWindowPlacement(topLeft.X, topLeft.Y, width, height);
+        return true;
+    }
+
+    private static int CalculateNativeOffscreenX(IntPtr handle, int width)
+    {
+        var virtualLeft = NativeMethods.GetSystemMetrics(NativeMethods.SmXVirtualScreen);
+        var parent = NativeMethods.GetParent(handle);
+        if (parent == IntPtr.Zero || !NativeMethods.GetWindowRect(parent, out var parentRect))
+        {
+            return virtualLeft - width - NativeOffscreenMargin;
+        }
+
+        return virtualLeft - parentRect.Left - width - NativeOffscreenMargin;
     }
 
     internal void PrepareNativeRendererForReveal(TimeSpan duration)
@@ -1800,33 +2102,38 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         // updates (font size, width drag, chrome toggle) must not invalidate
         // readiness — otherwise the renderer is forced to re-emit layout-ready
         // and minimap-state on every drag delta, causing visible lag.
+        PostRendererMessage(BuildReadingPreferencesMessage("reading-preferences"));
+    }
 
+    private object BuildReadingPreferencesMessage(string type)
+    {
         var maxWidth = double.IsFinite(AvailableContentWidth) && AvailableContentWidth > 0
             ? AvailableContentWidth
             : ReadingPreferences.ContentWidth;
-        PostRendererMessage(
-            new
-            {
-                type = "reading-preferences",
-                fontFamily = ReadingPreferences.FontFamily.ToString().ToLowerInvariant(),
-                fontSize = ReadingPreferences.FontSize,
-                lineHeight = ReadingPreferences.LineHeight,
-                maxWidth,
-                // F-06 fix: host's clamp floor sourced from the canonical
-                // owner (ApplicateDocumentLayout). Renderer uses this to limit
-                // drag preview so it doesn't go below where host will clamp on
-                // echo; without it, drag visually pulls to renderer-local min
-                // (200) but host re-clamps, snapping the document wider on
-                // release. Previous reference (ApplicateViewerView.MinManualContentWidth)
-                // inverted the dependency direction: a shared lower layer was
-                // reading a constant from one specific consumer slot.
-                minMaxWidth = ApplicateDocumentLayout.MinManualContentWidth,
-                minimapMode = ReadingPreferences.DocumentMinimapMode.ToString().ToLowerInvariant(),
-                viewerChromeEnabled = ViewerChromeEnabled,
-                documentScrollEnabled = DocumentScrollEnabled,
-                wheelProxyEnabled = WheelProxyEnabled,
-                widthResizerVisibility = ToRendererWidthResizerVisibility(ReadingPreferences.WidthResizerVisibility)
-            });
+        return new
+        {
+            type,
+            fontFamily = ReadingPreferences.FontFamily.ToString().ToLowerInvariant(),
+            fontSize = ReadingPreferences.FontSize,
+            lineHeight = ReadingPreferences.LineHeight,
+            maxWidth,
+            // F-06 fix: host's clamp floor sourced from the canonical
+            // owner (ApplicateDocumentLayout). Renderer uses this to limit
+            // drag preview so it doesn't go below where host will clamp on
+            // echo; without it, drag visually pulls to renderer-local min
+            // (200) but host re-clamps, snapping the document wider on
+            // release. Previous reference (ApplicateViewerView.MinManualContentWidth)
+            // inverted the dependency direction: a shared lower layer was
+            // reading a constant from one specific consumer slot.
+            minMaxWidth = ApplicateDocumentLayout.MinManualContentWidth,
+            minimapMode = ReadingPreferences.DocumentMinimapMode.ToString().ToLowerInvariant(),
+            viewerChromeEnabled = ViewerChromeEnabled,
+            documentScrollEnabled = DocumentScrollEnabled,
+            wheelProxyEnabled = WheelProxyEnabled,
+            widthResizerVisibility = ToRendererWidthResizerVisibility(ReadingPreferences.WidthResizerVisibility),
+            viewportWidth = _webView.Bounds.Width,
+            viewportHeight = _webView.Bounds.Height
+        };
     }
 
     private void BeginAwaitingLayoutReady()
@@ -1877,7 +2184,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     internal void RequestModeToggleSettleProbe()
     {
         ApplicateTrace.DiagMs("pane-seq", "host-revealgate-probe-sent");
-        PostRendererMessage(new { type = "mode-settle-probe" });
+        // Carry the same preference payload as a live preference update. C#
+        // posts host messages through asynchronous WebView2 script calls, so
+        // the settle probe must be self-contained: even if the prior
+        // reading-preferences message is still crossing that boundary, the
+        // renderer applies these values synchronously before ACKing reveal.
+        PostRendererMessage(BuildReadingPreferencesMessage("mode-settle-probe"));
     }
 
     public void ScrollToProgress(double progressPercent)
@@ -2042,6 +2354,78 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ActualThemeVariantChanged -= OnThemeChanged;
         RemoveHandler(KeyDownEvent, OnWebViewKeyDown);
         GC.SuppressFinalize(this);
+    }
+
+    private static class NativeMethods
+    {
+        public const int SwHide = 0;
+        public const int SwShow = 5;
+        public const int SmXVirtualScreen = 76;
+        public const uint SwpNoMove = 0x0002;
+        public const uint SwpNoZOrder = 0x0004;
+        public const uint SwpNoActivate = 0x0010;
+        public const uint SwpNoCopyBits = 0x0100;
+        public const uint SwpNoOwnerZOrder = 0x0200;
+
+        public delegate bool EnumWindowProc(IntPtr windowHandle, IntPtr parameter);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ShowWindow(IntPtr windowHandle, int commandShow);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetWindowPos(
+            IntPtr windowHandle,
+            IntPtr insertAfter,
+            int x,
+            int y,
+            int cx,
+            int cy,
+            uint flags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr GetParent(IntPtr windowHandle);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern int GetSystemMetrics(int index);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetWindowRect(IntPtr windowHandle, out NativeRect rect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetClientRect(IntPtr windowHandle, out NativeRect rect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ScreenToClient(IntPtr windowHandle, ref NativePoint point);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EnumChildWindows(
+            IntPtr parentHandle,
+            EnumWindowProc callback,
+            IntPtr parameter);
+    }
+
+    private readonly record struct NativeWindowPlacement(int X, int Y, int Width, int Height);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint(int x, int y)
+    {
+        public int X = x;
+        public int Y = y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly struct NativeRect
+    {
+        public readonly int Left;
+        public readonly int Top;
+        public readonly int Right;
+        public readonly int Bottom;
     }
 }
 
