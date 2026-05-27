@@ -79,6 +79,22 @@ public sealed class ApplicateMarkdownDocumentRendererTests
     }
 
     [Fact]
+    public void RenderDoesNotTreatLineWithTwoInlineMathSpansAsDisplayMath()
+    {
+        var renderer = new ApplicateMarkdownDocumentRenderer();
+
+        var document = renderer.Render("$\\mathbf r_{q}\\in\\Gamma_{p}$ нужно получить local coordinates $(u_{q},v_{q})$");
+
+        var paragraph = Assert.IsType<MarkdownParagraphBlock>(Assert.Single(document.Blocks));
+        var math = paragraph.Inlines.OfType<ApplicateMathInline>().ToArray();
+        Assert.Equal(2, math.Length);
+        Assert.Equal("\\mathbf r_{q}\\in\\Gamma_{p}", math[0].Tex);
+        Assert.Equal("(u_{q},v_{q})", math[1].Tex);
+        Assert.Contains(paragraph.Inlines.OfType<MarkdownTextInline>(), text =>
+            text.Text.Contains("нужно получить local coordinates", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void RenderPreservesMathLikeTextInsideInlineCode()
     {
         var renderer = new ApplicateMarkdownDocumentRenderer();

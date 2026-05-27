@@ -63,6 +63,25 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
+    public async Task RenderKeepsAdjacentInlineMathSpansSeparateInHtml()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        var markdown = "$\\mathbf r_{q}\\in\\Gamma_{p}$ нужно получить local coordinates $(u_{q},v_{q})$";
+        var source = new MarkdownSource("sample.md", "sample.md", markdown);
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        Assert.Contains(@"data-tex=""\mathbf r_{q}\in\Gamma_{p}""", document.Html);
+        Assert.Contains(@"data-tex=""(u_{q},v_{q})""", document.Html);
+        Assert.Contains("нужно получить local coordinates", document.Html);
+        Assert.DoesNotContain(@"data-tex=""\mathbf r_{q}\in\Gamma_{p}$ нужно", document.Html);
+    }
+
+    [Fact]
     public async Task RenderUsesDifferentTexPolicyThanNativeRenderer()
     {
         var htmlRenderer = new ApplicateHtmlMarkdownRenderer();

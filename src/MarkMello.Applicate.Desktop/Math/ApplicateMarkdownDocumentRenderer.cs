@@ -712,13 +712,44 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
             || !trimmed.StartsWith('$')
             || !trimmed.EndsWith('$')
             || trimmed.StartsWith("$$", StringComparison.Ordinal)
-            || trimmed.EndsWith("$$", StringComparison.Ordinal))
+            || trimmed.EndsWith("$$", StringComparison.Ordinal)
+            || IsEscaped(trimmed, trimmed.Length - 1))
         {
             return false;
         }
 
         tex = trimmed[1..^1].Trim();
+        if (ContainsUnescapedDollar(tex))
+        {
+            tex = string.Empty;
+            return false;
+        }
+
         return tex.Length > 0;
+    }
+
+    private static bool ContainsUnescapedDollar(string text)
+    {
+        for (var index = 0; index < text.Length; index++)
+        {
+            if (text[index] == '$' && !IsEscaped(text, index))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsEscaped(string text, int index)
+    {
+        var slashCount = 0;
+        for (var cursor = index - 1; cursor >= 0 && text[cursor] == '\\'; cursor--)
+        {
+            slashCount++;
+        }
+
+        return slashCount % 2 == 1;
     }
 
     private static IEnumerable<string> ReadLinesWithEndings(string text)
