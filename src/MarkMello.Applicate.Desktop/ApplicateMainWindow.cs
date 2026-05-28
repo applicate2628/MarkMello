@@ -43,6 +43,7 @@ public sealed class ApplicateMainWindow : MainWindow
 
     private Panel? _tabsContentPanel;
     private ApplicateSiblingMountBridge? _siblingMountBridge;
+    private ApplicateModeTransactionHostRouter? _modeTransactionHostRouter;
     private bool _editModeHotkeyDown;
 
     public ApplicateMainWindow(
@@ -893,9 +894,11 @@ public sealed class ApplicateMainWindow : MainWindow
         // at app startup, with DataContext=null (dormant state). The bridge
         // updates the editWorkspace's DataContext on session changes — no
         // per-toggle template materialization, no reparent.
-        var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
+        var hostProvider = App.Services?.GetService<IApplicateSharedWebViewHostProvider>();
+        var viewerHostForMode = hostProvider?.ViewerHost ?? App.Services?.GetService<IApplicateSharedWebViewHost>();
+        var editHost = hostProvider?.EditPreviewHost ?? viewerHostForMode;
         ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-preview-start");
-        var editPreview = new ApplicateEditPreviewView(sharedHost);
+        var editPreview = new ApplicateEditPreviewView(editHost);
         ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-preview-end");
         ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-workspace-start");
         var editWorkspace = new EditWorkspaceView
@@ -983,6 +986,11 @@ public sealed class ApplicateMainWindow : MainWindow
         editSlot.IsVisible = false;
         ApplicateTrace.DiagMs("startup-synthetic-mount", "hide-edit-slot-end");
 
+        _modeTransactionHostRouter?.Dispose();
+        _modeTransactionHostRouter = viewerHostForMode is not null && editHost is not null
+            ? new ApplicateModeTransactionHostRouter(viewerHostForMode, editHost)
+            : null;
+
         _siblingMountBridge = new ApplicateSiblingMountBridge(
             viewModel,
             viewerSlot,
@@ -994,16 +1002,340 @@ public sealed class ApplicateMainWindow : MainWindow
             () => viewModel.Document,
             () => viewModel.ReadingPreferences,
             viewerContent: viewModel,
-            modeRevealSignal: sharedHost as IApplicateModeRevealSignal,
+            modeRevealSignal: null,
+            transactionHost: _modeTransactionHostRouter,
             modeRevealCoverHost: siblingPanel);
+
+        InstallInactiveEditPreviewPrime(
+            viewModel,
+            contentPanel,
+            viewerSlot,
+            editSlot,
+            editPreview);
 
         Closed += OnApplicateMainWindowClosed;
     }
+
+    private void InstallInactiveEditPreviewPrime(
+        MainWindowViewModel viewModel,
+        Panel contentPanel,
+        Control viewerSlot,
+        Panel editSlot,
+        ApplicateEditPreviewView editPreview)
+    {
+        const double inactivePrimeOffscreenX = -100000.0;
+        var inactivePrimeTimeout = TimeSpan.FromSeconds(15);
+        MarkdownSource? primedDocument = null;
+        ReadingPreferences? primedPreferences = null;
+        Size primedViewportSize = default;
+        MarkdownSource? pendingDocument = null;
+        ReadingPreferences? pendingPreferences = null;
+        Size pendingViewportSize = default;
+        bool primeQueued = false;
+        bool primeInProgress = false;
+        (
+            bool IsVisible,
+            bool IsEnabled,
+            bool IsHitTestVisible,
+            double Opacity,
+            double Width,
+            double Height,
+            Thickness Margin,
+            HorizontalAlignment HorizontalAlignment,
+            VerticalAlignment VerticalAlignment
+        )? activePrimeRestore = null;
+        Avalonia.Threading.DispatcherTimer? primeTimeoutTimer = null;
+
+        Opened += OnPrimeSurfaceReady;
+        contentPanel.PropertyChanged += OnPrimeSurfaceChanged;
+        viewerSlot.PropertyChanged += OnPrimeSurfaceChanged;
+        viewModel.PropertyChanged += OnPrimeViewModelChanged;
+        editPreview.InactivePrimeRendered += OnInactivePrimeRendered;
+        Closed += OnPrimeClosed;
+
+        QueuePrime();
+
+        void OnPrimeSurfaceReady(object? sender, EventArgs e)
+            => QueuePrime();
+
+        void OnPrimeSurfaceChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+        {
+            if (e.Property == Visual.BoundsProperty || e.Property == Visual.IsVisibleProperty)
+            {
+                QueuePrime();
+            }
+        }
+
+        void OnPrimeViewModelChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName == nameof(MainWindowViewModel.IsEditMode)
+                && viewModel.IsEditMode
+                && primeInProgress)
+            {
+                CompletePrime(success: false, preserveCurrentVisibility: true);
+            }
+
+            if (e.PropertyName is nameof(MainWindowViewModel.Document)
+                or nameof(MainWindowViewModel.ReadingPreferences)
+                or nameof(MainWindowViewModel.IsTocVisible)
+                or nameof(MainWindowViewModel.TocColumnWidth)
+                or nameof(MainWindowViewModel.IsEditMode))
+            {
+                QueuePrime();
+            }
+        }
+
+        void OnPrimeClosed(object? sender, EventArgs e)
+        {
+            CompletePrime(success: false, preserveCurrentVisibility: false);
+            Opened -= OnPrimeSurfaceReady;
+            contentPanel.PropertyChanged -= OnPrimeSurfaceChanged;
+            viewerSlot.PropertyChanged -= OnPrimeSurfaceChanged;
+            viewModel.PropertyChanged -= OnPrimeViewModelChanged;
+            editPreview.InactivePrimeRendered -= OnInactivePrimeRendered;
+            Closed -= OnPrimeClosed;
+        }
+
+        void OnInactivePrimeRendered(object? sender, EventArgs e)
+            => CompletePrime(success: true, preserveCurrentVisibility: false);
+
+        void QueuePrime()
+        {
+            if (primeQueued)
+            {
+                return;
+            }
+
+            primeQueued = true;
+            Avalonia.Threading.Dispatcher.UIThread.Post(
+                () =>
+                {
+                    primeQueued = false;
+                    TryPrime();
+                },
+                Avalonia.Threading.DispatcherPriority.Background);
+        }
+
+        void TryPrime()
+        {
+            if (viewModel.IsEditMode || viewModel.Document is not { } document)
+            {
+                return;
+            }
+
+            var editWorkspaceSize = ResolveInactiveEditPrimeSize(contentPanel, viewerSlot);
+            var viewportSize = ResolveInactiveEditPreviewViewportSize(editWorkspaceSize);
+            if (viewportSize.Width <= 0 || viewportSize.Height <= 0)
+            {
+                return;
+            }
+
+            var preferences = viewModel.ReadingPreferences;
+            if (ReferenceEquals(primedDocument, document)
+                && Equals(primedPreferences, preferences)
+                && AreClose(primedViewportSize.Width, viewportSize.Width)
+                && AreClose(primedViewportSize.Height, viewportSize.Height))
+            {
+                return;
+            }
+
+            if (primeInProgress
+                && ReferenceEquals(pendingDocument, document)
+                && Equals(pendingPreferences, preferences)
+                && AreClose(pendingViewportSize.Width, viewportSize.Width)
+                && AreClose(pendingViewportSize.Height, viewportSize.Height))
+            {
+                return;
+            }
+
+            if (primeInProgress)
+            {
+                CompletePrime(success: false, preserveCurrentVisibility: false);
+            }
+
+            var restore = BeginPrimeLayout(editWorkspaceSize);
+            if (restore is null)
+            {
+                return;
+            }
+
+            activePrimeRestore = restore;
+            primeInProgress = true;
+            pendingDocument = document;
+            pendingPreferences = preferences;
+            pendingViewportSize = viewportSize;
+            RestartPrimeTimeout();
+
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "editpreview-inactive-prime-layout",
+                $"editWorkspaceSize={editWorkspaceSize.Width:F0}x{editWorkspaceSize.Height:F0} viewport={viewportSize.Width:F0}x{viewportSize.Height:F0} editSlotBounds={editSlot.Bounds.Width:F0}x{editSlot.Bounds.Height:F0}");
+
+            if (!editPreview.PrimeInactiveWebPreview(
+                document,
+                preferences,
+                viewModel.ImageSourceResolver,
+                viewportSize))
+            {
+                CompletePrime(success: false, preserveCurrentVisibility: false);
+            }
+        }
+
+        (
+            bool IsVisible,
+            bool IsEnabled,
+            bool IsHitTestVisible,
+            double Opacity,
+            double Width,
+            double Height,
+            Thickness Margin,
+            HorizontalAlignment HorizontalAlignment,
+            VerticalAlignment VerticalAlignment
+        )? BeginPrimeLayout(Size editWorkspaceSize)
+        {
+            if (editWorkspaceSize.Width <= 0 || editWorkspaceSize.Height <= 0)
+            {
+                return null;
+            }
+
+            var restore = (
+                editSlot.IsVisible,
+                editSlot.IsEnabled,
+                editSlot.IsHitTestVisible,
+                editSlot.Opacity,
+                editSlot.Width,
+                editSlot.Height,
+                editSlot.Margin,
+                editSlot.HorizontalAlignment,
+                editSlot.VerticalAlignment);
+
+            editPreview.BeginInactivePrimeVisibility();
+            editSlot.Margin = new Thickness(inactivePrimeOffscreenX, 0, 0, 0);
+            editSlot.HorizontalAlignment = HorizontalAlignment.Left;
+            editSlot.VerticalAlignment = VerticalAlignment.Top;
+            editSlot.Width = editWorkspaceSize.Width;
+            editSlot.Height = editWorkspaceSize.Height;
+            editSlot.IsEnabled = false;
+            editSlot.IsHitTestVisible = false;
+            editSlot.Opacity = 1.0;
+            editSlot.IsVisible = true;
+            editSlot.Measure(editWorkspaceSize);
+            editSlot.Arrange(new Rect(inactivePrimeOffscreenX, 0, editWorkspaceSize.Width, editWorkspaceSize.Height));
+            editSlot.UpdateLayout();
+            editPreview.UpdateLayout();
+            return restore;
+        }
+
+        void RestartPrimeTimeout()
+        {
+            ReleasePrimeTimeout();
+            primeTimeoutTimer = new Avalonia.Threading.DispatcherTimer
+            {
+                Interval = inactivePrimeTimeout
+            };
+            primeTimeoutTimer.Tick += OnPrimeTimeout;
+            primeTimeoutTimer.Start();
+        }
+
+        void OnPrimeTimeout(object? sender, EventArgs e)
+        {
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "editpreview-inactive-prime-timeout",
+                $"pendingSource={pendingDocument?.Path ?? "(null)"} viewport={pendingViewportSize.Width:F0}x{pendingViewportSize.Height:F0}");
+            CompletePrime(success: false, preserveCurrentVisibility: viewModel.IsEditMode);
+        }
+
+        void ReleasePrimeTimeout()
+        {
+            if (primeTimeoutTimer is null)
+            {
+                return;
+            }
+
+            primeTimeoutTimer.Stop();
+            primeTimeoutTimer.Tick -= OnPrimeTimeout;
+            primeTimeoutTimer = null;
+        }
+
+        void CompletePrime(bool success, bool preserveCurrentVisibility)
+        {
+            if (!primeInProgress && activePrimeRestore is null)
+            {
+                return;
+            }
+
+            ReleasePrimeTimeout();
+
+            if (activePrimeRestore is { } restore)
+            {
+                editSlot.Margin = restore.Margin;
+                editSlot.HorizontalAlignment = restore.HorizontalAlignment;
+                editSlot.VerticalAlignment = restore.VerticalAlignment;
+                editSlot.Width = restore.Width;
+                editSlot.Height = restore.Height;
+                editSlot.Opacity = restore.Opacity;
+                if (!preserveCurrentVisibility)
+                {
+                    editSlot.IsVisible = restore.IsVisible;
+                    editSlot.IsEnabled = restore.IsEnabled;
+                    editSlot.IsHitTestVisible = restore.IsHitTestVisible;
+                }
+
+                activePrimeRestore = null;
+            }
+
+            editPreview.EndInactivePrimeVisibility();
+            if (success && pendingDocument is not null)
+            {
+                primedDocument = pendingDocument;
+                primedPreferences = pendingPreferences;
+                primedViewportSize = pendingViewportSize;
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "editpreview-inactive-prime-complete",
+                    $"source={pendingDocument.Path} viewport={pendingViewportSize.Width:F0}x{pendingViewportSize.Height:F0}");
+            }
+
+            primeInProgress = false;
+            pendingDocument = null;
+            pendingPreferences = null;
+            pendingViewportSize = default;
+        }
+    }
+
+    private static Size ResolveInactiveEditPrimeSize(Panel contentPanel, Control viewerSlot)
+    {
+        _ = contentPanel;
+        var width = double.IsFinite(viewerSlot.Bounds.Width) && viewerSlot.Bounds.Width > 0
+            ? viewerSlot.Bounds.Width
+            : 0;
+        var height = double.IsFinite(viewerSlot.Bounds.Height) && viewerSlot.Bounds.Height > 0
+            ? viewerSlot.Bounds.Height
+            : 0;
+        return new Size(width, height);
+    }
+
+    private static Size ResolveInactiveEditPreviewViewportSize(Size editWorkspaceSize)
+    {
+        const double editSplitterWidth = 1.0;
+        const double previewToolbarHeight = 34.0;
+        var gutter = ApplicateDocumentLayout.GetWebSlotScrollBarGutter();
+        var previewColumnWidth = System.Math.Max(1, (editWorkspaceSize.Width - editSplitterWidth) * 0.5);
+        var viewportWidth = System.Math.Max(1, previewColumnWidth - gutter.Left - gutter.Right);
+        var viewportHeight = System.Math.Max(1, editWorkspaceSize.Height - previewToolbarHeight);
+        return new Size(viewportWidth, viewportHeight);
+    }
+
+    private static bool AreClose(double left, double right)
+        => System.Math.Abs(left - right) < 0.5;
 
     private void OnApplicateMainWindowClosed(object? sender, EventArgs e)
     {
         _siblingMountBridge?.Dispose();
         _siblingMountBridge = null;
+        _modeTransactionHostRouter?.Dispose();
+        _modeTransactionHostRouter = null;
         ApplicateWebMarkdownDocumentView.HostShortcutHandler = null;
         Closed -= OnApplicateMainWindowClosed;
     }
@@ -1652,41 +1984,68 @@ public sealed class ApplicateMainWindow : MainWindow
     // ownership of error recovery on the next user render if pre-warm fails.
     private void InstallSharedWebViewPreWarm()
     {
-        var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
-        if (sharedHost is null)
+        foreach (var sharedHost in EnumerateSharedWebViewHosts())
         {
-            return;
+            // The Avalonia.Controls.WebView controller initialises lazily once the
+            // View is in a realised visual subtree (warmup panel is in BodyPanel by
+            // this point). Navigate() called now queues internally and fires at
+            // environment-ready; the asset-bundle GetAsync await yields the UI
+            // thread immediately so the remaining ctor work (install-tabs, sibling-
+            // views, install-hooks) proceeds without blocking.
+            _ = sharedHost.PreWarmShellAsync();
         }
-        // The Avalonia.Controls.WebView controller initialises lazily once the
-        // View is in a realised visual subtree (warmup panel is in BodyPanel by
-        // this point). Navigate() called now queues internally and fires at
-        // environment-ready; the asset-bundle GetAsync await yields the UI
-        // thread immediately so the remaining ctor work (install-tabs, sibling-
-        // views, install-hooks) proceeds without blocking.
-        _ = sharedHost.PreWarmShellAsync();
     }
 
     private void InstallSharedWebViewWarmupPanel()
     {
         var bodyPanel = this.FindControl<Panel>("BodyPanel");
-        var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
-        if (bodyPanel is null || sharedHost is null)
+        if (bodyPanel is null)
         {
             return;
         }
 
-        var warmupPanel = new Panel
+        var index = 0;
+        foreach (var sharedHost in EnumerateSharedWebViewHosts())
         {
-            Width = WarmupPanelWidth,
-            Height = WarmupPanelHeight,
-            HorizontalAlignment = HorizontalAlignment.Left,
-            VerticalAlignment = VerticalAlignment.Top,
-            Margin = WarmupPanelMargin,
-            IsHitTestVisible = false,
-            UseLayoutRounding = true
-        };
+            var warmupPanel = new Panel
+            {
+                Width = WarmupPanelWidth,
+                Height = WarmupPanelHeight,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(
+                    WarmupPanelMargin.Left - (WarmupPanelWidth + 32) * index,
+                    WarmupPanelMargin.Top,
+                    WarmupPanelMargin.Right,
+                    WarmupPanelMargin.Bottom),
+                IsHitTestVisible = false,
+                UseLayoutRounding = true
+            };
 
-        bodyPanel.Children.Add(warmupPanel);
-        sharedHost.SetWarmupParent(warmupPanel);
+            bodyPanel.Children.Add(warmupPanel);
+            sharedHost.SetWarmupParent(warmupPanel);
+            index++;
+        }
+    }
+
+    private static IEnumerable<IApplicateSharedWebViewHost> EnumerateSharedWebViewHosts()
+    {
+        var provider = App.Services?.GetService<IApplicateSharedWebViewHostProvider>();
+        if (provider is not null)
+        {
+            yield return provider.ViewerHost;
+            if (!ReferenceEquals(provider.ViewerHost, provider.EditPreviewHost))
+            {
+                yield return provider.EditPreviewHost;
+            }
+
+            yield break;
+        }
+
+        var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
+        if (sharedHost is not null)
+        {
+            yield return sharedHost;
+        }
     }
 }

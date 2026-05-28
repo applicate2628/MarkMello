@@ -27,8 +27,15 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
     private HostState _state = HostState.Parked;
     private long _generation;
     private long _activeGeneration;
+    private long _activeTransactionGeneration;
+    private long _minimapSettledTransactionGeneration;
+    private long _rendererSettledTransactionGeneration;
     private MarkdownSource? _failureSource;
     private ApplicateWebRenderRequest? _failureRequest;
+    private ApplicateMode _currentMode = ApplicateMode.Edit;
+    private long _transactionNativeRevealGeneration;
+    private bool _transactionNativeRevealPending;
+    private TimeSpan _pendingTransactionRevealDuration;
 
     // Set to true after the first successful Commit. While false (cold start)
     // the host hides the consumer slot on AttachTo / RequestRender so the user
@@ -83,6 +90,8 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         // renderer available.
         View = new ApplicateWebMarkdownDocumentView(renderer, shellAssetFactory);
         View.DocumentRendered += OnViewDocumentRendered;
+        View.MinimapSettled += OnViewMinimapSettled;
+        View.ModeToggleTransactionSettled += OnViewModeToggleTransactionSettled;
         View.FallbackRequested += OnViewFallbackRequested;
         ApplicateTrace.DiagMs("startup-webview", "shared-host-ctor-end");
     }
@@ -138,6 +147,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         ArgumentNullException.ThrowIfNull(intent);
 
         _currentIntent = intent;
+        _currentMode = intent.ViewerChromeEnabled ? ApplicateMode.Viewer : ApplicateMode.Edit;
 
         if (ReferenceEquals(_currentParent, target))
         {
@@ -148,15 +158,23 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
             return;
         }
 
+        var transactionalAttach = ApplicateModeTransactionContext.GetTransactionGeneration(target) > 0;
         var previousParent = _currentParent;
         ApplicateTrace.ModeToggle(
             $"SharedHost.AttachTo target.Bounds={target.Bounds} previous={(previousParent is null ? "(null)" : previousParent.GetType().Name)}");
         ApplicateTrace.DiagMs(
             "pane-seq",
             "host-attachto-start",
-            $"targetBounds={target.Bounds.Width:F0}x{target.Bounds.Height:F0} previous={(previousParent is null ? "null" : previousParent.GetType().Name)} hasEverCommitted={_hasEverCommitted}");
+            $"targetBounds={target.Bounds.Width:F0}x{target.Bounds.Height:F0} previous={(previousParent is null ? "null" : previousParent.GetType().Name)} hasEverCommitted={_hasEverCommitted} transactionAttach={transactionalAttach}");
         var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        PrepareTargetForReveal(target);
+        if (!transactionalAttach)
+        {
+            PrepareTargetForReveal(target);
+        }
+        else if (_hasEverCommitted)
+        {
+            View.PrepareNativeRendererForReveal(CurrentModeSwitchDuration());
+        }
 
         // Anti-airspace-leak (RESTORED 2026-05-19 — c8c48c2 wiring inadvertently
         // removed by 354fa86 refactor "remove View.MinHeight writes from consumers";
@@ -215,15 +233,27 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         // means RequestRender for edit never fires, leaving the edit pane
         // blank. Hiding the symptom is also kostyl per AGENTS no-kostyl rule.
         // Architectural fix needed — see follow-up discussion on this branch.
-        target.IsVisible = _hasEverCommitted;
-        if (_hasEverCommitted)
+        if (!transactionalAttach)
         {
-            // Setting the new target visible is still required so edit and
-            // viewer consumers can issue their RequestRender fast path, but
-            // NativeControlHost may immediately reshow the reparented child
-            // HWND at the previous slot bounds. Re-hide it inside AttachTo
-            // itself; Commit will perform the settled offscreen prepaint and
-            // final reveal after layout.
+            target.IsVisible = _hasEverCommitted;
+            if (_hasEverCommitted)
+            {
+                // Setting the new target visible is still required so edit and
+                // viewer consumers can issue their RequestRender fast path, but
+                // NativeControlHost may immediately reshow the reparented child
+                // HWND at the previous slot bounds. Re-hide it inside AttachTo
+                // itself; Commit will perform the settled offscreen prepaint and
+                // final reveal after layout.
+                View.SetNativeWebViewVisibility(false);
+            }
+        }
+        else
+        {
+            // A positive bridge transaction means the bridge owns both outer
+            // slot visibility and opacity. Keep the native child hidden, but
+            // do not collapse or fade the target panel here; the renderer
+            // needs a visible layout target so the bridge can wait for the
+            // final bounds before revealing the HWND.
             View.SetNativeWebViewVisibility(false);
         }
 
@@ -282,11 +312,35 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
     }
 
     public void RequestRender(MarkdownSource? source, ApplicateWebRenderRequest request)
+        => RequestRender(source, request, transactionGeneration: 0);
+
+    public void RequestRender(MarkdownSource? source, ApplicateWebRenderRequest request, long transactionGeneration)
+        => RequestRender(
+            source,
+            request,
+            transactionGeneration,
+            keepColdParentVisibleForInactivePrime: false);
+
+    public void RequestInactivePrimeRender(MarkdownSource? source, ApplicateWebRenderRequest request)
+        => RequestRender(
+            source,
+            request,
+            transactionGeneration: 0,
+            keepColdParentVisibleForInactivePrime: true);
+
+    private void RequestRender(
+        MarkdownSource? source,
+        ApplicateWebRenderRequest request,
+        long transactionGeneration,
+        bool keepColdParentVisibleForInactivePrime)
     {
         ArgumentNullException.ThrowIfNull(request);
 
         _failureSource = source;
         _failureRequest = request;
+        _activeTransactionGeneration = transactionGeneration;
+        _minimapSettledTransactionGeneration = 0;
+        _rendererSettledTransactionGeneration = 0;
 
         var newGeneration = ++_generation;
         _activeGeneration = newGeneration;
@@ -299,12 +353,22 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         // very "garbage gap" we are eliminating. Single source of truth for
         // "do we already have something safe to show" is _hasEverCommitted.
         // The warmup parent stays IsVisible=true offscreen regardless so
-        // the WebView2 controller stays warm.
-        if (!_hasEverCommitted
+        // the WebView2 controller stays warm. Inactive edit-prime is another
+        // offscreen-visible path: hiding its child panel prevents Chromium
+        // from reaching layout-ready, so that caller explicitly keeps the
+        // current parent visible while the outer slot is outside the window.
+        var transactionalRequest = transactionGeneration > 0;
+        if (!transactionalRequest
+            && !keepColdParentVisibleForInactivePrime
+            && !_hasEverCommitted
             && _currentParent is not null
             && !ReferenceEquals(_currentParent, _warmupParent))
         {
             _currentParent.IsVisible = false;
+        }
+        if (transactionalRequest)
+        {
+            View.SetNativeWebViewVisibility(false);
         }
 
         // State machine always transitions through SWITCHING so the next
@@ -322,7 +386,13 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
             availableContentWidth: request.AvailableContentWidth,
             viewerChromeEnabled: _currentIntent.ViewerChromeEnabled,
             documentScrollEnabled: _currentIntent.DocumentScrollEnabled,
-            wheelProxyEnabled: _currentIntent.WheelProxyEnabled);
+            wheelProxyEnabled: _currentIntent.WheelProxyEnabled,
+            deferLivePreferencesUntilModeSettleProbe: transactionGeneration > 0);
+
+        if (transactionGeneration > 0 && !_currentIntent.ViewerChromeEnabled)
+        {
+            RaiseMinimapSettled(transactionGeneration, state: null);
+        }
 
         // Fast path: when UpdateInputs determines the document is already
         // loaded (same source + same image resolver), no new DocumentRendered
@@ -348,12 +418,46 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
 
     public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
 
+    public event EventHandler<ApplicateMinimapSettledEventArgs>? MinimapSettled;
+
+    public event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted;
+
+    public event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled;
+
     public event EventHandler? RevealCompleted;
 
     public void SuppressNativeRendererForModeSwitch()
     {
         ApplicateTrace.ModeToggle($"SharedHost.SuppressNativeRendererForModeSwitch gen={_activeGeneration}");
         View.ParkNativeWebViewForReparent();
+    }
+
+    public void SuppressNativeRendererForModeSwitch(ApplicateMode displayedMode)
+    {
+        if (displayedMode != _currentMode)
+        {
+            ApplicateTrace.ModeToggle(
+                $"SharedHost.SuppressNativeRendererForModeSwitch skipped displayed={displayedMode} current={_currentMode}");
+            return;
+        }
+
+        ApplicateTrace.ModeToggle(
+            $"SharedHost.SuppressNativeRendererForModeSwitch displayed={displayedMode} gen={_activeGeneration}");
+        View.SetNativeWebViewVisibility(false);
+    }
+
+    public void RestoreNativeRendererAfterModeSwitchSuppression(ApplicateMode displayedMode)
+    {
+        if (displayedMode != _currentMode)
+        {
+            ApplicateTrace.ModeToggle(
+                $"SharedHost.RestoreNativeRendererAfterModeSwitchSuppression skipped displayed={displayedMode} current={_currentMode}");
+            return;
+        }
+
+        ApplicateTrace.ModeToggle(
+            $"SharedHost.RestoreNativeRendererAfterModeSwitchSuppression displayed={displayedMode} gen={_activeGeneration}");
+        View.SetNativeWebViewVisibility(true);
     }
 
     /// <summary>
@@ -482,14 +586,18 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
             "host-commit-enter",
             $"parent={(_currentParent is null ? "null" : _currentParent.GetType().Name)} reparented={_reparentedThisCycle} hasEverCommitted={_hasEverCommitted} viewBounds={View.Bounds.Width:F0}x{View.Bounds.Height:F0}");
 
-        var armRevealGate = _reparentedThisCycle && _hasEverCommitted;
+        var transactionalCommit = _activeTransactionGeneration > 0;
+        var armRevealGate = !transactionalCommit && _reparentedThisCycle && _hasEverCommitted;
         var modeSwitchDuration = CurrentModeSwitchDuration();
         _reparentedThisCycle = false;
 
         if (_currentParent is not null
             && !ReferenceEquals(_currentParent, _warmupParent))
         {
-            _currentParent.IsVisible = true;
+            if (!transactionalCommit)
+            {
+                _currentParent.IsVisible = true;
+            }
 
             // Force synchronous layout pass so View.Bounds reflects the new
             // parent's bounds BEFORE we re-show the HWND. Without this, the
@@ -502,7 +610,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
             // synchronous-layout path Avalonia exposes for exactly this case.
             _currentParent.UpdateLayout();
 
-            if (armRevealGate)
+            if (transactionalCommit || armRevealGate)
             {
                 // NativeControlHost can reshow the child HWND while the
                 // previously hidden slot is made visible for layout. Re-hide
@@ -525,7 +633,18 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         // Pure same-source/same-panel Commit (no reparent) also keeps the
         // legacy immediate-show: the HWND's backing store already paints the
         // correct bounds, there is no reflow window to wait through.
-        if (armRevealGate)
+        if (transactionalCommit)
+        {
+            _transactionNativeRevealGeneration = _activeTransactionGeneration;
+            _transactionNativeRevealPending = true;
+            _pendingTransactionRevealDuration = modeSwitchDuration;
+            View.PrepareNativeRendererForReveal(modeSwitchDuration);
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "host-commit-waiting-bridge-native-reveal",
+                $"transactionGeneration={_activeTransactionGeneration}");
+        }
+        else if (armRevealGate)
         {
             ApplicateTrace.DiagMs("pane-seq", "host-commit-armed-revealgate");
             _pendingRevealDuration = modeSwitchDuration;
@@ -564,6 +683,88 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
 
         ApplicateTrace.ModeToggle(
             $"SharedHost.Commit gen={_activeGeneration} slot={(_currentParent is null ? "(null)" : _currentParent.GetType().Name)} revealGate={armRevealGate}");
+        CommitCompleted?.Invoke(
+            this,
+            new ApplicateCommitCompletedEventArgs(
+                _currentMode,
+                _currentParent?.Bounds ?? default,
+                _activeTransactionGeneration));
+
+        if (_activeTransactionGeneration > 0 && _currentMode == ApplicateMode.Viewer)
+        {
+            View.RequestMinimapSettleProbe(_activeTransactionGeneration);
+        }
+        if (_activeTransactionGeneration > 0)
+        {
+            View.RequestModeToggleSettleProbe(_activeTransactionGeneration);
+        }
+    }
+
+    public bool RevealNativeWebViewForCommittedTransaction(long transactionGeneration)
+    {
+        if (transactionGeneration <= 0
+            || !_transactionNativeRevealPending
+            || transactionGeneration != _transactionNativeRevealGeneration
+            || transactionGeneration != _activeTransactionGeneration
+            || _state != HostState.Committed)
+        {
+            return false;
+        }
+
+        _transactionNativeRevealPending = false;
+        _transactionNativeRevealGeneration = 0;
+        var duration = _pendingTransactionRevealDuration;
+        _pendingTransactionRevealDuration = TimeSpan.Zero;
+        View.CompleteNativeWebViewHiddenPaint();
+        View.RevealNativeRenderer(duration);
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "host-hwnd-shown",
+            $"path=bridge-transaction transactionGeneration={transactionGeneration}");
+        return true;
+    }
+
+    private void OnViewMinimapSettled(object? sender, ApplicateWebMinimapSettledEventArgs e)
+    {
+        RaiseMinimapSettled(e.TransactionGeneration, e.State);
+    }
+
+    private void OnViewModeToggleTransactionSettled(
+        object? sender,
+        ApplicateWebModeToggleSettledEventArgs e)
+    {
+        RaiseRendererSettled(e.TransactionGeneration);
+    }
+
+    private bool RaiseMinimapSettled(long transactionGeneration, ApplicateWebMinimapStateEventArgs? state)
+    {
+        if (transactionGeneration <= 0
+            || transactionGeneration != _activeTransactionGeneration
+            || _minimapSettledTransactionGeneration == transactionGeneration)
+        {
+            return false;
+        }
+
+        _minimapSettledTransactionGeneration = transactionGeneration;
+        var args = state is null
+            ? ApplicateMinimapSettledEventArgs.NotApplicable(transactionGeneration)
+            : new ApplicateMinimapSettledEventArgs(transactionGeneration, state);
+        MinimapSettled?.Invoke(this, args);
+        return true;
+    }
+
+    private bool RaiseRendererSettled(long transactionGeneration)
+    {
+        if (transactionGeneration <= 0
+            || transactionGeneration != _activeTransactionGeneration
+            || _rendererSettledTransactionGeneration == transactionGeneration)
+        {
+            return false;
+        }
+
+        _rendererSettledTransactionGeneration = transactionGeneration;
+        RendererSettled?.Invoke(this, new ApplicateRendererSettledEventArgs(transactionGeneration));
+        return true;
     }
 
     /// <summary>
@@ -743,12 +944,26 @@ internal sealed class ApplicateSharedWebViewHostStateMachine
     private Panel? _warmupParent;
     private Panel? _currentParent;
     private long _generation;
+    private long _activeTransactionGeneration;
+    private long _minimapSettledTransactionGeneration;
+    private long _rendererSettledTransactionGeneration;
+    private long _transactionNativeRevealGeneration;
+    private bool _transactionNativeRevealPending;
+    private ApplicateMode _currentMode = ApplicateMode.Edit;
 
     public State CurrentState { get; private set; } = State.Parked;
 
     public long CurrentGeneration => _generation;
 
     public Panel? CurrentParent => _currentParent;
+
+    public bool NativeWebViewVisible { get; private set; }
+
+    public event EventHandler<ApplicateMinimapSettledEventArgs>? MinimapSettled;
+
+    public event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted;
+
+    public event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled;
 
     public void SetWarmupParent(Panel panel)
     {
@@ -761,6 +976,9 @@ internal sealed class ApplicateSharedWebViewHostStateMachine
     }
 
     public void AttachTo(Panel target)
+        => AttachTo(target, transactionGeneration: 0);
+
+    public void AttachTo(Panel target, long transactionGeneration)
     {
         if (ReferenceEquals(_currentParent, target))
         {
@@ -769,8 +987,15 @@ internal sealed class ApplicateSharedWebViewHostStateMachine
 
         var previousParent = _currentParent;
         _currentParent = target;
-        target.Opacity = 0.0;
-        target.IsVisible = false;
+        if (transactionGeneration <= 0)
+        {
+            target.Opacity = 0.0;
+            target.IsVisible = false;
+        }
+        else
+        {
+            NativeWebViewVisible = false;
+        }
         CurrentState = State.Switching;
 
         if (previousParent is not null
@@ -804,15 +1029,72 @@ internal sealed class ApplicateSharedWebViewHostStateMachine
     }
 
     public long RequestRender()
+        => RequestRender(
+            transactionGeneration: 0,
+            mode: ApplicateMode.Viewer);
+
+    public long RequestRender(
+        long transactionGeneration,
+        ApplicateMode mode,
+        bool minimapApplicable = true,
+        bool fastPathCommit = false)
     {
         var newGen = ++_generation;
-        if (_currentParent is not null
+        _activeTransactionGeneration = transactionGeneration;
+        _minimapSettledTransactionGeneration = 0;
+        _rendererSettledTransactionGeneration = 0;
+        _currentMode = mode;
+        if (transactionGeneration <= 0
+            && _currentParent is not null
             && !ReferenceEquals(_currentParent, _warmupParent))
         {
             _currentParent.IsVisible = false;
         }
+        if (transactionGeneration > 0)
+        {
+            NativeWebViewVisible = false;
+        }
         CurrentState = State.Switching;
+        if (transactionGeneration > 0 && (mode == ApplicateMode.Edit || !minimapApplicable))
+        {
+            ApplyMinimapSettled(transactionGeneration, state: null);
+        }
+        if (fastPathCommit)
+        {
+            ApplyDocumentRendered(newGen);
+        }
         return newGen;
+    }
+
+    public bool ApplyMinimapSettled(long transactionGeneration, ApplicateWebMinimapStateEventArgs? state)
+    {
+        if (transactionGeneration <= 0
+            || transactionGeneration != _activeTransactionGeneration
+            || _minimapSettledTransactionGeneration == transactionGeneration)
+        {
+            return false;
+        }
+
+        _minimapSettledTransactionGeneration = transactionGeneration;
+        var args = state is null
+            ? ApplicateMinimapSettledEventArgs.NotApplicable(transactionGeneration)
+            : new ApplicateMinimapSettledEventArgs(transactionGeneration, state);
+        MinimapSettled?.Invoke(this, args);
+        return true;
+    }
+
+    public bool ApplyRendererSettled(long transactionGeneration)
+    {
+        if (transactionGeneration <= 0
+            || transactionGeneration != _activeTransactionGeneration
+            || _rendererSettledTransactionGeneration == transactionGeneration)
+        {
+            return false;
+        }
+
+        _rendererSettledTransactionGeneration = transactionGeneration;
+        RendererSettled?.Invoke(this, new ApplicateRendererSettledEventArgs(transactionGeneration));
+        return true;
     }
 
     /// <summary>
@@ -839,7 +1121,39 @@ internal sealed class ApplicateSharedWebViewHostStateMachine
             _currentParent.IsVisible = true;
             _currentParent.Opacity = 1.0;
         }
+        if (_activeTransactionGeneration > 0)
+        {
+            _transactionNativeRevealGeneration = _activeTransactionGeneration;
+            _transactionNativeRevealPending = true;
+        }
+        else
+        {
+            NativeWebViewVisible = true;
+        }
         CurrentState = State.Committed;
+        CommitCompleted?.Invoke(
+            this,
+            new ApplicateCommitCompletedEventArgs(
+                _currentMode,
+                _currentParent?.Bounds ?? default,
+                _activeTransactionGeneration));
+        return true;
+    }
+
+    public bool RevealNativeWebViewForCommittedTransaction(long transactionGeneration)
+    {
+        if (transactionGeneration <= 0
+            || !_transactionNativeRevealPending
+            || transactionGeneration != _transactionNativeRevealGeneration
+            || transactionGeneration != _activeTransactionGeneration
+            || CurrentState != State.Committed)
+        {
+            return false;
+        }
+
+        _transactionNativeRevealPending = false;
+        _transactionNativeRevealGeneration = 0;
+        NativeWebViewVisible = true;
         return true;
     }
 }

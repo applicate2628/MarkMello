@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia;
 using Avalonia.Controls;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Views;
@@ -49,6 +50,17 @@ public sealed record ApplicateWebMountIntent(
     bool WheelProxyEnabled);
 
 /// <summary>
+/// User-facing mode represented by the slot currently targeted by the shared
+/// WebView host. The bridge uses this as a transaction payload, not as a
+/// replacement for the view-model's edit-mode state.
+/// </summary>
+public enum ApplicateMode
+{
+    Viewer,
+    Edit,
+}
+
+/// <summary>
 /// Render request for the currently-attached slot. The host uses
 /// <see cref="ApplicateWebMountIntent"/> from the prior <see cref="IApplicateSharedWebViewHost.AttachTo"/>
 /// call to fold chrome / scroll / wheel-proxy flags into the underlying
@@ -58,6 +70,50 @@ public sealed record ApplicateWebRenderRequest(
     ReadingPreferences ReadingPreferences,
     IImageSourceResolver? ImageSourceResolver,
     double AvailableContentWidth);
+
+/// <summary>
+/// Host-level minimap readiness signal tagged with the bridge's transaction
+/// generation. <see cref="State"/> is null when the target mode has no minimap
+/// participant and the transaction should treat minimap as not applicable.
+/// </summary>
+public sealed class ApplicateMinimapSettledEventArgs(
+    long transactionGeneration,
+    ApplicateWebMinimapStateEventArgs? state) : EventArgs
+{
+    public long TransactionGeneration { get; } = transactionGeneration;
+
+    public ApplicateWebMinimapStateEventArgs? State { get; } = state;
+
+    public bool IsApplicable => State is not null;
+
+    public static ApplicateMinimapSettledEventArgs NotApplicable(long transactionGeneration)
+        => new(transactionGeneration, null);
+}
+
+/// <summary>
+/// Host-level commit signal emitted when the WebView has committed content for
+/// the current parent and the host has run its existing layout/HWND commit path.
+/// </summary>
+public sealed class ApplicateCommitCompletedEventArgs(
+    ApplicateMode mode,
+    Rect bounds,
+    long transactionGeneration) : EventArgs
+{
+    public ApplicateMode Mode { get; } = mode;
+
+    public Rect Bounds { get; } = bounds;
+
+    public long TransactionGeneration { get; } = transactionGeneration;
+}
+
+/// <summary>
+/// Host-level renderer paint-settle signal emitted after the renderer acks
+/// the transaction-scoped mode-settle probe.
+/// </summary>
+public sealed class ApplicateRendererSettledEventArgs(long transactionGeneration) : EventArgs
+{
+    public long TransactionGeneration { get; } = transactionGeneration;
+}
 
 /// <summary>
 /// Failure context emitted by <see cref="IApplicateSharedWebViewHost.RendererFailed"/>.
@@ -118,7 +174,54 @@ internal interface IApplicateModeRevealSignal
 /// generation token; <c>DocumentRendered</c> events with a stale generation
 /// are dropped silently (Invariant I-4).
 /// </summary>
-public interface IApplicateSharedWebViewHost
+public interface IApplicateModeTransactionHost
+{
+    /// <summary>
+    /// Raised when the WebView pipeline fails — runtime missing, per-document
+    /// render failure, or stale-navigation abort. Consumers subscribe to
+    /// route the failure to their slot's failure-view surface.
+    /// </summary>
+    event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
+
+    /// <summary>
+    /// Raised once per positive transaction generation when the minimap
+    /// reservation has either reported its first state or is not applicable.
+    /// </summary>
+    event EventHandler<ApplicateMinimapSettledEventArgs>? MinimapSettled;
+
+    /// <summary>
+    /// Raised when the host reaches its renderer commit point for a render
+    /// request, tagged with the transaction generation supplied by the bridge.
+    /// </summary>
+    event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted;
+
+    /// <summary>
+    /// Raised once per positive transaction generation after the renderer has
+    /// applied settle-probe preferences and passed its post-paint ack point.
+    /// </summary>
+    event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled;
+
+    /// <summary>
+    /// Reveal the native WebView HWND for a committed bridge-owned mode
+    /// transaction. Returns <c>false</c> when the generation is stale or the
+    /// host is not waiting for a bridge reveal.
+    /// </summary>
+    bool RevealNativeWebViewForCommittedTransaction(long transactionGeneration);
+
+    /// <summary>
+    /// Hide the native renderer that belongs to the mode currently displayed
+    /// before the bridge mutates the outer slot layout for a transaction.
+    /// </summary>
+    void SuppressNativeRendererForModeSwitch(ApplicateMode displayedMode);
+
+    /// <summary>
+    /// Restore the temporarily hidden displayed-mode native renderer after the
+    /// bridge has finished the protected outer slot layout mutation.
+    /// </summary>
+    void RestoreNativeRendererAfterModeSwitchSuppression(ApplicateMode displayedMode);
+}
+
+public interface IApplicateSharedWebViewHost : IApplicateModeTransactionHost
 {
     /// <summary>
     /// The shared WebView. Consumers may subscribe to non-render events
@@ -127,6 +230,11 @@ public interface IApplicateSharedWebViewHost
     /// construction.
     /// </summary>
     ApplicateWebMarkdownDocumentView View { get; }
+
+    /// <summary>
+    /// Hide this host's native WebView HWND during a mode switch.
+    /// </summary>
+    void SuppressNativeRendererForModeSwitch();
 
     /// <summary>
     /// Register the offscreen warmup panel. Called once at app startup by
@@ -173,6 +281,21 @@ public interface IApplicateSharedWebViewHost
     void RequestRender(MarkdownSource? source, ApplicateWebRenderRequest request);
 
     /// <summary>
+    /// Issue a render request tagged with the bridge-owned mode-transaction
+    /// generation. The two-argument overload remains for non-transactional
+    /// callers and maps to generation 0.
+    /// </summary>
+    void RequestRender(MarkdownSource? source, ApplicateWebRenderRequest request, long transactionGeneration);
+
+    /// <summary>
+    /// Prime an inactive, offscreen consumer slot before the user-visible mode
+    /// switch. Unlike the normal cold render path, this keeps the attached
+    /// parent visible so WebView2 can produce layout and DocumentRendered
+    /// signals while the outer slot is positioned outside the viewport.
+    /// </summary>
+    void RequestInactivePrimeRender(MarkdownSource? source, ApplicateWebRenderRequest request);
+
+    /// <summary>
     /// Retry the last failed render in the current slot. Re-uses the source
     /// and request from the in-flight generation at the failure moment so
     /// transient renderer-side faults can recover without consumer
@@ -180,13 +303,6 @@ public interface IApplicateSharedWebViewHost
     /// failure was terminal (<see cref="ApplicateRendererFailureKind.WebView2RuntimeMissing"/>).
     /// </summary>
     void RetryRender();
-
-    /// <summary>
-    /// Raised when the WebView pipeline fails — runtime missing, per-document
-    /// render failure, or stale-navigation abort. Consumers subscribe to
-    /// route the failure to their slot's failure-view surface.
-    /// </summary>
-    event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
 
     /// <summary>
     /// Pre-warm the renderer shell at app boot so the first user

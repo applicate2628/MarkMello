@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -27,6 +28,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 {
     private const double MaxRendererReportedMinimapReservedWidth = 2000;
     private const int NativeOffscreenMargin = 512;
+    private const int IUnknownVtableSlotCount = 3;
+    private const string CoreWebView2InteropTypeName = "Avalonia.Controls.Win.WebView2.Interop.ICoreWebView2";
+    private static readonly int CoreWebView2PostWebMessageAsJsonVtableSlot =
+        ResolveCoreWebView2PostWebMessageAsJsonVtableSlot();
 
     public static readonly StyledProperty<MarkdownSource?> SourceProperty =
         AvaloniaProperty.Register<ApplicateWebMarkdownDocumentView, MarkdownSource?>(nameof(Source));
@@ -188,6 +193,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     public event EventHandler<ApplicateWebMinimapStateEventArgs>? MinimapStateChanged;
 
+    public event EventHandler<ApplicateWebMinimapSettledEventArgs>? MinimapSettled;
+
+    public event EventHandler<ApplicateWebModeToggleSettledEventArgs>? ModeToggleTransactionSettled;
+
     public event EventHandler<ApplicateWebWidthDragEventArgs>? WidthDragRequested;
 
     public event EventHandler<ApplicateWebWheelEventArgs>? WheelRequested;
@@ -237,7 +246,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         double availableContentWidth,
         bool viewerChromeEnabled,
         bool documentScrollEnabled = true,
-        bool wheelProxyEnabled = false)
+        bool wheelProxyEnabled = false,
+        bool deferLivePreferencesUntilModeSettleProbe = false)
     {
         var action = DetermineInputUpdateAction(
             sourceChanged: !Equals(Source, source),
@@ -274,7 +284,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
-        if (action == ApplicateWebInputUpdateAction.ApplyLivePreferences)
+        if (action == ApplicateWebInputUpdateAction.ApplyLivePreferences
+            && !deferLivePreferencesUntilModeSettleProbe)
         {
             ApplyReadingPreferences();
         }
@@ -560,10 +571,23 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         var handle = _webView.TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
-        if (handle == IntPtr.Zero || _pendingNativeHiddenPaintPlacement is not { } placement)
+        if (handle == IntPtr.Zero)
         {
             SetNativeWebViewVisibility(true);
             return;
+        }
+
+        var placementSource = "pending";
+        if (_pendingNativeHiddenPaintPlacement is not { } placement)
+        {
+            SyncNativeWebViewWindowSize(handle);
+            if (!TryCaptureNativeWebViewPlacement(handle, out placement))
+            {
+                SetNativeWebViewVisibility(true);
+                return;
+            }
+
+            placementSource = "current";
         }
 
         _pendingNativeHiddenPaintPlacement = null;
@@ -571,7 +595,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         // Do not copy the offscreen backing store into the visible slot. The
         // 2026-05-24 frame capture showed WebView2 can expose one fragmented
         // text frame when Windows preserves those bits during the move back.
-        // Force a normal repaint at the settled bounds instead.
+        // Force a normal repaint at the settled bounds instead. Transactional
+        // mode switches intentionally use the current hidden placement here:
+        // moving the HWND offscreen before the renderer's rAF-settle ACK can
+        // stall that ACK, so the no-copy repaint belongs at reveal time.
         var flags = NativeMethods.SwpNoZOrder
             | NativeMethods.SwpNoActivate
             | NativeMethods.SwpNoOwnerZOrder
@@ -587,7 +614,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         SyncNativeWebViewChildTree(handle);
         SetNativeWebViewTreeVisibility(handle, isVisible: true);
         ApplicateTrace.ModeToggle(
-            $"CompleteNativeWebViewHiddenPaint restored={restored} saved={placement.X},{placement.Y},{placement.Width}x{placement.Height}");
+            $"CompleteNativeWebViewHiddenPaint restored={restored} source={placementSource} saved={placement.X},{placement.Y},{placement.Width}x{placement.Height}");
     }
 
     private void SyncNativeWebViewWindowSize(IntPtr handle)
@@ -921,8 +948,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (_shellReady is not null)
             {
                 ApplicateTrace.ModeToggle($"Web.RenderShell wait-shell-ready id={renderId}");
-                using var registration = cancellationToken.Register(() => _shellReady.TrySetCanceled(cancellationToken));
-                await _shellReady.Task.ConfigureAwait(true);
+                await _shellReady.Task.WaitAsync(cancellationToken).ConfigureAwait(true);
                 ApplicateTrace.ModeToggle($"Web.RenderShell shell-ready id={renderId}");
             }
 
@@ -1078,8 +1104,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             // shell-prewarm-ready must mean fully-ready, not just navigated).
             if (_shellReady is not null)
             {
-                using var registration = cancellationToken.Register(() => _shellReady.TrySetCanceled(cancellationToken));
-                await _shellReady.Task.ConfigureAwait(true);
+                await _shellReady.Task.WaitAsync(cancellationToken).ConfigureAwait(true);
             }
         }
         catch (OperationCanceledException)
@@ -1087,9 +1112,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             // Pre-warm cancelled (window closed, dispose race). Leave
             // _shellNavigated == false so the lazy path takes over on the
             // next user render; QueueRenderShellAsync will retry the shell
-            // navigation. _shellReady's TCS is still null-or-pending, which
-            // QueueRenderShellAsync handles by either re-initialising or
-            // awaiting the existing TCS.
+            // navigation. _shellReady's TCS remains pending so a cancelled
+            // pre-warm does not poison later lazy render attempts.
             throw;
         }
         catch
@@ -1448,12 +1472,13 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
             if (type == "mode-toggle-settled")
             {
-                // Renderer ack to the host-sent mode-settle-probe. Two rAFs
-                // have elapsed in the renderer, so CSS reflow on any new slot
-                // bounds has propagated and one paint has happened. The host
-                // listens once and uses this to flip HWND visibility on the
-                // Commit fast-path; see ApplicateSharedWebViewHost.Commit().
-                ModeToggleSettled?.Invoke(this, EventArgs.Empty);
+                HandleModeToggleSettledMessage(document.RootElement);
+                return;
+            }
+
+            if (type == "minimap-settled")
+            {
+                HandleMinimapSettledMessage(document.RootElement);
                 return;
             }
 
@@ -1723,6 +1748,35 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         CompleteLayoutReady();
     }
 
+    private void HandleMinimapSettledMessage(JsonElement root)
+    {
+        if (!TryReadMinimapSettledState(root, out var settled) || settled is null)
+        {
+            return;
+        }
+
+        MinimapSettled?.Invoke(this, settled);
+    }
+
+    private void HandleModeToggleSettledMessage(JsonElement root)
+    {
+        if (!TryReadModeToggleSettledState(root, out var settled) || settled is null)
+        {
+            return;
+        }
+
+        // Renderer ack to the host-sent mode-settle-probe. Two rAFs have
+        // elapsed in the renderer, so CSS reflow on any new slot bounds has
+        // propagated and one paint has happened.
+        if (settled.IsTransactional)
+        {
+            ModeToggleTransactionSettled?.Invoke(this, settled);
+            return;
+        }
+
+        ModeToggleSettled?.Invoke(this, EventArgs.Empty);
+    }
+
     internal static bool TryReadMinimapState(JsonElement root, out ApplicateWebMinimapStateEventArgs? state)
     {
         state = null;
@@ -1750,6 +1804,55 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         state = new ApplicateWebMinimapStateEventArgs(visible: true, reservedWidth);
+        return true;
+    }
+
+    internal static bool TryReadMinimapSettledState(JsonElement root, out ApplicateWebMinimapSettledEventArgs? settled)
+    {
+        settled = null;
+        if (!root.TryGetProperty("type", out var typeProperty)
+            || typeProperty.ValueKind != JsonValueKind.String
+            || !string.Equals(typeProperty.GetString(), "minimap-settled", StringComparison.Ordinal)
+            || !root.TryGetProperty("transactionGeneration", out var generationProperty)
+            || generationProperty.ValueKind != JsonValueKind.Number
+            || !generationProperty.TryGetInt64(out var transactionGeneration)
+            || transactionGeneration <= 0
+            || !TryReadMinimapState(root, out var state)
+            || state is null)
+        {
+            return false;
+        }
+
+        settled = new ApplicateWebMinimapSettledEventArgs(transactionGeneration, state);
+        return true;
+    }
+
+    internal static bool TryReadModeToggleSettledState(
+        JsonElement root,
+        out ApplicateWebModeToggleSettledEventArgs? settled)
+    {
+        settled = null;
+        if (!root.TryGetProperty("type", out var typeProperty)
+            || typeProperty.ValueKind != JsonValueKind.String
+            || !string.Equals(typeProperty.GetString(), "mode-toggle-settled", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!root.TryGetProperty("transactionGeneration", out var generationProperty))
+        {
+            settled = new ApplicateWebModeToggleSettledEventArgs(0);
+            return true;
+        }
+
+        if (generationProperty.ValueKind != JsonValueKind.Number
+            || !generationProperty.TryGetInt64(out var transactionGeneration)
+            || transactionGeneration <= 0)
+        {
+            return false;
+        }
+
+        settled = new ApplicateWebModeToggleSettledEventArgs(transactionGeneration);
         return true;
     }
 
@@ -2136,6 +2239,35 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         };
     }
 
+    private object BuildReadingPreferencesMessage(string type, long transactionGeneration)
+    {
+        if (transactionGeneration <= 0)
+        {
+            return BuildReadingPreferencesMessage(type);
+        }
+
+        var maxWidth = double.IsFinite(AvailableContentWidth) && AvailableContentWidth > 0
+            ? AvailableContentWidth
+            : ReadingPreferences.ContentWidth;
+        return new
+        {
+            type,
+            fontFamily = ReadingPreferences.FontFamily.ToString().ToLowerInvariant(),
+            fontSize = ReadingPreferences.FontSize,
+            lineHeight = ReadingPreferences.LineHeight,
+            maxWidth,
+            minMaxWidth = ApplicateDocumentLayout.MinManualContentWidth,
+            minimapMode = ReadingPreferences.DocumentMinimapMode.ToString().ToLowerInvariant(),
+            viewerChromeEnabled = ViewerChromeEnabled,
+            documentScrollEnabled = DocumentScrollEnabled,
+            wheelProxyEnabled = WheelProxyEnabled,
+            widthResizerVisibility = ToRendererWidthResizerVisibility(ReadingPreferences.WidthResizerVisibility),
+            viewportWidth = _webView.Bounds.Width,
+            viewportHeight = _webView.Bounds.Height,
+            transactionGeneration
+        };
+    }
+
     private void BeginAwaitingLayoutReady()
     {
         _awaitingLayoutReady = true;
@@ -2192,6 +2324,31 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         PostRendererMessage(BuildReadingPreferencesMessage("mode-settle-probe"));
     }
 
+    internal void RequestModeToggleSettleProbe(long transactionGeneration)
+    {
+        if (transactionGeneration <= 0)
+        {
+            RequestModeToggleSettleProbe();
+            return;
+        }
+
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "host-transaction-settle-probe-sent",
+            $"transactionGeneration={transactionGeneration}");
+        PostRendererMessage(BuildReadingPreferencesMessage("mode-settle-probe", transactionGeneration));
+    }
+
+    internal void RequestMinimapSettleProbe(long transactionGeneration)
+    {
+        if (transactionGeneration <= 0)
+        {
+            return;
+        }
+
+        PostRendererMessage(new { type = "minimap-settle-probe", transactionGeneration });
+    }
+
     public void ScrollToProgress(double progressPercent)
     {
         var progress = double.IsFinite(progressPercent)
@@ -2203,8 +2360,114 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private void PostRendererMessage(object message)
     {
         var payload = JsonSerializer.Serialize(message);
+        var isModeSettleProbe = payload.Contains("\"type\":\"mode-settle-probe\"", StringComparison.Ordinal);
+        var postStart = isModeSettleProbe ? Stopwatch.GetTimestamp() : 0;
+        if (TryPostRendererMessageNative(payload))
+        {
+            if (isModeSettleProbe)
+            {
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "host-renderer-message-native-post-end",
+                    $"elapsedMs={Stopwatch.GetElapsedTime(postStart).TotalMilliseconds:F2}");
+            }
+
+            return;
+        }
+
+        if (isModeSettleProbe)
+        {
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "host-renderer-message-fallback-invoke",
+                $"elapsedMs={Stopwatch.GetElapsedTime(postStart).TotalMilliseconds:F2}");
+        }
+
         _ = InvokeRendererAsync($"window.postMessage({payload},'*');");
     }
+
+    private bool TryPostRendererMessageNative(string payload)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        if (_webView.TryGetPlatformHandle() is not IWindowsWebView2PlatformHandle platformHandle
+            || platformHandle.CoreWebView2 == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        var isModeSettleProbe = payload.Contains("\"type\":\"mode-settle-probe\"", StringComparison.Ordinal);
+        try
+        {
+            InvokeCoreWebView2PostWebMessageAsJson(platformHandle.CoreWebView2, payload);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (isModeSettleProbe)
+            {
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "host-renderer-message-native-post-failed",
+                    $"reason={ex.GetType().Name}");
+            }
+
+            return false;
+        }
+    }
+
+    private static int ResolveCoreWebView2PostWebMessageAsJsonVtableSlot()
+    {
+        var interopType = typeof(NativeWebView).Assembly.GetType(CoreWebView2InteropTypeName);
+        if (interopType is null)
+        {
+            return -1;
+        }
+
+        var methods = interopType.GetMethods();
+        Array.Sort(methods, static (left, right) => left.MetadataToken.CompareTo(right.MetadataToken));
+        for (var index = 0; index < methods.Length; index++)
+        {
+            if (methods[index].Name.Equals("PostWebMessageAsJson", StringComparison.Ordinal))
+            {
+                return IUnknownVtableSlotCount + index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static void InvokeCoreWebView2PostWebMessageAsJson(IntPtr coreWebView2, string payload)
+    {
+        if (CoreWebView2PostWebMessageAsJsonVtableSlot < IUnknownVtableSlotCount)
+        {
+            throw new InvalidOperationException("CoreWebView2 PostWebMessageAsJson vtable slot was not resolved.");
+        }
+
+        var vtable = Marshal.ReadIntPtr(coreWebView2);
+        var entry = Marshal.ReadIntPtr(
+            vtable,
+            CoreWebView2PostWebMessageAsJsonVtableSlot * IntPtr.Size);
+        if (entry == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("CoreWebView2 PostWebMessageAsJson vtable entry is null.");
+        }
+
+        var postWebMessageAsJson = Marshal.GetDelegateForFunctionPointer<CoreWebView2PostWebMessageAsJsonDelegate>(entry);
+        var hresult = postWebMessageAsJson(coreWebView2, payload);
+        if (hresult < 0)
+        {
+            Marshal.ThrowExceptionForHR(hresult);
+        }
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int CoreWebView2PostWebMessageAsJsonDelegate(
+        IntPtr coreWebView2,
+        [MarshalAs(UnmanagedType.LPWStr)] string webMessageAsJson);
 
     private async Task InvokeRendererAsync(string script)
     {
@@ -2459,6 +2722,22 @@ public sealed class ApplicateWebMinimapStateEventArgs(
     public bool Visible { get; } = visible;
 
     public double ReservedWidth { get; } = reservedWidth;
+}
+
+public sealed class ApplicateWebMinimapSettledEventArgs(
+    long transactionGeneration,
+    ApplicateWebMinimapStateEventArgs state) : EventArgs
+{
+    public long TransactionGeneration { get; } = transactionGeneration;
+
+    public ApplicateWebMinimapStateEventArgs State { get; } = state;
+}
+
+public sealed class ApplicateWebModeToggleSettledEventArgs(long transactionGeneration) : EventArgs
+{
+    public long TransactionGeneration { get; } = transactionGeneration;
+
+    public bool IsTransactional => TransactionGeneration > 0;
 }
 
 public sealed class ApplicateWebPreviewSourceLineEventArgs(int sourceLine) : EventArgs

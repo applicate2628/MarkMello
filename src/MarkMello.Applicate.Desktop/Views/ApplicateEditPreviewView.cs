@@ -15,6 +15,7 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
+using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Domain;
@@ -73,6 +74,8 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     private bool _isAttachedToHost;
     private bool _hostEventsWired;
     private bool _syncEnabled;
+    private int _inactivePrimeVisibilityDepth;
+    private bool _inactivePrimeRenderInFlight;
     private DateTime _ignoreEditorScrollUntil;
     private DateTime _ignorePreviewScrollUntil;
     private double? _pendingScrollRestoreProgress;
@@ -92,6 +95,8 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     public event EventHandler? SourceLineScrollSyncPreviewRendered;
 
     public event EventHandler<SourceLineScrollSyncEventArgs>? PreviewSourceLineChanged;
+
+    internal event EventHandler? InactivePrimeRendered;
 
     public ApplicateEditPreviewView(IApplicateSharedWebViewHost? sharedHost)
     {
@@ -171,8 +176,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         // operates against a viewport that no longer matches the visible
         // track length — user sees "mouse outpaces thumb".
         if (e.Property == Visual.BoundsProperty
-            && _sharedHost is not null
-            && _isAttachedToHost
             && _webSlot.Bounds.Width > 0
             && _webSlot.Bounds.Height > 0)
         {
@@ -192,10 +195,13 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
                 // pre-bounds window. Previously this path early-returned,
                 // leaving MinHeight=editPreview.Bounds.Height (toolbar+
                 // slot), causing the View to overflow upward — exactly
-                // the first-edit-activation overlap symptom.
+                    // the first-edit-activation overlap symptom.
             }
 
-            ApplyAvailableWidth(deferWebContentWidth: true);
+            if (_sharedHost is not null && _isAttachedToHost)
+            {
+                ApplyAvailableWidth(deferWebContentWidth: true);
+            }
         }
     }
 
@@ -769,8 +775,13 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         ApplicateTrace.DiagMs(
             "pane-seq",
             "editpreview-effvis-changed",
-            $"isEffectivelyVisible={IsEffectivelyVisible} webSlotBounds={_webSlot.Bounds.Width:F0}x{_webSlot.Bounds.Height:F0} hasHost={_sharedHost is not null}");
+            $"isEffectivelyVisible={IsEffectivelyVisible} webSlotBounds={_webSlot.Bounds.Width:F0}x{_webSlot.Bounds.Height:F0} hasHost={_sharedHost is not null} inactivePrimeDepth={_inactivePrimeVisibilityDepth}");
         if (_sharedHost is null)
+        {
+            return;
+        }
+
+        if (_inactivePrimeVisibilityDepth > 0)
         {
             return;
         }
@@ -782,6 +793,10 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
                 DocumentScrollEnabled: true,
                 WheelProxyEnabled: false);
             _sharedHost.AttachTo(_webSlot, intent);
+            _webSlot.Width = double.NaN;
+            _webSlot.Height = double.NaN;
+            _sharedHost.View.Width = double.NaN;
+            _sharedHost.View.Height = double.NaN;
             _isAttachedToHost = true;
             // F-05 fix: signal consumer ownership of the scrollbar overlay
             // so its scroll-state mirror is no longer dormant.
@@ -1019,6 +1034,15 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         var restoreProgress = _pendingScrollRestoreProgress;
         _pendingScrollRestoreProgress = null;
         ApplicateTrace.ModeToggle("SharedView Rendered (edit-preview)");
+        if (_inactivePrimeRenderInFlight && !_isAttachedToHost)
+        {
+            _inactivePrimeRenderInFlight = false;
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "editpreview-inactive-prime-rendered",
+                $"webSlotBounds={_webSlot.Bounds.Width:F0}x{_webSlot.Bounds.Height:F0}");
+            InactivePrimeRendered?.Invoke(this, EventArgs.Empty);
+        }
         // Render committed: hide any visible failure overlay.
         _failureView.IsVisible = false;
         if (restoreProgress.HasValue
@@ -1152,7 +1176,93 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         var shouldRestoreScroll = restoreProgress > 0
             && !_sharedHost.View.HasLoadedDocumentForSource(source);
         _pendingScrollRestoreProgress = shouldRestoreScroll ? restoreProgress : null;
-        _sharedHost.RequestRender(source, request);
+        _sharedHost.RequestRender(
+            source,
+            request,
+            transactionGeneration: ApplicateModeTransactionContext.GetTransactionGeneration(_webSlot));
+    }
+
+    internal bool PrimeInactiveWebPreview(
+        MarkdownSource? source,
+        ReadingPreferences preferences,
+        IImageSourceResolver? imageSourceResolver,
+        Size viewportSize)
+    {
+        if (_sharedHost is null
+            || source is null
+            || (IsEffectivelyVisible && _inactivePrimeVisibilityDepth <= 0)
+            || viewportSize.Width <= 0
+            || viewportSize.Height <= 0)
+        {
+            return false;
+        }
+
+        var intent = new ApplicateWebMountIntent(
+            ViewerChromeEnabled: false,
+            DocumentScrollEnabled: true,
+            WheelProxyEnabled: false);
+
+        var normalizedPreferences = CreateWebPreviewPreferences(preferences);
+        var widths = CalculatePreviewWidths(
+            viewportSize.Width,
+            normalizedPreferences,
+            ResolveDocumentPadding(normalizedPreferences));
+
+        var request = new ApplicateWebRenderRequest(
+            ReadingPreferences: normalizedPreferences,
+            ImageSourceResolver: imageSourceResolver,
+            AvailableContentWidth: widths.WebColumnWidth);
+
+        _pendingScrollRestoreProgress = null;
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "editpreview-inactive-prime-request",
+            $"viewport={viewportSize.Width:F0}x{viewportSize.Height:F0} webColumnWidth={widths.WebColumnWidth:F0} source={source.Path}");
+        _webSlot.Width = viewportSize.Width;
+        _webSlot.Height = viewportSize.Height;
+        _sharedHost.AttachTo(_webSlot, intent);
+        _sharedHost.View.Width = viewportSize.Width;
+        _sharedHost.View.Height = viewportSize.Height;
+        _sharedHost.View.Measure(viewportSize);
+        _sharedHost.View.Arrange(new Rect(0, 0, viewportSize.Width, viewportSize.Height));
+        _sharedHost.View.UpdateLayout();
+        if (_webSlot.Bounds.Width > 0 && _webSlot.Bounds.Height > 0)
+        {
+            _hasValidSlotBounds = true;
+        }
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "editpreview-inactive-prime-target",
+            $"webSlotBounds={_webSlot.Bounds.Width:F0}x{_webSlot.Bounds.Height:F0} viewBounds={_sharedHost.View.Bounds.Width:F0}x{_sharedHost.View.Bounds.Height:F0}");
+        _inactivePrimeRenderInFlight = true;
+        _sharedHost.RequestInactivePrimeRender(source, request);
+        if (_inactivePrimeRenderInFlight && _sharedHost.View.HasLoadedDocumentForSource(source))
+        {
+            _inactivePrimeRenderInFlight = false;
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "editpreview-inactive-prime-rendered",
+                $"webSlotBounds={_webSlot.Bounds.Width:F0}x{_webSlot.Bounds.Height:F0} fastPath=true");
+            InactivePrimeRendered?.Invoke(this, EventArgs.Empty);
+        }
+
+        return true;
+    }
+
+    internal void BeginInactivePrimeVisibility()
+        => _inactivePrimeVisibilityDepth++;
+
+    internal void EndInactivePrimeVisibility()
+    {
+        if (_inactivePrimeVisibilityDepth > 0)
+        {
+            _inactivePrimeVisibilityDepth--;
+        }
+
+        if (_inactivePrimeVisibilityDepth == 0)
+        {
+            OnEffectiveVisibilityChanged();
+        }
     }
 
     private static double NormalizeReadingProgress(double progress)

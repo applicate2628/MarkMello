@@ -58,6 +58,44 @@ public sealed class ApplicateEditPreviewSyncTests
         Assert.Contains("_sharedHost.View.ScrollToProgress(restoreProgress.Value);", renderedHandler, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void EditPreviewVisibilityChainStillAttachesAndQueuesRender()
+    {
+        var codeBehind = ReadEditPreviewCodeBehind();
+        var handler = ExtractMethodBody(codeBehind, "private void OnEffectiveVisibilityChanged()");
+
+        Assert.True(
+            handler.IndexOf("_sharedHost.AttachTo(_webSlot, intent);", StringComparison.Ordinal)
+            < handler.IndexOf("QueueWebPreviewRender(immediate: true);", StringComparison.Ordinal));
+        Assert.DoesNotContain("Opacity", handler, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EditPreviewWaitsForValidWebSlotBoundsBeforeTransactionRender()
+    {
+        var codeBehind = ReadEditPreviewCodeBehind();
+        var applyRender = ExtractMethodBody(codeBehind, "private void ApplyWebPreviewSource()");
+
+        Assert.True(
+            applyRender.IndexOf("if (!_hasValidSlotBounds)", StringComparison.Ordinal)
+            < applyRender.IndexOf("transactionGeneration:", StringComparison.Ordinal));
+        Assert.Contains(
+            "ApplicateModeTransactionContext.GetTransactionGeneration(_webSlot)",
+            applyRender,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EditPreviewReevaluatesEffectiveVisibilityWhenInactivePrimeEnds()
+    {
+        var codeBehind = ReadEditPreviewCodeBehind();
+        var endPrime = ExtractMethodBody(codeBehind, "internal void EndInactivePrimeVisibility()");
+
+        Assert.Contains("_inactivePrimeVisibilityDepth--", endPrime, StringComparison.Ordinal);
+        Assert.Contains("if (_inactivePrimeVisibilityDepth == 0)", endPrime, StringComparison.Ordinal);
+        Assert.Contains("OnEffectiveVisibilityChanged();", endPrime, StringComparison.Ordinal);
+    }
+
     private static string ReadEditPreviewCodeBehind()
         => File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,

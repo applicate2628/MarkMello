@@ -1080,6 +1080,10 @@
   var minimapRefreshTimer;
   var resizeReactFrameRequested = false;
   var modeToggleProbeFrameRequested = false;
+  var modeToggleProbeToken = 0;
+  var modeToggleProbeTransactionGeneration;
+  var modeRevealPrepared = false;
+  var modeRevealShield = null;
   var minimapRoot = null;
   var minimapContent = null;
   var minimapViewport = null;
@@ -1212,9 +1216,56 @@
   function getModeRevealTarget() {
     return document.querySelector("main.mm-document");
   }
+  function getModeRevealShieldBackground() {
+    const bodyBackground = window.getComputedStyle(document.body).backgroundColor;
+    if (bodyBackground && bodyBackground !== "rgba(0, 0, 0, 0)" && bodyBackground !== "transparent") {
+      return bodyBackground;
+    }
+    return getCurrentTheme() === "dark" ? "#11100d" : "#ffffff";
+  }
+  function ensureModeRevealShield() {
+    if (modeRevealShield && modeRevealShield.isConnected) {
+      return modeRevealShield;
+    }
+    modeRevealShield = document.createElement("div");
+    modeRevealShield.className = "mm-mode-reveal-shield";
+    modeRevealShield.setAttribute("aria-hidden", "true");
+    modeRevealShield.style.position = "fixed";
+    modeRevealShield.style.inset = "0";
+    modeRevealShield.style.zIndex = "2147483647";
+    modeRevealShield.style.pointerEvents = "none";
+    document.body.append(modeRevealShield);
+    postPerfMark("mm-mode-reveal-shield-created", {
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight
+    });
+    return modeRevealShield;
+  }
+  function clearModeRevealShield() {
+    if (modeRevealShield) {
+      postPerfMark("mm-mode-reveal-shield-cleared", {
+        connected: modeRevealShield.isConnected,
+        opacity: modeRevealShield.style.opacity
+      });
+    }
+    modeRevealShield?.remove();
+    modeRevealShield = null;
+  }
   function prepareModeReveal(durationMs) {
+    modeRevealPrepared = true;
+    const shield = ensureModeRevealShield();
+    shield.style.background = getModeRevealShieldBackground();
+    shield.style.opacity = "1";
+    shield.style.transition = "none";
+    postPerfMark("mm-mode-reveal-shield-prepared", {
+      durationMs: clampModeRevealDuration(durationMs),
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      connected: shield.isConnected
+    });
     const target = getModeRevealTarget();
     if (!target) {
+      postPerfMark("mm-mode-reveal-prepare-missing-target");
       return;
     }
     const duration = clampModeRevealDuration(durationMs);
@@ -1224,12 +1275,21 @@
     target.style.willChange = duration > 0 ? "transform" : "";
   }
   function startModeReveal(durationMs) {
+    modeRevealPrepared = false;
     const target = getModeRevealTarget();
+    postPerfMark("mm-mode-reveal-start", {
+      durationMs: clampModeRevealDuration(durationMs),
+      hasShield: modeRevealShield !== null,
+      shieldConnected: modeRevealShield?.isConnected ?? false,
+      hasTarget: target !== null
+    });
     if (!target) {
+      clearModeRevealShield();
       return;
     }
     const duration = clampModeRevealDuration(durationMs);
     if (duration <= 0) {
+      clearModeRevealShield();
       target.style.transition = "none";
       target.style.opacity = "1";
       target.style.transform = "";
@@ -1240,12 +1300,18 @@
     target.style.transition = `transform ${duration}ms ${MODE_REVEAL_EASING}`;
     target.style.opacity = "1";
     target.style.transform = "translateY(0)";
+    if (modeRevealShield) {
+      void modeRevealShield.offsetWidth;
+      modeRevealShield.style.transition = `opacity ${duration}ms ${MODE_REVEAL_EASING}`;
+      modeRevealShield.style.opacity = "0";
+    }
     window.setTimeout(() => {
       if (target.style.transition.includes("transform")) {
         target.style.transition = "";
         target.style.transform = "";
         target.style.willChange = "";
       }
+      clearModeRevealShield();
     }, duration);
   }
   function postHostMessage(message) {
@@ -1942,11 +2008,11 @@
     if (!hasReceivedHostPreferences || !minimapPolicy || !viewerChromeEnabled || !minimapSourceReady || minimapMode === "off" || viewportHeight <= 0 || documentHeight <= viewportHeight) {
       return false;
     }
-    if (documentHeight > minimapPolicy.maxDetailedDocumentHeight) {
-      return false;
-    }
     if (minimapMode === "on") {
       return true;
+    }
+    if (documentHeight > minimapPolicy.maxDetailedDocumentHeight) {
+      return false;
     }
     return window.innerWidth >= minimapPolicy.minHostWidth && documentHeight >= viewportHeight * minimapPolicy.minScrollableViewportRatio;
   }
@@ -1983,6 +2049,21 @@
     }
     lastPostedMinimapState = { ...nextState, hasPosted: true };
     postHostMessage({ type: "minimap-state", visible, reservedWidth });
+  }
+  function postTransactionMinimapSettled(transactionGeneration) {
+    if (!Number.isFinite(transactionGeneration) || transactionGeneration <= 0) {
+      return;
+    }
+    updateMinimapVisibility(true);
+    updateMinimapViewport();
+    const visible = minimapRoot ? !minimapRoot.hidden : false;
+    const reservedWidth = visible ? getCurrentMinimapReservedWidth() : 0;
+    postHostMessage({
+      type: "minimap-settled",
+      transactionGeneration,
+      visible,
+      reservedWidth
+    });
   }
   function updateMinimapViewport() {
     ensureMinimap();
@@ -2116,6 +2197,9 @@
   }
   function scheduleResizeReactions() {
     if (resizeReactFrameRequested) {
+      return;
+    }
+    if (modeRevealPrepared) {
       return;
     }
     resizeReactFrameRequested = true;
@@ -2326,32 +2410,60 @@
       return;
     }
     if (message.type === "clear-document") {
+      clearModeRevealShield();
       clearDocumentState(buildLoadDocumentDeps());
       return;
     }
     if (message.type === "mode-settle-probe") {
       postPerfMark("mm-mode-settle-probe-received");
       applyModeSettleProbePreferences(message);
+      const transactionGeneration = readModeSettleTransactionGeneration(message);
       if (modeToggleProbeFrameRequested) {
-        postPerfMark("mm-mode-settle-probe-duplicate");
-        return;
+        if (transactionGeneration === void 0 || modeToggleProbeTransactionGeneration !== void 0 && transactionGeneration <= modeToggleProbeTransactionGeneration) {
+          postPerfMark("mm-mode-settle-probe-duplicate");
+          return;
+        }
+        postPerfMark("mm-mode-settle-probe-superseded", {
+          previousGeneration: modeToggleProbeTransactionGeneration,
+          transactionGeneration
+        });
       }
       flushPendingReadingPreferences();
       modeToggleProbeFrameRequested = true;
+      modeToggleProbeTransactionGeneration = transactionGeneration;
+      const probeToken = ++modeToggleProbeToken;
+      const isCurrentProbe = () => probeToken === modeToggleProbeToken;
       const postModeToggleSettleAck = () => {
+        if (!isCurrentProbe()) {
+          return;
+        }
         postPerfMark("mm-mode-settle-chrome-ready");
         modeToggleProbeFrameRequested = false;
-        postHostMessage({ type: "mode-toggle-settled" });
+        modeToggleProbeTransactionGeneration = void 0;
+        if (transactionGeneration === void 0) {
+          postHostMessage({ type: "mode-toggle-settled" });
+        } else {
+          postHostMessage({ type: "mode-toggle-settled", transactionGeneration });
+        }
       };
       const completeModeToggleSettleAfterPaint = () => {
+        if (!isCurrentProbe()) {
+          return;
+        }
         updateMinimapViewport();
         updateWidthHandlePosition();
         window.requestAnimationFrame(() => {
+          if (!isCurrentProbe()) {
+            return;
+          }
           postPerfMark("mm-mode-settle-post-chrome-paint");
           postModeToggleSettleAck();
         });
       };
       const settleAfterViewportReady = (attempt) => {
+        if (!isCurrentProbe()) {
+          return;
+        }
         if (!isModeSettleViewportReady(message) && attempt < MODE_SETTLE_VIEWPORT_MAX_FRAMES) {
           postPerfMark("mm-mode-settle-viewport-wait", {
             attempt,
@@ -2373,6 +2485,9 @@
           return;
         }
         window.requestAnimationFrame(() => {
+          if (!isCurrentProbe()) {
+            return;
+          }
           postPerfMark("mm-mode-settle-second-raf");
           flushPendingReadingPreferences();
           updateMinimapVisibility();
@@ -2392,11 +2507,21 @@
       startModeReveal(message.durationMs);
       return;
     }
+    if (message.type === "minimap-settle-probe") {
+      postTransactionMinimapSettled(message.transactionGeneration);
+      return;
+    }
   }
   function isModeSettleViewportReady(message) {
     const widthReady = typeof message.viewportWidth !== "number" || !Number.isFinite(message.viewportWidth) || message.viewportWidth <= 0 || Math.abs(window.innerWidth - message.viewportWidth) <= MODE_SETTLE_VIEWPORT_TOLERANCE;
     const heightReady = typeof message.viewportHeight !== "number" || !Number.isFinite(message.viewportHeight) || message.viewportHeight <= 0 || Math.abs(window.innerHeight - message.viewportHeight) <= MODE_SETTLE_VIEWPORT_TOLERANCE;
     return widthReady && heightReady;
+  }
+  function readModeSettleTransactionGeneration(message) {
+    if (typeof message.transactionGeneration !== "number" || !Number.isFinite(message.transactionGeneration) || message.transactionGeneration <= 0) {
+      return void 0;
+    }
+    return message.transactionGeneration;
   }
   function applyModeSettleProbePreferences(message) {
     if (typeof message.fontSize !== "number" || typeof message.lineHeight !== "number" || typeof message.maxWidth !== "number" || message.minimapMode === void 0) {
@@ -2816,6 +2941,7 @@
     queuePostScroll();
     queuePreviewSourceLinePost();
   }, { passive: true });
+  hostWindow.chrome?.webview?.addEventListener?.("message", (event) => handleHostMessage(event.data));
   window.addEventListener("message", (event) => handleHostMessage(event.data));
   window.addEventListener("resize", () => {
     scheduleResizeReactions();

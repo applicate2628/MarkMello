@@ -61,6 +61,85 @@ public sealed class ApplicateWebMinimapStateTests
         Assert.Equal(0, state.ReservedWidth);
     }
 
+    [Fact]
+    public void ParserAcceptsTransactionMinimapSettledState()
+    {
+        using var document = JsonDocument.Parse("""{"type":"minimap-settled","transactionGeneration":42,"visible":true,"reservedWidth":168}""");
+
+        var parsed = ApplicateWebMarkdownDocumentView.TryReadMinimapSettledState(
+            document.RootElement,
+            out var settled);
+
+        Assert.True(parsed);
+        Assert.NotNull(settled);
+        Assert.Equal(42, settled.TransactionGeneration);
+        Assert.True(settled.State.Visible);
+        Assert.Equal(168, settled.State.ReservedWidth);
+    }
+
+    [Theory]
+    [InlineData("""{"type":"minimap-state","transactionGeneration":42,"visible":true,"reservedWidth":168}""")]
+    [InlineData("""{"type":"minimap-settled","transactionGeneration":0,"visible":true,"reservedWidth":168}""")]
+    [InlineData("""{"type":"minimap-settled","transactionGeneration":"42","visible":true,"reservedWidth":168}""")]
+    [InlineData("""{"type":"minimap-settled","transactionGeneration":42,"visible":true}""")]
+    public void ParserRejectsMalformedTransactionMinimapSettledState(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+
+        var parsed = ApplicateWebMarkdownDocumentView.TryReadMinimapSettledState(
+            document.RootElement,
+            out var settled);
+
+        Assert.False(parsed);
+        Assert.Null(settled);
+    }
+
+    [Fact]
+    public void ParserAcceptsTaggedModeToggleSettledState()
+    {
+        using var document = JsonDocument.Parse("""{"type":"mode-toggle-settled","transactionGeneration":42}""");
+
+        var parsed = ApplicateWebMarkdownDocumentView.TryReadModeToggleSettledState(
+            document.RootElement,
+            out var settled);
+
+        Assert.True(parsed);
+        Assert.NotNull(settled);
+        Assert.True(settled.IsTransactional);
+        Assert.Equal(42, settled.TransactionGeneration);
+    }
+
+    [Fact]
+    public void ParserAcceptsUntaggedModeToggleSettledStateAsLegacy()
+    {
+        using var document = JsonDocument.Parse("""{"type":"mode-toggle-settled"}""");
+
+        var parsed = ApplicateWebMarkdownDocumentView.TryReadModeToggleSettledState(
+            document.RootElement,
+            out var settled);
+
+        Assert.True(parsed);
+        Assert.NotNull(settled);
+        Assert.False(settled.IsTransactional);
+        Assert.Equal(0, settled.TransactionGeneration);
+    }
+
+    [Theory]
+    [InlineData("""{"type":"mode-toggle-settled","transactionGeneration":0}""")]
+    [InlineData("""{"type":"mode-toggle-settled","transactionGeneration":"42"}""")]
+    [InlineData("""{"type":"minimap-settled","transactionGeneration":42}""")]
+    public void ParserRejectsMalformedTaggedModeToggleSettledState(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+
+        var parsed = ApplicateWebMarkdownDocumentView.TryReadModeToggleSettledState(
+            document.RootElement,
+            out var settled);
+
+        Assert.False(parsed);
+        Assert.Null(settled);
+    }
+
     [Theory]
     [InlineData("""{"reservedWidth":168}""")]
     [InlineData("""{"visible":"true","reservedWidth":168}""")]

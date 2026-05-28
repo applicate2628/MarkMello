@@ -60,6 +60,7 @@ type RendererWindow = Window & {
   chrome?: {
     webview?: {
       postMessage: (message: unknown) => void;
+      addEventListener?: (type: "message", listener: (event: MessageEvent<unknown>) => void) => void;
     };
   };
   invokeCSharpAction?: (message: string) => void;
@@ -70,6 +71,7 @@ type RendererMessage =
   | { type: "layout-ready"; scrollTop: number; scrollHeight: number; clientHeight: number; cached?: boolean }
   | { type: "link-clicked"; href: string; button: number; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }
   | { type: "minimap-state"; visible: boolean; reservedWidth: number }
+  | { type: "minimap-settled"; transactionGeneration: number; visible: boolean; reservedWidth: number }
   | { type: "scroll"; scrollTop: number; scrollHeight: number; clientHeight: number; topBlockIndex: number | null }
   | { type: "viewer-interaction" }
   | { type: "wheel"; deltaY: number; deltaMode: number }
@@ -96,7 +98,7 @@ type RendererMessage =
   // to defer `SetNativeWebViewVisibility(true)` on the Commit fast-path
   // (Ctrl+E mode toggle within the same document), so the user never sees the
   // HWND repainted at the old document width before the renderer catches up.
-  | { type: "mode-toggle-settled" };
+  | { type: "mode-toggle-settled"; transactionGeneration?: number };
 
 type MinimapMode = "auto" | "on" | "off";
 
@@ -158,7 +160,9 @@ type HostMessage =
       widthResizerVisibility?: WidthResizerVisibility;
       viewportWidth?: number;
       viewportHeight?: number;
+      transactionGeneration?: number;
     }
+  | { type: "minimap-settle-probe"; transactionGeneration: number }
   | { type: "mode-reveal-prepare"; durationMs?: number }
   | { type: "mode-reveal-start"; durationMs?: number };
 
@@ -206,6 +210,10 @@ let resizeReactFrameRequested = false;
 // response so CSS reflow on any new slot bounds has propagated and one paint
 // has happened after minimap visibility settles.
 let modeToggleProbeFrameRequested = false;
+let modeToggleProbeToken = 0;
+let modeToggleProbeTransactionGeneration: number | undefined;
+let modeRevealPrepared = false;
+let modeRevealShield: HTMLElement | null = null;
 let minimapRoot: HTMLElement | null = null;
 let minimapContent: HTMLElement | null = null;
 let minimapViewport: HTMLElement | null = null;
@@ -388,9 +396,63 @@ function getModeRevealTarget(): HTMLElement | null {
   return document.querySelector<HTMLElement>("main.mm-document");
 }
 
+function getModeRevealShieldBackground(): string {
+  const bodyBackground = window.getComputedStyle(document.body).backgroundColor;
+  if (bodyBackground && bodyBackground !== "rgba(0, 0, 0, 0)" && bodyBackground !== "transparent") {
+    return bodyBackground;
+  }
+
+  return getCurrentTheme() === "dark" ? "#11100d" : "#ffffff";
+}
+
+function ensureModeRevealShield(): HTMLElement {
+  if (modeRevealShield && modeRevealShield.isConnected) {
+    return modeRevealShield;
+  }
+
+  modeRevealShield = document.createElement("div");
+  modeRevealShield.className = "mm-mode-reveal-shield";
+  modeRevealShield.setAttribute("aria-hidden", "true");
+  modeRevealShield.style.position = "fixed";
+  modeRevealShield.style.inset = "0";
+  modeRevealShield.style.zIndex = "2147483647";
+  modeRevealShield.style.pointerEvents = "none";
+  document.body.append(modeRevealShield);
+  postPerfMark("mm-mode-reveal-shield-created", {
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+  });
+  return modeRevealShield;
+}
+
+function clearModeRevealShield(): void {
+  if (modeRevealShield) {
+    postPerfMark("mm-mode-reveal-shield-cleared", {
+      connected: modeRevealShield.isConnected,
+      opacity: modeRevealShield.style.opacity,
+    });
+  }
+
+  modeRevealShield?.remove();
+  modeRevealShield = null;
+}
+
 function prepareModeReveal(durationMs: unknown): void {
+  modeRevealPrepared = true;
+  const shield = ensureModeRevealShield();
+  shield.style.background = getModeRevealShieldBackground();
+  shield.style.opacity = "1";
+  shield.style.transition = "none";
+  postPerfMark("mm-mode-reveal-shield-prepared", {
+    durationMs: clampModeRevealDuration(durationMs),
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    connected: shield.isConnected,
+  });
+
   const target = getModeRevealTarget();
   if (!target) {
+    postPerfMark("mm-mode-reveal-prepare-missing-target");
     return;
   }
 
@@ -402,13 +464,22 @@ function prepareModeReveal(durationMs: unknown): void {
 }
 
 function startModeReveal(durationMs: unknown): void {
+  modeRevealPrepared = false;
   const target = getModeRevealTarget();
+  postPerfMark("mm-mode-reveal-start", {
+    durationMs: clampModeRevealDuration(durationMs),
+    hasShield: modeRevealShield !== null,
+    shieldConnected: modeRevealShield?.isConnected ?? false,
+    hasTarget: target !== null,
+  });
   if (!target) {
+    clearModeRevealShield();
     return;
   }
 
   const duration = clampModeRevealDuration(durationMs);
   if (duration <= 0) {
+    clearModeRevealShield();
     target.style.transition = "none";
     target.style.opacity = "1";
     target.style.transform = "";
@@ -420,12 +491,18 @@ function startModeReveal(durationMs: unknown): void {
   target.style.transition = `transform ${duration}ms ${MODE_REVEAL_EASING}`;
   target.style.opacity = "1";
   target.style.transform = "translateY(0)";
+  if (modeRevealShield) {
+    void modeRevealShield.offsetWidth;
+    modeRevealShield.style.transition = `opacity ${duration}ms ${MODE_REVEAL_EASING}`;
+    modeRevealShield.style.opacity = "0";
+  }
   window.setTimeout(() => {
     if (target.style.transition.includes("transform")) {
       target.style.transition = "";
       target.style.transform = "";
       target.style.willChange = "";
     }
+    clearModeRevealShield();
   }, duration);
 }
 
@@ -1346,12 +1423,12 @@ function shouldShowMinimap(): boolean {
     return false;
   }
 
-  if (documentHeight > minimapPolicy.maxDetailedDocumentHeight) {
-    return false;
-  }
-
   if (minimapMode === "on") {
     return true;
+  }
+
+  if (documentHeight > minimapPolicy.maxDetailedDocumentHeight) {
+    return false;
   }
 
   return window.innerWidth >= minimapPolicy.minHostWidth
@@ -1408,6 +1485,23 @@ function postMinimapState(visible: boolean, force = false): void {
 
   lastPostedMinimapState = { ...nextState, hasPosted: true };
   postHostMessage({ type: "minimap-state", visible, reservedWidth });
+}
+
+function postTransactionMinimapSettled(transactionGeneration: number): void {
+  if (!Number.isFinite(transactionGeneration) || transactionGeneration <= 0) {
+    return;
+  }
+
+  updateMinimapVisibility(true);
+  updateMinimapViewport();
+  const visible = minimapRoot ? !minimapRoot.hidden : false;
+  const reservedWidth = visible ? getCurrentMinimapReservedWidth() : 0;
+  postHostMessage({
+    type: "minimap-settled",
+    transactionGeneration,
+    visible,
+    reservedWidth,
+  });
 }
 
 function updateMinimapViewport(): void {
@@ -1599,6 +1693,10 @@ function queueMinimapRefreshAfterLayoutSettles(): void {
 // piece for stable chrome positions during drag.
 function scheduleResizeReactions(): void {
   if (resizeReactFrameRequested) {
+    return;
+  }
+
+  if (modeRevealPrepared) {
     return;
   }
 
@@ -1915,6 +2013,7 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "clear-document") {
+    clearModeRevealShield();
     clearDocumentState(buildLoadDocumentDeps());
     return;
   }
@@ -1922,28 +2021,66 @@ function handleHostMessage(raw: unknown): void {
   if (message.type === "mode-settle-probe") {
     postPerfMark("mm-mode-settle-probe-received");
     applyModeSettleProbePreferences(message);
+    const transactionGeneration = readModeSettleTransactionGeneration(message);
     if (modeToggleProbeFrameRequested) {
-      postPerfMark("mm-mode-settle-probe-duplicate");
-      return;
+      if (
+        transactionGeneration === undefined
+        || (
+          modeToggleProbeTransactionGeneration !== undefined
+          && transactionGeneration <= modeToggleProbeTransactionGeneration
+        )
+      ) {
+        postPerfMark("mm-mode-settle-probe-duplicate");
+        return;
+      }
+
+      postPerfMark("mm-mode-settle-probe-superseded", {
+        previousGeneration: modeToggleProbeTransactionGeneration,
+        transactionGeneration,
+      });
     }
 
     flushPendingReadingPreferences();
     modeToggleProbeFrameRequested = true;
+    modeToggleProbeTransactionGeneration = transactionGeneration;
+    const probeToken = ++modeToggleProbeToken;
+    const isCurrentProbe = () => probeToken === modeToggleProbeToken;
     const postModeToggleSettleAck = () => {
+      if (!isCurrentProbe()) {
+        return;
+      }
+
       postPerfMark("mm-mode-settle-chrome-ready");
       modeToggleProbeFrameRequested = false;
-      postHostMessage({ type: "mode-toggle-settled" });
+      modeToggleProbeTransactionGeneration = undefined;
+      if (transactionGeneration === undefined) {
+        postHostMessage({ type: "mode-toggle-settled" });
+      } else {
+        postHostMessage({ type: "mode-toggle-settled", transactionGeneration });
+      }
     };
     const completeModeToggleSettleAfterPaint = () => {
+      if (!isCurrentProbe()) {
+        return;
+      }
+
       updateMinimapViewport();
       updateWidthHandlePosition();
       window.requestAnimationFrame(() => {
+        if (!isCurrentProbe()) {
+          return;
+        }
+
         postPerfMark("mm-mode-settle-post-chrome-paint");
         postModeToggleSettleAck();
       });
     };
 
     const settleAfterViewportReady = (attempt: number) => {
+      if (!isCurrentProbe()) {
+        return;
+      }
+
       if (!isModeSettleViewportReady(message) && attempt < MODE_SETTLE_VIEWPORT_MAX_FRAMES) {
         postPerfMark("mm-mode-settle-viewport-wait", {
           attempt,
@@ -1968,6 +2105,10 @@ function handleHostMessage(raw: unknown): void {
       }
 
       window.requestAnimationFrame(() => {
+        if (!isCurrentProbe()) {
+          return;
+        }
+
         postPerfMark("mm-mode-settle-second-raf");
         flushPendingReadingPreferences();
         updateMinimapVisibility();
@@ -1990,6 +2131,11 @@ function handleHostMessage(raw: unknown): void {
     startModeReveal(message.durationMs);
     return;
   }
+
+  if (message.type === "minimap-settle-probe") {
+    postTransactionMinimapSettled(message.transactionGeneration);
+    return;
+  }
 }
 
 function isModeSettleViewportReady(message: Extract<HostMessage, { type: "mode-settle-probe" }>): boolean {
@@ -2002,6 +2148,16 @@ function isModeSettleViewportReady(message: Extract<HostMessage, { type: "mode-s
     || message.viewportHeight <= 0
     || Math.abs(window.innerHeight - message.viewportHeight) <= MODE_SETTLE_VIEWPORT_TOLERANCE;
   return widthReady && heightReady;
+}
+
+function readModeSettleTransactionGeneration(message: Extract<HostMessage, { type: "mode-settle-probe" }>): number | undefined {
+  if (typeof message.transactionGeneration !== "number"
+    || !Number.isFinite(message.transactionGeneration)
+    || message.transactionGeneration <= 0) {
+    return undefined;
+  }
+
+  return message.transactionGeneration;
 }
 
 function applyModeSettleProbePreferences(message: Extract<HostMessage, { type: "mode-settle-probe" }>): void {
@@ -2577,6 +2733,7 @@ document.addEventListener("scroll", () => {
   queuePreviewSourceLinePost();
 }, { passive: true });
 
+hostWindow.chrome?.webview?.addEventListener?.("message", (event) => handleHostMessage(event.data));
 window.addEventListener("message", (event) => handleHostMessage(event.data));
 // Resize-time reactive work (chrome reposition + minimap viewport refresh)
 // is coalesced to at most one rAF per frame via scheduleResizeReactions; see

@@ -120,6 +120,44 @@ describe("renderer chrome race handling", () => {
     }
   }
 
+  function setDocumentMetrics(documentHeight: number, viewportHeight: number): void {
+    Object.defineProperty(document.documentElement, "clientHeight", {
+      configurable: true,
+      value: viewportHeight,
+    });
+    Object.defineProperty(document.documentElement, "scrollHeight", {
+      configurable: true,
+      value: documentHeight,
+    });
+  }
+
+  function loadMinimapPolicy(maxDetailedDocumentHeight: number): void {
+    load({
+      type: "minimap-policy",
+      minimapPolicy: {
+        minHostWidth: 500,
+        minScrollableViewportRatio: 0.1,
+        maxDetailedDocumentHeight,
+      },
+    });
+  }
+
+  async function loadDocumentAndFlushMinimap(): Promise<void> {
+    load({ type: "load-document", html: "<p>Loaded document</p>", hasMermaid: false });
+    await Promise.resolve();
+    await Promise.resolve();
+    flushQueuedRafs();
+  }
+
+  async function loadDocumentWithMinimapPolicy(maxDetailedDocumentHeight: number): Promise<void> {
+    loadMinimapPolicy(maxDetailedDocumentHeight);
+    await loadDocumentAndFlushMinimap();
+  }
+
+  function loadModeSettleProbe(minimapMode: ReadingPreferencesMessage["minimapMode"]): void {
+    load({ ...makePreferences(true, minimapMode), type: "mode-settle-probe" });
+  }
+
   async function settleInitialVisibleLayout(): Promise<void> {
     load({ type: "reading-preferences", ...makePreferences(true) });
     flushNextRaf();
@@ -141,6 +179,94 @@ describe("renderer chrome race handling", () => {
 
     expect(handle!.hidden).toBe(true);
     expect(document.documentElement.dataset.mmChrome).toBe("off");
+  });
+
+  it("keeps minimap visible for heavy scrollable documents when mode is on", async () => {
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+
+    setDocumentMetrics(2400, 600);
+    await loadDocumentWithMinimapPolicy(1000);
+    messages.length = 0;
+
+    loadModeSettleProbe("on");
+    flushQueuedRafs();
+
+    const minimapStates = messages.filter((message): message is { type: "minimap-state"; visible: boolean; reservedWidth: number } =>
+      typeof message === "object" && message !== null && (message as { type?: string }).type === "minimap-state");
+    const latestState = minimapStates.at(-1);
+
+    expect(document.body.classList.contains("mm-has-minimap")).toBe(true);
+    expect(latestState).toEqual({
+      type: "minimap-state",
+      visible: true,
+      reservedWidth: expect.any(Number),
+    });
+    expect(Object.keys(latestState ?? {}).sort()).toEqual(["reservedWidth", "type", "visible"]);
+  });
+
+  it("keeps heavy documents hidden in automatic minimap mode", async () => {
+    setDocumentMetrics(2400, 600);
+    await loadDocumentWithMinimapPolicy(1000);
+
+    loadModeSettleProbe("auto");
+    flushQueuedRafs();
+
+    expect(document.body.classList.contains("mm-has-minimap")).toBe(false);
+  });
+
+  it("keeps minimap hidden when mode is off", async () => {
+    setDocumentMetrics(2400, 600);
+    await loadDocumentWithMinimapPolicy(10000);
+
+    loadModeSettleProbe("off");
+    flushQueuedRafs();
+
+    expect(document.body.classList.contains("mm-has-minimap")).toBe(false);
+  });
+
+  it("keeps minimap hidden for invalid viewport metrics even when mode is on", async () => {
+    setDocumentMetrics(2400, 0);
+    await loadDocumentWithMinimapPolicy(1000);
+
+    loadModeSettleProbe("on");
+    flushQueuedRafs();
+
+    expect(document.body.classList.contains("mm-has-minimap")).toBe(false);
+  });
+
+  it("responds to transaction minimap settle probes without changing minimap-state shape", async () => {
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+
+    setDocumentMetrics(2400, 600);
+    await loadDocumentWithMinimapPolicy(10000);
+    messages.length = 0;
+
+    loadModeSettleProbe("on");
+    flushQueuedRafs();
+    messages.length = 0;
+
+    load({ type: "minimap-settle-probe", transactionGeneration: 99 });
+    flushQueuedRafs();
+
+    const minimapState = messages.find((message): message is { type: "minimap-state"; visible: boolean; reservedWidth: number } =>
+      typeof message === "object" && message !== null && (message as { type?: string }).type === "minimap-state");
+    const settled = messages.find((message): message is { type: "minimap-settled"; transactionGeneration: number; visible: boolean; reservedWidth: number } =>
+      typeof message === "object" && message !== null && (message as { type?: string }).type === "minimap-settled");
+
+    expect(minimapState).toBeTruthy();
+    expect(Object.keys(minimapState ?? {}).sort()).toEqual(["reservedWidth", "type", "visible"]);
+    expect(settled).toEqual({
+      type: "minimap-settled",
+      transactionGeneration: 99,
+      visible: true,
+      reservedWidth: expect.any(Number),
+    });
   });
 
   it("settles mode toggle one paint after applying minimap visibility", async () => {
@@ -271,5 +397,87 @@ describe("renderer chrome race handling", () => {
 
     expect(messages.some((message: { type?: string } | null) =>
       message?.type === "mode-toggle-settled")).toBe(true);
+  });
+
+  it("echoes transaction generation on tagged mode settle ack", () => {
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+
+    load({
+      ...makePreferences(true, "on"),
+      type: "mode-settle-probe",
+      transactionGeneration: 42,
+    });
+    flushQueuedRafs();
+
+    expect(messages.some((message) =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: string; transactionGeneration?: number }).type === "mode-toggle-settled"
+      && (message as { transactionGeneration?: number }).transactionGeneration === 42)).toBe(true);
+  });
+
+  it("keeps an internal reveal shield until host starts the mode reveal", () => {
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+
+    load({ type: "mode-reveal-prepare", durationMs: 180 });
+
+    const shield = document.querySelector<HTMLElement>(".mm-mode-reveal-shield");
+    expect(shield).toBeTruthy();
+    expect(shield!.style.opacity).toBe("1");
+    expect(shield!.style.position).toBe("fixed");
+
+    load({
+      ...makePreferences(true, "on"),
+      type: "mode-settle-probe",
+      transactionGeneration: 42,
+    });
+    flushQueuedRafs();
+
+    expect(document.querySelector(".mm-mode-reveal-shield")).toBe(shield);
+    expect(messages.some((message) =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: string; transactionGeneration?: number }).type === "mode-toggle-settled"
+      && (message as { transactionGeneration?: number }).transactionGeneration === 42)).toBe(true);
+
+    load({ type: "mode-reveal-start", durationMs: 0 });
+
+    expect(document.querySelector(".mm-mode-reveal-shield")).toBeNull();
+  });
+
+  it("lets a newer tagged settle probe supersede an older pending probe", () => {
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+
+    load({
+      ...makePreferences(true, "on"),
+      type: "mode-settle-probe",
+      transactionGeneration: 41,
+    });
+    load({
+      ...makePreferences(true, "on"),
+      type: "mode-settle-probe",
+      transactionGeneration: 42,
+    });
+    flushQueuedRafs();
+
+    const settleMessages = messages.filter((message): message is { type: "mode-toggle-settled"; transactionGeneration?: number } =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: string }).type === "mode-toggle-settled");
+
+    expect(settleMessages.at(-1)).toEqual({
+      type: "mode-toggle-settled",
+      transactionGeneration: 42,
+    });
+    expect(settleMessages.some((message) => message.transactionGeneration === 41)).toBe(false);
   });
 });

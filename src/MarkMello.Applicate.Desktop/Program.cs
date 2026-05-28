@@ -292,7 +292,9 @@ internal static class Program
         collection.AddSingleton<ApplicateWebAssetEmbedder>();
         collection.AddSingleton<IApplicateHtmlMarkdownRenderer, ApplicateHtmlMarkdownRenderer>();
         collection.AddSingleton<IApplicateShellAssetBundleFactory, ApplicateShellAssetBundleFactory>();
-        collection.AddSingleton<IApplicateSharedWebViewHost, ApplicateSharedWebViewHost>();
+        collection.AddSingleton<IApplicateSharedWebViewHostProvider, ApplicateSharedWebViewHostProvider>();
+        collection.AddSingleton<IApplicateSharedWebViewHost>(
+            static provider => provider.GetRequiredService<IApplicateSharedWebViewHostProvider>().ViewerHost);
         // D-phase race fix: VM cache-hit branch awaits this readiness signal
         // before publishing Document / State so the renderer pipeline can
         // complete its initial-visible-ready pass without a mid-load reparent.

@@ -400,7 +400,10 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         var shouldRestoreScroll = restoreProgress > 0
             && !_sharedHost.View.HasLoadedDocumentForSource(_viewModel.Document);
         _pendingScrollRestoreProgress = shouldRestoreScroll ? restoreProgress : null;
-        _sharedHost.RequestRender(_viewModel.Document, request);
+        _sharedHost.RequestRender(
+            _viewModel.Document,
+            request,
+            transactionGeneration: ApplicateModeTransactionContext.GetTransactionGeneration(_webSlot));
     }
 
     private void EnsureSharedHostMounted(bool force = false)

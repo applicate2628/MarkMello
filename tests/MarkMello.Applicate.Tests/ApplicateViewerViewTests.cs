@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Threading;
 using Avalonia.Headless;
+using MarkMello.Applicate.Desktop;
 using MarkMello.Applicate.Desktop.Views;
 using Xunit;
 
@@ -96,6 +97,50 @@ public sealed class ApplicateViewerViewTests
         Assert.Contains("!_sharedHost.View.LastLayoutReadyWasCached", renderedHandler, StringComparison.Ordinal);
         Assert.Contains("_sharedHost.View.ScrollToProgress(restoreProgress.Value);", renderedHandler, StringComparison.Ordinal);
         Assert.Contains("_viewModel.ReadingProgress = restoreProgress.Value;", renderedHandler, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ViewerVisibilityChainStillAttachesBeforeRender()
+    {
+        var codeBehind = ReadViewerCodeBehind();
+        var handler = ExtractMethodBody(codeBehind, "private void OnEffectiveVisibilityChanged()");
+
+        Assert.True(
+            handler.IndexOf("EnsureSharedHostMounted(force: true);", StringComparison.Ordinal)
+            < handler.IndexOf("IssueRenderRequest();", StringComparison.Ordinal));
+        Assert.DoesNotContain("Opacity", handler, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ViewerPassesContextualTransactionGenerationToSharedHost()
+    {
+        var codeBehind = ReadViewerCodeBehind();
+        var issueRender = ExtractMethodBody(codeBehind, "private void IssueRenderRequest()");
+
+        Assert.Contains(
+            "ApplicateModeTransactionContext.GetTransactionGeneration(_webSlot)",
+            issueRender,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "transactionGeneration:",
+            issueRender,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TransactionGenerationContextInheritsToConsumerWebSlot()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var parent = new Avalonia.Controls.Grid();
+            var child = new Avalonia.Controls.Panel();
+            parent.Children.Add(child);
+
+            ApplicateModeTransactionContext.SetTransactionGeneration(parent, 123);
+
+            Assert.Equal(123, ApplicateModeTransactionContext.GetTransactionGeneration(child));
+        }, CancellationToken.None);
     }
 
     private static string ReadViewerCodeBehind()

@@ -69,6 +69,16 @@ public sealed class ApplicateEditWorkspaceTemplateTests
         Assert.Equal(expected, ApplicateEditPreviewView.CalculateWebPreviewMinHeight(hostHeight));
     }
 
+    [Fact]
+    public void WebPreviewPreferencesForceMinimapOff()
+    {
+        var preferences = ReadingPreferences.Default with { DocumentMinimapMode = DocumentMinimapMode.On };
+
+        var actual = ApplicateEditPreviewView.CreateWebPreviewPreferences(preferences);
+
+        Assert.Equal(DocumentMinimapMode.Off, actual.DocumentMinimapMode);
+    }
+
     // F-10 fix: the CalculateHostVerticalScrollMode test-surface helper
     // was deleted alongside the native renderer; the runtime path now
     // unconditionally disables the outer preview ScrollViewer (the

@@ -3,6 +3,8 @@ using System.Threading;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using MarkMello.Applicate.Desktop.Rendering;
+using MarkMello.Applicate.Desktop.Views;
+using MarkMello.Domain;
 using Xunit;
 
 namespace MarkMello.Applicate.Tests;
@@ -210,6 +212,286 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
+    public void SharedHostInterfaceExposesTransactionReadinessSurface()
+    {
+        var overload = typeof(IApplicateSharedWebViewHost)
+            .GetMethods()
+            .SingleOrDefault(method =>
+                method.Name == nameof(IApplicateSharedWebViewHost.RequestRender)
+                && method.GetParameters().Length == 3);
+
+        Assert.NotNull(overload);
+        Assert.Equal(typeof(long), overload.GetParameters()[2].ParameterType);
+        Assert.NotNull(typeof(IApplicateModeTransactionHost).GetEvent("MinimapSettled"));
+        Assert.NotNull(typeof(IApplicateModeTransactionHost).GetEvent("CommitCompleted"));
+        Assert.NotNull(typeof(IApplicateModeTransactionHost).GetEvent("RendererSettled"));
+    }
+
+    [Fact]
+    public void SharedHostInterfaceExposesTransactionalNativeRevealSurface()
+    {
+        var method = typeof(IApplicateModeTransactionHost)
+            .GetMethod("RevealNativeWebViewForCommittedTransaction");
+
+        Assert.NotNull(method);
+        Assert.Equal(typeof(bool), method.ReturnType);
+        var parameter = Assert.Single(method.GetParameters());
+        Assert.Equal(typeof(long), parameter.ParameterType);
+
+        var suppressMethod = typeof(IApplicateModeTransactionHost)
+            .GetMethod("SuppressNativeRendererForModeSwitch");
+        Assert.NotNull(suppressMethod);
+        Assert.Equal(typeof(void), suppressMethod.ReturnType);
+        var suppressParameter = Assert.Single(suppressMethod.GetParameters());
+        Assert.Equal(typeof(ApplicateMode), suppressParameter.ParameterType);
+
+        var restoreMethod = typeof(IApplicateModeTransactionHost)
+            .GetMethod("RestoreNativeRendererAfterModeSwitchSuppression");
+        Assert.NotNull(restoreMethod);
+        Assert.Equal(typeof(void), restoreMethod.ReturnType);
+        var restoreParameter = Assert.Single(restoreMethod.GetParameters());
+        Assert.Equal(typeof(ApplicateMode), restoreParameter.ParameterType);
+    }
+
+    [Fact]
+    public void SharedHostInterfaceExposesInactivePrimeRenderSurface()
+    {
+        var method = typeof(IApplicateSharedWebViewHost)
+            .GetMethod(nameof(IApplicateSharedWebViewHost.RequestInactivePrimeRender));
+
+        Assert.NotNull(method);
+        var parameters = method.GetParameters();
+        Assert.Equal(2, parameters.Length);
+        Assert.Equal(typeof(MarkdownSource), parameters[0].ParameterType);
+        Assert.Equal(typeof(ApplicateWebRenderRequest), parameters[1].ParameterType);
+    }
+
+    [Fact]
+    public void SharedHostInactivePrimeRenderKeepsColdParentVisible()
+    {
+        var source = File.ReadAllText(HostSourcePath);
+
+        Assert.Contains(
+            "keepColdParentVisibleForInactivePrime: true",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "&& !keepColdParentVisibleForInactivePrime",
+            source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TransactionalCommitWaitsForBridgeNativeReveal()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var sm = new ApplicateSharedWebViewHostStateMachine();
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true, Opacity = 0.0 };
+            sm.SetWarmupParent(warmup);
+            sm.AttachTo(slot, transactionGeneration: 42);
+
+            var renderGen = sm.RequestRender(
+                transactionGeneration: 42,
+                mode: ApplicateMode.Viewer,
+                fastPathCommit: true);
+
+            Assert.NotEqual(0, renderGen);
+            Assert.Equal(ApplicateSharedWebViewHostStateMachine.State.Committed, sm.CurrentState);
+            Assert.False(sm.NativeWebViewVisible);
+            Assert.False(sm.RevealNativeWebViewForCommittedTransaction(41));
+            Assert.False(sm.NativeWebViewVisible);
+            Assert.True(sm.RevealNativeWebViewForCommittedTransaction(42));
+            Assert.True(sm.NativeWebViewVisible);
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public void TransactionalAttachAndRequestRenderKeepBridgeOwnedSlotVisible()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var sm = new ApplicateSharedWebViewHostStateMachine();
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true, Opacity = 1.0 };
+            sm.SetWarmupParent(warmup);
+
+            sm.AttachTo(slot, transactionGeneration: 42);
+
+            Assert.True(slot.IsVisible);
+            Assert.Equal(1.0, slot.Opacity);
+            Assert.False(sm.NativeWebViewVisible);
+
+            var renderGen = sm.RequestRender(
+                transactionGeneration: 42,
+                mode: ApplicateMode.Edit);
+
+            Assert.True(renderGen > 0);
+            Assert.True(slot.IsVisible);
+            Assert.Equal(1.0, slot.Opacity);
+            Assert.False(sm.NativeWebViewVisible);
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public void TransactionGenerationTagsCommitCompletedEvent()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var sm = new ApplicateSharedWebViewHostStateMachine();
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            ApplicateCommitCompletedEventArgs? completed = null;
+            sm.CommitCompleted += (_, e) => completed = e;
+            sm.SetWarmupParent(warmup);
+            sm.AttachTo(slot);
+
+            var renderGen = sm.RequestRender(
+                transactionGeneration: 42,
+                mode: ApplicateMode.Viewer);
+
+            Assert.True(sm.ApplyDocumentRendered(renderGen));
+            Assert.NotNull(completed);
+            Assert.Equal(42, completed.TransactionGeneration);
+            Assert.Equal(ApplicateMode.Viewer, completed.Mode);
+            Assert.Equal(slot.Bounds, completed.Bounds);
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public void StaleRenderGenerationDoesNotRaiseCommitCompletedEvent()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var sm = new ApplicateSharedWebViewHostStateMachine();
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            var commitCount = 0;
+            ApplicateCommitCompletedEventArgs? completed = null;
+            sm.CommitCompleted += (_, e) =>
+            {
+                commitCount++;
+                completed = e;
+            };
+            sm.SetWarmupParent(warmup);
+            sm.AttachTo(slot);
+
+            var firstRenderGen = sm.RequestRender(
+                transactionGeneration: 10,
+                mode: ApplicateMode.Viewer);
+            var secondRenderGen = sm.RequestRender(
+                transactionGeneration: 20,
+                mode: ApplicateMode.Viewer);
+
+            Assert.False(sm.ApplyDocumentRendered(firstRenderGen));
+            Assert.Null(completed);
+
+            Assert.True(sm.ApplyDocumentRendered(secondRenderGen));
+            Assert.Equal(1, commitCount);
+            Assert.NotNull(completed);
+            Assert.Equal(20, completed.TransactionGeneration);
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public void FastPathRequestRenderRaisesCommitCompletedSynchronously()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var sm = new ApplicateSharedWebViewHostStateMachine();
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            ApplicateCommitCompletedEventArgs? completed = null;
+            sm.CommitCompleted += (_, e) => completed = e;
+            sm.SetWarmupParent(warmup);
+            sm.AttachTo(slot);
+
+            var renderGen = sm.RequestRender(
+                transactionGeneration: 77,
+                mode: ApplicateMode.Viewer,
+                fastPathCommit: true);
+
+            Assert.NotEqual(0, renderGen);
+            Assert.NotNull(completed);
+            Assert.Equal(77, completed.TransactionGeneration);
+            Assert.Equal(ApplicateSharedWebViewHostStateMachine.State.Committed, sm.CurrentState);
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public void EditTransactionRaisesMinimapSettledNotApplicableSynchronously()
+    {
+        var sm = new ApplicateSharedWebViewHostStateMachine();
+        ApplicateMinimapSettledEventArgs? settled = null;
+        sm.MinimapSettled += (_, e) => settled = e;
+
+        sm.RequestRender(
+            transactionGeneration: 33,
+            mode: ApplicateMode.Edit,
+            minimapApplicable: false);
+
+        Assert.NotNull(settled);
+        Assert.Equal(33, settled.TransactionGeneration);
+        Assert.False(settled.IsApplicable);
+        Assert.Null(settled.State);
+    }
+
+    [Fact]
+    public void ViewerTransactionRaisesMinimapSettledOnceAndDropsStaleGeneration()
+    {
+        var sm = new ApplicateSharedWebViewHostStateMachine();
+        var events = new List<ApplicateMinimapSettledEventArgs>();
+        sm.MinimapSettled += (_, e) => events.Add(e);
+
+        sm.RequestRender(
+            transactionGeneration: 44,
+            mode: ApplicateMode.Viewer,
+            minimapApplicable: true);
+
+        Assert.False(sm.ApplyMinimapSettled(
+            transactionGeneration: 43,
+            state: new ApplicateWebMinimapStateEventArgs(visible: false, reservedWidth: 0)));
+        Assert.True(sm.ApplyMinimapSettled(
+            transactionGeneration: 44,
+            state: new ApplicateWebMinimapStateEventArgs(visible: true, reservedWidth: 168)));
+        Assert.False(sm.ApplyMinimapSettled(
+            transactionGeneration: 44,
+            state: new ApplicateWebMinimapStateEventArgs(visible: false, reservedWidth: 0)));
+
+        var settled = Assert.Single(events);
+        Assert.Equal(44, settled.TransactionGeneration);
+        Assert.True(settled.IsApplicable);
+        Assert.NotNull(settled.State);
+        Assert.True(settled.State.Visible);
+        Assert.Equal(168, settled.State.ReservedWidth);
+    }
+
+    [Fact]
+    public void TransactionRaisesRendererSettledOnceAndDropsStaleGeneration()
+    {
+        var sm = new ApplicateSharedWebViewHostStateMachine();
+        var events = new List<ApplicateRendererSettledEventArgs>();
+        sm.RendererSettled += (_, e) => events.Add(e);
+
+        sm.RequestRender(
+            transactionGeneration: 44,
+            mode: ApplicateMode.Edit);
+
+        Assert.False(sm.ApplyRendererSettled(43));
+        Assert.True(sm.ApplyRendererSettled(44));
+        Assert.False(sm.ApplyRendererSettled(44));
+
+        var settled = Assert.Single(events);
+        Assert.Equal(44, settled.TransactionGeneration);
+    }
+
+    [Fact]
     public void ReturnToWarmupClearsConsumerSlotAndRestoresVisibility()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
@@ -272,6 +554,33 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
+    public void TransactionRevealUsesConfiguredModeSwitchDuration()
+    {
+        var source = File.ReadAllText(HostSourcePath);
+        var commit = ExtractMethodBody(
+            source,
+            source.IndexOf("private void Commit()", StringComparison.Ordinal));
+        var transactionalReveal = ExtractMethodBody(
+            source,
+            source.IndexOf("public bool RevealNativeWebViewForCommittedTransaction", StringComparison.Ordinal));
+        var transactionalCommit = commit[
+            commit.IndexOf("if (transactionalCommit)", StringComparison.Ordinal)..
+            commit.IndexOf("else if (armRevealGate)", StringComparison.Ordinal)];
+
+        Assert.Contains("_pendingTransactionRevealDuration = modeSwitchDuration", commit, StringComparison.Ordinal);
+        Assert.Contains("View.PrepareNativeRendererForReveal(modeSwitchDuration)", transactionalCommit, StringComparison.Ordinal);
+        Assert.DoesNotContain("View.PrepareNativeWebViewForHiddenPaint();", transactionalCommit, StringComparison.Ordinal);
+        Assert.True(
+            transactionalCommit.IndexOf("View.PrepareNativeRendererForReveal(modeSwitchDuration)", StringComparison.Ordinal)
+            < commit.IndexOf("View.RequestModeToggleSettleProbe(_activeTransactionGeneration);", StringComparison.Ordinal));
+        Assert.Contains("var duration = _pendingTransactionRevealDuration", transactionalReveal, StringComparison.Ordinal);
+        Assert.Contains("View.CompleteNativeWebViewHiddenPaint();", transactionalReveal, StringComparison.Ordinal);
+        Assert.DoesNotContain("View.SetNativeWebViewVisibility(true)", transactionalReveal, StringComparison.Ordinal);
+        Assert.DoesNotContain("View.RevealNativeRenderer(TimeSpan.Zero)", transactionalReveal, StringComparison.Ordinal);
+        Assert.Contains("View.RevealNativeRenderer(duration)", transactionalReveal, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RevealGateRehidesNativeWindowAfterLayoutBeforeOffscreenPrepaint()
     {
         var source = File.ReadAllText(HostSourcePath);
@@ -286,6 +595,30 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
         Assert.True(
             commit.IndexOf("View.SetNativeWebViewVisibility(false);", StringComparison.Ordinal)
             < commit.IndexOf("View.PrepareNativeWebViewForHiddenPaint();", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TransactionOutgoingSuppressionHidesNativeWindowWithoutOffscreenParking()
+    {
+        var source = File.ReadAllText(HostSourcePath);
+        var suppress = ExtractMethodBody(
+            source,
+            source.IndexOf("public void SuppressNativeRendererForModeSwitch(ApplicateMode displayedMode)", StringComparison.Ordinal));
+
+        Assert.Contains("View.SetNativeWebViewVisibility(false);", suppress, StringComparison.Ordinal);
+        Assert.DoesNotContain("View.ParkNativeWebViewForReparent();", suppress, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TransactionOutgoingRestoreShowsNativeWindowAfterLayoutBarrier()
+    {
+        var source = File.ReadAllText(HostSourcePath);
+        var restore = ExtractMethodBody(
+            source,
+            source.IndexOf("public void RestoreNativeRendererAfterModeSwitchSuppression(ApplicateMode displayedMode)", StringComparison.Ordinal));
+
+        Assert.Contains("View.SetNativeWebViewVisibility(true);", restore, StringComparison.Ordinal);
+        Assert.DoesNotContain("View.ParkNativeWebViewForReparent();", restore, StringComparison.Ordinal);
     }
 
     [Fact]
