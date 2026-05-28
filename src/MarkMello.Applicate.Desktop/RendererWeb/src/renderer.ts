@@ -125,12 +125,13 @@ type HostMessage =
       documentScrollEnabled?: boolean;
       wheelProxyEnabled?: boolean;
       widthResizerVisibility?: WidthResizerVisibility;
+      skipFrameWait?: boolean;
     }
   | { type: "scroll-by"; deltaY: number }
   | { type: "scroll-to-block"; blockIndex: number }
   | { type: "scroll-to"; anchor: string }
   | { type: "scroll-to-progress"; progressPercent: number }
-  | { type: "load-document"; html: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number }
+  | { type: "load-document"; html: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; skipFrameWait?: boolean }
   | { type: "clear-document" }
   | { type: "scroll-to-heading"; id: string }
   | { type: "scroll-to-source-line"; sourceLine: number }
@@ -161,8 +162,10 @@ type HostMessage =
       viewportWidth?: number;
       viewportHeight?: number;
       transactionGeneration?: number;
+      skipFrameWait?: boolean;
     }
   | { type: "minimap-settle-probe"; transactionGeneration: number }
+  | { type: "host-shortcuts-reset" }
   | { type: "mode-reveal-prepare"; durationMs?: number }
   | { type: "mode-reveal-start"; durationMs?: number };
 
@@ -829,7 +832,7 @@ function restoreCachedScrollPosition(): void {
   });
 }
 
-function scheduleLayoutReady(): void {
+function scheduleLayoutReady(skipFrameWait = false): void {
   const generation = ++layoutReadyGeneration;
   let completed = false;
   if (layoutReadyTimer !== undefined) {
@@ -845,6 +848,12 @@ function scheduleLayoutReady(): void {
     if (layoutReadyTimer !== undefined) {
       window.clearTimeout(layoutReadyTimer);
       layoutReadyTimer = undefined;
+    }
+
+    if (skipFrameWait) {
+      postPerfMark("mm-layout-ready-frame-wait-skipped");
+      postLayoutReady();
+      return;
     }
 
     window.requestAnimationFrame(() => {
@@ -1728,6 +1737,7 @@ type AppliedReadingPreferences = {
 
 let lastAppliedReadingPreferences: AppliedReadingPreferences | null = null;
 let pendingReadingPreferences: AppliedReadingPreferences | null = null;
+let pendingReadingPreferencesSkipFrameWait = false;
 let applyPrefsFrameRequested = false;
 // Host-provided floor for max-width during drag (mirrors host's clamp).
 // Without it, drag preview can dip below host's min and snap wider on release.
@@ -1764,6 +1774,8 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
     widthResizerVisibility: normalizeWidthResizerVisibility(message.widthResizerVisibility),
   };
   pendingReadingPreferences = next;
+  pendingReadingPreferencesSkipFrameWait =
+    pendingReadingPreferencesSkipFrameWait || message.skipFrameWait === true;
   if (!next.viewerChromeEnabled) {
     viewerChromeEnabled = false;
     applyViewerChromeState();
@@ -1778,7 +1790,9 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
 function flushPendingReadingPreferences(): void {
   applyPrefsFrameRequested = false;
   const next = pendingReadingPreferences;
+  const skipFrameWait = pendingReadingPreferencesSkipFrameWait;
   pendingReadingPreferences = null;
+  pendingReadingPreferencesSkipFrameWait = false;
   if (!next) return;
 
   const prev = lastAppliedReadingPreferences;
@@ -1880,7 +1894,7 @@ function flushPendingReadingPreferences(): void {
       renderCodeBlocks,
       scheduleLayoutReady: () => {
         initialRenderPipelineCompleted = true;
-        scheduleLayoutReady();
+        scheduleLayoutReady(skipFrameWait);
       }
     });
   }
@@ -1902,6 +1916,11 @@ function scheduleHeavyLiveUpdate(): void {
 
 function handleHostMessage(raw: unknown): void {
   const message = raw as HostMessage;
+  if (message.type === "host-shortcuts-reset") {
+    resetHostShortcutsForModeSwitch?.();
+    return;
+  }
+
   if (message.type === "theme") {
     if (initialRenderPipelineCompleted) {
       void handleThemeChange(message.theme);
@@ -1994,6 +2013,9 @@ function handleHostMessage(raw: unknown): void {
     if (message.renderId !== undefined) {
       loadMessage.renderId = message.renderId;
     }
+    if (message.skipFrameWait !== undefined) {
+      loadMessage.skipFrameWait = message.skipFrameWait;
+    }
     // PE r2 item G — propagate hasMermaid from the IPC payload (host computes
     // this from ApplicateHtmlMarkdownRenderer.RenderBodyAsync at
     // ApplicateWebMarkdownDocumentView.cs:557). Undefined → mermaid runs by
@@ -2040,7 +2062,6 @@ function handleHostMessage(raw: unknown): void {
       });
     }
 
-    flushPendingReadingPreferences();
     modeToggleProbeFrameRequested = true;
     modeToggleProbeTransactionGeneration = transactionGeneration;
     const probeToken = ++modeToggleProbeToken;
@@ -2059,6 +2080,15 @@ function handleHostMessage(raw: unknown): void {
         postHostMessage({ type: "mode-toggle-settled", transactionGeneration });
       }
     };
+    flushPendingReadingPreferences();
+    if (message.skipFrameWait === true) {
+      postPerfMark("mm-mode-settle-frame-wait-skipped", {
+        transactionGeneration,
+      });
+      postModeToggleSettleAck();
+      return;
+    }
+
     const completeModeToggleSettleAfterPaint = () => {
       if (!isCurrentProbe()) {
         return;
@@ -2196,6 +2226,9 @@ function applyModeSettleProbePreferences(message: Extract<HostMessage, { type: "
   if (message.widthResizerVisibility !== undefined) {
     preferences.widthResizerVisibility = message.widthResizerVisibility;
   }
+  if (message.skipFrameWait !== undefined) {
+    preferences.skipFrameWait = message.skipFrameWait;
+  }
 
   applyReadingPreferences(preferences);
 }
@@ -2280,7 +2313,7 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
     // skips mermaid init+render for docs without mermaid blocks. Undefined
     // passes through to the pipeline's `!== false` default, preserving the
     // pre-G behavior for any caller that doesn't carry the flag.
-    runInitialRenderPipeline: async (hasMermaid) => {
+    runInitialRenderPipeline: async (hasMermaid, skipFrameWait) => {
       await runInitialRenderPipeline({
         getCurrentTheme,
         applyTheme,
@@ -2290,7 +2323,7 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
         renderCodeBlocks,
         scheduleLayoutReady: () => {
           initialRenderPipelineCompleted = true;
-          scheduleLayoutReady();
+          scheduleLayoutReady(skipFrameWait === true);
           // Re-emit document-ready so the host's _hasLoadedDocument state
           // machine restarts for the new document.
           postHostMessage({
@@ -2452,6 +2485,8 @@ function setDropOverlayVisible(visible: boolean): void {
 // combos the host cares about, posts them to the host, and preventDefault's
 // the in-WebView behavior so the user can use shortcuts without first
 // clicking back into the title bar.
+let resetHostShortcutsForModeSwitch: (() => void) | undefined;
+
 function wireHostShortcuts(): void {
   let editModeShortcutDown = false;
   let editModeShortcutResetTimer: number | undefined;
@@ -2459,12 +2494,22 @@ function wireHostShortcuts(): void {
     editModeShortcutDown = false;
     window.clearTimeout(editModeShortcutResetTimer);
   };
+  resetHostShortcutsForModeSwitch = resetEditModeShortcut;
   const keepEditModeShortcutHeld = () => {
     editModeShortcutDown = true;
     window.clearTimeout(editModeShortcutResetTimer);
     editModeShortcutResetTimer = window.setTimeout(resetEditModeShortcut, 1000);
   };
   const hostShortcuts = new Set<string>([
+    "ctrl+1",
+    "ctrl+2",
+    "ctrl+3",
+    "ctrl+4",
+    "ctrl+5",
+    "ctrl+6",
+    "ctrl+7",
+    "ctrl+8",
+    "ctrl+9",
     "ctrl+e",
     "ctrl+o",
     "ctrl+s",

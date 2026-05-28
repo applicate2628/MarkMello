@@ -239,7 +239,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     internal bool LastLayoutReadyWasCached => _lastLayoutReadyWasCached;
 
-    internal void UpdateInputs(
+    internal ApplicateWebInputUpdateAction UpdateInputs(
         MarkdownSource? source,
         ReadingPreferences readingPreferences,
         IImageSourceResolver? imageSourceResolver,
@@ -247,7 +247,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         bool viewerChromeEnabled,
         bool documentScrollEnabled = true,
         bool wheelProxyEnabled = false,
-        bool deferLivePreferencesUntilModeSettleProbe = false)
+        bool deferLivePreferencesUntilModeSettleProbe = false,
+        bool skipFrameWaitUntilRenderReady = false)
     {
         var action = DetermineInputUpdateAction(
             sourceChanged: !Equals(Source, source),
@@ -280,8 +281,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         if (action == ApplicateWebInputUpdateAction.Render)
         {
-            QueueRender();
-            return;
+            QueueRender(skipFrameWaitUntilRenderReady);
+            return action;
         }
 
         if (action == ApplicateWebInputUpdateAction.ApplyLivePreferences
@@ -289,6 +290,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             ApplyReadingPreferences();
         }
+
+        return action;
     }
 
     /// <summary>
@@ -512,6 +515,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             else
             {
                 _pendingNativeHiddenPaintPlacement = null;
+                ReleaseNativeWebViewFocusBeforeHide(handle);
             }
 
             SetNativeWebViewTreeVisibility(handle, isVisible);
@@ -521,6 +525,75 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         // Non-Windows fallback: preserve the old control-level visibility path
         // where there is no HWND airspace race to hide directly.
         _webView.IsVisible = isVisible;
+    }
+
+    private void ReleaseNativeWebViewFocusBeforeHide(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var focused = NativeMethods.GetFocus();
+        var focusSource = "thread";
+        if (!IsNativeFocusInsideWebView(handle, focused))
+        {
+            if (!TryGetForegroundFocusedWindow(out var foregroundFocused)
+                || !IsNativeFocusInsideWebView(handle, foregroundFocused))
+            {
+                return;
+            }
+
+            focused = foregroundFocused;
+            focusSource = "foreground";
+        }
+
+        var focusTarget = TopLevel.GetTopLevel(_webView)?.TryGetPlatformHandle()?.Handle
+            ?? NativeMethods.GetParent(handle);
+        if (focusTarget == IntPtr.Zero
+            || focusTarget == handle
+            || IsNativeFocusInsideWebView(handle, focusTarget))
+        {
+            return;
+        }
+
+        var previous = NativeMethods.SetFocus(focusTarget);
+        var setFocusError = previous == IntPtr.Zero
+            ? Marshal.GetLastWin32Error()
+            : 0;
+        var focusedAfter = NativeMethods.GetFocus();
+        if (IsNativeFocusInsideWebView(handle, focusedAfter))
+        {
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "native-focus-release-failed",
+                $"source={focusSource} focus=0x{focused.ToInt64():X} target=0x{focusTarget.ToInt64():X} previous=0x{previous.ToInt64():X} after=0x{focusedAfter.ToInt64():X} error={setFocusError}");
+            return;
+        }
+
+        ApplicateTrace.ModeToggle(
+            $"ReleaseNativeWebViewFocusBeforeHide source={focusSource} focus=0x{focused.ToInt64():X} target=0x{focusTarget.ToInt64():X} previous=0x{previous.ToInt64():X} after=0x{focusedAfter.ToInt64():X} error={setFocusError}");
+    }
+
+    private static bool IsNativeFocusInsideWebView(IntPtr root, IntPtr focused)
+        => root != IntPtr.Zero
+           && focused != IntPtr.Zero
+           && (focused == root || NativeMethods.IsChild(root, focused));
+
+    private static bool TryGetForegroundFocusedWindow(out IntPtr focused)
+    {
+        var info = new NativeGuiThreadInfo
+        {
+            CbSize = Marshal.SizeOf<NativeGuiThreadInfo>(),
+        };
+        if (!NativeMethods.GetGUIThreadInfo(0, ref info))
+        {
+            focused = IntPtr.Zero;
+            return false;
+        }
+
+        focused = info.FocusWindow;
+        return focused != IntPtr.Zero;
     }
 
     internal void PrepareNativeWebViewForHiddenPaint()
@@ -870,7 +943,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private static bool AreEqual(double left, double right)
         => double.IsNaN(left) && double.IsNaN(right) || SysMath.Abs(left - right) <= double.Epsilon;
 
-    private void QueueRender()
+    private void QueueRender(bool skipFrameWaitUntilRenderReady = false)
     {
         if (_disposed)
         {
@@ -895,7 +968,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         if (_shellMode)
         {
             _renderCancellation = new CancellationTokenSource();
-            _ = QueueRenderShellAsync(source, renderId, _renderCancellation.Token);
+            _ = QueueRenderShellAsync(source, renderId, skipFrameWaitUntilRenderReady, _renderCancellation.Token);
             return;
         }
 
@@ -910,7 +983,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _ = RenderAsync(source, _renderCancellation.Token);
     }
 
-    private async Task QueueRenderShellAsync(MarkdownSource? source, long renderId, CancellationToken cancellationToken)
+    private async Task QueueRenderShellAsync(
+        MarkdownSource? source,
+        long renderId,
+        bool skipFrameWaitUntilRenderReady,
+        CancellationToken cancellationToken)
     {
         try
         {
@@ -967,16 +1044,29 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             ApplicateTrace.ModeToggle(
                 $"Web.RenderShell render-body-end id={renderId} source={source.Path} htmlLength={body.BodyHtml.Length} theme={GetThemeName()}");
 
-            PostRendererMessage(new
-            {
-                type = "load-document",
-                html = body.BodyHtml,
-                documentName = source.FileName,
-                theme = GetThemeName(),
-                hasMermaid = body.HasMermaidBlock,
-                hasHljs = body.HasCodeBlockWithSyntax,
-                renderId,
-            });
+            object loadDocumentMessage = skipFrameWaitUntilRenderReady
+                ? new
+                {
+                    type = "load-document",
+                    html = body.BodyHtml,
+                    documentName = source.FileName,
+                    theme = GetThemeName(),
+                    hasMermaid = body.HasMermaidBlock,
+                    hasHljs = body.HasCodeBlockWithSyntax,
+                    renderId,
+                    skipFrameWait = true
+                }
+                : new
+                {
+                    type = "load-document",
+                    html = body.BodyHtml,
+                    documentName = source.FileName,
+                    theme = GetThemeName(),
+                    hasMermaid = body.HasMermaidBlock,
+                    hasHljs = body.HasCodeBlockWithSyntax,
+                    renderId
+                };
+            PostRendererMessage(loadDocumentMessage);
             ApplicateTrace.ModeToggle($"Web.RenderShell post-load id={renderId} source={source.Path}");
         }
         catch (OperationCanceledException)
@@ -2239,7 +2329,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         };
     }
 
-    private object BuildReadingPreferencesMessage(string type, long transactionGeneration)
+    private object BuildReadingPreferencesMessage(
+        string type,
+        long transactionGeneration,
+        bool skipFrameWait = false)
     {
         if (transactionGeneration <= 0)
         {
@@ -2264,7 +2357,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             widthResizerVisibility = ToRendererWidthResizerVisibility(ReadingPreferences.WidthResizerVisibility),
             viewportWidth = _webView.Bounds.Width,
             viewportHeight = _webView.Bounds.Height,
-            transactionGeneration
+            transactionGeneration,
+            skipFrameWait
         };
     }
 
@@ -2324,7 +2418,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         PostRendererMessage(BuildReadingPreferencesMessage("mode-settle-probe"));
     }
 
-    internal void RequestModeToggleSettleProbe(long transactionGeneration)
+    internal void RequestModeToggleSettleProbe(long transactionGeneration, bool skipFrameWait = false)
     {
         if (transactionGeneration <= 0)
         {
@@ -2335,8 +2429,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ApplicateTrace.DiagMs(
             "pane-seq",
             "host-transaction-settle-probe-sent",
-            $"transactionGeneration={transactionGeneration}");
-        PostRendererMessage(BuildReadingPreferencesMessage("mode-settle-probe", transactionGeneration));
+            $"transactionGeneration={transactionGeneration} skipFrameWait={skipFrameWait}");
+        PostRendererMessage(BuildReadingPreferencesMessage(
+            "mode-settle-probe",
+            transactionGeneration,
+            skipFrameWait));
     }
 
     internal void RequestMinimapSettleProbe(long transactionGeneration)
@@ -2356,6 +2453,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             : 0;
         PostRendererMessage(new { type = "scroll-to-progress", progressPercent = progress });
     }
+
+    internal void ResetHostShortcutsForModeSwitch()
+        => PostRendererMessage(new { type = "host-shortcuts-reset" });
 
     private void PostRendererMessage(object message)
     {
@@ -2662,6 +2762,20 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         public static extern bool GetClientRect(IntPtr windowHandle, out NativeRect rect);
 
         [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr GetFocus();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetFocus(IntPtr windowHandle);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsChild(IntPtr parentHandle, IntPtr windowHandle);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetGUIThreadInfo(uint threadId, ref NativeGuiThreadInfo info);
+
+        [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool ScreenToClient(IntPtr windowHandle, ref NativePoint point);
 
@@ -2680,6 +2794,20 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     {
         public int X = x;
         public int Y = y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeGuiThreadInfo
+    {
+        public int CbSize;
+        public uint Flags;
+        public IntPtr ActiveWindow;
+        public IntPtr FocusWindow;
+        public IntPtr CaptureWindow;
+        public IntPtr MenuOwnerWindow;
+        public IntPtr MoveSizeWindow;
+        public IntPtr CaretWindow;
+        public NativeRect CaretRect;
     }
 
     [StructLayout(LayoutKind.Sequential)]

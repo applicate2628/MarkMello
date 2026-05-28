@@ -52,6 +52,54 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("_editModeHotkeyDown = false;", keyUp, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void RendererFocusedTabHotkeysUseSameOrdinalActivationAsWindowHotkeys()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var tabHotkey = ExtractMethodBody(codeBehind, "private void OnTabHotkey(object? sender, KeyEventArgs e)");
+        var hostBridge = ExtractMethodBody(codeBehind, "private void InstallHostShortcutBridge(MainWindowViewModel viewModel)");
+        var ordinalActivation = ExtractMethodBody(codeBehind, "private static bool TryActivateTabOrdinal(int ordinal)");
+        var renderer = ReadRendererSource();
+
+        Assert.Contains("TryActivateTabOrdinal(ordinal)", tabHotkey, StringComparison.Ordinal);
+        Assert.Contains("TryReadHostShortcutTabOrdinal(combo)", hostBridge, StringComparison.Ordinal);
+        Assert.Contains("TryActivateTabOrdinal(tabOrdinal.Value)", hostBridge, StringComparison.Ordinal);
+        Assert.Contains("ordinal == 9", ordinalActivation, StringComparison.Ordinal);
+        Assert.Contains("openDocs.Activate(target);", ordinalActivation, StringComparison.Ordinal);
+
+        for (var ordinal = 1; ordinal <= 9; ordinal++)
+        {
+            Assert.Contains($"\"ctrl+{ordinal}\"", renderer, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void InactiveEditPreviewPrimeWaitsForVisibleViewerCommit()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var installSiblingViews = ExtractMethodBody(codeBehind, "private void InstallSiblingMountedViews(MainWindowViewModel viewModel)");
+        var primeInstaller = ExtractMethodBody(codeBehind, "private void InstallInactiveEditPreviewPrime(");
+        var tryPrime = ExtractMethodBody(primeInstaller, "void TryPrime()");
+        var closeHandler = ExtractMethodBody(primeInstaller, "void OnPrimeClosed(object? sender, EventArgs e)");
+        var commitHandler = ExtractMethodBody(primeInstaller, "void OnViewerHostCommitCompleted(object? sender, ApplicateCommitCompletedEventArgs e)");
+
+        Assert.Contains("viewerHostForMode);", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("IApplicateSharedWebViewHost? viewerCommitHost", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("viewerCommitHost.CommitCompleted += OnViewerHostCommitCompleted;", primeInstaller, StringComparison.Ordinal);
+        Assert.Contains("viewerCommitHost.CommitCompleted -= OnViewerHostCommitCompleted;", closeHandler, StringComparison.Ordinal);
+
+        Assert.Contains("e.TransactionGeneration != 0", commitHandler, StringComparison.Ordinal);
+        Assert.Contains("e.Mode != ApplicateMode.Viewer", commitHandler, StringComparison.Ordinal);
+        Assert.Contains("QueuePrime();", commitHandler, StringComparison.Ordinal);
+
+        var gateIndex = tryPrime.IndexOf("viewerCommitHost.View.HasLoadedDocumentForSource(document)", StringComparison.Ordinal);
+        var beginLayoutIndex = tryPrime.IndexOf("BeginPrimeLayout(editWorkspaceSize)", StringComparison.Ordinal);
+        Assert.True(gateIndex >= 0, "TryPrime should gate on the viewer host's current loaded document.");
+        Assert.True(beginLayoutIndex > gateIndex, "Inactive prime should not begin layout before the viewer commit gate.");
+        Assert.Contains("Equals(viewerCommitHost.View.ReadingPreferences, preferences)", tryPrime, StringComparison.Ordinal);
+        Assert.Contains("\"editpreview-inactive-prime-gated\"", tryPrime, StringComparison.Ordinal);
+    }
+
     private static string ReadMainWindowCodeBehind()
         => File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,
@@ -63,6 +111,20 @@ public sealed class ApplicateMainWindowBridgeTests
             "src",
             "MarkMello.Applicate.Desktop",
             "ApplicateMainWindow.cs"));
+
+    private static string ReadRendererSource()
+        => File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "RendererWeb",
+            "src",
+            "renderer.ts"));
 
     private static string ExtractFromMarker(string source, string marker)
     {

@@ -171,7 +171,7 @@
       deps.completeCachedDocumentLoad();
       return;
     }
-    void deps.runInitialRenderPipeline(message.hasMermaid);
+    void deps.runInitialRenderPipeline(message.hasMermaid, message.skipFrameWait);
   }
   function clearDocumentState(deps) {
     const main = document.querySelector("main.mm-document");
@@ -1580,7 +1580,7 @@
       behavior: "instant"
     });
   }
-  function scheduleLayoutReady() {
+  function scheduleLayoutReady(skipFrameWait = false) {
     const generation = ++layoutReadyGeneration;
     let completed = false;
     if (layoutReadyTimer !== void 0) {
@@ -1594,6 +1594,11 @@
       if (layoutReadyTimer !== void 0) {
         window.clearTimeout(layoutReadyTimer);
         layoutReadyTimer = void 0;
+      }
+      if (skipFrameWait) {
+        postPerfMark("mm-layout-ready-frame-wait-skipped");
+        postLayoutReady();
+        return;
       }
       window.requestAnimationFrame(() => {
         window.requestAnimationFrame(() => {
@@ -2214,6 +2219,7 @@
   }
   var lastAppliedReadingPreferences = null;
   var pendingReadingPreferences = null;
+  var pendingReadingPreferencesSkipFrameWait = false;
   var applyPrefsFrameRequested = false;
   var RENDERER_FALLBACK_MIN_MAX_WIDTH = 320;
   var hostMinMaxWidth = RENDERER_FALLBACK_MIN_MAX_WIDTH;
@@ -2239,6 +2245,7 @@
       widthResizerVisibility: normalizeWidthResizerVisibility(message.widthResizerVisibility)
     };
     pendingReadingPreferences = next;
+    pendingReadingPreferencesSkipFrameWait = pendingReadingPreferencesSkipFrameWait || message.skipFrameWait === true;
     if (!next.viewerChromeEnabled) {
       viewerChromeEnabled = false;
       applyViewerChromeState();
@@ -2252,7 +2259,9 @@
   function flushPendingReadingPreferences() {
     applyPrefsFrameRequested = false;
     const next = pendingReadingPreferences;
+    const skipFrameWait = pendingReadingPreferencesSkipFrameWait;
     pendingReadingPreferences = null;
+    pendingReadingPreferencesSkipFrameWait = false;
     if (!next) return;
     const prev = lastAppliedReadingPreferences;
     const fontFamilyChanged = !prev || prev.fontFamily !== next.fontFamily;
@@ -2311,7 +2320,7 @@
         renderCodeBlocks,
         scheduleLayoutReady: () => {
           initialRenderPipelineCompleted = true;
-          scheduleLayoutReady();
+          scheduleLayoutReady(skipFrameWait);
         }
       });
     }
@@ -2327,6 +2336,10 @@
   }
   function handleHostMessage(raw) {
     const message = raw;
+    if (message.type === "host-shortcuts-reset") {
+      resetHostShortcutsForModeSwitch?.();
+      return;
+    }
     if (message.type === "theme") {
       if (initialRenderPipelineCompleted) {
         void handleThemeChange(message.theme);
@@ -2395,6 +2408,9 @@
       if (message.renderId !== void 0) {
         loadMessage.renderId = message.renderId;
       }
+      if (message.skipFrameWait !== void 0) {
+        loadMessage.skipFrameWait = message.skipFrameWait;
+      }
       if (message.hasMermaid !== void 0) {
         loadMessage.hasMermaid = message.hasMermaid;
       }
@@ -2428,7 +2444,6 @@
           transactionGeneration
         });
       }
-      flushPendingReadingPreferences();
       modeToggleProbeFrameRequested = true;
       modeToggleProbeTransactionGeneration = transactionGeneration;
       const probeToken = ++modeToggleProbeToken;
@@ -2446,6 +2461,14 @@
           postHostMessage({ type: "mode-toggle-settled", transactionGeneration });
         }
       };
+      flushPendingReadingPreferences();
+      if (message.skipFrameWait === true) {
+        postPerfMark("mm-mode-settle-frame-wait-skipped", {
+          transactionGeneration
+        });
+        postModeToggleSettleAck();
+        return;
+      }
       const completeModeToggleSettleAfterPaint = () => {
         if (!isCurrentProbe()) {
           return;
@@ -2552,6 +2575,9 @@
     if (message.widthResizerVisibility !== void 0) {
       preferences.widthResizerVisibility = message.widthResizerVisibility;
     }
+    if (message.skipFrameWait !== void 0) {
+      preferences.skipFrameWait = message.skipFrameWait;
+    }
     applyReadingPreferences(preferences);
   }
   function resetModuleGlobalsForLoadDocument() {
@@ -2602,7 +2628,7 @@
       // skips mermaid init+render for docs without mermaid blocks. Undefined
       // passes through to the pipeline's `!== false` default, preserving the
       // pre-G behavior for any caller that doesn't carry the flag.
-      runInitialRenderPipeline: async (hasMermaid) => {
+      runInitialRenderPipeline: async (hasMermaid, skipFrameWait) => {
         await runInitialRenderPipeline({
           getCurrentTheme,
           applyTheme,
@@ -2612,7 +2638,7 @@
           renderCodeBlocks,
           scheduleLayoutReady: () => {
             initialRenderPipelineCompleted = true;
-            scheduleLayoutReady();
+            scheduleLayoutReady(skipFrameWait === true);
             postHostMessage({
               type: "document-ready",
               mathCount: document.querySelectorAll("[data-tex]").length
@@ -2740,6 +2766,7 @@
       node.removeAttribute("data-visible");
     }
   }
+  var resetHostShortcutsForModeSwitch;
   function wireHostShortcuts() {
     let editModeShortcutDown = false;
     let editModeShortcutResetTimer;
@@ -2747,12 +2774,22 @@
       editModeShortcutDown = false;
       window.clearTimeout(editModeShortcutResetTimer);
     };
+    resetHostShortcutsForModeSwitch = resetEditModeShortcut;
     const keepEditModeShortcutHeld = () => {
       editModeShortcutDown = true;
       window.clearTimeout(editModeShortcutResetTimer);
       editModeShortcutResetTimer = window.setTimeout(resetEditModeShortcut, 1e3);
     };
     const hostShortcuts = /* @__PURE__ */ new Set([
+      "ctrl+1",
+      "ctrl+2",
+      "ctrl+3",
+      "ctrl+4",
+      "ctrl+5",
+      "ctrl+6",
+      "ctrl+7",
+      "ctrl+8",
+      "ctrl+9",
       "ctrl+e",
       "ctrl+o",
       "ctrl+s",

@@ -66,8 +66,49 @@ public sealed class ApplicateWebHostMessagingTests
         var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
 
         Assert.Contains("deferLivePreferencesUntilModeSettleProbe: transactionGeneration > 0", hostSource, StringComparison.Ordinal);
+        Assert.Contains("internal ApplicateWebInputUpdateAction UpdateInputs", viewSource, StringComparison.Ordinal);
         Assert.Contains("bool deferLivePreferencesUntilModeSettleProbe = false", viewSource, StringComparison.Ordinal);
         Assert.Contains("&& !deferLivePreferencesUntilModeSettleProbe", viewSource, StringComparison.Ordinal);
+        Assert.Contains("return action;", viewSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TransactionalSettleProbeFastPathKeepsRendererAckBoundary()
+    {
+        var source = File.ReadAllText(SharedWebViewHostSourcePath);
+        var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
+        var rendererSource = File.ReadAllText(RendererSourcePath);
+        var requestRender = source[
+            source.IndexOf("private void RequestRender(", StringComparison.Ordinal)..
+            source.IndexOf("public void RetryRender()", StringComparison.Ordinal)];
+        var commit = source[
+            source.IndexOf("private void Commit()", StringComparison.Ordinal)..
+            source.IndexOf("public bool RevealNativeWebViewForCommittedTransaction", StringComparison.Ordinal)];
+
+        Assert.Contains("View.UpdateInputs(", requestRender, StringComparison.Ordinal);
+        Assert.Contains("ShouldSkipRendererFrameSettleForTransaction(transactionGeneration)", requestRender, StringComparison.Ordinal);
+        Assert.Contains("=> transactionGeneration > 0", source, StringComparison.Ordinal);
+        Assert.Contains("skipFrameWait: _activeTransactionSkipsRendererFrameSettle", commit, StringComparison.Ordinal);
+        Assert.Contains("skipFrameWait={skipFrameWait}", viewSource, StringComparison.Ordinal);
+        Assert.Contains("skipFrameWait", rendererSource, StringComparison.Ordinal);
+        Assert.Contains("mm-mode-settle-frame-wait-skipped", rendererSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("host-transaction-renderer-settled-fastpath", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TransactionalRenderLoadDocumentSkipsRendererLayoutFrameWait()
+    {
+        var hostSource = File.ReadAllText(SharedWebViewHostSourcePath);
+        var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
+        var rendererSource = File.ReadAllText(RendererSourcePath);
+
+        Assert.Contains("skipFrameWaitUntilRenderReady: transactionGeneration > 0", hostSource, StringComparison.Ordinal);
+        Assert.Contains("bool skipFrameWaitUntilRenderReady = false", viewSource, StringComparison.Ordinal);
+        Assert.Contains("QueueRender(skipFrameWaitUntilRenderReady)", viewSource, StringComparison.Ordinal);
+        Assert.Contains("skipFrameWait = true", viewSource, StringComparison.Ordinal);
+        Assert.Contains("skipFrameWait?: boolean", rendererSource, StringComparison.Ordinal);
+        Assert.Contains("mm-layout-ready-frame-wait-skipped", rendererSource, StringComparison.Ordinal);
+        Assert.Contains("scheduleLayoutReady(skipFrameWait === true)", rendererSource, StringComparison.Ordinal);
     }
 
     [Fact]

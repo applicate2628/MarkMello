@@ -86,6 +86,26 @@ public sealed class ApplicateWebMarkdownDocumentViewAirspaceTests
     }
 
     [Fact]
+    public void NativeWebViewHideReleasesFocusBeforeHidingHwndTree()
+    {
+        var source = File.ReadAllText(ViewSourcePath);
+        var methodStart = source.IndexOf(
+            "private void SetNativeWebViewWindowVisibility(bool isVisible)",
+            StringComparison.Ordinal);
+        var method = ExtractMethodBody(source, methodStart);
+
+        Assert.Contains("ReleaseNativeWebViewFocusBeforeHide(handle);", method, StringComparison.Ordinal);
+        Assert.True(
+            method.IndexOf("ReleaseNativeWebViewFocusBeforeHide(handle);", StringComparison.Ordinal)
+            < method.IndexOf("SetNativeWebViewTreeVisibility(handle, isVisible);", StringComparison.Ordinal));
+        Assert.Contains("NativeMethods.GetFocus", source, StringComparison.Ordinal);
+        Assert.Contains("NativeMethods.SetFocus", source, StringComparison.Ordinal);
+        Assert.Contains("NativeMethods.IsChild", source, StringComparison.Ordinal);
+        Assert.Contains("Marshal.GetLastWin32Error()", source, StringComparison.Ordinal);
+        Assert.Contains("native-focus-release-failed", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void NativeWebViewPlacementUsesParentClientCoordinates()
     {
         var source = File.ReadAllText(ViewSourcePath);

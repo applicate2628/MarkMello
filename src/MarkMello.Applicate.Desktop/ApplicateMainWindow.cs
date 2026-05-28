@@ -137,10 +137,23 @@ public sealed class ApplicateMainWindow : MainWindow
             return;
         }
 
+        if (TryActivateTabOrdinal(ordinal))
+        {
+            e.Handled = true;
+        }
+    }
+
+    private static bool TryActivateTabOrdinal(int ordinal)
+    {
+        if (ordinal <= 0 || ordinal > 9)
+        {
+            return false;
+        }
+
         var openDocs = App.Services?.GetService<IOpenDocumentsService>();
         if (openDocs is null || openDocs.OpenDocuments.Count == 0)
         {
-            return;
+            return false;
         }
 
         var docs = openDocs.OpenDocuments;
@@ -149,14 +162,27 @@ public sealed class ApplicateMainWindow : MainWindow
             : System.Math.Min(ordinal - 1, docs.Count - 1);
 
         var target = docs[index];
-        if (ReferenceEquals(target, openDocs.ActiveDocument))
+        if (!ReferenceEquals(target, openDocs.ActiveDocument))
         {
-            e.Handled = true;
-            return;
+            openDocs.Activate(target);
         }
 
-        openDocs.Activate(target);
-        e.Handled = true;
+        return true;
+    }
+
+    private static int? TryReadHostShortcutTabOrdinal(string combo)
+    {
+        const string prefix = "ctrl+";
+        if (!combo.StartsWith(prefix, System.StringComparison.Ordinal)
+            || combo.Length != prefix.Length + 1)
+        {
+            return null;
+        }
+
+        var digit = combo[prefix.Length];
+        return digit is >= '1' and <= '9'
+            ? digit - '0'
+            : null;
     }
 
     private void InstallEditModeHotkeyRepeatGate(MainWindowViewModel viewModel)
@@ -1011,7 +1037,8 @@ public sealed class ApplicateMainWindow : MainWindow
             contentPanel,
             viewerSlot,
             editSlot,
-            editPreview);
+            editPreview,
+            viewerHostForMode);
 
         Closed += OnApplicateMainWindowClosed;
     }
@@ -1021,7 +1048,8 @@ public sealed class ApplicateMainWindow : MainWindow
         Panel contentPanel,
         Control viewerSlot,
         Panel editSlot,
-        ApplicateEditPreviewView editPreview)
+        ApplicateEditPreviewView editPreview,
+        IApplicateSharedWebViewHost? viewerCommitHost)
     {
         const double inactivePrimeOffscreenX = -100000.0;
         var inactivePrimeTimeout = TimeSpan.FromSeconds(15);
@@ -1051,6 +1079,11 @@ public sealed class ApplicateMainWindow : MainWindow
         viewerSlot.PropertyChanged += OnPrimeSurfaceChanged;
         viewModel.PropertyChanged += OnPrimeViewModelChanged;
         editPreview.InactivePrimeRendered += OnInactivePrimeRendered;
+        if (viewerCommitHost is not null)
+        {
+            viewerCommitHost.CommitCompleted += OnViewerHostCommitCompleted;
+        }
+
         Closed += OnPrimeClosed;
 
         QueuePrime();
@@ -1093,11 +1126,26 @@ public sealed class ApplicateMainWindow : MainWindow
             viewerSlot.PropertyChanged -= OnPrimeSurfaceChanged;
             viewModel.PropertyChanged -= OnPrimeViewModelChanged;
             editPreview.InactivePrimeRendered -= OnInactivePrimeRendered;
+            if (viewerCommitHost is not null)
+            {
+                viewerCommitHost.CommitCompleted -= OnViewerHostCommitCompleted;
+            }
+
             Closed -= OnPrimeClosed;
         }
 
         void OnInactivePrimeRendered(object? sender, EventArgs e)
             => CompletePrime(success: true, preserveCurrentVisibility: false);
+
+        void OnViewerHostCommitCompleted(object? sender, ApplicateCommitCompletedEventArgs e)
+        {
+            if (e.TransactionGeneration != 0 || e.Mode != ApplicateMode.Viewer)
+            {
+                return;
+            }
+
+            QueuePrime();
+        }
 
         void QueuePrime()
         {
@@ -1137,6 +1185,20 @@ public sealed class ApplicateMainWindow : MainWindow
                 && AreClose(primedViewportSize.Height, viewportSize.Height))
             {
                 return;
+            }
+
+            if (viewerCommitHost is not null)
+            {
+                var viewerLoaded = viewerCommitHost.View.HasLoadedDocumentForSource(document);
+                var preferencesMatch = Equals(viewerCommitHost.View.ReadingPreferences, preferences);
+                if (!viewerLoaded || !preferencesMatch)
+                {
+                    ApplicateTrace.DiagMs(
+                        "pane-seq",
+                        "editpreview-inactive-prime-gated",
+                        $"source={document.Path} viewerLoaded={viewerLoaded} preferencesMatch={preferencesMatch}");
+                    return;
+                }
             }
 
             if (primeInProgress
@@ -1349,6 +1411,16 @@ public sealed class ApplicateMainWindow : MainWindow
     {
         ApplicateWebMarkdownDocumentView.HostShortcutHandler = combo =>
         {
+            var tabOrdinal = TryReadHostShortcutTabOrdinal(combo);
+            if (tabOrdinal.HasValue)
+            {
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    TryActivateTabOrdinal(tabOrdinal.Value);
+                });
+                return;
+            }
+
             var command = combo switch
             {
                 "ctrl+e" => viewModel.ToggleEditModeCommand,

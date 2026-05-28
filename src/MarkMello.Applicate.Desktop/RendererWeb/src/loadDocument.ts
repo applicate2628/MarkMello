@@ -4,6 +4,7 @@ export type LoadDocumentMessage = {
   theme?: "light" | "dark" | "classic-white";
   renderId?: number;
   cacheKey?: string;
+  skipFrameWait?: boolean;
   // PE r2 item G — host-provided per-document mermaid presence flag,
   // populated from C#'s `body.HasMermaidBlock` at the IPC boundary
   // (ApplicateWebMarkdownDocumentView.cs:557, IPC type at renderer.ts:108).
@@ -19,7 +20,7 @@ export type LoadDocumentDeps = {
   // mermaid guard set correctly for this specific load. Omitting the arg
   // (e.g. test harness, first-reading-preferences bootstrap) leaves the
   // pipeline at the "run mermaid" default.
-  runInitialRenderPipeline: (hasMermaid?: boolean) => Promise<void>;
+  runInitialRenderPipeline: (hasMermaid?: boolean, skipFrameWait?: boolean) => Promise<void>;
   cancelCurrentMathController: () => void;
   resetModuleGlobals: () => void;
   scrollWindowToTop: () => void;
@@ -107,7 +108,7 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
     return;
   }
 
-  void deps.runInitialRenderPipeline(message.hasMermaid);
+  void deps.runInitialRenderPipeline(message.hasMermaid, message.skipFrameWait);
 }
 
 export function clearDocumentState(deps: LoadDocumentDeps): void {

@@ -95,6 +95,7 @@ describe("renderer chrome race handling", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -140,6 +141,17 @@ describe("renderer chrome race handling", () => {
         maxDetailedDocumentHeight,
       },
     });
+  }
+
+  function findMessageIndex(type: string, messages: unknown[]): number {
+    return messages.findIndex((message: { type?: string } | null) => message?.type === type);
+  }
+
+  async function advanceLayoutReadyTimer(): Promise<void> {
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+    await Promise.resolve();
   }
 
   async function loadDocumentAndFlushMinimap(): Promise<void> {
@@ -315,6 +327,89 @@ describe("renderer chrome race handling", () => {
     flushNextRaf();
     expect(messages.some((message: { type?: string } | null) =>
       message?.type === "mode-toggle-settled")).toBe(true);
+  });
+
+  it("skip-frame settle probe applies preferences before ack without waiting for requestAnimationFrame", () => {
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+
+    load({ ...makePreferences(false, "off"), type: "reading-preferences" });
+    flushQueuedRafs();
+    messages.length = 0;
+
+    load({
+      ...makePreferences(true, "on"),
+      type: "mode-settle-probe",
+      transactionGeneration: 42,
+      skipFrameWait: true,
+    });
+
+    expect(messages).toContainEqual({
+      type: "mode-toggle-settled",
+      transactionGeneration: 42,
+    });
+    expect(document.documentElement.dataset.mmChrome).toBe("on");
+  });
+
+  it("transactional load-document skipFrameWait emits layout-ready without flushing requestAnimationFrame", async () => {
+    vi.useFakeTimers();
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+    setDocumentMetrics(2400, 600);
+
+    load({
+      type: "load-document",
+      html: "<h1>Transactional</h1><p>Ready</p>",
+      hasMermaid: false,
+      skipFrameWait: true,
+      renderId: 14,
+    });
+
+    await advanceLayoutReadyTimer();
+
+    const documentReadyIndex = findMessageIndex("document-ready", messages);
+    const layoutReadyIndex = findMessageIndex("layout-ready", messages);
+    const layoutReady = messages[layoutReadyIndex] as {
+      scrollTop?: number;
+      scrollHeight?: number;
+      clientHeight?: number;
+    };
+
+    expect(documentReadyIndex).toBeGreaterThanOrEqual(0);
+    expect(layoutReadyIndex).toBeGreaterThan(documentReadyIndex);
+    expect(layoutReady).toMatchObject({
+      scrollTop: 0,
+      scrollHeight: 2400,
+      clientHeight: 600,
+    });
+    expect(messages.some((message: { type?: string; name?: string } | null) =>
+      message?.type === "perf-mark" && message.name === "mm-layout-ready-frame-wait-skipped")).toBe(true);
+  });
+
+  it("non-transactional load-document keeps layout-ready behind animation frames", async () => {
+    vi.useFakeTimers();
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+
+    load({
+      type: "load-document",
+      html: "<h1>Normal</h1><p>Ready</p>",
+      hasMermaid: false,
+      renderId: 15,
+    });
+
+    await advanceLayoutReadyTimer();
+
+    expect(findMessageIndex("layout-ready", messages)).toBe(-1);
+    expect(rafCallbacks.length).toBeGreaterThan(0);
+    flushQueuedRafs();
+    expect(findMessageIndex("layout-ready", messages)).toBeGreaterThanOrEqual(0);
   });
 
   it("applies preferences carried by the settle probe before ack", async () => {

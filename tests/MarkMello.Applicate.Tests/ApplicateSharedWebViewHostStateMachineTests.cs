@@ -572,7 +572,7 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
         Assert.DoesNotContain("View.PrepareNativeWebViewForHiddenPaint();", transactionalCommit, StringComparison.Ordinal);
         Assert.True(
             transactionalCommit.IndexOf("View.PrepareNativeRendererForReveal(modeSwitchDuration)", StringComparison.Ordinal)
-            < commit.IndexOf("View.RequestModeToggleSettleProbe(_activeTransactionGeneration);", StringComparison.Ordinal));
+            < commit.IndexOf("View.RequestModeToggleSettleProbe(", StringComparison.Ordinal));
         Assert.Contains("var duration = _pendingTransactionRevealDuration", transactionalReveal, StringComparison.Ordinal);
         Assert.Contains("View.CompleteNativeWebViewHiddenPaint();", transactionalReveal, StringComparison.Ordinal);
         Assert.DoesNotContain("View.SetNativeWebViewVisibility(true)", transactionalReveal, StringComparison.Ordinal);
@@ -597,6 +597,19 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
             < commit.IndexOf("View.PrepareNativeWebViewForHiddenPaint();", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(42, true)]
+    public void TransactionalFrameSettleSkipDependsOnlyOnTransactionGeneration(
+        long transactionGeneration,
+        bool expected)
+    {
+        var actual = ApplicateSharedWebViewHost.ShouldSkipRendererFrameSettleForTransaction(
+            transactionGeneration);
+
+        Assert.Equal(expected, actual);
+    }
+
     [Fact]
     public void TransactionOutgoingSuppressionHidesNativeWindowWithoutOffscreenParking()
     {
@@ -605,7 +618,11 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
             source,
             source.IndexOf("public void SuppressNativeRendererForModeSwitch(ApplicateMode displayedMode)", StringComparison.Ordinal));
 
+        Assert.Contains("View.ResetHostShortcutsForModeSwitch();", suppress, StringComparison.Ordinal);
         Assert.Contains("View.SetNativeWebViewVisibility(false);", suppress, StringComparison.Ordinal);
+        Assert.True(
+            suppress.IndexOf("View.ResetHostShortcutsForModeSwitch();", StringComparison.Ordinal)
+            < suppress.IndexOf("View.SetNativeWebViewVisibility(false);", StringComparison.Ordinal));
         Assert.DoesNotContain("View.ParkNativeWebViewForReparent();", suppress, StringComparison.Ordinal);
     }
 

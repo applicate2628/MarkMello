@@ -28,6 +28,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
     private long _generation;
     private long _activeGeneration;
     private long _activeTransactionGeneration;
+    private bool _activeTransactionSkipsRendererFrameSettle;
     private long _minimapSettledTransactionGeneration;
     private long _rendererSettledTransactionGeneration;
     private MarkdownSource? _failureSource;
@@ -387,7 +388,10 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
             viewerChromeEnabled: _currentIntent.ViewerChromeEnabled,
             documentScrollEnabled: _currentIntent.DocumentScrollEnabled,
             wheelProxyEnabled: _currentIntent.WheelProxyEnabled,
-            deferLivePreferencesUntilModeSettleProbe: transactionGeneration > 0);
+            deferLivePreferencesUntilModeSettleProbe: transactionGeneration > 0,
+            skipFrameWaitUntilRenderReady: transactionGeneration > 0);
+        _activeTransactionSkipsRendererFrameSettle =
+            ShouldSkipRendererFrameSettleForTransaction(transactionGeneration);
 
         if (transactionGeneration > 0 && !_currentIntent.ViewerChromeEnabled)
         {
@@ -426,6 +430,13 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
 
     public event EventHandler? RevealCompleted;
 
+    internal static bool ShouldSkipRendererFrameSettleForTransaction(long transactionGeneration)
+        // Transactional Commit() is already gated by UpdateInputs' synchronous
+        // preference application or by DocumentRendered's layout/minimap quorum.
+        // Waiting for another renderer rAF while the target WebView HWND is
+        // intentionally hidden can deadlock tab switches.
+        => transactionGeneration > 0;
+
     public void SuppressNativeRendererForModeSwitch()
     {
         ApplicateTrace.ModeToggle($"SharedHost.SuppressNativeRendererForModeSwitch gen={_activeGeneration}");
@@ -443,6 +454,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
 
         ApplicateTrace.ModeToggle(
             $"SharedHost.SuppressNativeRendererForModeSwitch displayed={displayedMode} gen={_activeGeneration}");
+        View.ResetHostShortcutsForModeSwitch();
         View.SetNativeWebViewVisibility(false);
     }
 
@@ -696,7 +708,9 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         }
         if (_activeTransactionGeneration > 0)
         {
-            View.RequestModeToggleSettleProbe(_activeTransactionGeneration);
+            View.RequestModeToggleSettleProbe(
+                _activeTransactionGeneration,
+                skipFrameWait: _activeTransactionSkipsRendererFrameSettle);
         }
     }
 
