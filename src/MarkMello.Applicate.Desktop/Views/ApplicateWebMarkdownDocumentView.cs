@@ -90,6 +90,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _isWebWidthDragging;
     private long _renderSequence;
     private NativeWindowPlacement? _pendingNativeHiddenPaintPlacement;
+    private bool _documentRevealPending;
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -250,8 +251,22 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         bool deferLivePreferencesUntilModeSettleProbe = false,
         bool skipFrameWaitUntilRenderReady = false)
     {
+        var sourceChanged = !Equals(Source, source);
+        var shouldPrepareDocumentReveal = ShouldPrepareDocumentReveal(
+            sourceChanged,
+            _hasLoadedDocument,
+            source);
+        if (shouldPrepareDocumentReveal)
+        {
+            PrepareNativeDocumentReveal(TimeSpan.Zero);
+        }
+        else if (source is null && _documentRevealPending)
+        {
+            RevealNativeDocument(TimeSpan.Zero);
+        }
+
         var action = DetermineInputUpdateAction(
-            sourceChanged: !Equals(Source, source),
+            sourceChanged: sourceChanged,
             imageSourceResolverChanged: !ReferenceEquals(ImageSourceResolver, imageSourceResolver),
             hasLoadedDocument: _hasLoadedDocument,
             readingPreferencesChanged: ReadingPreferences != readingPreferences,
@@ -860,6 +875,32 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         });
     }
 
+    private void PrepareNativeDocumentReveal(TimeSpan duration)
+    {
+        _documentRevealPending = true;
+        PostRendererMessage(new
+        {
+            type = "document-reveal-prepare",
+            durationMs = ToRendererDurationMs(duration),
+            theme = GetThemeName()
+        });
+    }
+
+    private void RevealNativeDocument(TimeSpan duration)
+    {
+        if (!_documentRevealPending)
+        {
+            return;
+        }
+
+        _documentRevealPending = false;
+        PostRendererMessage(new
+        {
+            type = "document-reveal-start",
+            durationMs = ToRendererDurationMs(duration)
+        });
+    }
+
     private static int ToRendererDurationMs(TimeSpan duration)
         => (int)SysMath.Clamp(
             SysMath.Round(duration.TotalMilliseconds, MidpointRounding.AwayFromZero),
@@ -939,6 +980,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             ? ApplicateWebInputUpdateAction.ApplyLivePreferences
             : ApplicateWebInputUpdateAction.None;
     }
+
+    internal static bool ShouldPrepareDocumentRevealForTesting(
+        bool sourceChanged,
+        bool hasLoadedDocument,
+        MarkdownSource? nextSource)
+        => ShouldPrepareDocumentReveal(sourceChanged, hasLoadedDocument, nextSource);
+
+    private static bool ShouldPrepareDocumentReveal(
+        bool sourceChanged,
+        bool hasLoadedDocument,
+        MarkdownSource? nextSource)
+        => sourceChanged && hasLoadedDocument && nextSource is not null;
 
     private static bool AreEqual(double left, double right)
         => double.IsNaN(left) && double.IsNaN(right) || SysMath.Abs(left - right) <= double.Epsilon;
@@ -1965,6 +2018,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         _awaitingLayoutReady = false;
+        RevealNativeDocument(TimeSpan.Zero);
         DocumentRendered?.Invoke(this, EventArgs.Empty);
     }
 

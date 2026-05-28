@@ -209,6 +209,29 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task OpeningDifferentDocumentClearsStaleTableOfContentsBeforeRendererReportsHeadings()
+    {
+        var harness = CreateHarness();
+        var firstPath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "toc-first.md");
+        var secondPath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "toc-second.md");
+        harness.Loader.Sources[firstPath] = CreateSource(firstPath, "# First");
+        harness.Loader.Sources[secondPath] = CreateSource(secondPath, "# Second");
+
+        await harness.ViewModel.OpenPathAsync(firstPath);
+        harness.ViewModel.UpdateDocumentHeadings([
+            new DocumentHeading("first", 1, "First", 0),
+        ]);
+        harness.ViewModel.ScrollToHeadingCommand.Execute("first");
+
+        await harness.ViewModel.OpenPathAsync(secondPath);
+
+        Assert.Empty(harness.ViewModel.DocumentHeadings);
+        Assert.False(harness.ViewModel.HasDocumentHeadings);
+        Assert.False(harness.ViewModel.IsTocVisible);
+        Assert.Equal(string.Empty, harness.ViewModel.ActiveHeadingId);
+    }
+
+    [Fact]
     public async Task ReadableDocumentMetricIsMarkedOnlyAfterViewReportsRender()
     {
         var harness = CreateHarness();

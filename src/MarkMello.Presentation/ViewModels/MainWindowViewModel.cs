@@ -1232,6 +1232,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     partial void OnDocumentChanged(MarkdownSource? value)
     {
+        ClearDocumentHeadings();
         RefreshDocumentSummary();
         OnPropertyChanged(nameof(ShowsEditToggle));
         RefreshWindowTitle();

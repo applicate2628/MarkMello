@@ -546,6 +546,26 @@ describe("renderer chrome race handling", () => {
     expect(document.querySelector(".mm-mode-reveal-shield")).toBeNull();
   });
 
+  it("keeps a document reveal shield independent from the mode reveal shield", () => {
+    load({ type: "document-reveal-prepare", durationMs: 0, theme: "dark" });
+
+    const documentShield = document.querySelector<HTMLElement>(".mm-document-reveal-shield");
+    expect(documentShield).toBeTruthy();
+    expect(documentShield!.style.opacity).toBe("1");
+    expect(documentShield!.style.position).toBe("fixed");
+    expect(document.querySelector(".mm-mode-reveal-shield")).toBeNull();
+
+    load({ type: "mode-reveal-prepare", durationMs: 180 });
+
+    expect(document.querySelector(".mm-document-reveal-shield")).toBe(documentShield);
+    expect(document.querySelector(".mm-mode-reveal-shield")).toBeTruthy();
+
+    load({ type: "document-reveal-start", durationMs: 0 });
+
+    expect(document.querySelector(".mm-document-reveal-shield")).toBeNull();
+    expect(document.querySelector(".mm-mode-reveal-shield")).toBeTruthy();
+  });
+
   it("lets a newer tagged settle probe supersede an older pending probe", () => {
     const messages: unknown[] = [];
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {

@@ -167,7 +167,9 @@ type HostMessage =
   | { type: "minimap-settle-probe"; transactionGeneration: number }
   | { type: "host-shortcuts-reset" }
   | { type: "mode-reveal-prepare"; durationMs?: number }
-  | { type: "mode-reveal-start"; durationMs?: number };
+  | { type: "mode-reveal-start"; durationMs?: number }
+  | { type: "document-reveal-prepare"; durationMs?: number; theme?: RendererTheme }
+  | { type: "document-reveal-start"; durationMs?: number };
 
 const hostWindow = window as RendererWindow;
 const MINIMAP_CLASS = "mm-minimap";
@@ -217,6 +219,7 @@ let modeToggleProbeToken = 0;
 let modeToggleProbeTransactionGeneration: number | undefined;
 let modeRevealPrepared = false;
 let modeRevealShield: HTMLElement | null = null;
+let documentRevealShield: HTMLElement | null = null;
 let minimapRoot: HTMLElement | null = null;
 let minimapContent: HTMLElement | null = null;
 let minimapViewport: HTMLElement | null = null;
@@ -399,13 +402,21 @@ function getModeRevealTarget(): HTMLElement | null {
   return document.querySelector<HTMLElement>("main.mm-document");
 }
 
-function getModeRevealShieldBackground(): string {
+function getRevealShieldBackground(theme: RendererTheme = getCurrentTheme()): string {
   const bodyBackground = window.getComputedStyle(document.body).backgroundColor;
   if (bodyBackground && bodyBackground !== "rgba(0, 0, 0, 0)" && bodyBackground !== "transparent") {
     return bodyBackground;
   }
 
-  return getCurrentTheme() === "dark" ? "#11100d" : "#ffffff";
+  return theme === "dark" ? "#11100d" : "#ffffff";
+}
+
+function getModeRevealShieldBackground(): string {
+  return getRevealShieldBackground();
+}
+
+function getThemeRevealShieldBackground(theme: RendererTheme): string {
+  return theme === "dark" ? "#11100d" : "#ffffff";
 }
 
 function ensureModeRevealShield(): HTMLElement {
@@ -438,6 +449,73 @@ function clearModeRevealShield(): void {
 
   modeRevealShield?.remove();
   modeRevealShield = null;
+}
+
+function ensureDocumentRevealShield(): HTMLElement {
+  if (documentRevealShield && documentRevealShield.isConnected) {
+    return documentRevealShield;
+  }
+
+  documentRevealShield = document.createElement("div");
+  documentRevealShield.className = "mm-document-reveal-shield";
+  documentRevealShield.setAttribute("aria-hidden", "true");
+  documentRevealShield.style.position = "fixed";
+  documentRevealShield.style.inset = "0";
+  documentRevealShield.style.zIndex = "2147483646";
+  documentRevealShield.style.pointerEvents = "none";
+  document.body.append(documentRevealShield);
+  postPerfMark("mm-document-reveal-shield-created", {
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+  });
+  return documentRevealShield;
+}
+
+function clearDocumentRevealShield(): void {
+  if (documentRevealShield) {
+    postPerfMark("mm-document-reveal-shield-cleared", {
+      connected: documentRevealShield.isConnected,
+      opacity: documentRevealShield.style.opacity,
+    });
+  }
+
+  documentRevealShield?.remove();
+  documentRevealShield = null;
+}
+
+function prepareDocumentReveal(durationMs: unknown, theme?: RendererTheme): void {
+  const shield = ensureDocumentRevealShield();
+  shield.style.background = theme
+    ? getThemeRevealShieldBackground(theme)
+    : getRevealShieldBackground();
+  shield.style.opacity = "1";
+  shield.style.transition = "none";
+  postPerfMark("mm-document-reveal-shield-prepared", {
+    durationMs: clampModeRevealDuration(durationMs),
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    connected: shield.isConnected,
+  });
+}
+
+function startDocumentReveal(durationMs: unknown): void {
+  postPerfMark("mm-document-reveal-start", {
+    durationMs: clampModeRevealDuration(durationMs),
+    hasShield: documentRevealShield !== null,
+    shieldConnected: documentRevealShield?.isConnected ?? false,
+  });
+  const duration = clampModeRevealDuration(durationMs);
+  if (duration <= 0) {
+    clearDocumentRevealShield();
+    return;
+  }
+
+  if (documentRevealShield) {
+    void documentRevealShield.offsetWidth;
+    documentRevealShield.style.transition = `opacity ${duration}ms ${MODE_REVEAL_EASING}`;
+    documentRevealShield.style.opacity = "0";
+  }
+  window.setTimeout(clearDocumentRevealShield, duration);
 }
 
 function prepareModeReveal(durationMs: unknown): void {
@@ -2159,6 +2237,16 @@ function handleHostMessage(raw: unknown): void {
 
   if (message.type === "mode-reveal-start") {
     startModeReveal(message.durationMs);
+    return;
+  }
+
+  if (message.type === "document-reveal-prepare") {
+    prepareDocumentReveal(message.durationMs, message.theme);
+    return;
+  }
+
+  if (message.type === "document-reveal-start") {
+    startDocumentReveal(message.durationMs);
     return;
   }
 

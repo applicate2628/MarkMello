@@ -1084,6 +1084,7 @@
   var modeToggleProbeTransactionGeneration;
   var modeRevealPrepared = false;
   var modeRevealShield = null;
+  var documentRevealShield = null;
   var minimapRoot = null;
   var minimapContent = null;
   var minimapViewport = null;
@@ -1216,12 +1217,18 @@
   function getModeRevealTarget() {
     return document.querySelector("main.mm-document");
   }
-  function getModeRevealShieldBackground() {
+  function getRevealShieldBackground(theme = getCurrentTheme()) {
     const bodyBackground = window.getComputedStyle(document.body).backgroundColor;
     if (bodyBackground && bodyBackground !== "rgba(0, 0, 0, 0)" && bodyBackground !== "transparent") {
       return bodyBackground;
     }
-    return getCurrentTheme() === "dark" ? "#11100d" : "#ffffff";
+    return theme === "dark" ? "#11100d" : "#ffffff";
+  }
+  function getModeRevealShieldBackground() {
+    return getRevealShieldBackground();
+  }
+  function getThemeRevealShieldBackground(theme) {
+    return theme === "dark" ? "#11100d" : "#ffffff";
   }
   function ensureModeRevealShield() {
     if (modeRevealShield && modeRevealShield.isConnected) {
@@ -1250,6 +1257,64 @@
     }
     modeRevealShield?.remove();
     modeRevealShield = null;
+  }
+  function ensureDocumentRevealShield() {
+    if (documentRevealShield && documentRevealShield.isConnected) {
+      return documentRevealShield;
+    }
+    documentRevealShield = document.createElement("div");
+    documentRevealShield.className = "mm-document-reveal-shield";
+    documentRevealShield.setAttribute("aria-hidden", "true");
+    documentRevealShield.style.position = "fixed";
+    documentRevealShield.style.inset = "0";
+    documentRevealShield.style.zIndex = "2147483646";
+    documentRevealShield.style.pointerEvents = "none";
+    document.body.append(documentRevealShield);
+    postPerfMark("mm-document-reveal-shield-created", {
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight
+    });
+    return documentRevealShield;
+  }
+  function clearDocumentRevealShield() {
+    if (documentRevealShield) {
+      postPerfMark("mm-document-reveal-shield-cleared", {
+        connected: documentRevealShield.isConnected,
+        opacity: documentRevealShield.style.opacity
+      });
+    }
+    documentRevealShield?.remove();
+    documentRevealShield = null;
+  }
+  function prepareDocumentReveal(durationMs, theme) {
+    const shield = ensureDocumentRevealShield();
+    shield.style.background = theme ? getThemeRevealShieldBackground(theme) : getRevealShieldBackground();
+    shield.style.opacity = "1";
+    shield.style.transition = "none";
+    postPerfMark("mm-document-reveal-shield-prepared", {
+      durationMs: clampModeRevealDuration(durationMs),
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      connected: shield.isConnected
+    });
+  }
+  function startDocumentReveal(durationMs) {
+    postPerfMark("mm-document-reveal-start", {
+      durationMs: clampModeRevealDuration(durationMs),
+      hasShield: documentRevealShield !== null,
+      shieldConnected: documentRevealShield?.isConnected ?? false
+    });
+    const duration = clampModeRevealDuration(durationMs);
+    if (duration <= 0) {
+      clearDocumentRevealShield();
+      return;
+    }
+    if (documentRevealShield) {
+      void documentRevealShield.offsetWidth;
+      documentRevealShield.style.transition = `opacity ${duration}ms ${MODE_REVEAL_EASING}`;
+      documentRevealShield.style.opacity = "0";
+    }
+    window.setTimeout(clearDocumentRevealShield, duration);
   }
   function prepareModeReveal(durationMs) {
     modeRevealPrepared = true;
@@ -2528,6 +2593,14 @@
     }
     if (message.type === "mode-reveal-start") {
       startModeReveal(message.durationMs);
+      return;
+    }
+    if (message.type === "document-reveal-prepare") {
+      prepareDocumentReveal(message.durationMs, message.theme);
+      return;
+    }
+    if (message.type === "document-reveal-start") {
+      startDocumentReveal(message.durationMs);
       return;
     }
     if (message.type === "minimap-settle-probe") {

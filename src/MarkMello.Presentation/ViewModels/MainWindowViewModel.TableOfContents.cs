@@ -171,6 +171,18 @@ public partial class MainWindowViewModel
         ActiveHeadingId = string.Empty;
     }
 
+    private void ClearDocumentHeadings()
+    {
+        if (DocumentHeadings.Count == 0 && string.IsNullOrEmpty(ActiveHeadingId))
+        {
+            return;
+        }
+
+        DocumentHeadings = new ObservableCollection<DocumentHeading>();
+        _pendingScrollToHeadingId = null;
+        ActiveHeadingId = string.Empty;
+    }
+
     // IsTocVisible propagation when IsEditMode / State changes lives in the
     // main MainWindowViewModel partial via OnIsEditModeChanged / OnStateChanged
     // (partial methods can only be implemented once across all partials of
