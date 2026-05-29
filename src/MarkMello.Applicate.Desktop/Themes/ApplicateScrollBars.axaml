@@ -3,11 +3,14 @@
         xmlns:sys="clr-namespace:System;assembly=System.Runtime">
 
   <!-- Single source of truth for every Avalonia ScrollBar in the app.
-       ScrollBarSize drives the track, hit target, and Thumb cross-axis size.
-       Always visible, faint track, gray theme thumb, arrows kept. -->
+       ScrollBarSize drives the track width and hit target; ScrollBarThumbSize
+       is the narrower visible pill, centered so the faint track shows on both
+       sides of the thumb. Always visible, faint track, gray theme thumb,
+       arrows kept. -->
 
   <Styles.Resources>
     <sys:Double x:Key="ScrollBarSize">12</sys:Double>
+    <sys:Double x:Key="ScrollBarThumbSize">8</sys:Double>
   </Styles.Resources>
 
   <Style Selector="ScrollBar">
@@ -34,9 +37,10 @@
     <Setter Property="Opacity" Value="0.55" />
   </Style>
 
-  <!-- Thumb shared state. Per-orientation templates below bind the painted
-       short-axis dimension to ScrollBarSize too, so Fluent's actual Thumb
-       bounds and the visible pill cannot drift apart. -->
+  <!-- Thumb shared state. The Thumb keeps the full ScrollBarSize hit target
+       (easy to grab); the per-orientation templates paint a narrower
+       ScrollBarThumbSize pill, centered, so the faint track stays visible on
+       both sides of the thumb. -->
   <Style Selector="ScrollBar /template/ Thumb">
     <Setter Property="Background" Value="{DynamicResource MmTextSoftBrush}" />
     <Setter Property="UseLayoutRounding" Value="False" />
@@ -47,9 +51,9 @@
     <Setter Property="Template">
       <ControlTemplate>
         <Border Background="{TemplateBinding Background}"
-                Width="{DynamicResource ScrollBarSize}"
+                Width="{DynamicResource ScrollBarThumbSize}"
                 HorizontalAlignment="Center"
-                CornerRadius="7" />
+                CornerRadius="4" />
       </ControlTemplate>
     </Setter>
   </Style>
@@ -59,9 +63,9 @@
     <Setter Property="Template">
       <ControlTemplate>
         <Border Background="{TemplateBinding Background}"
-                Height="{DynamicResource ScrollBarSize}"
+                Height="{DynamicResource ScrollBarThumbSize}"
                 VerticalAlignment="Center"
-                CornerRadius="7" />
+                CornerRadius="4" />
       </ControlTemplate>
     </Setter>
   </Style>
