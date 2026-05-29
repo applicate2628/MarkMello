@@ -41,6 +41,17 @@ public sealed class ApplicateMainWindow : MainWindow
     private const double WarmupPanelHeight = 768;
     private static readonly Thickness WarmupPanelMargin = new(-5000, 0, 0, 0);
 
+    // TOC column resize bounds. While the TOC is visible the column carries
+    // these as MinWidth/MaxWidth so Avalonia's GridSplitter clamps the drag to
+    // [min, max] live — verified against Avalonia 12 GridSplitter
+    // .GetDeltaConstraints, which derives its delta limits from each
+    // definition's UserMinSize/UserMaxSize. MinWidth is dropped to 0 when the
+    // TOC is hidden because it is a hard floor that would otherwise keep the
+    // column 160px wide even with Width=0.
+    private const double TocColumnMinWidth = 160;
+    private const double TocColumnMaxWidth = 480;
+    private const double TocColumnDefaultWidth = 240;
+
     private Panel? _tabsContentPanel;
     private ApplicateSiblingMountBridge? _siblingMountBridge;
     private ApplicateModeTransactionHostRouter? _modeTransactionHostRouter;
@@ -558,10 +569,12 @@ public sealed class ApplicateMainWindow : MainWindow
             // inherit MainWindow's DataContext (= MainWindowViewModel) by
             // ancestry and its DataContextChanged handler will pick it up.
         };
-        var tocColumn = new ColumnDefinition(new GridLength(240, GridUnitType.Pixel))
+        var tocColumn = new ColumnDefinition(new GridLength(TocColumnDefaultWidth, GridUnitType.Pixel))
         {
+            // Real bounds are applied per-visibility in ApplyFromViewModel; the
+            // column starts collapsible (MinWidth 0) until the TOC is shown.
             MinWidth = 0,
-            MaxWidth = 480,
+            MaxWidth = TocColumnMaxWidth,
         };
         var splitterColumn = new ColumnDefinition(new GridLength(1, GridUnitType.Pixel))
         {
@@ -813,11 +826,20 @@ public sealed class ApplicateMainWindow : MainWindow
                 {
                     if (viewModel.IsTocVisible)
                     {
-                        tocColumn.Width = new GridLength(viewModel.TocColumnWidth, GridUnitType.Pixel);
+                        // Apply the resize bounds so the GridSplitter clamps the
+                        // drag to [min, max]; MinWidth must be set before Width.
+                        tocColumn.MinWidth = TocColumnMinWidth;
+                        tocColumn.MaxWidth = TocColumnMaxWidth;
+                        tocColumn.Width = new GridLength(
+                            System.Math.Clamp(viewModel.TocColumnWidth, TocColumnMinWidth, TocColumnMaxWidth),
+                            GridUnitType.Pixel);
                         splitterColumn.Width = new GridLength(1, GridUnitType.Pixel);
                     }
                     else
                     {
+                        // Drop the hard MinWidth floor first so the column can
+                        // actually collapse to zero when the TOC is hidden.
+                        tocColumn.MinWidth = 0;
                         tocColumn.Width = new GridLength(0, GridUnitType.Pixel);
                         splitterColumn.Width = new GridLength(0, GridUnitType.Pixel);
                     }
@@ -845,7 +867,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 suppress = true;
                 try
                 {
-                    var clamped = System.Math.Clamp(tocColumn.Width.Value, 160.0, 480.0);
+                    var clamped = System.Math.Clamp(tocColumn.Width.Value, TocColumnMinWidth, TocColumnMaxWidth);
                     viewModel.TocColumnWidth = clamped;
                 }
                 finally
