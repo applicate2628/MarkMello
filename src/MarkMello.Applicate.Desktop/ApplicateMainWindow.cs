@@ -52,6 +52,16 @@ public sealed class ApplicateMainWindow : MainWindow
     private const double TocColumnMaxWidth = 480;
     private const double TocColumnDefaultWidth = 240;
 
+    // The off-screen inactive edit-preview prime warms Ctrl+E by rendering the
+    // active document a SECOND time on the shared WebView right after the viewer
+    // commits. On large documents that second full render dominates cold-load
+    // CPU (~1.8s on the 4.8 MB stress doc) and hogs the main thread just after
+    // the viewer reveal, for the sake of a first-Ctrl+E that may never come.
+    // Skip the prime above this markdown-content-length threshold; the first
+    // Ctrl+E on a skipped doc renders fresh under the mode-toggle cover and
+    // stays garbage-free. Common docs (<100 KB) keep the warm-up. Tunable.
+    private const int InactiveEditPrimeMaxDocumentContentLength = 256 * 1024;
+
     private Panel? _tabsContentPanel;
     private Grid? _tocContentGrid;
     private ApplicateSiblingMountBridge? _siblingMountBridge;
@@ -1212,6 +1222,18 @@ public sealed class ApplicateMainWindow : MainWindow
         {
             if (viewModel.IsEditMode || viewModel.Document is not { } document)
             {
+                return;
+            }
+
+            // D3 (load-regression): skip the off-screen prime for large docs —
+            // the second full render costs far more than the first-Ctrl+E it
+            // warms. Re-checked here at execution time (not at schedule time).
+            if (document.Content.Length > InactiveEditPrimeMaxDocumentContentLength)
+            {
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "editpreview-inactive-prime-skipped-heavy",
+                    $"source={document.Path} contentLength={document.Content.Length} threshold={InactiveEditPrimeMaxDocumentContentLength}");
                 return;
             }
 
