@@ -2147,7 +2147,7 @@
     }
     const minimapHeight = minimapRoot.clientHeight;
     const minimapWidth = minimapRoot.clientWidth;
-    const documentHeight = root.scrollHeight;
+    const documentScrollHeight = root.scrollHeight;
     const sourceStyle = getComputedStyle(source);
     const documentWidth = calculateMinimapDocumentWidth({
       borderBoxWidth: source.clientWidth || source.getBoundingClientRect().width,
@@ -2155,16 +2155,22 @@
       paddingRight: readPixelValue(sourceStyle.paddingRight)
     });
     const viewportHeight = root.clientHeight;
-    if (minimapHeight <= 0 || minimapWidth <= 0 || documentHeight <= 0 || viewportHeight <= 0) {
+    if (minimapHeight <= 0 || minimapWidth <= 0 || documentScrollHeight <= 0 || viewportHeight <= 0) {
       return;
     }
+    minimapContent.style.width = `${documentWidth}px`;
+    const measuredContentHeight = minimapContent.scrollHeight;
+    const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
+    const realMaxScrollTop = Math.max(0, documentScrollHeight - viewportHeight);
+    const scrollProgress = realMaxScrollTop > 0 ? Math.min(1, Math.max(0, root.scrollTop / realMaxScrollTop)) : 0;
+    const contentScrollTop = scrollProgress * Math.max(0, contentHeight - viewportHeight);
     const layout = calculateMinimapViewportLayout({
       minimapWidth,
       minimapHeight,
       documentWidth,
-      documentHeight,
+      documentHeight: contentHeight,
       viewportHeight,
-      scrollTop: root.scrollTop
+      scrollTop: contentScrollTop
     });
     if (!layout) {
       currentMinimapLayout = null;
@@ -2172,7 +2178,6 @@
     }
     currentMinimapLayout = layout;
     minimapContent.style.transform = layout.transform;
-    minimapContent.style.width = `${layout.contentWidth}px`;
     minimapViewport.style.transform = `translateY(${layout.thumbTop}px)`;
     minimapViewport.style.height = `${layout.thumbHeight}px`;
   }

@@ -1605,15 +1605,10 @@ function updateMinimapViewport(): void {
 
   const minimapHeight = minimapRoot.clientHeight;
   const minimapWidth = minimapRoot.clientWidth;
-  // Use root coordinates (root.scrollHeight, root.scrollTop) so the scrollbar
-  // thumb and minimap viewport always agree with the actual user scroll state.
-  // Previous attempt to switch to .mm-document basis for "precision" caused a
-  // misalignment in viewer mode: when body has top/bottom padding, source.
-  // scrollHeight < root.scrollHeight, but the user's root.scrollTop can reach
-  // values beyond (source.scrollHeight - viewportHeight), making scrollProgress
-  // > 1 at the bottom of the document. Stick with root coords — the documented
-  // line-by-line drift is acceptable; thumb correctness is not negotiable.
-  const documentHeight = root.scrollHeight;
+  // root.scrollHeight / root.scrollTop describe the REAL scroll range the user
+  // scrolls over; keep them as the basis for scroll PROGRESS so the thumb
+  // tracks actual user scroll (thumb correctness is not negotiable).
+  const documentScrollHeight = root.scrollHeight;
   const sourceStyle = getComputedStyle(source);
   const documentWidth = calculateMinimapDocumentWidth({
     borderBoxWidth: source.clientWidth || source.getBoundingClientRect().width,
@@ -1621,17 +1616,43 @@ function updateMinimapViewport(): void {
     paddingRight: readPixelValue(sourceStyle.paddingRight),
   });
   const viewportHeight = root.clientHeight;
-  if (minimapHeight <= 0 || minimapWidth <= 0 || documentHeight <= 0 || viewportHeight <= 0) {
+  if (minimapHeight <= 0 || minimapWidth <= 0 || documentScrollHeight <= 0 || viewportHeight <= 0) {
     return;
   }
+
+  // Content height must be the CLONE's true rendered height, not
+  // root.scrollHeight. The minimap clone is intentionally NOT content-
+  // visibility-covered (the `body > main.mm-document > *` rule in renderer.css
+  // does not match the clone under aside.mm-minimap), so it renders every block
+  // at full height. root.scrollHeight, by contrast, is the content-visibility
+  // ESTIMATE (`contain-intrinsic-size: auto 120px` per not-yet-rendered block)
+  // and badly underestimates a heavy document until every block has scrolled
+  // into view. Driving the content translate from root.scrollHeight stopped the
+  // minimap short of the bottom ("content doesn't reach the middle at full
+  // scroll"). Lay the clone out at the source width first, then measure it.
+  // Re-setting width to the same value on plain scroll is a no-op, so the
+  // scrollHeight read stays cheap (no per-frame clone reflow).
+  minimapContent.style.width = `${documentWidth}px`;
+  const measuredContentHeight = minimapContent.scrollHeight;
+  const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
+
+  // Bridge the two coordinate systems (real content-visibility scroll range vs.
+  // the clone's full height) through dimensionless progress, then express the
+  // position in clone space. The existing (unit-tested) layout math then drives
+  // both content and thumb to the true bottom at progress 1.
+  const realMaxScrollTop = Math.max(0, documentScrollHeight - viewportHeight);
+  const scrollProgress = realMaxScrollTop > 0
+    ? Math.min(1, Math.max(0, root.scrollTop / realMaxScrollTop))
+    : 0;
+  const contentScrollTop = scrollProgress * Math.max(0, contentHeight - viewportHeight);
 
   const layout = calculateMinimapViewportLayout({
     minimapWidth,
     minimapHeight,
     documentWidth,
-    documentHeight,
+    documentHeight: contentHeight,
     viewportHeight,
-    scrollTop: root.scrollTop
+    scrollTop: contentScrollTop
   });
   if (!layout) {
     currentMinimapLayout = null;
@@ -1640,7 +1661,7 @@ function updateMinimapViewport(): void {
 
   currentMinimapLayout = layout;
   minimapContent.style.transform = layout.transform;
-  minimapContent.style.width = `${layout.contentWidth}px`;
+  // width already set above (same value as layout.contentWidth) for measurement
   minimapViewport.style.transform = `translateY(${layout.thumbTop}px)`;
   minimapViewport.style.height = `${layout.thumbHeight}px`;
 }
