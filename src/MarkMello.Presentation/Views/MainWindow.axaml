@@ -144,10 +144,14 @@
                   Stroke="{DynamicResource MmTitleBarTextBrush}"
                   StrokeThickness="1" />
           </Button>
-          <Button Classes="titlebar"
-                  Click="OnMaximizeClick"
-                  ToolTip.Tip="{Binding TitleBarMaximize}">
-            <Path Data="M0,0 L10,0 L10,10 L0,10 Z"
+          <!-- Glyph + tooltip are owned by code-behind (MainWindow.axaml.cs):
+               they flip between Maximize and Restore by WindowState, which the
+               VM cannot observe. See UpdateMaximizeRestoreAffordance. -->
+          <Button Name="MaximizeRestoreButton"
+                  Classes="titlebar"
+                  Click="OnMaximizeClick">
+            <Path Name="MaximizeRestoreGlyph"
+                  Data="M0,0 L10,0 L10,10 L0,10 Z"
                   Stroke="{DynamicResource MmTitleBarTextBrush}"
                   StrokeThickness="1"
                   Fill="Transparent" />

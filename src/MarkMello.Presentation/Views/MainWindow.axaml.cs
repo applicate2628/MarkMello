@@ -29,6 +29,7 @@ public partial class MainWindow : Window
     private WindowPlacement? _lastNormalWindowPlacement;
     private bool _allowConfirmedClose;
     private bool _isTopChromeHovering;
+    private IDisposable? _windowStateSubscription;
 
     public MainWindow()
     {
@@ -76,6 +77,14 @@ public partial class MainWindow : Window
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
         _viewModel.CloseRequested += OnViewModelCloseRequested;
         Deactivated += OnWindowDeactivated;
+
+        // Keep the maximize button's glyph + tooltip in lockstep with the live
+        // WindowState. GetObservable pushes the current value on subscribe, so
+        // the initial affordance (including a restored-as-maximized startup) is
+        // correct without a separate priming call.
+        _windowStateSubscription = this.GetObservable(WindowStateProperty)
+            .Subscribe(new Avalonia.Reactive.AnonymousObserver<WindowState>(
+                _ => UpdateMaximizeRestoreAffordance()));
 
         StartupDiag.DiagMs("startup-mainwindow", "initialize-startup-task-start");
         _startupInitializationTask = InitializeStartupAsync();
@@ -206,6 +215,8 @@ public partial class MainWindow : Window
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
         _viewModel.CloseRequested -= OnViewModelCloseRequested;
         Deactivated -= OnWindowDeactivated;
+        _windowStateSubscription?.Dispose();
+        _windowStateSubscription = null;
         base.OnClosed(e);
     }
 
@@ -214,16 +225,40 @@ public partial class MainWindow : Window
     private void OnMinimizeClick(object? sender, RoutedEventArgs e)
         => WindowState = WindowState.Minimized;
 
-    private void OnMaximizeClick(object? sender, RoutedEventArgs e)
+    private void OnMaximizeClick(object? sender, RoutedEventArgs e) => ToggleMaximizeRestore();
+
+    private void OnCloseClick(object? sender, RoutedEventArgs e) => Close();
+
+    private void ToggleMaximizeRestore()
         => WindowState = WindowState == WindowState.Maximized
             ? WindowState.Normal
             : WindowState.Maximized;
 
-    private void OnCloseClick(object? sender, RoutedEventArgs e) => Close();
+    // Keeps the maximize button's glyph + tooltip in sync with the actual
+    // window state. Driven by the WindowState observable (set up in the ctor)
+    // and re-invoked on language switch via OnViewModelPropertyChanged. The VM
+    // cannot own this because WindowState is a Window-level concern.
+    private void UpdateMaximizeRestoreAffordance()
+    {
+        var glyph = this.FindControl<Avalonia.Controls.Shapes.Path>("MaximizeRestoreGlyph");
+        var button = this.FindControl<Button>("MaximizeRestoreButton");
+        if (glyph is null || button is null)
+        {
+            return;
+        }
+
+        var isMaximized = WindowState == WindowState.Maximized;
+        // Normal -> single square (maximize). Maximized -> front square plus the
+        // back window's top-right L, the conventional Windows restore glyph.
+        glyph.Data = Avalonia.Media.Geometry.Parse(isMaximized
+            ? "M0,3 L7,3 L7,10 L0,10 Z M3,3 L3,0 L10,0 L10,7 L7,7"
+            : "M0,0 L10,0 L10,10 L0,10 Z");
+        ToolTip.SetTip(button, isMaximized ? _viewModel.TitleBarRestore : _viewModel.TitleBarMaximize);
+    }
 
     private void OnTitleBarPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (!_viewModel.ShowCustomTitleBar || e.ClickCount != 1)
+        if (!_viewModel.ShowCustomTitleBar)
         {
             return;
         }
@@ -234,6 +269,22 @@ public partial class MainWindow : Window
         }
 
         if (e.Source is Visual source && IsInteractiveTitleBarSource(source))
+        {
+            return;
+        }
+
+        // Double-click toggles maximize/restore — the default OS title-bar
+        // gesture we lost by switching to custom chrome (WindowDecorations
+        // .BorderOnly). Handled before BeginMoveDrag so the move-drag path only
+        // runs for a genuine single press.
+        if (e.ClickCount == 2)
+        {
+            ToggleMaximizeRestore();
+            e.Handled = true;
+            return;
+        }
+
+        if (e.ClickCount != 1)
         {
             return;
         }
@@ -391,6 +442,14 @@ public partial class MainWindow : Window
             or nameof(MainWindowViewModel.HasOpenOverlay))
         {
             SyncOverlayWindowClasses();
+            return;
+        }
+
+        if (e.PropertyName == nameof(MainWindowViewModel.TitleBarMaximize))
+        {
+            // Language switched — re-resolve the maximize/restore tooltip for
+            // the current window state (the glyph itself is locale-independent).
+            UpdateMaximizeRestoreAffordance();
             return;
         }
 
