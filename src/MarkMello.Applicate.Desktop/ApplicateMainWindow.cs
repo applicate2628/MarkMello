@@ -53,8 +53,10 @@ public sealed class ApplicateMainWindow : MainWindow
     private const double TocColumnDefaultWidth = 240;
 
     private Panel? _tabsContentPanel;
+    private Grid? _tocContentGrid;
     private ApplicateSiblingMountBridge? _siblingMountBridge;
     private ApplicateModeTransactionHostRouter? _modeTransactionHostRouter;
+    private ApplicateDocumentSwitchRevealCoordinator? _documentSwitchRevealCoordinator;
     private bool _editModeHotkeyDown;
 
     public ApplicateMainWindow(
@@ -604,6 +606,9 @@ public sealed class ApplicateMainWindow : MainWindow
         contentGrid.Children.Add(tocPanel);
         contentGrid.Children.Add(tocSplitter);
         contentGrid.Children.Add(contentPanel);
+        // Cover host for the document-switch atomic reveal (spans TOC +
+        // document; the tabs row above stays visible during a switch).
+        _tocContentGrid = contentGrid;
 
         // Visibility wiring: bind TOC panel + splitter to MainWindowViewModel.
         // IsTocVisible composite predicate. The columns themselves stay in
@@ -1054,6 +1059,23 @@ public sealed class ApplicateMainWindow : MainWindow
             transactionHost: _modeTransactionHostRouter,
             modeRevealCoverHost: siblingPanel);
 
+        // Atomic reveal for viewer DOCUMENT switches (tab change, startup,
+        // reload): hold a solid cover over the TOC + document until the new
+        // document has committed and painted, mirroring the mode-toggle
+        // bridge's covered reveal without touching the host state machine or
+        // the mode-toggle path. See ApplicateDocumentSwitchRevealCoordinator.
+        if (_tocContentGrid is not null && viewerHostForMode is not null)
+        {
+            _documentSwitchRevealCoordinator = new ApplicateDocumentSwitchRevealCoordinator(
+                _tocContentGrid,
+                viewerHostForMode,
+                // Reader surface only: IsViewer is `State == Viewing`, which is
+                // also true in edit mode (edit is a sub-mode of Viewing), so the
+                // !IsEditMode clause keeps the cover off the edit workspace.
+                viewModel,
+                () => viewModel.IsViewer && !viewModel.IsEditMode);
+        }
+
         InstallInactiveEditPreviewPrime(
             viewModel,
             contentPanel,
@@ -1416,6 +1438,8 @@ public sealed class ApplicateMainWindow : MainWindow
 
     private void OnApplicateMainWindowClosed(object? sender, EventArgs e)
     {
+        _documentSwitchRevealCoordinator?.Dispose();
+        _documentSwitchRevealCoordinator = null;
         _siblingMountBridge?.Dispose();
         _siblingMountBridge = null;
         _modeTransactionHostRouter?.Dispose();
