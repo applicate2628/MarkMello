@@ -16,7 +16,7 @@
     <NoWarn>$(NoWarn);CA1822;CA1859</NoWarn>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug' and '$(MarkMelloDebugConsole)' == 'true'">
     <OutputType>Exe</OutputType>
   </PropertyGroup>
 
