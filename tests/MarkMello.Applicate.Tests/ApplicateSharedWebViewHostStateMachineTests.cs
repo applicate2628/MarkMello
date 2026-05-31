@@ -554,7 +554,7 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void TransactionRevealUsesConfiguredModeSwitchDuration()
+    public void TransactionRevealIsShieldedByBridgeCoverOnly()
     {
         var source = File.ReadAllText(HostSourcePath);
         var commit = ExtractMethodBody(
@@ -567,17 +567,13 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
             commit.IndexOf("if (transactionalCommit)", StringComparison.Ordinal)..
             commit.IndexOf("else if (armRevealGate)", StringComparison.Ordinal)];
 
-        Assert.Contains("_pendingTransactionRevealDuration = modeSwitchDuration", commit, StringComparison.Ordinal);
-        Assert.Contains("View.PrepareNativeRendererForReveal(modeSwitchDuration)", transactionalCommit, StringComparison.Ordinal);
+        Assert.DoesNotContain("_pendingTransactionRevealDuration", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("View.PrepareNativeRendererForReveal(modeSwitchDuration)", transactionalCommit, StringComparison.Ordinal);
         Assert.DoesNotContain("View.PrepareNativeWebViewForHiddenPaint();", transactionalCommit, StringComparison.Ordinal);
-        Assert.True(
-            transactionalCommit.IndexOf("View.PrepareNativeRendererForReveal(modeSwitchDuration)", StringComparison.Ordinal)
-            < commit.IndexOf("View.RequestModeToggleSettleProbe(", StringComparison.Ordinal));
-        Assert.Contains("var duration = _pendingTransactionRevealDuration", transactionalReveal, StringComparison.Ordinal);
         Assert.Contains("View.CompleteNativeWebViewHiddenPaint();", transactionalReveal, StringComparison.Ordinal);
         Assert.DoesNotContain("View.SetNativeWebViewVisibility(true)", transactionalReveal, StringComparison.Ordinal);
         Assert.DoesNotContain("View.RevealNativeRenderer(TimeSpan.Zero)", transactionalReveal, StringComparison.Ordinal);
-        Assert.Contains("View.RevealNativeRenderer(duration)", transactionalReveal, StringComparison.Ordinal);
+        Assert.DoesNotContain("View.RevealNativeRenderer(", transactionalReveal, StringComparison.Ordinal);
     }
 
     [Fact]

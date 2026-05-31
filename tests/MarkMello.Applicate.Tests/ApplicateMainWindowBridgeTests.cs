@@ -34,6 +34,51 @@ public sealed class ApplicateMainWindowBridgeTests
     }
 
     [Fact]
+    public void SessionRestorePrefersCommandLineActivationBeforeViewModelDocumentExists()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var restore = ExtractFromMarker(bridge, "var argvPath =");
+
+        var activationIndex = restore.IndexOf(
+            "App.Services?.GetService<ICommandLineActivation>()?.GetActivationFilePath()",
+            StringComparison.Ordinal);
+        var fallbackIndex = restore.IndexOf("argvPath = viewModel.Document?.Path;", StringComparison.Ordinal);
+        var preferredIndex = restore.IndexOf("var preferredActivePath = !string.IsNullOrWhiteSpace(argvPath)", StringComparison.Ordinal);
+
+        Assert.True(activationIndex >= 0, "Startup restore should read the command-line activation path directly.");
+        Assert.True(fallbackIndex > activationIndex, "ViewModel.Document should only be a fallback after direct activation lookup.");
+        Assert.True(preferredIndex > fallbackIndex, "The preferred active path should be computed after argv fallback is resolved.");
+    }
+
+    [Fact]
+    public void StartupArgvDocumentKeepsWindowCoveredUntilViewerRevealReady()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var constructor = ExtractMethodBody(codeBehind, "public ApplicateMainWindow(");
+        var shouldHold = ExtractMethodBody(codeBehind, "private static bool ShouldHoldStartupDocumentReveal()");
+        var gate = ExtractMethodBody(codeBehind, "private void InstallStartupDocumentRevealGate(MainWindowViewModel viewModel)");
+
+        Assert.Contains("ShouldHoldStartupDocumentReveal()", constructor, StringComparison.Ordinal);
+        Assert.DoesNotContain("Opacity = 0;", constructor, StringComparison.Ordinal);
+        Assert.Contains("InstallStartupDocumentRevealGate(viewModel);", constructor, StringComparison.Ordinal);
+        Assert.Contains("GetService<ICommandLineActivation>()?.GetActivationFilePath()", shouldHold, StringComparison.Ordinal);
+        Assert.Contains("var startupCover = new ApplicateModeRevealCoverWindow();", gate, StringComparison.Ordinal);
+        Assert.Contains("Opened += OnStartupWindowOpened;", gate, StringComparison.Ordinal);
+        Assert.Contains("SizeChanged += OnStartupWindowSizeChanged;", gate, StringComparison.Ordinal);
+        Assert.Contains("startupCover.Show(this)", gate, StringComparison.Ordinal);
+        Assert.Contains("startupViewerHost.View.DocumentRevealReady += OnDocumentRevealReady;", gate, StringComparison.Ordinal);
+        Assert.Contains("startupViewerHost.View.HeadingsChanged += OnHeadingsChanged;", gate, StringComparison.Ordinal);
+        Assert.Contains("startupViewerHost.RendererFailed += OnRendererFailed;", gate, StringComparison.Ordinal);
+        Assert.Contains("viewModel.PropertyChanged += OnViewModelPropertyChanged;", gate, StringComparison.Ordinal);
+        Assert.Contains("viewModel.HasDocumentHeadings", gate, StringComparison.Ordinal);
+        Assert.Contains("new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) }", gate, StringComparison.Ordinal);
+        Assert.Contains("Opacity = 1;", gate, StringComparison.Ordinal);
+        Assert.Contains("startupCover.Hide();", gate, StringComparison.Ordinal);
+        Assert.Contains("startup-window-reveal-released", gate, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void EditModeHotkeyIsEdgeTriggeredSoHeldCtrlEDoesNotFloodModeSwitches()
     {
         var codeBehind = ReadMainWindowCodeBehind();

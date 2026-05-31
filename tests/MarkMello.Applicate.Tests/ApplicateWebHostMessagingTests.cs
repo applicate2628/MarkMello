@@ -120,17 +120,17 @@ public sealed class ApplicateWebHostMessagingTests
     }
 
     [Fact]
-    public void TransactionalAttachPreparesRendererBeforeReparentResize()
+    public void TransactionalAttachLeavesRendererRevealToBridgeCover()
     {
         var source = File.ReadAllText(SharedWebViewHostSourcePath);
 
-        var prepare = source.IndexOf(
-            "View.PrepareNativeRendererForReveal(CurrentModeSwitchDuration())",
-            StringComparison.Ordinal);
-        var park = source.IndexOf("View.ParkNativeWebViewForReparent();", StringComparison.Ordinal);
+        var attach = source[
+            source.IndexOf("public void AttachTo(", StringComparison.Ordinal)..
+            source.IndexOf("private void RequestRender(", StringComparison.Ordinal)];
 
-        Assert.True(prepare >= 0, "Transactional attach should prepare the renderer before the native resize/reparent.");
-        Assert.True(park > prepare, "The renderer prepare message must be sent before ParkNativeWebViewForReparent.");
+        Assert.Contains("var transactionalAttach", attach, StringComparison.Ordinal);
+        Assert.DoesNotContain("View.PrepareNativeRendererForReveal", attach, StringComparison.Ordinal);
+        Assert.Contains("View.ParkNativeWebViewForReparent();", attach, StringComparison.Ordinal);
     }
 
     [Fact]

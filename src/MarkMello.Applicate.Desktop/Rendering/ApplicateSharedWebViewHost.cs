@@ -36,7 +36,6 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
     private ApplicateMode _currentMode = ApplicateMode.Edit;
     private long _transactionNativeRevealGeneration;
     private bool _transactionNativeRevealPending;
-    private TimeSpan _pendingTransactionRevealDuration;
 
     // Set to true after the first successful Commit. While false (cold start)
     // the host hides the consumer slot on AttachTo / RequestRender so the user
@@ -179,10 +178,6 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         if (!transactionalAttach)
         {
             PrepareTargetForReveal(target);
-        }
-        else if (_hasEverCommitted)
-        {
-            View.PrepareNativeRendererForReveal(CurrentModeSwitchDuration());
         }
 
         // Anti-airspace-leak (RESTORED 2026-05-19 — c8c48c2 wiring inadvertently
@@ -657,8 +652,6 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         {
             _transactionNativeRevealGeneration = _activeTransactionGeneration;
             _transactionNativeRevealPending = true;
-            _pendingTransactionRevealDuration = modeSwitchDuration;
-            View.PrepareNativeRendererForReveal(modeSwitchDuration);
             ApplicateTrace.DiagMs(
                 "pane-seq",
                 "host-commit-waiting-bridge-native-reveal",
@@ -735,10 +728,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
 
         _transactionNativeRevealPending = false;
         _transactionNativeRevealGeneration = 0;
-        var duration = _pendingTransactionRevealDuration;
-        _pendingTransactionRevealDuration = TimeSpan.Zero;
         View.CompleteNativeWebViewHiddenPaint();
-        View.RevealNativeRenderer(duration);
         ApplicateTrace.DiagMs(
             "pane-seq",
             "host-hwnd-shown",

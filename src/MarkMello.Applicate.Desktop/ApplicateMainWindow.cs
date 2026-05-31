@@ -9,6 +9,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Styling;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Activation;
@@ -75,6 +76,11 @@ public sealed class ApplicateMainWindow : MainWindow
         : base(viewModel, startupSmokeTestOptions, settings)
     {
         ApplicateTrace.DiagMs("startup-applicate-window", "applicate-ctor-start");
+        var holdStartupDocumentReveal = ShouldHoldStartupDocumentReveal();
+        if (holdStartupDocumentReveal)
+        {
+            ApplicateTrace.DiagMs("startup-applicate-window", "startup-window-reveal-gated");
+        }
         var viewerTemplate = new ApplicateViewerTemplate();
         DataTemplates.Insert(0, viewerTemplate);
         InstallViewerHostTemplate(viewerTemplate);
@@ -94,6 +100,10 @@ public sealed class ApplicateMainWindow : MainWindow
         ApplicateTrace.DiagMs("startup-applicate-window", "install-sibling-views-start");
         InstallSiblingMountedViews(viewModel);
         ApplicateTrace.DiagMs("startup-applicate-window", "install-sibling-views-end");
+        if (holdStartupDocumentReveal)
+        {
+            InstallStartupDocumentRevealGate(viewModel);
+        }
         InstallHostShortcutBridge(viewModel);
         InstallActiveDocumentBridge(viewModel);
         InstallSingleInstanceActivationBridge(viewModel, singleInstance);
@@ -110,6 +120,160 @@ public sealed class ApplicateMainWindow : MainWindow
             InstallStatusHintAboveWebView,
             Avalonia.Threading.DispatcherPriority.Loaded);
         ApplicateTrace.DiagMs("startup-applicate-window", "applicate-ctor-end");
+    }
+
+    private static bool ShouldHoldStartupDocumentReveal()
+    {
+        var startupPath = App.Services?.GetService<ICommandLineActivation>()?.GetActivationFilePath();
+        return !string.IsNullOrWhiteSpace(startupPath);
+    }
+
+    private void InstallStartupDocumentRevealGate(MainWindowViewModel viewModel)
+    {
+        var hostProvider = App.Services?.GetService<IApplicateSharedWebViewHostProvider>();
+        var viewerHost = hostProvider?.ViewerHost ?? App.Services?.GetService<IApplicateSharedWebViewHost>();
+        if (viewerHost is null)
+        {
+            Opacity = 1;
+            ApplicateTrace.DiagMs(
+                "startup-applicate-window",
+                "startup-window-reveal-released",
+                "reason=no-viewer-host");
+            return;
+        }
+
+        var startupViewerHost = viewerHost;
+        var startupCover = new ApplicateModeRevealCoverWindow();
+        var released = false;
+        var documentRevealReady = false;
+        var waitForHeadings = viewModel.IsTocPreferredVisible;
+        var headingsReady = !waitForHeadings || viewModel.HasDocumentHeadings;
+        var fallbackTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+        Opened += OnStartupWindowOpened;
+        SizeChanged += OnStartupWindowSizeChanged;
+        startupViewerHost.View.DocumentRevealReady += OnDocumentRevealReady;
+        startupViewerHost.View.HeadingsChanged += OnHeadingsChanged;
+        startupViewerHost.RendererFailed += OnRendererFailed;
+        viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        Closed += OnClosed;
+        fallbackTimer.Tick += OnFallbackTick;
+        fallbackTimer.Start();
+
+        void OnStartupWindowOpened(object? sender, EventArgs e)
+            => QueueStartupCover("opened");
+
+        void OnStartupWindowSizeChanged(object? sender, SizeChangedEventArgs e)
+            => QueueStartupCover("size-changed");
+
+        void QueueStartupCover(string reason)
+            => Dispatcher.UIThread.Post(
+                () =>
+                {
+                    if (released)
+                    {
+                        return;
+                    }
+
+                    var shown = startupCover.Show(this);
+                    ApplicateTrace.DiagMs(
+                        "startup-applicate-window",
+                        "startup-window-cover-shown",
+                        $"reason={reason} shown={shown}");
+                },
+                DispatcherPriority.Render);
+
+        void OnDocumentRevealReady(object? sender, EventArgs e)
+            => Dispatcher.UIThread.Post(
+                () =>
+                {
+                    documentRevealReady = true;
+                    TryRelease("document-reveal-ready");
+                },
+                DispatcherPriority.Render);
+
+        void OnHeadingsChanged(object? sender, IReadOnlyList<DocumentHeading> headings)
+            => Dispatcher.UIThread.Post(
+                () =>
+                {
+                    waitForHeadings = viewModel.IsTocPreferredVisible && headings.Count > 0;
+                    headingsReady = !waitForHeadings || viewModel.HasDocumentHeadings;
+                    TryRelease("headings-reported");
+                },
+                DispatcherPriority.Background);
+
+        void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName is not nameof(MainWindowViewModel.DocumentHeadings)
+                and not nameof(MainWindowViewModel.IsTocVisible)
+                and not nameof(MainWindowViewModel.HasDocumentHeadings))
+            {
+                return;
+            }
+
+            if (!waitForHeadings)
+            {
+                return;
+            }
+
+            headingsReady = viewModel.HasDocumentHeadings || !viewModel.IsTocPreferredVisible;
+            TryRelease("headings-applied");
+        }
+
+        void OnRendererFailed(object? sender, ApplicateRendererFailureEvent e)
+            => Dispatcher.UIThread.Post(
+                () => Release("renderer-failed"),
+                DispatcherPriority.Render);
+
+        void OnFallbackTick(object? sender, EventArgs e)
+            => Release("fallback");
+
+        void OnClosed(object? sender, EventArgs e)
+        {
+            Cleanup();
+            startupCover.Dispose();
+        }
+
+        void TryRelease(string reason)
+        {
+            if (!documentRevealReady || (waitForHeadings && !headingsReady))
+            {
+                return;
+            }
+
+            Release(reason);
+        }
+
+        void Release(string reason)
+        {
+            if (released)
+            {
+                return;
+            }
+
+            released = true;
+            Cleanup();
+            Opacity = 1;
+            Dispatcher.UIThread.Post(
+                () =>
+                {
+                    startupCover.Hide();
+                    ApplicateTrace.DiagMs("startup-applicate-window", "startup-window-reveal-released", $"reason={reason}");
+                },
+                DispatcherPriority.Render);
+        }
+
+        void Cleanup()
+        {
+            fallbackTimer.Stop();
+            fallbackTimer.Tick -= OnFallbackTick;
+            Opened -= OnStartupWindowOpened;
+            SizeChanged -= OnStartupWindowSizeChanged;
+            startupViewerHost.View.DocumentRevealReady -= OnDocumentRevealReady;
+            startupViewerHost.View.HeadingsChanged -= OnHeadingsChanged;
+            startupViewerHost.RendererFailed -= OnRendererFailed;
+            viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+            Closed -= OnClosed;
+        }
     }
 
     // Status-hint Border (Ctrl+O / Ctrl+E / Ctrl+, hotkeys at bottom-right
@@ -2086,7 +2250,11 @@ public sealed class ApplicateMainWindow : MainWindow
                 }
             }
 
-            var argvPath = viewModel.Document?.Path;
+            var argvPath = App.Services?.GetService<ICommandLineActivation>()?.GetActivationFilePath();
+            if (string.IsNullOrWhiteSpace(argvPath))
+            {
+                argvPath = viewModel.Document?.Path;
+            }
 
             // Multi-tab startup-scaling polish: determine the preferred
             // active path UP FRONT so the restore loop knows which one
