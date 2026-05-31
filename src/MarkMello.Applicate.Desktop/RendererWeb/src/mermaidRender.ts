@@ -2,6 +2,15 @@ export type MermaidApiLike = {
   render: (id: string, source: string) => Promise<{ svg: string }>;
 };
 
+export function isMermaidNodeNearViewport(
+  node: HTMLElement,
+  viewportHeight: number,
+  marginPx: number
+): boolean {
+  const rect = node.getBoundingClientRect();
+  return rect.bottom >= -marginPx && rect.top <= viewportHeight + marginPx;
+}
+
 export async function renderMermaidNode(
   node: HTMLElement,
   generation: number,

@@ -291,6 +291,7 @@ internal static class Program
 
         collection.AddSingleton<ApplicateWebAssetEmbedder>();
         collection.AddSingleton<IApplicateHtmlMarkdownRenderer, ApplicateHtmlMarkdownRenderer>();
+        collection.AddSingleton<ApplicateRenderedBodyCache>();
         collection.AddSingleton<IApplicateShellAssetBundleFactory, ApplicateShellAssetBundleFactory>();
         collection.AddSingleton<IApplicateSharedWebViewHostProvider, ApplicateSharedWebViewHostProvider>();
         collection.AddSingleton<IApplicateSharedWebViewHost>(

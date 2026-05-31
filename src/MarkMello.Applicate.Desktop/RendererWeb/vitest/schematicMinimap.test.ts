@@ -115,25 +115,37 @@ describe("Phase B trigger", () => {
 
 describe("schedulePhaseBRebuild (real renderer seam)", () => {
   it("calls refresh('B') when documentHeight changes after allMathRendered", async () => {
-    const refresh = vi.fn();
-    const currentScrollHeight = 200;
-    const cachedHeight = 100;
-    let resolveMath: () => void = () => {};
-    const allMathRendered = new Promise<void>(r => { resolveMath = r; });
+    vi.useFakeTimers();
+    const win = window as typeof window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+    };
+    const originalRequestIdleCallback = win.requestIdleCallback;
+    win.requestIdleCallback = undefined;
+    try {
+      const refresh = vi.fn();
+      const currentScrollHeight = 200;
+      const cachedHeight = 100;
+      let resolveMath: () => void = () => {};
+      const allMathRendered = new Promise<void>(r => { resolveMath = r; });
 
-    schedulePhaseBRebuild({
-      allMathRendered,
-      getCurrentDocumentHeight: () => currentScrollHeight,
-      getCachedDocumentHeight: () => cachedHeight,
-      refresh,
-    });
+      const phaseBReady = schedulePhaseBRebuild({
+        allMathRendered,
+        getCurrentDocumentHeight: () => currentScrollHeight,
+        getCachedDocumentHeight: () => cachedHeight,
+        refresh,
+      });
 
-    resolveMath();
-    await allMathRendered;
-    // Phase B refresh is now deferred via requestIdleCallback (or setTimeout
-    // 50ms fallback in happy-dom which lacks requestIdleCallback).
-    await new Promise(r => setTimeout(r, 80));
-    expect(refresh).toHaveBeenCalledWith("B");
+      resolveMath();
+      await Promise.resolve();
+      // Phase B refresh is now deferred via requestIdleCallback (or setTimeout
+      // 50ms fallback in happy-dom which lacks requestIdleCallback).
+      await vi.advanceTimersByTimeAsync(50);
+      await phaseBReady;
+      expect(refresh).toHaveBeenCalledWith("B");
+    } finally {
+      win.requestIdleCallback = originalRequestIdleCallback;
+      vi.useRealTimers();
+    }
   });
 
   it("does NOT call refresh when documentHeight stable", async () => {
@@ -141,7 +153,7 @@ describe("schedulePhaseBRebuild (real renderer seam)", () => {
     let resolveMath: () => void = () => {};
     const allMathRendered = new Promise<void>(r => { resolveMath = r; });
 
-    schedulePhaseBRebuild({
+    const phaseBReady = schedulePhaseBRebuild({
       allMathRendered,
       getCurrentDocumentHeight: () => 100,
       getCachedDocumentHeight: () => 100,
@@ -149,8 +161,7 @@ describe("schedulePhaseBRebuild (real renderer seam)", () => {
     });
 
     resolveMath();
-    await allMathRendered;
-    await new Promise(r => setTimeout(r, 0));
+    await phaseBReady;
     expect(refresh).not.toHaveBeenCalled();
   });
 });

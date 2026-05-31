@@ -91,6 +91,15 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
                 NativeMethods.SwpNoActivate | NativeMethods.SwpShowWindow);
         }
 
+        // Force a synchronous layout pass so the solid cover content is measured
+        // and arranged before Show() returns. Callers that raise the cover
+        // immediately BEFORE a synchronous teardown (the document-switch
+        // cover-first path) rely on the cover being painted first; without this
+        // the cover Window can present one frame of unsized/unpainted content,
+        // leaking a sliver of the teardown the cover exists to hide. Mirrors the
+        // mode-toggle bridge's post-Show UpdateLayout.
+        _window.UpdateLayout();
+
         ApplicateTrace.DiagMs(
             "pane-seq",
             "bridge-cover-window-shown",

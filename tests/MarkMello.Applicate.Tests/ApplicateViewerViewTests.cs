@@ -128,6 +128,55 @@ public sealed class ApplicateViewerViewTests
     }
 
     [Fact]
+    public void HeavyDocumentResizeDebouncesOnlyLiveWebWidthEcho()
+    {
+        var codeBehind = ReadViewerCodeBehind();
+        var sizeChanged = ExtractMethodBody(codeBehind, "protected override void OnSizeChanged(");
+        var syncFromViewModel = ExtractMethodBody(codeBehind, "private void SyncFromViewModel()");
+        var widthDrag = ExtractMethodBody(codeBehind, "private void ApplyWidthDragDelta(");
+        var applyColumnWidth = ExtractMethodBody(codeBehind, "private void ApplyColumnWidth(");
+        var debounceGate = ExtractMethodBody(codeBehind, "private bool ShouldDebounceLiveWebWidthUpdates()");
+
+        Assert.Contains("ApplyColumnWidth(deferWebContentWidth: ShouldDebounceLiveWebWidthUpdates());", sizeChanged, StringComparison.Ordinal);
+        Assert.Contains("ApplyColumnWidth();", syncFromViewModel, StringComparison.Ordinal);
+        Assert.Contains("ApplyColumnWidth();", widthDrag, StringComparison.Ordinal);
+        Assert.Contains("ScheduleDeferredWebAvailableContentWidth(availableContentWidth);", applyColumnWidth, StringComparison.Ordinal);
+        Assert.Contains("ApplyWebAvailableContentWidth(availableContentWidth);", applyColumnWidth, StringComparison.Ordinal);
+        Assert.Contains("Content.Length: > HeavyDocumentResizeContentLengthThreshold", debounceGate, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ViewerDefersLargeTocHeadingUpdatesBehindRendererReveal()
+    {
+        var codeBehind = ReadViewerCodeBehind();
+        var handler = ExtractMethodBody(codeBehind, "private void OnHostHeadingsChanged(");
+        var unwire = ExtractMethodBody(codeBehind, "private void UnwireSharedHostEvents()");
+        var rendered = ExtractMethodBody(codeBehind, "private void OnHostDocumentRendered(object? sender, EventArgs e)");
+        var updater = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Views",
+            "ApplicateDeferredHeadingUpdater.cs"));
+
+        Assert.Contains("_headingUpdater.Apply(", handler, StringComparison.Ordinal);
+        Assert.Contains("ReferenceEquals(_viewModel, viewModel)", handler, StringComparison.Ordinal);
+        Assert.Contains("_headingUpdater.FlushPending();", rendered, StringComparison.Ordinal);
+        Assert.Contains("_headingUpdater.Invalidate();", unwire, StringComparison.Ordinal);
+        Assert.Contains("LargeHeadingUpdateThreshold = 250", updater, StringComparison.Ordinal);
+        Assert.Contains("LargeHeadingFlushDelay = TimeSpan.FromMilliseconds(350)", updater, StringComparison.Ordinal);
+        Assert.Contains("Task.Delay(LargeHeadingFlushDelay)", updater, StringComparison.Ordinal);
+        Assert.Contains("DispatcherPriority.Background", updater, StringComparison.Ordinal);
+        Assert.Contains("public void FlushPending()", updater, StringComparison.Ordinal);
+        Assert.Contains("viewModel.UpdateDocumentHeadings(snapshot);", updater, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TransactionGenerationContextInheritsToConsumerWebSlot()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());

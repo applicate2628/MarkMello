@@ -12,6 +12,7 @@ export type LoadDocumentMessage = {
   // calls skip when false. `undefined` defaults to running (backward-compat
   // for older docs that don't carry the flag).
   hasMermaid?: boolean;
+  hasHljs?: boolean;
 };
 
 export type LoadDocumentDeps = {
@@ -20,7 +21,7 @@ export type LoadDocumentDeps = {
   // mermaid guard set correctly for this specific load. Omitting the arg
   // (e.g. test harness, first-reading-preferences bootstrap) leaves the
   // pipeline at the "run mermaid" default.
-  runInitialRenderPipeline: (hasMermaid?: boolean, skipFrameWait?: boolean) => Promise<void>;
+  runInitialRenderPipeline: (hasMermaid?: boolean, skipFrameWait?: boolean, renderId?: number, hasHljs?: boolean) => Promise<void>;
   cancelCurrentMathController: () => void;
   resetModuleGlobals: () => void;
   scrollWindowToTop: () => void;
@@ -32,7 +33,7 @@ export type LoadDocumentDeps = {
   getCachedDocumentFragment?: (cacheKey: string) => DocumentFragment | undefined;
   setCurrentDocumentCacheKey?: (cacheKey: string | null) => void;
   restoreCachedScrollPosition?: () => void;
-  completeCachedDocumentLoad?: () => void;
+  completeCachedDocumentLoad?: (renderId?: number, hasMermaid?: boolean, hasHljs?: boolean) => void;
 };
 
 export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocumentDeps): void {
@@ -99,16 +100,16 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
   }
 
   // Re-run the initial render pipeline against the new body. The pipeline owns
-  // math, mermaid, code-block, layout-ready, and document-ready emission.
+  // math, layout-ready, document-ready emission, and post-ready rich enhancement.
   // PE r2 item G — thread the per-document `hasMermaid` flag down so the
   // pipeline can skip mermaid init+render entirely for docs without mermaid
   // blocks. Undefined defaults to running (backward-compat).
   if (cachedFragment !== undefined && deps.completeCachedDocumentLoad) {
-    deps.completeCachedDocumentLoad();
+    deps.completeCachedDocumentLoad(message.renderId, message.hasMermaid, message.hasHljs);
     return;
   }
 
-  void deps.runInitialRenderPipeline(message.hasMermaid, message.skipFrameWait);
+  void deps.runInitialRenderPipeline(message.hasMermaid, message.skipFrameWait, message.renderId, message.hasHljs);
 }
 
 export function clearDocumentState(deps: LoadDocumentDeps): void {

@@ -25,7 +25,7 @@ describe("applyLoadDocument", () => {
     const deps = makeDeps();
     applyLoadDocument({ html: "<h1>new</h1>", documentName: "doc.md" }, deps);
     const main = document.querySelector("main.mm-document");
-    expect(main?.innerHTML).toContain("<h1>new</h1>");
+    expect(main?.querySelector("h1")?.textContent).toBe("new");
     expect(main?.innerHTML).not.toContain("old");
   });
 
@@ -42,7 +42,14 @@ describe("applyLoadDocument", () => {
       completeCachedDocumentLoad: vi.fn(),
     });
 
-    applyLoadDocument({ html: "<p>raw</p>", documentName: "doc.md", cacheKey: "doc-cache" }, deps);
+    applyLoadDocument({
+      html: "<p>raw</p>",
+      documentName: "doc.md",
+      cacheKey: "doc-cache",
+      renderId: 42,
+      hasMermaid: true,
+      hasHljs: true,
+    }, deps);
 
     const main = document.querySelector("main.mm-document");
     expect(main?.innerHTML).toContain("data-processed=\"true\"");
@@ -52,7 +59,7 @@ describe("applyLoadDocument", () => {
       "mm-load-document-cache-hit",
       expect.objectContaining({ documentName: "doc.md" }));
     expect(deps.runInitialRenderPipeline).not.toHaveBeenCalled();
-    expect(deps.completeCachedDocumentLoad).toHaveBeenCalledTimes(1);
+    expect(deps.completeCachedDocumentLoad).toHaveBeenCalledWith(42, true, true);
   });
 
   it("restores cached scroll before completing a cached document load", () => {
@@ -96,6 +103,20 @@ describe("applyLoadDocument", () => {
     applyLoadDocument({ html: "<p>x</p>" }, deps);
     await Promise.resolve();
     expect(order).toEqual(["reset", "pipeline"]);
+  });
+
+  it("passes render readiness metadata into the initial pipeline", () => {
+    const deps = makeDeps();
+
+    applyLoadDocument({
+      html: "<pre class='mermaid'>graph TD; A-->B;</pre>",
+      renderId: 7,
+      hasMermaid: true,
+      hasHljs: true,
+      skipFrameWait: true,
+    }, deps);
+
+    expect(deps.runInitialRenderPipeline).toHaveBeenCalledWith(true, true, 7, true);
   });
 
   it("scrolls to top after swap", () => {

@@ -51,6 +51,18 @@ public partial class MainWindowViewModel : ObservableObject
 
     public event EventHandler? CloseRequested;
 
+    /// <summary>
+    /// Raised immediately BEFORE a viewer document load mutates
+    /// <see cref="Document"/>. The Applicate document-switch reveal coordinator
+    /// subscribes to raise its transition cover FIRST, so the synchronous
+    /// teardown that follows (the generated <c>OnDocumentChanged</c> clears the
+    /// TOC, then the render pipeline swaps the WebView document) happens UNDER
+    /// the cover instead of as a visible staged teardown (render gone -> TOC
+    /// gone -> blank). Presentation-layer event so the VM keeps no dependency
+    /// on the Applicate-side coordinator.
+    /// </summary>
+    public event EventHandler? DocumentTransitionStarting;
+
     public MainWindowViewModel(
         OpenDocumentUseCase openDocument,
         SaveDocumentUseCase saveDocument,
@@ -1232,7 +1244,23 @@ public partial class MainWindowViewModel : ObservableObject
 
     partial void OnDocumentChanged(MarkdownSource? value)
     {
-        ClearDocumentHeadings();
+        // C3 (atomic transition): clear the TOC only when there is no document
+        // (close, or a load failure that nulls Document). On a viewer->viewer
+        // switch Document stays non-null, so old headings remain until the new
+        // list replaces them atomically (UpdateDocumentHeadings) -- no empty
+        // phase, so DocumentHeadings.Count never hits 0 and IsTocVisible never
+        // drops to false: the TOC column repaints its rows in place instead of
+        // collapsing+re-expanding. A renderer crash mid-render (Document stays
+        // non-null) is covered by the coordinator's OnRendererFailed clear.
+        if (value is null)
+        {
+            ClearDocumentHeadings();
+        }
+        else
+        {
+            _pendingScrollToHeadingId = null;
+            ActiveHeadingId = string.Empty;
+        }
         RefreshDocumentSummary();
         OnPropertyChanged(nameof(ShowsEditToggle));
         RefreshWindowTitle();
@@ -1613,6 +1641,11 @@ public partial class MainWindowViewModel : ObservableObject
         // Document is set AFTER State rises to Viewing so the viewer becomes
         // visible only when the document is real.
         State = ViewState.Viewing;
+        // Cover-first (atomic teardown): raise the transition cover BEFORE the
+        // Document swap below, so the WebView document swap happens under the
+        // cover instead of as a visible staged teardown. The TOC keeps its old
+        // rows until UpdateDocumentHeadings replaces them with the new model.
+        DocumentTransitionStarting?.Invoke(this, EventArgs.Empty);
         Document = source;
         RenderedDocument = _renderMarkdown.Execute(
             source.Content,

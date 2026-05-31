@@ -52,18 +52,16 @@ public sealed class ApplicateMainWindow : MainWindow
     private const double TocColumnMaxWidth = 480;
     private const double TocColumnDefaultWidth = 240;
 
-    // The off-screen inactive edit-preview prime warms Ctrl+E by rendering the
-    // active document a SECOND time on the shared WebView right after the viewer
-    // commits. On large documents that second full render dominates cold-load
-    // CPU (~1.8s on the 4.8 MB stress doc) and hogs the main thread just after
-    // the viewer reveal, for the sake of a first-Ctrl+E that may never come.
-    // Skip the prime above this markdown-content-length threshold; the first
-    // Ctrl+E on a skipped doc renders fresh under the mode-toggle cover and
-    // stays garbage-free. Common docs (<100 KB) keep the warm-up. Tunable.
-    private const int InactiveEditPrimeMaxDocumentContentLength = 256 * 1024;
+    // The inactive edit-preview prime warms Ctrl+E by rendering the active
+    // document on the edit WebView before the user switches modes. Small docs
+    // can prime immediately; heavy docs wait until the viewer has committed
+    // and the UI has had a short quiet period, so startup/tab reveal is not
+    // taxed but the first edit transition is still warmed when the user pauses
+    // on the document.
+    private const int InactiveEditPrimeImmediateMaxDocumentContentLength = 256 * 1024;
+    private static readonly TimeSpan InactiveEditPrimeHeavyDelay = TimeSpan.FromMilliseconds(1400);
 
     private Panel? _tabsContentPanel;
-    private Grid? _tocContentGrid;
     private ApplicateSiblingMountBridge? _siblingMountBridge;
     private ApplicateModeTransactionHostRouter? _modeTransactionHostRouter;
     private ApplicateDocumentSwitchRevealCoordinator? _documentSwitchRevealCoordinator;
@@ -616,9 +614,9 @@ public sealed class ApplicateMainWindow : MainWindow
         contentGrid.Children.Add(tocPanel);
         contentGrid.Children.Add(tocSplitter);
         contentGrid.Children.Add(contentPanel);
-        // Cover host for the document-switch atomic reveal (spans TOC +
-        // document; the tabs row above stays visible during a switch).
-        _tocContentGrid = contentGrid;
+        // Document-switch cover is mounted later on the document/editor slot,
+        // not on contentGrid: the TOC column must stay visible and only replace
+        // its row contents when the renderer reports new headings.
 
         // Visibility wiring: bind TOC panel + splitter to MainWindowViewModel.
         // IsTocVisible composite predicate. The columns themselves stay in
@@ -1070,14 +1068,13 @@ public sealed class ApplicateMainWindow : MainWindow
             modeRevealCoverHost: siblingPanel);
 
         // Atomic reveal for viewer DOCUMENT switches (tab change, startup,
-        // reload): hold a solid cover over the TOC + document until the new
-        // document has committed and painted, mirroring the mode-toggle
-        // bridge's covered reveal without touching the host state machine or
-        // the mode-toggle path. See ApplicateDocumentSwitchRevealCoordinator.
-        if (_tocContentGrid is not null && viewerHostForMode is not null)
+        // reload): hold a solid cover over the document slot until the new
+        // document has committed and painted. The TOC column stays visible and
+        // swaps its row model in place.
+        if (viewerHostForMode is not null)
         {
             _documentSwitchRevealCoordinator = new ApplicateDocumentSwitchRevealCoordinator(
-                _tocContentGrid,
+                siblingPanel,
                 viewerHostForMode,
                 // Reader surface only: IsViewer is `State == Viewing`, which is
                 // also true in edit mode (edit is a sub-mode of Viewing), so the
@@ -1092,7 +1089,8 @@ public sealed class ApplicateMainWindow : MainWindow
             viewerSlot,
             editSlot,
             editPreview,
-            viewerHostForMode);
+            viewerHostForMode,
+            editHost);
 
         Closed += OnApplicateMainWindowClosed;
     }
@@ -1103,7 +1101,8 @@ public sealed class ApplicateMainWindow : MainWindow
         Control viewerSlot,
         Panel editSlot,
         ApplicateEditPreviewView editPreview,
-        IApplicateSharedWebViewHost? viewerCommitHost)
+        IApplicateSharedWebViewHost? viewerCommitHost,
+        IApplicateSharedWebViewHost? editPreviewHost)
     {
         const double inactivePrimeOffscreenX = -100000.0;
         var inactivePrimeTimeout = TimeSpan.FromSeconds(15);
@@ -1113,8 +1112,14 @@ public sealed class ApplicateMainWindow : MainWindow
         MarkdownSource? pendingDocument = null;
         ReadingPreferences? pendingPreferences = null;
         Size pendingViewportSize = default;
+        MarkdownSource? revealReadyDocument = null;
+        ReadingPreferences? revealReadyPreferences = null;
         bool primeQueued = false;
         bool primeInProgress = false;
+        bool delayedHeavyPrimeReady = false;
+        MarkdownSource? delayedHeavyPrimeDocument = null;
+        ReadingPreferences? delayedHeavyPrimePreferences = null;
+        Size delayedHeavyPrimeViewportSize = default;
         (
             bool IsVisible,
             bool IsEnabled,
@@ -1127,6 +1132,7 @@ public sealed class ApplicateMainWindow : MainWindow
             VerticalAlignment VerticalAlignment
         )? activePrimeRestore = null;
         Avalonia.Threading.DispatcherTimer? primeTimeoutTimer = null;
+        Avalonia.Threading.DispatcherTimer? delayedHeavyPrimeTimer = null;
 
         Opened += OnPrimeSurfaceReady;
         contentPanel.PropertyChanged += OnPrimeSurfaceChanged;
@@ -1136,6 +1142,7 @@ public sealed class ApplicateMainWindow : MainWindow
         if (viewerCommitHost is not null)
         {
             viewerCommitHost.CommitCompleted += OnViewerHostCommitCompleted;
+            viewerCommitHost.View.DocumentRevealReady += OnViewerDocumentRevealReady;
         }
 
         Closed += OnPrimeClosed;
@@ -1168,6 +1175,13 @@ public sealed class ApplicateMainWindow : MainWindow
                 or nameof(MainWindowViewModel.TocColumnWidth)
                 or nameof(MainWindowViewModel.IsEditMode))
             {
+                if (e.PropertyName is nameof(MainWindowViewModel.Document)
+                    or nameof(MainWindowViewModel.ReadingPreferences))
+                {
+                    revealReadyDocument = null;
+                    revealReadyPreferences = null;
+                }
+
                 QueuePrime();
             }
         }
@@ -1175,6 +1189,7 @@ public sealed class ApplicateMainWindow : MainWindow
         void OnPrimeClosed(object? sender, EventArgs e)
         {
             CompletePrime(success: false, preserveCurrentVisibility: false);
+            CancelDelayedHeavyPrime();
             Opened -= OnPrimeSurfaceReady;
             contentPanel.PropertyChanged -= OnPrimeSurfaceChanged;
             viewerSlot.PropertyChanged -= OnPrimeSurfaceChanged;
@@ -1183,6 +1198,7 @@ public sealed class ApplicateMainWindow : MainWindow
             if (viewerCommitHost is not null)
             {
                 viewerCommitHost.CommitCompleted -= OnViewerHostCommitCompleted;
+                viewerCommitHost.View.DocumentRevealReady -= OnViewerDocumentRevealReady;
             }
 
             Closed -= OnPrimeClosed;
@@ -1198,6 +1214,21 @@ public sealed class ApplicateMainWindow : MainWindow
                 return;
             }
 
+            QueuePrime();
+        }
+
+        void OnViewerDocumentRevealReady(object? sender, EventArgs e)
+        {
+            if (viewerCommitHost is null
+                || viewModel.Document is not { } document
+                || !viewerCommitHost.View.HasLoadedDocumentForSource(document)
+                || !Equals(viewerCommitHost.View.ReadingPreferences, viewModel.ReadingPreferences))
+            {
+                return;
+            }
+
+            revealReadyDocument = document;
+            revealReadyPreferences = viewModel.ReadingPreferences;
             QueuePrime();
         }
 
@@ -1222,18 +1253,7 @@ public sealed class ApplicateMainWindow : MainWindow
         {
             if (viewModel.IsEditMode || viewModel.Document is not { } document)
             {
-                return;
-            }
-
-            // D3 (load-regression): skip the off-screen prime for large docs —
-            // the second full render costs far more than the first-Ctrl+E it
-            // warms. Re-checked here at execution time (not at schedule time).
-            if (document.Content.Length > InactiveEditPrimeMaxDocumentContentLength)
-            {
-                ApplicateTrace.DiagMs(
-                    "pane-seq",
-                    "editpreview-inactive-prime-skipped-heavy",
-                    $"source={document.Path} contentLength={document.Content.Length} threshold={InactiveEditPrimeMaxDocumentContentLength}");
+                CancelDelayedHeavyPrime();
                 return;
             }
 
@@ -1250,6 +1270,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 && AreClose(primedViewportSize.Width, viewportSize.Width)
                 && AreClose(primedViewportSize.Height, viewportSize.Height))
             {
+                CancelDelayedHeavyPrime();
                 return;
             }
 
@@ -1266,6 +1287,48 @@ public sealed class ApplicateMainWindow : MainWindow
                     return;
                 }
             }
+
+            if (viewerCommitHost is not null
+                && ReferenceEquals(viewerCommitHost, editPreviewHost)
+                && viewModel.IsViewer)
+            {
+                // Fallback DI can map reader and edit-preview to the same
+                // host. In that shape an inactive prime would reparent the
+                // visible reader WebView out of its slot and blank the body.
+                // Normal production DI provides a separate edit-preview host,
+                // so that path can prime offscreen without stealing reader
+                // ownership.
+                CancelDelayedHeavyPrime();
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "editpreview-inactive-prime-skipped-active-viewer",
+                    $"source={document.Path} sharedHost=True");
+                return;
+            }
+
+            if (TrySkipViewportOnlyPrime(document, preferences, viewportSize))
+            {
+                return;
+            }
+
+            var isHeavyDocument = document.Content.Length > InactiveEditPrimeImmediateMaxDocumentContentLength;
+            if (isHeavyDocument && !IsViewerRevealReadyForPrime(document, preferences))
+            {
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "editpreview-inactive-prime-gated-reveal",
+                    $"source={document.Path} contentLength={document.Content.Length}");
+                return;
+            }
+
+            if (isHeavyDocument
+                && !IsDelayedHeavyPrimeReady(document, preferences, viewportSize))
+            {
+                ScheduleDelayedHeavyPrime(document, preferences, viewportSize);
+                return;
+            }
+
+            CancelDelayedHeavyPrime();
 
             if (primeInProgress
                 && ReferenceEquals(pendingDocument, document)
@@ -1307,6 +1370,97 @@ public sealed class ApplicateMainWindow : MainWindow
             {
                 CompletePrime(success: false, preserveCurrentVisibility: false);
             }
+        }
+
+        bool TrySkipViewportOnlyPrime(MarkdownSource document, ReadingPreferences preferences, Size viewportSize)
+        {
+            if (editPreviewHost is null
+                || ReferenceEquals(viewerCommitHost, editPreviewHost))
+            {
+                return false;
+            }
+
+            var previewPreferences = ApplicateEditPreviewView.CreateWebPreviewPreferences(preferences);
+            var previewLoaded = editPreviewHost.View.HasLoadedDocumentForSource(document);
+            var preferencesMatch = Equals(editPreviewHost.View.ReadingPreferences, previewPreferences);
+            if (!previewLoaded || !preferencesMatch)
+            {
+                return false;
+            }
+
+            var previousViewportSize = primedViewportSize;
+            primedDocument = document;
+            primedPreferences = preferences;
+            primedViewportSize = viewportSize;
+            CancelDelayedHeavyPrime();
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "editpreview-inactive-prime-skipped-size-only",
+                $"source={document.Path} previousViewport={previousViewportSize.Width:F0}x{previousViewportSize.Height:F0} newViewport={viewportSize.Width:F0}x{viewportSize.Height:F0}");
+            return true;
+        }
+
+        bool IsDelayedHeavyPrimeReady(MarkdownSource document, ReadingPreferences preferences, Size viewportSize)
+            => delayedHeavyPrimeReady
+                && ReferenceEquals(delayedHeavyPrimeDocument, document)
+                && Equals(delayedHeavyPrimePreferences, preferences)
+                && AreClose(delayedHeavyPrimeViewportSize.Width, viewportSize.Width)
+                && AreClose(delayedHeavyPrimeViewportSize.Height, viewportSize.Height);
+
+        bool IsViewerRevealReadyForPrime(MarkdownSource document, ReadingPreferences preferences)
+            => ReferenceEquals(revealReadyDocument, document)
+                && Equals(revealReadyPreferences, preferences);
+
+        void ScheduleDelayedHeavyPrime(MarkdownSource document, ReadingPreferences preferences, Size viewportSize)
+        {
+            if (ReferenceEquals(delayedHeavyPrimeDocument, document)
+                && Equals(delayedHeavyPrimePreferences, preferences)
+                && AreClose(delayedHeavyPrimeViewportSize.Width, viewportSize.Width)
+                && AreClose(delayedHeavyPrimeViewportSize.Height, viewportSize.Height)
+                && delayedHeavyPrimeTimer?.IsEnabled == true)
+            {
+                return;
+            }
+
+            delayedHeavyPrimeDocument = document;
+            delayedHeavyPrimePreferences = preferences;
+            delayedHeavyPrimeViewportSize = viewportSize;
+            delayedHeavyPrimeReady = false;
+
+            delayedHeavyPrimeTimer ??= new Avalonia.Threading.DispatcherTimer
+            {
+                Interval = InactiveEditPrimeHeavyDelay,
+            };
+            delayedHeavyPrimeTimer.Tick -= OnDelayedHeavyPrimeTimerTick;
+            delayedHeavyPrimeTimer.Tick += OnDelayedHeavyPrimeTimerTick;
+            delayedHeavyPrimeTimer.Stop();
+            delayedHeavyPrimeTimer.Start();
+
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "editpreview-inactive-prime-delayed-heavy",
+                $"source={document.Path} contentLength={document.Content.Length} threshold={InactiveEditPrimeImmediateMaxDocumentContentLength} delayMs={InactiveEditPrimeHeavyDelay.TotalMilliseconds:F0} viewport={viewportSize.Width:F0}x{viewportSize.Height:F0}");
+        }
+
+        void OnDelayedHeavyPrimeTimerTick(object? sender, EventArgs e)
+        {
+            delayedHeavyPrimeTimer?.Stop();
+            delayedHeavyPrimeReady = true;
+            QueuePrime();
+        }
+
+        void CancelDelayedHeavyPrime()
+        {
+            if (delayedHeavyPrimeTimer is not null)
+            {
+                delayedHeavyPrimeTimer.Stop();
+                delayedHeavyPrimeTimer.Tick -= OnDelayedHeavyPrimeTimerTick;
+            }
+
+            delayedHeavyPrimeReady = false;
+            delayedHeavyPrimeDocument = null;
+            delayedHeavyPrimePreferences = null;
+            delayedHeavyPrimeViewportSize = default;
         }
 
         (

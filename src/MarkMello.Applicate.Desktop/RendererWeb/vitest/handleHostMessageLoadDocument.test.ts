@@ -48,6 +48,57 @@ describe("handleHostMessage(load-document)", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
   });
 
+  it("applies live theme before deferred mermaid refresh", () => {
+    const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+    const themeStart = source.indexOf("function handleThemeChange(theme: RendererTheme): void");
+    const themeEnd = source.indexOf("function getScrollState", themeStart);
+    const themeHandler = source.slice(themeStart, themeEnd);
+    const schedulerStart = source.indexOf("function scheduleThemeMermaidRefresh(");
+    const schedulerEnd = source.indexOf("function handleThemeChange", schedulerStart);
+    const scheduler = source.slice(schedulerStart, schedulerEnd);
+
+    expect(themeStart).toBeGreaterThanOrEqual(0);
+    expect(themeEnd).toBeGreaterThan(themeStart);
+    expect(themeHandler.indexOf("applyTheme(theme);")).toBeLessThan(themeHandler.indexOf("scheduleThemeMermaidRefresh(theme);"));
+    expect(themeHandler).toContain('postPerfMark("mm-theme-change-applied", { theme });');
+    expect(themeHandler).not.toContain("await renderMermaid()");
+    expect(scheduler).toContain("window.setTimeout");
+    expect(scheduler).toContain("THEME_MERMAID_REFRESH_DELAY_MS");
+    expect(scheduler).toContain("++mermaidRenderGeneration;");
+  });
+
+  it("keeps offscreen mermaid diagrams out of the blocking post-ready path", () => {
+    const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+    const renderStart = source.indexOf("async function renderMermaid(): Promise<void>");
+    const renderEnd = source.indexOf("function renderCodeBlocks", renderStart);
+    const renderMermaid = source.slice(renderStart, renderEnd);
+
+    expect(renderStart).toBeGreaterThanOrEqual(0);
+    expect(renderEnd).toBeGreaterThan(renderStart);
+    expect(renderMermaid).toContain("isMermaidNodeNearViewport");
+    expect(renderMermaid).toContain("installLazyMermaidObserver(lazyNodes, generation, mermaid);");
+    expect(renderMermaid).toContain("mm-mermaid-visible-first");
+    expect(renderMermaid).toContain("mm-mermaid-lazy-observe");
+    expect(renderMermaid).not.toContain("allNodes.slice");
+  });
+
+  it("does not rebuild a full-DOM minimap clone twice before first reveal", () => {
+    const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+    const renderMathStart = source.indexOf("function renderMath(): MathReadinessController");
+    const renderMathEnd = source.indexOf("function getCurrentTheme", renderMathStart);
+    const renderMath = source.slice(renderMathStart, renderMathEnd);
+    const helperStart = source.indexOf("function refreshInitialVisibleMinimapContent()");
+    const helperEnd = source.indexOf("function postCachedMinimapState", helperStart);
+    const helper = source.slice(helperStart, helperEnd);
+
+    expect(renderMathStart).toBeGreaterThanOrEqual(0);
+    expect(renderMathEnd).toBeGreaterThan(renderMathStart);
+    expect(renderMath).toContain("refreshInitialVisibleMinimapContent();");
+    expect(helper).toContain("documentWindow || !minimapSourceReady");
+    expect(helper).toContain('postPerfMark("mm-minimap-refresh-skipped"');
+    expect(helper).toContain("updateMinimapViewport();");
+  });
+
   it("prepares and starts mode reveal on the renderer document", () => {
     const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
     const main = document.querySelector<HTMLElement>("main.mm-document")!;
@@ -125,5 +176,17 @@ describe("handleHostMessage(load-document)", () => {
     expect(paintGateCallIndex).toBeGreaterThan(visibilityRefreshIndex);
     expect(paintGate).toContain("updateMinimapViewport();");
     expect(paintGate).toContain("updateWidthHandlePosition();");
+  });
+
+  it("defers edit-preview post-ready work behind mode-settle messages", () => {
+    const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+    const flushStart = source.indexOf("function flushPostLayoutReadyWork()");
+    const flushEnd = source.indexOf("function restoreCachedScrollPosition", flushStart);
+    const flush = source.slice(flushStart, flushEnd);
+
+    expect(flushStart).toBeGreaterThanOrEqual(0);
+    expect(flushEnd).toBeGreaterThan(flushStart);
+    expect(flush).toContain("viewerChromeEnabled ? 0 : POST_LAYOUT_READY_EDIT_PREVIEW_DELAY_MS");
+    expect(flush).toContain('postPerfMark("post-ready-enhancements-deferred"');
   });
 });

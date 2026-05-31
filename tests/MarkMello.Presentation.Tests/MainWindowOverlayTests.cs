@@ -446,4 +446,28 @@ public sealed class MainWindowOverlayTests
         Assert.DoesNotContain("InputElement.PointerReleasedEvent", applicateWindowCode, StringComparison.Ordinal);
         Assert.Contains("control.Classes.Set(\"dragging\", isDragging);", applicateWindowCode, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void ApplicateDocumentSwitchCoverDoesNotCoverTableOfContentsColumn()
+    {
+        var applicateWindowCode = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "ApplicateMainWindow.cs"));
+
+        var coordinatorStart = applicateWindowCode.IndexOf(
+            "new ApplicateDocumentSwitchRevealCoordinator(",
+            StringComparison.Ordinal);
+
+        Assert.True(coordinatorStart >= 0, "document-switch reveal coordinator should be wired.");
+        var coordinatorBlock = applicateWindowCode[coordinatorStart..];
+        Assert.Contains("siblingPanel,", coordinatorBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("_tocContentGrid,", coordinatorBlock, StringComparison.Ordinal);
+    }
 }

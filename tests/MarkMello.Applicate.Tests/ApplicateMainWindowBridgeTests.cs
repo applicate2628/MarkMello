@@ -82,22 +82,51 @@ public sealed class ApplicateMainWindowBridgeTests
         var tryPrime = ExtractMethodBody(primeInstaller, "void TryPrime()");
         var closeHandler = ExtractMethodBody(primeInstaller, "void OnPrimeClosed(object? sender, EventArgs e)");
         var commitHandler = ExtractMethodBody(primeInstaller, "void OnViewerHostCommitCompleted(object? sender, ApplicateCommitCompletedEventArgs e)");
+        var revealHandler = ExtractMethodBody(primeInstaller, "void OnViewerDocumentRevealReady(object? sender, EventArgs e)");
+        var sizeOnlySkip = ExtractMethodBody(primeInstaller, "bool TrySkipViewportOnlyPrime(");
 
-        Assert.Contains("viewerHostForMode);", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("viewerHostForMode,", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("editHost);", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("IApplicateSharedWebViewHost? viewerCommitHost", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("IApplicateSharedWebViewHost? editPreviewHost", codeBehind, StringComparison.Ordinal);
         Assert.Contains("viewerCommitHost.CommitCompleted += OnViewerHostCommitCompleted;", primeInstaller, StringComparison.Ordinal);
+        Assert.Contains("viewerCommitHost.View.DocumentRevealReady += OnViewerDocumentRevealReady;", primeInstaller, StringComparison.Ordinal);
         Assert.Contains("viewerCommitHost.CommitCompleted -= OnViewerHostCommitCompleted;", closeHandler, StringComparison.Ordinal);
+        Assert.Contains("viewerCommitHost.View.DocumentRevealReady -= OnViewerDocumentRevealReady;", closeHandler, StringComparison.Ordinal);
 
         Assert.Contains("e.TransactionGeneration != 0", commitHandler, StringComparison.Ordinal);
         Assert.Contains("e.Mode != ApplicateMode.Viewer", commitHandler, StringComparison.Ordinal);
         Assert.Contains("QueuePrime();", commitHandler, StringComparison.Ordinal);
+        Assert.Contains("viewerCommitHost.View.HasLoadedDocumentForSource(document)", revealHandler, StringComparison.Ordinal);
+        Assert.Contains("revealReadyDocument = document;", revealHandler, StringComparison.Ordinal);
 
         var gateIndex = tryPrime.IndexOf("viewerCommitHost.View.HasLoadedDocumentForSource(document)", StringComparison.Ordinal);
+        var sharedHostGateIndex = tryPrime.IndexOf("ReferenceEquals(viewerCommitHost, editPreviewHost)", StringComparison.Ordinal);
+        var activeViewerSkipIndex = tryPrime.IndexOf("editpreview-inactive-prime-skipped-active-viewer", StringComparison.Ordinal);
+        var sizeOnlySkipIndex = tryPrime.IndexOf("TrySkipViewportOnlyPrime(document, preferences, viewportSize)", StringComparison.Ordinal);
+        var revealGateIndex = tryPrime.IndexOf("IsViewerRevealReadyForPrime(document, preferences)", StringComparison.Ordinal);
+        var delayedHeavyIndex = tryPrime.IndexOf("ScheduleDelayedHeavyPrime(document, preferences, viewportSize);", StringComparison.Ordinal);
         var beginLayoutIndex = tryPrime.IndexOf("BeginPrimeLayout(editWorkspaceSize)", StringComparison.Ordinal);
         Assert.True(gateIndex >= 0, "TryPrime should gate on the viewer host's current loaded document.");
-        Assert.True(beginLayoutIndex > gateIndex, "Inactive prime should not begin layout before the viewer commit gate.");
+        Assert.True(sharedHostGateIndex > gateIndex, "Inactive prime should skip the active-viewer path only when reader and preview share one host.");
+        Assert.True(activeViewerSkipIndex > sharedHostGateIndex, "Inactive prime should not steal a fallback shared WebView from the active viewer.");
+        Assert.True(sizeOnlySkipIndex > activeViewerSkipIndex, "A resize-only re-prime should be skipped only after the active-viewer ownership gate.");
+        Assert.True(revealGateIndex > sizeOnlySkipIndex, "Heavy edit-preview prime should wait for the viewer reveal-ready gate after the resize-only reuse gate.");
+        Assert.True(delayedHeavyIndex > revealGateIndex, "Heavy edit-preview prime should delay only after the viewer reveal-ready gate passes.");
+        Assert.True(beginLayoutIndex > activeViewerSkipIndex, "Inactive prime should not begin layout before the active-viewer ownership gate.");
         Assert.Contains("Equals(viewerCommitHost.View.ReadingPreferences, preferences)", tryPrime, StringComparison.Ordinal);
         Assert.Contains("\"editpreview-inactive-prime-gated\"", tryPrime, StringComparison.Ordinal);
+        Assert.Contains("\"editpreview-inactive-prime-skipped-active-viewer\"", tryPrime, StringComparison.Ordinal);
+        Assert.Contains("\"editpreview-inactive-prime-skipped-size-only\"", sizeOnlySkip, StringComparison.Ordinal);
+        Assert.Contains("ApplicateEditPreviewView.CreateWebPreviewPreferences(preferences)", sizeOnlySkip, StringComparison.Ordinal);
+        Assert.Contains("editPreviewHost.View.HasLoadedDocumentForSource(document)", sizeOnlySkip, StringComparison.Ordinal);
+        Assert.Contains("Equals(editPreviewHost.View.ReadingPreferences, previewPreferences)", sizeOnlySkip, StringComparison.Ordinal);
+        Assert.Contains("primedDocument = document;", sizeOnlySkip, StringComparison.Ordinal);
+        Assert.Contains("primedPreferences = preferences;", sizeOnlySkip, StringComparison.Ordinal);
+        Assert.Contains("primedViewportSize = viewportSize;", sizeOnlySkip, StringComparison.Ordinal);
+        Assert.Contains("InactiveEditPrimeHeavyDelay", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("\"editpreview-inactive-prime-delayed-heavy\"", primeInstaller, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"editpreview-inactive-prime-skipped-heavy\"", tryPrime, StringComparison.Ordinal);
     }
 
     private static string ReadMainWindowCodeBehind()

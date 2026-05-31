@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { renderMermaidNode, type MermaidApiLike } from "../src/mermaidRender";
+import { isMermaidNodeNearViewport, renderMermaidNode, type MermaidApiLike } from "../src/mermaidRender";
 
 function makeNode(source: string): HTMLElement {
   const pre = document.createElement("pre");
@@ -63,5 +63,34 @@ describe("renderMermaidNode", () => {
 
     expect(node.classList.contains("is-rendered")).toBe(false);
     expect(node.nextElementSibling).toBeNull();
+  });
+});
+
+describe("isMermaidNodeNearViewport", () => {
+  function makeMeasuredNode(top: number, bottom: number): HTMLElement {
+    const node = document.createElement("pre");
+    node.getBoundingClientRect = () => ({
+      x: 0,
+      y: top,
+      top,
+      bottom,
+      left: 0,
+      right: 100,
+      width: 100,
+      height: bottom - top,
+      toJSON: () => ({})
+    } as DOMRect);
+    return node;
+  }
+
+  it("treats visible and near-viewport diagrams as eager", () => {
+    expect(isMermaidNodeNearViewport(makeMeasuredNode(100, 220), 800, 200)).toBe(true);
+    expect(isMermaidNodeNearViewport(makeMeasuredNode(900, 1020), 800, 200)).toBe(true);
+    expect(isMermaidNodeNearViewport(makeMeasuredNode(-180, -20), 800, 200)).toBe(true);
+  });
+
+  it("keeps distant offscreen diagrams lazy", () => {
+    expect(isMermaidNodeNearViewport(makeMeasuredNode(1101, 1220), 800, 200)).toBe(false);
+    expect(isMermaidNodeNearViewport(makeMeasuredNode(-421, -301), 800, 200)).toBe(false);
   });
 });

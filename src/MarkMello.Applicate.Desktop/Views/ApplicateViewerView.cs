@@ -6,6 +6,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Rendering;
@@ -29,6 +30,8 @@ namespace MarkMello.Applicate.Desktop.Views;
 public sealed class ApplicateViewerView : UserControl, IDisposable
 {
     private const double WheelStepMultiplier = 6.0;
+    private const int HeavyDocumentResizeContentLengthThreshold = 256 * 1024;
+    private static readonly TimeSpan HeavyDocumentResizeContentWidthDebounce = TimeSpan.FromMilliseconds(120);
     /// <summary>
     /// Backwards-compatible re-export of
     /// <see cref="ApplicateDocumentLayout.MinManualContentWidth"/>. The
@@ -60,6 +63,8 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private readonly Grid _documentLayer;
     private readonly IApplicateSharedWebViewHost? _sharedHost;
     private readonly ApplicateRendererFailureView _failureView;
+    private readonly DispatcherTimer _resizeContentWidthTimer;
+    private readonly ApplicateDeferredHeadingUpdater _headingUpdater = new();
     private WebViewHostScrollBarOverlay? _scrollBarOverlay;
     private MainWindowViewModel? _viewModel;
     private bool _isDraggingWidth;
@@ -79,6 +84,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private bool _hostEventsWired;
     private bool _isAttachedToHost;
     private bool _hasValidBounds;
+    private double _pendingAvailableContentWidth = double.NaN;
 
     public ApplicateViewerView(
         IApplicateHtmlMarkdownRenderer? htmlRenderer = null,
@@ -98,6 +104,11 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         {
             IsVisible = false,
         };
+        _resizeContentWidthTimer = new DispatcherTimer
+        {
+            Interval = HeavyDocumentResizeContentWidthDebounce,
+        };
+        _resizeContentWidthTimer.Tick += OnResizeContentWidthTimerTick;
 
         // documentLayer hosts the WebView slot and the optional failure
         // overlay. The Avalonia ScrollBar overlay (mounted once the host
@@ -187,6 +198,8 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         PropertyChanged -= OnViewerPropertyChanged;
         DetachAncestorVisibilityListeners();
         UnwireSharedHostEvents();
+        _resizeContentWidthTimer.Stop();
+        _pendingAvailableContentWidth = double.NaN;
         AttachViewModel(null);
         base.OnDetachedFromVisualTree(e);
     }
@@ -248,6 +261,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         else
         {
             _isAttachedToHost = false;
+            _headingUpdater.Invalidate();
             // F-05 fix: hand consumer ownership of the scrollbar overlay
             // back to the inactive state when this view stops being the
             // shared WebView's owner.
@@ -273,7 +287,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
             return;
         }
 
-        ApplyColumnWidth();
+        ApplyColumnWidth(deferWebContentWidth: ShouldDebounceLiveWebWidthUpdates());
     }
 
     private void AttachViewModel(MainWindowViewModel? viewModel)
@@ -479,6 +493,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         _sharedHost.View.HeadingsChanged -= OnHostHeadingsChanged;
         _sharedHost.View.ActiveHeadingChanged -= OnHostActiveHeadingChanged;
         _sharedHost.RendererFailed -= OnHostRendererFailed;
+        _headingUpdater.Invalidate();
         _hostEventsWired = false;
     }
 
@@ -487,11 +502,15 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         // Consumer-side filter — only the active viewer's TOC reflects the
         // current document; edit-preview heading payloads are dropped so
         // the user's TOC list stays anchored on the reading-mode document.
-        if (!_isAttachedToHost || _viewModel is null)
+        var viewModel = _viewModel;
+        if (!_isAttachedToHost || viewModel is null)
         {
             return;
         }
-        _viewModel.UpdateDocumentHeadings(headings);
+        _headingUpdater.Apply(
+            headings,
+            viewModel,
+            () => _isAttachedToHost && ReferenceEquals(_viewModel, viewModel));
     }
 
     private void OnHostActiveHeadingChanged(object? sender, string id)
@@ -530,6 +549,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         // committed the slot to IsVisible=true, and a stale failure overlay
         // beneath the now-visible WebView would block input.
         _failureView.IsVisible = false;
+        _headingUpdater.FlushPending();
 
         if (restoreProgress.HasValue
             && _sharedHost is not null
@@ -643,7 +663,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         }
     }
 
-    private void ApplyColumnWidth()
+    private void ApplyColumnWidth(bool deferWebContentWidth = false)
     {
         if (_viewModel is null)
         {
@@ -674,7 +694,15 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         // SyncFromViewModel → ApplyColumnWidth.
         if (_sharedHost is not null && _isAttachedToHost && IsEffectivelyVisible)
         {
-            _sharedHost.View.AvailableContentWidth = CalculateDocumentColumnWidthForWebSurface();
+            var availableContentWidth = CalculateDocumentColumnWidthForWebSurface();
+            if (deferWebContentWidth)
+            {
+                ScheduleDeferredWebAvailableContentWidth(availableContentWidth);
+            }
+            else
+            {
+                ApplyWebAvailableContentWidth(availableContentWidth);
+            }
         }
         // View.MinHeight intentionally NOT set here. The View has
         // VerticalAlignment=Stretch (set in its ctor) and is parented
@@ -692,6 +720,56 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         _documentLayer.Width = documentLayerWidth;
         _column.Width = shellWidth;
         _column.MaxWidth = shellWidth;
+    }
+
+    private bool ShouldDebounceLiveWebWidthUpdates()
+        => !_isDraggingWidth
+            && _viewModel?.Document is { Content.Length: > HeavyDocumentResizeContentLengthThreshold }
+            && _sharedHost is not null
+            && _isAttachedToHost
+            && IsEffectivelyVisible;
+
+    private void ScheduleDeferredWebAvailableContentWidth(double availableContentWidth)
+    {
+        _pendingAvailableContentWidth = availableContentWidth;
+        _resizeContentWidthTimer.Stop();
+        _resizeContentWidthTimer.Start();
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "viewer-resize-width-deferred",
+            $"width={availableContentWidth:F0} delayMs={HeavyDocumentResizeContentWidthDebounce.TotalMilliseconds:F0}");
+    }
+
+    private void OnResizeContentWidthTimerTick(object? sender, EventArgs e)
+    {
+        _resizeContentWidthTimer.Stop();
+        if (_sharedHost is null
+            || !_isAttachedToHost
+            || !IsEffectivelyVisible
+            || !double.IsFinite(_pendingAvailableContentWidth)
+            || _pendingAvailableContentWidth <= 0)
+        {
+            _pendingAvailableContentWidth = double.NaN;
+            return;
+        }
+
+        var availableContentWidth = _pendingAvailableContentWidth;
+        _pendingAvailableContentWidth = double.NaN;
+        _sharedHost.View.AvailableContentWidth = availableContentWidth;
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "viewer-resize-width-flushed",
+            $"width={availableContentWidth:F0}");
+    }
+
+    private void ApplyWebAvailableContentWidth(double availableContentWidth)
+    {
+        _resizeContentWidthTimer.Stop();
+        _pendingAvailableContentWidth = double.NaN;
+        if (_sharedHost is not null)
+        {
+            _sharedHost.View.AvailableContentWidth = availableContentWidth;
+        }
     }
 
     internal static double CalculateDocumentLayerWidth(double documentColumnWidth, double hostWidth, bool useWebRenderer)
@@ -825,6 +903,8 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     public void Dispose()
     {
         UnwireSharedHostEvents();
+        _resizeContentWidthTimer.Stop();
+        _resizeContentWidthTimer.Tick -= OnResizeContentWidthTimerTick;
         if (_scrollBarOverlay is not null)
         {
             _documentLayer.Children.Remove(_scrollBarOverlay.Control);

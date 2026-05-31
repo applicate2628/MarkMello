@@ -15,7 +15,11 @@ async function loadRendererWithMessages() {
 }
 
 async function letPipelineSettle(): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 50));
+  // Cache entries are published only after post-ready enhancements complete.
+  // The live renderer now gives edit-preview mode-settle messages a short
+  // head start before post-ready Mermaid/hljs work, so fixed sleeps in these
+  // cache tests need to cover that debounce plus Phase B minimap settle.
+  await new Promise(resolve => setTimeout(resolve, 700));
 }
 
 beforeEach(() => {
@@ -129,5 +133,34 @@ describe("renderer document cache", () => {
     expect(perfMarks).toContain("mm-load-document-cache-hit");
     expect(perfMarks).toContain("mm-minimap-cache-hit");
     expect(perfMarks).not.toContain("mm-minimap-refresh-start");
+  });
+
+  it("reuses post-ready mermaid documents from the processed document cache", async () => {
+    const { load, messages } = await loadRendererWithMessages();
+    const firstHtml = "<h1 id='first'>First</h1><pre class='mm-mermaid'>graph TD; A-->B;</pre>";
+    const secondHtml = "<h1 id='second'>Second</h1><p>other document</p>";
+
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "dark", hasMermaid: true, renderId: 1 });
+    await letPipelineSettle();
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "dark", hasMermaid: false, renderId: 2 });
+    await letPipelineSettle();
+
+    messages.length = 0;
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "dark", hasMermaid: true, renderId: 3 });
+    await letPipelineSettle();
+
+    const perfMarks = messages
+      .filter((message): message is { type: "perf-mark"; name: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: unknown }).type === "perf-mark")
+      .map(message => message.name);
+    const postReadyComplete = messages.find((message): message is { type: "post-ready-enhancements-complete"; renderId?: number } =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: unknown }).type === "post-ready-enhancements-complete");
+
+    expect(perfMarks).toContain("mm-load-document-cache-hit");
+    expect(postReadyComplete).toMatchObject({ renderId: 3 });
   });
 });

@@ -10,17 +10,18 @@ using MarkMello.Presentation.ViewModels;
 namespace MarkMello.Applicate.Desktop.Rendering;
 
 /// <summary>
-/// Holds a solid theme-background cover over the document + TOC region during a
+/// Holds a solid theme-background cover over the document region during a
 /// viewer DOCUMENT switch (tab change, startup, reload) so the user sees an
-/// atomic reveal instead of the staged sequence "TOC collapses → blank pane →
-/// content paints in chunks".
+/// atomic document reveal instead of the staged sequence "blank pane → content
+/// paints in chunks".
 ///
 /// <para>Background: the app reuses a single WebView across every tab. On a
 /// document switch the renderer clears and re-renders in place while the host
 /// keeps the slot visible (the non-transactional path in
-/// <see cref="ApplicateSharedWebViewHost"/>), and the Avalonia TOC collapses
-/// because <c>DocumentHeadings</c> is renderer-sourced and empties until the
-/// new headings arrive. The mode-toggle path already runs a covered/gated
+/// <see cref="ApplicateSharedWebViewHost"/>). The Avalonia TOC keeps its
+/// existing shell column and swaps its rows when new headings arrive; this
+/// cover intentionally targets only the document slot. The mode-toggle path
+/// already runs a covered/gated
 /// reveal via <see cref="ApplicateSiblingMountBridge"/>; document switches did
 /// not. This coordinator closes that asymmetry for the document-switch path
 /// WITHOUT touching the host state machine or the mode-toggle reveal — it is
@@ -54,6 +55,8 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
     // a prior switch cannot hide the cover belonging to a newer switch.
     private long _coverGeneration;
     private bool _pendingShowOnBounds;
+    private bool _commitCompletedForCover;
+    private bool _documentRevealReadyForCover;
     private DispatcherTimer? _fallbackTimer;
     private bool _disposed;
 
@@ -70,8 +73,27 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
 
         _lastSource = viewModel.Document;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        _viewModel.DocumentTransitionStarting += OnDocumentTransitionStarting;
         _host.CommitCompleted += OnCommitCompleted;
         _host.RendererFailed += OnRendererFailed;
+        _host.View.DocumentRevealReady += OnDocumentRevealReady;
+    }
+
+    // Cover-first (atomic teardown). The VM raises this immediately BEFORE it
+    // mutates Document, so the cover is up + painted before the synchronous
+    // WebView document swap. The
+    // later PropertyChanged(Document) handler then sees _covered == true and
+    // skips a redundant generation bump / re-show. Replaces the old behaviour
+    // where the cover was raised only from PropertyChanged(Document), ~73 ms
+    // after teardown had already started on screen.
+    private void OnDocumentTransitionStarting(object? sender, EventArgs e)
+    {
+        if (_disposed || !_isViewer())
+        {
+            return;
+        }
+        BeginCoverSession();
+        ShowCover();
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -115,10 +137,26 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
             return;
         }
 
-        // New switch session — bump the generation so any in-flight reveal RAF
-        // chain from a previous switch cannot hide THIS cover.
-        _coverGeneration++;
+        // New switch session. If DocumentTransitionStarting already raised the
+        // cover for THIS switch (cover-first), it is already up at the current
+        // generation — re-showing would hide+re-show the cover window (a visible
+        // flicker) and double-bump the generation. Skip when already covered;
+        // only fall through for a Document mutation that did NOT begin via the
+        // transition signal (e.g. a cover that failed to show on a cold start
+        // with no bounds yet).
+        if (_covered)
+        {
+            return;
+        }
+        BeginCoverSession();
         ShowCover();
+    }
+
+    private void BeginCoverSession()
+    {
+        _coverGeneration++;
+        _commitCompletedForCover = false;
+        _documentRevealReadyForCover = false;
     }
 
     private void ShowCover()
@@ -139,6 +177,7 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
             _pendingShowOnBounds = false;
             RestartFallback();
             ApplicateTrace.DiagMs("pane-seq", "doc-switch-cover-shown");
+            TryHideCoverAfterCommitAndRevealReady();
             return;
         }
 
@@ -173,7 +212,7 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
 
     private void OnCommitCompleted(object? sender, ApplicateCommitCompletedEventArgs e)
     {
-        if (!_covered)
+        if (!_covered && !_pendingShowOnBounds)
         {
             return;
         }
@@ -188,9 +227,32 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
             return;
         }
 
-        // The DOM has committed; wait two animation frames so the new content
-        // has actually painted at the committed bounds before dropping the
-        // cover, giving an atomic content+TOC reveal.
+        _commitCompletedForCover = true;
+        TryHideCoverAfterCommitAndRevealReady();
+    }
+
+    private void OnDocumentRevealReady(object? sender, EventArgs e)
+    {
+        if (!_covered && !_pendingShowOnBounds)
+        {
+            return;
+        }
+
+        _documentRevealReadyForCover = true;
+        TryHideCoverAfterCommitAndRevealReady();
+    }
+
+    private void TryHideCoverAfterCommitAndRevealReady()
+    {
+        if (!_covered || !_commitCompletedForCover || !_documentRevealReadyForCover)
+        {
+            return;
+        }
+
+        // The DOM has committed and the renderer has finished any post-ready
+        // Mermaid/hljs preparation for this document; wait two animation frames
+        // so the new content has actually painted at the committed bounds before
+        // dropping the cover, giving an atomic content+TOC reveal.
         HideCoverAfterPaint();
     }
 
@@ -199,6 +261,16 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         // A failure routes to the failure view; do not keep the user behind a
         // blank cover.
         HideCover();
+
+        // R1 (atomic-transition safety net): with the eager OnDocumentChanged TOC
+        // clear removed (C3), the old document's headings would otherwise persist
+        // beside the failure view when the renderer fails mid-render WITHOUT a
+        // Document/State change (e.g. a WebView crash — the source loaded fine, so
+        // Document stays non-null and OnDocumentChanged never clears). A genuine
+        // document LOAD failure nulls Document via ApplyLoadError, which the
+        // OnDocumentChanged null-clear handles; this covers the render-time crash
+        // the load-error path does not. Empty list = clear via the public API.
+        _viewModel.UpdateDocumentHeadings(System.Array.Empty<DocumentHeading>());
     }
 
     private void HideCoverAfterPaint()
@@ -252,6 +324,8 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         }
 
         _covered = false;
+        _commitCompletedForCover = false;
+        _documentRevealReadyForCover = false;
         _cover.Hide();
         ApplicateTrace.DiagMs("pane-seq", "doc-switch-cover-hidden");
     }
@@ -291,8 +365,10 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         _disposed = true;
 
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        _viewModel.DocumentTransitionStarting -= OnDocumentTransitionStarting;
         _host.CommitCompleted -= OnCommitCompleted;
         _host.RendererFailed -= OnRendererFailed;
+        _host.View.DocumentRevealReady -= OnDocumentRevealReady;
         if (_pendingShowOnBounds)
         {
             _coverHost.LayoutUpdated -= OnCoverHostLayoutUpdated;

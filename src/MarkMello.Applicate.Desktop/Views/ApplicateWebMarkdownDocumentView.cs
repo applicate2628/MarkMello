@@ -29,6 +29,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private const double MaxRendererReportedMinimapReservedWidth = 2000;
     private const int NativeOffscreenMargin = 512;
     private const int IUnknownVtableSlotCount = 3;
+    private static readonly TimeSpan DuplicateThemePostWindow = TimeSpan.FromMilliseconds(100);
     private const string CoreWebView2InteropTypeName = "Avalonia.Controls.Win.WebView2.Interop.ICoreWebView2";
     private static readonly int CoreWebView2PostWebMessageAsJsonVtableSlot =
         ResolveCoreWebView2PostWebMessageAsJsonVtableSlot();
@@ -57,6 +58,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         AvaloniaProperty.Register<ApplicateWebMarkdownDocumentView, bool>(nameof(WheelProxyEnabled), false);
 
     private readonly IApplicateHtmlMarkdownRenderer _renderer;
+    private readonly ApplicateRenderedBodyCache _renderedBodyCache;
     private readonly NativeWebView _webView;
     private CancellationTokenSource? _renderCancellation;
     private string? _currentGeneratedDocumentPath;
@@ -66,6 +68,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _hasLayoutReady;
     private bool _hasMinimapState;
     private bool _lastLayoutReadyWasCached;
+    private bool _requiresPostReadyEnhancements;
+    private bool _postReadyEnhancementsComplete = true;
+    private bool _documentRevealReadyRaised;
+    private long _activeRevealRenderId;
     private bool _disposed;
     private double _scrollTop;
     private double _scrollHeight;
@@ -87,6 +93,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     // on the UI thread). Null until first ApplyInitialTheme runs; the
     // suppression guard treats null as "do not suppress" (safe fallback).
     private string? _inlinedTheme;
+    private string? _lastPostedTheme;
+    private long _lastPostedThemeTimestamp;
     private bool _isWebWidthDragging;
     private long _renderSequence;
     private NativeWindowPlacement? _pendingNativeHiddenPaintPlacement;
@@ -111,9 +119,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     public ApplicateWebMarkdownDocumentView(
         IApplicateHtmlMarkdownRenderer renderer,
         IApplicateShellAssetBundleFactory? shellAssetFactory)
+        : this(renderer, shellAssetFactory, new ApplicateRenderedBodyCache())
+    {
+    }
+
+    internal ApplicateWebMarkdownDocumentView(
+        IApplicateHtmlMarkdownRenderer renderer,
+        IApplicateShellAssetBundleFactory? shellAssetFactory,
+        ApplicateRenderedBodyCache renderedBodyCache)
     {
         ApplicateTrace.DiagMs("startup-webview", "webview-view-ctor-start");
         _renderer = renderer;
+        _renderedBodyCache = renderedBodyCache;
         _shellAssetFactory = shellAssetFactory;
         // Shell mode requires both the env-var flag AND the factory injection.
         // Missing either falls back to legacy per-document Navigate.
@@ -187,6 +204,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     }
 
     public event EventHandler? DocumentRendered;
+
+    public event EventHandler? DocumentRevealReady;
 
     public event EventHandler? DocumentRenderInvalidated;
 
@@ -1010,6 +1029,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _hasLayoutReady = false;
         _hasMinimapState = false;
         _lastLayoutReadyWasCached = false;
+        _activeRevealRenderId = renderId;
+        _requiresPostReadyEnhancements = false;
+        _postReadyEnhancementsComplete = true;
+        _documentRevealReadyRaised = false;
         _scrollTop = 0;
         _scrollHeight = 0;
         _clientHeight = 0;
@@ -1089,14 +1112,37 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 return;
             }
 
-            ApplicateTrace.ModeToggle($"Web.RenderShell render-body-start id={renderId} source={source.Path}");
-            var body = await _renderer
-                .RenderBodyAsync(source, ReadingPreferences, ImageSourceResolver, cancellationToken)
+            var readingPreferences = ReadingPreferences;
+            var imageSourceResolver = ImageSourceResolver;
+            var renderedFromMarkdown = false;
+            var body = await _renderedBodyCache
+                .GetOrRenderAsync(
+                    source,
+                    readingPreferences,
+                    imageSourceResolver,
+                    async ct =>
+                    {
+                        renderedFromMarkdown = true;
+                        ApplicateTrace.ModeToggle($"Web.RenderShell render-body-start id={renderId} source={source.Path}");
+                        var renderedBody = await _renderer
+                            .RenderBodyAsync(source, readingPreferences, imageSourceResolver, ct)
+                            .ConfigureAwait(true);
+                        ApplicateTrace.ModeToggle(
+                            $"Web.RenderShell render-body-end id={renderId} source={source.Path} htmlLength={renderedBody.BodyHtml.Length} theme={GetThemeName()}");
+                        return renderedBody;
+                    },
+                    cancellationToken)
                 .ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
-            ApplicateTrace.ModeToggle(
-                $"Web.RenderShell render-body-end id={renderId} source={source.Path} htmlLength={body.BodyHtml.Length} theme={GetThemeName()}");
+            if (!renderedFromMarkdown)
+            {
+                ApplicateTrace.ModeToggle(
+                    $"Web.RenderShell render-body-cache-hit id={renderId} source={source.Path} htmlLength={body.BodyHtml.Length} theme={GetThemeName()}");
+            }
 
+            ConfigureDocumentRevealGate(
+                renderId,
+                requiresPostReadyEnhancements: body.HasMermaidBlock || body.HasCodeBlockWithSyntax);
             object loadDocumentMessage = skipFrameWaitUntilRenderReady
                 ? new
                 {
@@ -1467,10 +1513,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
             if (IsLayoutReadyMessage(document.RootElement))
             {
+                ApplicateTrace.DiagMs("diag-gate", "ipc-layout-ready",
+                    $"awaiting={_awaitingLayoutReady} hasLoaded={_hasLoadedDocument} hasLayoutBefore={_hasLayoutReady} cached={ReadBoolean(document.RootElement, "cached")}");
                 _lastLayoutReadyWasCached = ReadBoolean(document.RootElement, "cached");
                 HandleScrollMessage(document.RootElement);
                 _hasLayoutReady = true;
                 CompleteLayoutReady();
+                return;
+            }
+
+            if (IsPostReadyEnhancementsCompleteMessage(document.RootElement))
+            {
+                HandlePostReadyEnhancementsComplete(document.RootElement);
                 return;
             }
 
@@ -2009,8 +2063,54 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
            && typeProperty.ValueKind == JsonValueKind.String
            && string.Equals(typeProperty.GetString(), "layout-ready", StringComparison.Ordinal);
 
+    internal static bool IsPostReadyEnhancementsCompleteMessage(JsonElement root)
+        => root.TryGetProperty("type", out var typeProperty)
+           && typeProperty.ValueKind == JsonValueKind.String
+           && string.Equals(typeProperty.GetString(), "post-ready-enhancements-complete", StringComparison.Ordinal);
+
+    private void ConfigureDocumentRevealGate(long renderId, bool requiresPostReadyEnhancements)
+    {
+        _activeRevealRenderId = renderId;
+        _requiresPostReadyEnhancements = requiresPostReadyEnhancements;
+        _postReadyEnhancementsComplete = !requiresPostReadyEnhancements;
+        _documentRevealReadyRaised = false;
+        ApplicateTrace.DiagMs(
+            "diag-gate",
+            "document-reveal-gate-configured",
+            $"renderId={renderId} requiresPostReady={requiresPostReadyEnhancements}");
+    }
+
+    private void HandlePostReadyEnhancementsComplete(JsonElement root)
+    {
+        if (!root.TryGetProperty("renderId", out var renderIdProperty)
+            || renderIdProperty.ValueKind != JsonValueKind.Number
+            || !renderIdProperty.TryGetInt64(out var renderId)
+            || renderId <= 0)
+        {
+            return;
+        }
+
+        if (renderId != _activeRevealRenderId)
+        {
+            ApplicateTrace.DiagMs(
+                "diag-gate",
+                "post-ready-enhancements-stale",
+                $"renderId={renderId} active={_activeRevealRenderId}");
+            return;
+        }
+
+        _postReadyEnhancementsComplete = true;
+        ApplicateTrace.DiagMs(
+            "diag-gate",
+            "post-ready-enhancements-complete",
+            $"renderId={renderId} requiresPostReady={_requiresPostReadyEnhancements}");
+        CompleteDocumentRevealReady();
+    }
+
     private void CompleteLayoutReady()
     {
+        ApplicateTrace.DiagMs("diag-gate", "complete-layout-ready-enter",
+            $"hasLoaded={_hasLoadedDocument} hasLayout={_hasLayoutReady} awaiting={_awaitingLayoutReady} minimap={_hasMinimapState} willFire={ShouldCompleteRender(_hasLoadedDocument, _hasLayoutReady, _hasMinimapState) && _awaitingLayoutReady}");
         if (!ShouldCompleteRender(_hasLoadedDocument, _hasLayoutReady, _hasMinimapState)
             || !_awaitingLayoutReady)
         {
@@ -2020,6 +2120,25 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _awaitingLayoutReady = false;
         RevealNativeDocument(TimeSpan.Zero);
         DocumentRendered?.Invoke(this, EventArgs.Empty);
+        CompleteDocumentRevealReady();
+    }
+
+    private void CompleteDocumentRevealReady()
+    {
+        if (_documentRevealReadyRaised
+            || !_hasLoadedDocument
+            || !_hasLayoutReady
+            || !_postReadyEnhancementsComplete)
+        {
+            return;
+        }
+
+        _documentRevealReadyRaised = true;
+        ApplicateTrace.DiagMs(
+            "diag-gate",
+            "document-reveal-ready",
+            $"renderId={_activeRevealRenderId} requiresPostReady={_requiresPostReadyEnhancements}");
+        DocumentRevealReady?.Invoke(this, EventArgs.Empty);
     }
 
     internal static bool ShouldCompleteRenderForTesting(
@@ -2273,14 +2392,52 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     {
         if (_hasLoadedDocument)
         {
-            SendTheme();
+            SendThemeFromThemeVariantChange();
         }
+    }
+
+    private void SendThemeFromThemeVariantChange()
+    {
+        var theme = GetThemeName();
+        var now = Stopwatch.GetTimestamp();
+        if (IsDuplicateThemePostWithinWindow(
+                theme,
+                _lastPostedTheme,
+                _lastPostedThemeTimestamp > 0
+                    ? Stopwatch.GetElapsedTime(_lastPostedThemeTimestamp, now)
+                    : TimeSpan.MaxValue,
+                DuplicateThemePostWindow))
+        {
+            ApplicateTrace.Diag(
+                "perf-msg",
+                "send-theme suppressed=true",
+                $"reason=duplicate-theme-burst theme={theme}");
+            return;
+        }
+
+        SendTheme(theme, now);
     }
 
     private void SendTheme()
     {
-        PostRendererMessage(new { type = "theme", theme = GetThemeName() });
+        SendTheme(GetThemeName(), Stopwatch.GetTimestamp());
     }
+
+    private void SendTheme(string theme, long timestamp)
+    {
+        _lastPostedTheme = theme;
+        _lastPostedThemeTimestamp = timestamp;
+        PostRendererMessage(new { type = "theme", theme });
+    }
+
+    internal static bool IsDuplicateThemePostWithinWindow(
+        string theme,
+        string? lastTheme,
+        TimeSpan elapsedSinceLastPost,
+        TimeSpan duplicateWindow)
+        => theme.Equals(lastTheme, StringComparison.Ordinal)
+           && elapsedSinceLastPost >= TimeSpan.Zero
+           && elapsedSinceLastPost <= duplicateWindow;
 
     private string GetThemeName()
     {

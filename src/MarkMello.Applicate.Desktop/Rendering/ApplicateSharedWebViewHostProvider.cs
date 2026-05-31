@@ -6,10 +6,11 @@ internal sealed class ApplicateSharedWebViewHostProvider : IApplicateSharedWebVi
 {
     public ApplicateSharedWebViewHostProvider(
         IApplicateHtmlMarkdownRenderer renderer,
-        IApplicateShellAssetBundleFactory shellAssetFactory)
+        IApplicateShellAssetBundleFactory shellAssetFactory,
+        ApplicateRenderedBodyCache renderedBodyCache)
     {
-        ViewerHost = new ApplicateSharedWebViewHost(renderer, shellAssetFactory);
-        EditPreviewHost = new ApplicateSharedWebViewHost(renderer, shellAssetFactory);
+        ViewerHost = new ApplicateSharedWebViewHost(renderer, shellAssetFactory, renderedBodyCache);
+        EditPreviewHost = new ApplicateSharedWebViewHost(renderer, shellAssetFactory, renderedBodyCache);
     }
 
     public IApplicateSharedWebViewHost ViewerHost { get; }

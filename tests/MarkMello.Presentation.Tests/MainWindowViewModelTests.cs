@@ -209,7 +209,7 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public async Task OpeningDifferentDocumentClearsStaleTableOfContentsBeforeRendererReportsHeadings()
+    public async Task OpeningDifferentDocumentKeepsTableOfContentsUntilRendererReportsHeadings()
     {
         var harness = CreateHarness();
         var firstPath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "toc-first.md");
@@ -225,10 +225,19 @@ public sealed class MainWindowViewModelTests
 
         await harness.ViewModel.OpenPathAsync(secondPath);
 
-        Assert.Empty(harness.ViewModel.DocumentHeadings);
-        Assert.False(harness.ViewModel.HasDocumentHeadings);
-        Assert.False(harness.ViewModel.IsTocVisible);
+        Assert.Single(harness.ViewModel.DocumentHeadings);
+        Assert.Equal("first", harness.ViewModel.DocumentHeadings[0].Id);
+        Assert.True(harness.ViewModel.HasDocumentHeadings);
+        Assert.True(harness.ViewModel.IsTocVisible);
         Assert.Equal(string.Empty, harness.ViewModel.ActiveHeadingId);
+
+        harness.ViewModel.UpdateDocumentHeadings([
+            new DocumentHeading("second", 1, "Second", 0),
+        ]);
+
+        Assert.Single(harness.ViewModel.DocumentHeadings);
+        Assert.Equal("second", harness.ViewModel.DocumentHeadings[0].Id);
+        Assert.True(harness.ViewModel.IsTocVisible);
     }
 
     [Fact]

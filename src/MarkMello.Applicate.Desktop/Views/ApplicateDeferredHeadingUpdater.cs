@@ -1,0 +1,83 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Avalonia.Threading;
+using MarkMello.Presentation.ViewModels;
+
+namespace MarkMello.Applicate.Desktop.Views;
+
+internal sealed class ApplicateDeferredHeadingUpdater
+{
+    private const int LargeHeadingUpdateThreshold = 250;
+    private static readonly TimeSpan LargeHeadingFlushDelay = TimeSpan.FromMilliseconds(350);
+    private int _version;
+    private int _pendingVersion;
+    private DocumentHeading[]? _pendingHeadings;
+    private MainWindowViewModel? _pendingViewModel;
+    private Func<bool>? _pendingCanApply;
+
+    public void Invalidate()
+    {
+        _version = unchecked(_version + 1);
+        ClearPending();
+    }
+
+    public void Apply(
+        IReadOnlyList<DocumentHeading> headings,
+        MainWindowViewModel viewModel,
+        Func<bool> canApply)
+    {
+        ArgumentNullException.ThrowIfNull(headings);
+        ArgumentNullException.ThrowIfNull(viewModel);
+        ArgumentNullException.ThrowIfNull(canApply);
+
+        var version = unchecked(_version + 1);
+        _version = version;
+
+        if (headings.Count < LargeHeadingUpdateThreshold)
+        {
+            ClearPending();
+            viewModel.UpdateDocumentHeadings(headings);
+            return;
+        }
+
+        _pendingVersion = version;
+        _pendingHeadings = headings.ToArray();
+        _pendingViewModel = viewModel;
+        _pendingCanApply = canApply;
+    }
+
+    public void FlushPending()
+    {
+        var version = _pendingVersion;
+        var snapshot = _pendingHeadings;
+        var viewModel = _pendingViewModel;
+        var canApply = _pendingCanApply;
+        ClearPending();
+        if (snapshot is null || viewModel is null || canApply is null)
+        {
+            return;
+        }
+
+        _ = Task.Delay(LargeHeadingFlushDelay).ContinueWith(
+            _ => Dispatcher.UIThread.Post(() =>
+            {
+                if (_version != version || !canApply())
+                {
+                    return;
+                }
+
+                viewModel.UpdateDocumentHeadings(snapshot);
+            }, DispatcherPriority.Background),
+            TaskScheduler.Default);
+    }
+
+    private void ClearPending()
+    {
+        _pendingHeadings = null;
+        _pendingViewModel = null;
+        _pendingCanApply = null;
+        _pendingVersion = 0;
+    }
+}

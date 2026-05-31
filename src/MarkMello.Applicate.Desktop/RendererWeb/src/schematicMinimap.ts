@@ -121,8 +121,8 @@ export type PhaseBRebuildDeps = {
   refresh: (phase: "B") => void;
 };
 
-export function schedulePhaseBRebuild(deps: PhaseBRebuildDeps): void {
-  deps.allMathRendered.then(() => {
+export function schedulePhaseBRebuild(deps: PhaseBRebuildDeps): Promise<void> {
+  return deps.allMathRendered.then(() => {
     if (!shouldTriggerPhaseB(deps.getCurrentDocumentHeight(), deps.getCachedDocumentHeight())) {
       return;
     }
@@ -136,10 +136,16 @@ export function schedulePhaseBRebuild(deps: PhaseBRebuildDeps): void {
     const win = window as typeof window & {
       requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
     };
-    if (typeof win.requestIdleCallback === "function") {
-      win.requestIdleCallback(() => deps.refresh("B"), { timeout: 500 });
-    } else {
-      window.setTimeout(() => deps.refresh("B"), 50);
-    }
+    return new Promise<void>(resolve => {
+      const refresh = () => {
+        deps.refresh("B");
+        resolve();
+      };
+      if (typeof win.requestIdleCallback === "function") {
+        win.requestIdleCallback(refresh, { timeout: 500 });
+      } else {
+        window.setTimeout(refresh, 50);
+      }
+    });
   });
 }

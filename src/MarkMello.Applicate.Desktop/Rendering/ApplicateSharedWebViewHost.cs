@@ -81,6 +81,14 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
     public ApplicateSharedWebViewHost(
         IApplicateHtmlMarkdownRenderer renderer,
         IApplicateShellAssetBundleFactory shellAssetFactory)
+        : this(renderer, shellAssetFactory, new ApplicateRenderedBodyCache())
+    {
+    }
+
+    internal ApplicateSharedWebViewHost(
+        IApplicateHtmlMarkdownRenderer renderer,
+        IApplicateShellAssetBundleFactory shellAssetFactory,
+        ApplicateRenderedBodyCache renderedBodyCache)
     {
         ApplicateTrace.DiagMs("startup-webview", "shared-host-ctor-start");
         // If WebView2 runtime is missing the constructor throws here; DI
@@ -89,7 +97,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         // hypothetical post-construction crash; the constructor path
         // intentionally fails fast so we do not silently come up with no
         // renderer available.
-        View = new ApplicateWebMarkdownDocumentView(renderer, shellAssetFactory);
+        View = new ApplicateWebMarkdownDocumentView(renderer, shellAssetFactory, renderedBodyCache);
         View.DocumentRendered += OnViewDocumentRendered;
         View.MinimapSettled += OnViewMinimapSettled;
         View.ModeToggleTransactionSettled += OnViewModeToggleTransactionSettled;

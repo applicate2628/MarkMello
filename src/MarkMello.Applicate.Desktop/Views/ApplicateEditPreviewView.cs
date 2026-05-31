@@ -64,6 +64,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     private readonly ToggleButton _syncToggle;
     private readonly DispatcherTimer _webRenderTimer;
     private readonly DispatcherTimer _resizeContentWidthTimer;
+    private readonly ApplicateDeferredHeadingUpdater _headingUpdater = new();
     private EditorSessionViewModel? _session;
     private ScrollViewer? _hostScrollViewer;
     private ScrollBarVisibility? _hostScrollViewerVerticalMode;
@@ -818,6 +819,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
             // back to viewer). Clear the local flag so the next visibility
             // flip will re-AttachTo cleanly.
             _isAttachedToHost = false;
+            _headingUpdater.Invalidate();
             // F-05 fix: hand consumer ownership of the scrollbar overlay
             // back to the inactive state.
             if (_scrollBarOverlay is not null)
@@ -946,6 +948,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         _sharedHost.View.HeadingsChanged -= OnSharedHeadingsChanged;
         _sharedHost.View.ActiveHeadingChanged -= OnSharedActiveHeadingChanged;
         _sharedHost.RendererFailed -= OnSharedRendererFailed;
+        _headingUpdater.Invalidate();
         _hostEventsWired = false;
     }
 
@@ -1011,12 +1014,16 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
 
     private void OnSharedHeadingsChanged(object? sender, System.Collections.Generic.IReadOnlyList<DocumentHeading> headings)
     {
-        if (!_isAttachedToHost || _viewModel is null)
+        var viewModel = _viewModel;
+        if (!_isAttachedToHost || viewModel is null)
         {
             return;
         }
 
-        _viewModel.UpdateDocumentHeadings(headings);
+        _headingUpdater.Apply(
+            headings,
+            viewModel,
+            () => _isAttachedToHost && ReferenceEquals(_viewModel, viewModel));
     }
 
     private void OnSharedActiveHeadingChanged(object? sender, string id)
@@ -1045,6 +1052,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         }
         // Render committed: hide any visible failure overlay.
         _failureView.IsVisible = false;
+        _headingUpdater.FlushPending();
         if (restoreProgress.HasValue
             && _isAttachedToHost
             && _sharedHost is not null

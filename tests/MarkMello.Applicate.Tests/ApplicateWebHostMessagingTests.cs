@@ -31,6 +31,14 @@ public sealed class ApplicateWebHostMessagingTests
         "src",
         "renderer.ts");
 
+    private static readonly string DocumentSwitchRevealCoordinatorSourcePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..",
+        "src",
+        "MarkMello.Applicate.Desktop",
+        "Rendering",
+        "ApplicateDocumentSwitchRevealCoordinator.cs");
+
     [Fact]
     public void HostMessagesPreferNativeWebView2ChannelBeforeInvokeScriptFallback()
     {
@@ -142,5 +150,83 @@ public sealed class ApplicateWebHostMessagingTests
 
         Assert.DoesNotContain("TrySetCanceled", source, StringComparison.Ordinal);
         Assert.Contains("_shellReady.Task.WaitAsync(cancellationToken)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ShellRenderReusesRenderedBodyCacheBeforePostingLoadDocument()
+    {
+        var source = File.ReadAllText(WebDocumentViewSourcePath);
+        var cacheLookup = source.IndexOf("_renderedBodyCache", StringComparison.Ordinal);
+        var renderBody = source.IndexOf(".RenderBodyAsync(source, readingPreferences, imageSourceResolver, ct)", StringComparison.Ordinal);
+        var postLoad = source.IndexOf("PostRendererMessage(loadDocumentMessage)", StringComparison.Ordinal);
+
+        Assert.True(cacheLookup >= 0, "Shell render should keep a rendered-body cache before load-document IPC.");
+        Assert.True(renderBody > cacheLookup, "Markdown-to-HTML rendering should run behind the rendered-body cache.");
+        Assert.True(postLoad > renderBody, "The cached or freshly rendered body should be resolved before load-document IPC.");
+        Assert.Contains("render-body-cache-hit", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ViewerAndEditPreviewHostsShareRenderedBodyCache()
+    {
+        var providerSource = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Rendering",
+            "ApplicateSharedWebViewHostProvider.cs"));
+        var hostSource = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Rendering",
+            "ApplicateSharedWebViewHost.cs"));
+        var programSource = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Program.cs"));
+
+        Assert.Contains("collection.AddSingleton<ApplicateRenderedBodyCache>();", programSource, StringComparison.Ordinal);
+        Assert.Contains("ApplicateRenderedBodyCache renderedBodyCache", providerSource, StringComparison.Ordinal);
+        Assert.Contains("ViewerHost = new ApplicateSharedWebViewHost(renderer, shellAssetFactory, renderedBodyCache);", providerSource, StringComparison.Ordinal);
+        Assert.Contains("EditPreviewHost = new ApplicateSharedWebViewHost(renderer, shellAssetFactory, renderedBodyCache);", providerSource, StringComparison.Ordinal);
+        Assert.Contains("new ApplicateWebMarkdownDocumentView(renderer, shellAssetFactory, renderedBodyCache)", hostSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DocumentSwitchCoverWaitsForPostReadyRevealSignal()
+    {
+        var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
+        var coordinatorSource = File.ReadAllText(DocumentSwitchRevealCoordinatorSourcePath);
+        var rendererSource = File.ReadAllText(RendererSourcePath);
+
+        Assert.Contains("public event EventHandler? DocumentRevealReady;", viewSource, StringComparison.Ordinal);
+        Assert.Contains("\"post-ready-enhancements-complete\"", viewSource, StringComparison.Ordinal);
+        Assert.Contains("CompleteDocumentRevealReady()", viewSource, StringComparison.Ordinal);
+        Assert.Contains("DocumentRevealReady?.Invoke", viewSource, StringComparison.Ordinal);
+
+        Assert.Contains("_host.View.DocumentRevealReady += OnDocumentRevealReady;", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("_commitCompletedForCover", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("_documentRevealReadyForCover", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("TryHideCoverAfterCommitAndRevealReady()", coordinatorSource, StringComparison.Ordinal);
+
+        Assert.Contains("postReadyEnhancementsCompleted", rendererSource, StringComparison.Ordinal);
+        Assert.Contains("post-ready-enhancements-complete", rendererSource, StringComparison.Ordinal);
     }
 }

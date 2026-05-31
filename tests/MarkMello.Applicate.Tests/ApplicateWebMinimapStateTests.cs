@@ -31,6 +31,27 @@ public sealed class ApplicateWebMinimapStateTests
         Assert.Contains("<html data-theme=\"dark\" data-mm-chrome=\"off\">", themed, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("dark", "dark", 50, 100, true)]
+    [InlineData("dark", "dark", 101, 100, false)]
+    [InlineData("dark", "classic-white", 50, 100, false)]
+    [InlineData("dark", null, 50, 100, false)]
+    public void DuplicateThemePostSuppressionOnlyDropsSameThemeWithinBurst(
+        string theme,
+        string? lastTheme,
+        int elapsedMs,
+        int duplicateWindowMs,
+        bool expected)
+    {
+        var actual = ApplicateWebMarkdownDocumentView.IsDuplicateThemePostWithinWindow(
+            theme,
+            lastTheme,
+            TimeSpan.FromMilliseconds(elapsedMs),
+            TimeSpan.FromMilliseconds(duplicateWindowMs));
+
+        Assert.Equal(expected, actual);
+    }
+
     [Fact]
     public void ParserAcceptsVisibleStateWithFiniteReservation()
     {

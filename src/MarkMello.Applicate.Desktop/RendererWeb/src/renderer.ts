@@ -9,7 +9,7 @@ import {
   normalizeWidthResizerVisibility,
   type WidthResizerVisibility
 } from "./widthResizerVisibility";
-import { renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
+import { isMermaidNodeNearViewport, renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
 import { normalizeHljsLanguage } from "./hljsLanguage";
 import { runInitialRenderPipeline, type MathReadinessController, type RendererTheme } from "./initialRenderPipeline";
 import { applyLoadDocument, clearDocumentState } from "./loadDocument";
@@ -69,6 +69,7 @@ type RendererWindow = Window & {
 type RendererMessage =
   | { type: "document-ready"; mathCount: number }
   | { type: "layout-ready"; scrollTop: number; scrollHeight: number; clientHeight: number; cached?: boolean }
+  | { type: "post-ready-enhancements-complete"; renderId?: number; hasMermaid: boolean; hasHljs: boolean }
   | { type: "link-clicked"; href: string; button: number; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }
   | { type: "minimap-state"; visible: boolean; reservedWidth: number }
   | { type: "minimap-settled"; transactionGeneration: number; visible: boolean; reservedWidth: number }
@@ -231,11 +232,20 @@ let minimapDragMode: "tentative" | "panning" = "tentative";
 const MINIMAP_DRAG_THRESHOLD_PX = 4;
 let minimapSourceReady = false;
 let mermaidRenderGeneration = 0;
+let mermaidLazyObserver: IntersectionObserver | null = null;
+let mermaidLazyRenderQueue: Promise<void> = Promise.resolve();
+let themeMermaidRefreshGeneration = 0;
+let themeMermaidRefreshTimer: number | undefined;
+let initialRenderPipelineGeneration = 0;
 let initialRenderPipelineCompleted = false;
+let postReadyEnhancementsCompleted = false;
 let currentController: MathReadinessController | null = null;
-const MAX_MERMAID_DIAGRAMS = 50;
 const MERMAID_PER_DIAGRAM_TIMEOUT_MS = 3000;
 const MERMAID_WATCHDOG_MS = 15_000;
+const MERMAID_EAGER_VIEWPORT_MARGIN_PX = 700;
+const MERMAID_LAZY_ROOT_MARGIN_PX = 1400;
+const THEME_MERMAID_REFRESH_DELAY_MS = 160;
+const POST_LAYOUT_READY_EDIT_PREVIEW_DELAY_MS = 120;
 let widthResizerVisibility: WidthResizerVisibility = "on-hover";
 let viewerChromeEnabled = false;
 let documentScrollEnabled = true;
@@ -254,6 +264,7 @@ let widthDragFrameRequested = false;
 let widthDragApplyFrameRequested = false;
 let layoutReadyGeneration = 0;
 let layoutReadyTimer: number | undefined;
+let postLayoutReadyWorkQueue: Array<{ generation: number; work: () => void }> = [];
 let lastPostedMinimapState: PostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
 // F-07 fix: the host (ApplicateWebMarkdownDocumentView.SendMinimapPolicy)
 // always pushes the canonical ApplicateDocumentMinimapBuildPolicy values
@@ -312,10 +323,7 @@ function hashDocumentHtml(html: string): string {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-function createProcessedDocumentCacheKey(html: string, theme: RendererTheme, hasMermaid?: boolean): string | undefined {
-  if (hasMermaid === true) {
-    return undefined;
-  }
+function createProcessedDocumentCacheKey(html: string, theme: RendererTheme): string {
   return `${theme}|${html.length}|${hashDocumentHtml(html)}`;
 }
 
@@ -337,7 +345,7 @@ function setCurrentProcessedDocumentCacheKey(cacheKey: string | null): void {
 }
 
 function preserveCurrentProcessedDocument(): void {
-  if (!currentDocumentCacheKey || !initialRenderPipelineCompleted) {
+  if (!currentDocumentCacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
     return;
   }
 
@@ -633,13 +641,24 @@ function renderMath(): MathReadinessController {
   emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
   const katex = hostWindow.katex ?? undefined;
   const controller = renderMathInit({ katex, documentRoot: document });
-  currentController = controller;
-  schedulePhaseBRebuild({
+  const phaseBGeneration = layoutReadyGeneration;
+  const initialVisualSettleReady = schedulePhaseBRebuild({
     allMathRendered: controller.allMathRendered,
     getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
     getCachedDocumentHeight: () => minimapDocumentHeight,
-    refresh: refreshMinimapContent,
+    refresh: (phase) => {
+      if (phaseBGeneration !== layoutReadyGeneration || controller.isCancelled()) {
+        return;
+      }
+
+      refreshMinimapContent(phase);
+    },
   });
+  const readinessController: MathReadinessController = {
+    ...controller,
+    initialVisualSettleReady,
+  };
+  currentController = readinessController;
   // Lifecycle marks read failed-counts from the controller's frozen set (single
   // source of truth — no duplicate classification). For all-math, walk all
   // [data-tex] nodes since IO may have rendered nodes outside the frozen set.
@@ -673,7 +692,7 @@ function renderMath(): MathReadinessController {
       cancelled: controller.isCancelled(),
     });
   });
-  return controller;
+  return readinessController;
 }
 
 function getCurrentTheme(): RendererTheme {
@@ -695,14 +714,29 @@ function initMermaidWithTheme(theme: RendererTheme): void {
 }
 
 async function renderMermaid(): Promise<void> {
+  disconnectMermaidLazyObserver();
   const mermaid = hostWindow.mermaid;
   if (!mermaid) return;
 
   const allNodes = Array.from(document.querySelectorAll<HTMLElement>("pre.mm-mermaid"));
-  const nodes = allNodes.slice(0, MAX_MERMAID_DIAGRAMS);
-  if (nodes.length === 0) return;
+  if (allNodes.length === 0) return;
 
   const generation = ++mermaidRenderGeneration;
+  mermaidLazyRenderQueue = Promise.resolve();
+  const viewportHeight = getViewportHeightForMermaid();
+  const eagerNodes = allNodes.filter(node =>
+    isMermaidNodeNearViewport(node, viewportHeight, MERMAID_EAGER_VIEWPORT_MARGIN_PX));
+  const eagerSet = new Set(eagerNodes);
+  const lazyNodes = allNodes.filter(node => !eagerSet.has(node));
+
+  postPerfMark("mm-mermaid-visible-first", {
+    total: allNodes.length,
+    eager: eagerNodes.length,
+    lazy: lazyNodes.length
+  });
+  installLazyMermaidObserver(lazyNodes, generation, mermaid);
+  if (eagerNodes.length === 0) return;
+
   const watchdog = window.setTimeout(() => {
     if (generation === mermaidRenderGeneration) {
       ++mermaidRenderGeneration;
@@ -710,13 +744,81 @@ async function renderMermaid(): Promise<void> {
   }, MERMAID_WATCHDOG_MS);
 
   try {
-    for (const node of nodes) {
+    for (const node of eagerNodes) {
       await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
       if (generation !== mermaidRenderGeneration) return;
     }
   } finally {
     window.clearTimeout(watchdog);
   }
+}
+
+function getViewportHeightForMermaid(): number {
+  const root = document.scrollingElement ?? document.documentElement;
+  return root.clientHeight || window.innerHeight || 0;
+}
+
+function disconnectMermaidLazyObserver(): void {
+  mermaidLazyObserver?.disconnect();
+  mermaidLazyObserver = null;
+}
+
+function installLazyMermaidObserver(
+  nodes: HTMLElement[],
+  generation: number,
+  mermaid: MermaidApiLike
+): void {
+  if (nodes.length === 0) return;
+
+  postPerfMark("mm-mermaid-lazy-observe", {
+    total: nodes.length,
+    rootMarginPx: MERMAID_LAZY_ROOT_MARGIN_PX
+  });
+  if (typeof window.IntersectionObserver !== "function") {
+    for (const node of nodes) {
+      enqueueLazyMermaidRender(node, generation, mermaid);
+    }
+    return;
+  }
+
+  mermaidLazyObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const node = entry.target as HTMLElement;
+      mermaidLazyObserver?.unobserve(node);
+      enqueueLazyMermaidRender(node, generation, mermaid);
+    }
+  }, {
+    root: null,
+    rootMargin: `${MERMAID_LAZY_ROOT_MARGIN_PX}px 0px ${MERMAID_LAZY_ROOT_MARGIN_PX}px 0px`,
+    threshold: 0
+  });
+
+  for (const node of nodes) {
+    mermaidLazyObserver.observe(node);
+  }
+}
+
+function enqueueLazyMermaidRender(
+  node: HTMLElement,
+  generation: number,
+  mermaid: MermaidApiLike
+): void {
+  if (generation !== mermaidRenderGeneration) return;
+  const marker = String(generation);
+  if (node.dataset.mmMermaidRenderQueued === marker) return;
+  node.dataset.mmMermaidRenderQueued = marker;
+
+  mermaidLazyRenderQueue = mermaidLazyRenderQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (generation !== mermaidRenderGeneration) return;
+      postPerfMark("mm-mermaid-lazy-render-start");
+      await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+      if (generation === mermaidRenderGeneration) {
+        postPerfMark("mm-mermaid-lazy-render-end");
+      }
+    });
 }
 
 function renderCodeBlocks(): void {
@@ -737,10 +839,72 @@ function renderCodeBlocks(): void {
   }
 }
 
-async function handleThemeChange(theme: RendererTheme): Promise<void> {
+function deferPostReadyEnhancements(work: () => void): void {
+  postLayoutReadyWorkQueue.push({ generation: layoutReadyGeneration, work });
+}
+
+function postPostReadyEnhancementsComplete(
+  renderId: number | undefined,
+  hasMermaid: boolean | undefined,
+  hasHljs: boolean | undefined
+): void {
+  postReadyEnhancementsCompleted = true;
+  const message: RendererMessage = {
+    type: "post-ready-enhancements-complete",
+    hasMermaid: hasMermaid === true,
+    hasHljs: hasHljs === true
+  };
+  if (renderId !== undefined) {
+    message.renderId = renderId;
+  }
+  postHostMessage(message);
+}
+
+function hasMermaidNodes(): boolean {
+  return document.querySelector("pre.mm-mermaid") !== null;
+}
+
+function scheduleThemeMermaidRefresh(theme: RendererTheme): void {
+  const generation = ++themeMermaidRefreshGeneration;
+  ++mermaidRenderGeneration;
+  if (themeMermaidRefreshTimer !== undefined) {
+    window.clearTimeout(themeMermaidRefreshTimer);
+    themeMermaidRefreshTimer = undefined;
+  }
+
+  if (!hostWindow.mermaid || !hasMermaidNodes()) {
+    postPerfMark("mm-theme-mermaid-refresh-skipped", {
+      theme,
+      reason: hostWindow.mermaid ? "no-mermaid-nodes" : "no-mermaid-api"
+    });
+    return;
+  }
+
+  postPerfMark("mm-theme-mermaid-refresh-scheduled", {
+    theme,
+    delayMs: THEME_MERMAID_REFRESH_DELAY_MS
+  });
+  themeMermaidRefreshTimer = window.setTimeout(() => {
+    themeMermaidRefreshTimer = undefined;
+    if (generation !== themeMermaidRefreshGeneration) {
+      return;
+    }
+
+    postPerfMark("mm-theme-mermaid-refresh-start", { theme });
+    void renderMermaid().finally(() => {
+      if (generation === themeMermaidRefreshGeneration) {
+        postPerfMark("mm-theme-mermaid-refresh-end", { theme });
+      }
+    });
+  }, THEME_MERMAID_REFRESH_DELAY_MS);
+}
+
+function handleThemeChange(theme: RendererTheme): void {
+  postPerfMark("mm-theme-change-start", { theme });
   applyTheme(theme);
   initMermaidWithTheme(theme);
-  await renderMermaid();
+  postPerfMark("mm-theme-change-applied", { theme });
+  scheduleThemeMermaidRefresh(theme);
 }
 
 function getScrollState(): { scrollTop: number; scrollHeight: number; clientHeight: number } {
@@ -875,6 +1039,7 @@ function postLayoutReady(): void {
     ...scrollState
   });
   postPerfMark("mm-layout-ready");
+  flushPostLayoutReadyWork();
 }
 
 function postCachedLayoutReady(): void {
@@ -899,6 +1064,30 @@ function postCachedLayoutReady(): void {
     cached: true
   });
   postPerfMark("mm-layout-ready", { cached: true });
+  flushPostLayoutReadyWork();
+}
+
+function flushPostLayoutReadyWork(): void {
+  if (postLayoutReadyWorkQueue.length === 0) {
+    return;
+  }
+
+  const flushGeneration = layoutReadyGeneration;
+  const workItems = postLayoutReadyWorkQueue.filter(item => item.generation === flushGeneration);
+  postLayoutReadyWorkQueue = postLayoutReadyWorkQueue.filter(item => item.generation !== flushGeneration);
+  const delayMs = viewerChromeEnabled ? 0 : POST_LAYOUT_READY_EDIT_PREVIEW_DELAY_MS;
+  if (delayMs > 0) {
+    postPerfMark("post-ready-enhancements-deferred", { delayMs, viewerChromeEnabled });
+  }
+  window.setTimeout(() => {
+    if (flushGeneration !== layoutReadyGeneration) {
+      return;
+    }
+
+    for (const item of workItems) {
+      item.work();
+    }
+  }, delayMs);
 }
 
 function restoreCachedScrollPosition(): void {
@@ -1278,6 +1467,28 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   updateMinimapViewport();
   emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
   postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
+}
+
+function refreshInitialVisibleMinimapContent(): void {
+  if (!minimapSourceReady) {
+    refreshMinimapContent("A");
+    return;
+  }
+
+  const root = document.scrollingElement ?? document.documentElement;
+  minimapDocumentHeight = root.scrollHeight;
+  updateMinimapVisibility(true);
+  updateMinimapViewport();
+  emitMark("mm-minimap-refresh-skipped", {
+    phase: "A",
+    reason: "initial-source-ready",
+    documentHeight: minimapDocumentHeight
+  });
+  postPerfMark("mm-minimap-refresh-skipped", {
+    phase: "A",
+    reason: "initial-source-ready",
+    documentHeight: minimapDocumentHeight
+  });
 }
 
 function postCachedMinimapState(state: PostedMinimapState): void {
@@ -1982,8 +2193,10 @@ function flushPendingReadingPreferences(): void {
   }
 
   if (!hadHostPreferences && !initialRenderPipelineCompleted) {
-    // First reading-preferences — run the full Mermaid/code-block pipeline
-    // before emitting layout-ready. Pipeline schedules its own layout-ready.
+    // First reading-preferences — the pipeline owns layout-ready; heavy
+    // Mermaid/code-block enhancement is deferred behind the first readable
+    // paint so large full-DOM documents do not block on off-screen work.
+    const pipelineGeneration = ++initialRenderPipelineGeneration;
     void runInitialRenderPipeline({
       getCurrentTheme,
       applyTheme,
@@ -1991,10 +2204,16 @@ function flushPendingReadingPreferences(): void {
       renderMath,
       renderMermaid,
       renderCodeBlocks,
+      deferPostReadyWork: deferPostReadyEnhancements,
       scheduleLayoutReady: () => {
         initialRenderPipelineCompleted = true;
         scheduleLayoutReady(skipFrameWait);
-      }
+      },
+      postPerfMark,
+      notifyPostReadyEnhancementsComplete: () => {
+        postPostReadyEnhancementsComplete(undefined, undefined, undefined);
+      },
+      isCurrent: () => pipelineGeneration === initialRenderPipelineGeneration,
     });
   }
 
@@ -2122,13 +2341,12 @@ function handleHostMessage(raw: unknown): void {
     if (message.hasMermaid !== undefined) {
       loadMessage.hasMermaid = message.hasMermaid;
     }
-    const cacheKey = createProcessedDocumentCacheKey(
-      message.html,
-      message.theme ?? getCurrentTheme(),
-      message.hasMermaid);
-    if (cacheKey !== undefined) {
-      loadMessage.cacheKey = cacheKey;
+    if (message.hasHljs !== undefined) {
+      loadMessage.hasHljs = message.hasHljs;
     }
+    loadMessage.cacheKey = createProcessedDocumentCacheKey(
+      message.html,
+      message.theme ?? getCurrentTheme());
     applyLoadDocument(loadMessage, buildLoadDocumentDeps());
     return;
   }
@@ -2343,7 +2561,9 @@ function applyModeSettleProbePreferences(message: Extract<HostMessage, { type: "
 }
 
 function resetModuleGlobalsForLoadDocument(): void {
+  ++initialRenderPipelineGeneration;
   initialRenderPipelineCompleted = false;
+  postReadyEnhancementsCompleted = false;
   currentController?.cancel();
   currentController = null;
   restoredCachedLayoutState = null;
@@ -2354,6 +2574,14 @@ function resetModuleGlobalsForLoadDocument(): void {
     window.clearTimeout(layoutReadyTimer);
     layoutReadyTimer = undefined;
   }
+  postLayoutReadyWorkQueue = [];
+  if (themeMermaidRefreshTimer !== undefined) {
+    window.clearTimeout(themeMermaidRefreshTimer);
+    themeMermaidRefreshTimer = undefined;
+  }
+  ++themeMermaidRefreshGeneration;
+  disconnectMermaidLazyObserver();
+  mermaidLazyRenderQueue = Promise.resolve();
   // INCREMENT, not reset-to-0 — invalidates in-flight mermaid render callbacks
   // that compare against the old generation token. Resetting to 0 would let a
   // stale callback whose generation === 0 pass the check, painting an
@@ -2422,7 +2650,8 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
     // skips mermaid init+render for docs without mermaid blocks. Undefined
     // passes through to the pipeline's `!== false` default, preserving the
     // pre-G behavior for any caller that doesn't carry the flag.
-    runInitialRenderPipeline: async (hasMermaid, skipFrameWait) => {
+    runInitialRenderPipeline: async (hasMermaid, skipFrameWait, renderId, hasHljs) => {
+      const pipelineGeneration = ++initialRenderPipelineGeneration;
       await runInitialRenderPipeline({
         getCurrentTheme,
         applyTheme,
@@ -2430,6 +2659,7 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
         renderMath,
         renderMermaid,
         renderCodeBlocks,
+        deferPostReadyWork: deferPostReadyEnhancements,
         scheduleLayoutReady: () => {
           initialRenderPipelineCompleted = true;
           scheduleLayoutReady(skipFrameWait === true);
@@ -2442,6 +2672,10 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
         },
         hasMermaid,
         postPerfMark,
+        notifyPostReadyEnhancementsComplete: () => {
+          postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
+        },
+        isCurrent: () => pipelineGeneration === initialRenderPipelineGeneration,
       });
     },
     cancelCurrentMathController: () => { currentController?.cancel(); },
@@ -2465,14 +2699,16 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
     getCachedDocumentFragment: getCachedProcessedDocumentFragment,
     setCurrentDocumentCacheKey: setCurrentProcessedDocumentCacheKey,
     restoreCachedScrollPosition,
-    completeCachedDocumentLoad: () => {
+    completeCachedDocumentLoad: (renderId, hasMermaid, hasHljs) => {
       initialRenderPipelineCompleted = true;
       hasInitialLayoutSettled = true;
+      postReadyEnhancementsCompleted = true;
       postHostMessage({
         type: "document-ready",
         mathCount: document.querySelectorAll("[data-tex]").length
       });
       postCachedLayoutReady();
+      postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
     },
   };
 }

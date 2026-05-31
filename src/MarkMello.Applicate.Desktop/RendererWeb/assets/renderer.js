@@ -57,6 +57,10 @@
   }
 
   // RendererWeb/src/mermaidRender.ts
+  function isMermaidNodeNearViewport(node, viewportHeight, marginPx) {
+    const rect = node.getBoundingClientRect();
+    return rect.bottom >= -marginPx && rect.top <= viewportHeight + marginPx;
+  }
   async function renderMermaidNode(node, generation, getCurrentGeneration, mermaid, perDiagramTimeoutMs) {
     const codeEl = node.querySelector("code[data-mm-mermaid]");
     if (!codeEl) return;
@@ -106,6 +110,89 @@
   }
 
   // RendererWeb/src/initialRenderPipeline.ts
+  var DEFAULT_INITIAL_VISIBLE_READY_TIMEOUT_MS = 1200;
+  var DEFAULT_INITIAL_VISUAL_SETTLE_TIMEOUT_MS = 1800;
+  function deferPostReadyWork(deps, work) {
+    if (deps.deferPostReadyWork) {
+      deps.deferPostReadyWork(work);
+      return;
+    }
+    globalThis.setTimeout(work, 0);
+  }
+  function isCurrentPipeline(deps) {
+    return deps.isCurrent?.() !== false;
+  }
+  async function runPostReadyEnhancements(deps, shouldRunMermaid) {
+    if (!isCurrentPipeline(deps)) return;
+    deps.postPerfMark?.("post-ready-enhancements-start", { hasMermaid: shouldRunMermaid });
+    try {
+      if (shouldRunMermaid) {
+        try {
+          await deps.renderMermaid();
+        } catch {
+        }
+      }
+      if (!isCurrentPipeline(deps)) return;
+      deps.renderCodeBlocks();
+    } catch {
+      deps.postPerfMark?.("post-ready-enhancements-error");
+    } finally {
+      if (isCurrentPipeline(deps)) {
+        deps.postPerfMark?.("post-ready-enhancements-end", { hasMermaid: shouldRunMermaid });
+      }
+    }
+  }
+  async function waitForInitialVisibleReady(deps, mathController) {
+    const timeoutMs = deps.initialVisibleReadyTimeoutMs ?? DEFAULT_INITIAL_VISIBLE_READY_TIMEOUT_MS;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      await mathController.initialVisibleReady;
+      return;
+    }
+    let timeout;
+    const result = await Promise.race([
+      mathController.initialVisibleReady.then(() => "ready"),
+      new Promise((resolve) => {
+        timeout = globalThis.setTimeout(() => resolve("timeout"), timeoutMs);
+      })
+    ]);
+    if (timeout !== void 0) {
+      globalThis.clearTimeout(timeout);
+    }
+    if (result === "timeout") {
+      deps.postPerfMark?.("initial-visible-ready-timeout", {
+        timeoutMs,
+        totalMathCount: mathController.totalMathCount,
+        visibleCount: mathController.initialVisibleNodes.size
+      });
+    }
+  }
+  async function waitForInitialVisualSettle(deps, mathController) {
+    const visualSettleReady = mathController.initialVisualSettleReady;
+    if (!visualSettleReady) {
+      return;
+    }
+    const timeoutMs = DEFAULT_INITIAL_VISUAL_SETTLE_TIMEOUT_MS;
+    let timeout;
+    const result = await Promise.race([
+      visualSettleReady.then(() => "ready", () => "error"),
+      new Promise((resolve) => {
+        timeout = globalThis.setTimeout(() => resolve("timeout"), timeoutMs);
+      })
+    ]);
+    if (timeout !== void 0) {
+      globalThis.clearTimeout(timeout);
+    }
+    if (result === "timeout") {
+      deps.postPerfMark?.("initial-visual-settle-timeout", {
+        timeoutMs,
+        totalMathCount: mathController.totalMathCount
+      });
+    } else if (result === "error") {
+      deps.postPerfMark?.("initial-visual-settle-error", {
+        totalMathCount: mathController.totalMathCount
+      });
+    }
+  }
   async function runInitialRenderPipeline(deps) {
     const theme = deps.getCurrentTheme();
     deps.applyTheme(theme);
@@ -116,15 +203,17 @@
       deps.postPerfMark?.("mermaid-skipped", { hasMermaid: false });
     }
     const mathController = deps.renderMath();
-    if (shouldRunMermaid) {
-      try {
-        await deps.renderMermaid();
-      } catch {
-      }
-    }
-    deps.renderCodeBlocks();
-    await mathController.initialVisibleReady;
+    await waitForInitialVisibleReady(deps, mathController);
+    if (!isCurrentPipeline(deps)) return;
     deps.scheduleLayoutReady();
+    deferPostReadyWork(deps, () => {
+      if (!isCurrentPipeline(deps)) return;
+      void runPostReadyEnhancements(deps, shouldRunMermaid).then(() => {
+        if (!isCurrentPipeline(deps)) return;
+        deps.notifyPostReadyEnhancementsComplete?.();
+        return waitForInitialVisualSettle(deps, mathController);
+      });
+    });
   }
 
   // RendererWeb/src/loadDocument.ts
@@ -168,10 +257,10 @@
       deps.scrollWindowToTop();
     }
     if (cachedFragment !== void 0 && deps.completeCachedDocumentLoad) {
-      deps.completeCachedDocumentLoad();
+      deps.completeCachedDocumentLoad(message.renderId, message.hasMermaid, message.hasHljs);
       return;
     }
-    void deps.runInitialRenderPipeline(message.hasMermaid, message.skipFrameWait);
+    void deps.runInitialRenderPipeline(message.hasMermaid, message.skipFrameWait, message.renderId, message.hasHljs);
   }
   function clearDocumentState(deps) {
     const main = document.querySelector("main.mm-document");
@@ -542,16 +631,22 @@
     return Math.abs(currentHeight - cachedHeight) >= PHASE_B_HEIGHT_DELTA_THRESHOLD_PX;
   }
   function schedulePhaseBRebuild(deps) {
-    deps.allMathRendered.then(() => {
+    return deps.allMathRendered.then(() => {
       if (!shouldTriggerPhaseB(deps.getCurrentDocumentHeight(), deps.getCachedDocumentHeight())) {
         return;
       }
       const win = window;
-      if (typeof win.requestIdleCallback === "function") {
-        win.requestIdleCallback(() => deps.refresh("B"), { timeout: 500 });
-      } else {
-        window.setTimeout(() => deps.refresh("B"), 50);
-      }
+      return new Promise((resolve) => {
+        const refresh = () => {
+          deps.refresh("B");
+          resolve();
+        };
+        if (typeof win.requestIdleCallback === "function") {
+          win.requestIdleCallback(refresh, { timeout: 500 });
+        } else {
+          window.setTimeout(refresh, 50);
+        }
+      });
     });
   }
 
@@ -1096,11 +1191,20 @@
   var MINIMAP_DRAG_THRESHOLD_PX = 4;
   var minimapSourceReady = false;
   var mermaidRenderGeneration = 0;
+  var mermaidLazyObserver = null;
+  var mermaidLazyRenderQueue = Promise.resolve();
+  var themeMermaidRefreshGeneration = 0;
+  var themeMermaidRefreshTimer;
+  var initialRenderPipelineGeneration = 0;
   var initialRenderPipelineCompleted = false;
+  var postReadyEnhancementsCompleted = false;
   var currentController = null;
-  var MAX_MERMAID_DIAGRAMS = 50;
   var MERMAID_PER_DIAGRAM_TIMEOUT_MS = 3e3;
   var MERMAID_WATCHDOG_MS = 15e3;
+  var MERMAID_EAGER_VIEWPORT_MARGIN_PX = 700;
+  var MERMAID_LAZY_ROOT_MARGIN_PX = 1400;
+  var THEME_MERMAID_REFRESH_DELAY_MS = 160;
+  var POST_LAYOUT_READY_EDIT_PREVIEW_DELAY_MS = 120;
   var widthResizerVisibility = "on-hover";
   var viewerChromeEnabled = false;
   var documentScrollEnabled = true;
@@ -1115,6 +1219,7 @@
   var widthDragApplyFrameRequested = false;
   var layoutReadyGeneration = 0;
   var layoutReadyTimer;
+  var postLayoutReadyWorkQueue = [];
   var lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
   var minimapPolicy = null;
   var sourceLineAnchors = [];
@@ -1143,10 +1248,7 @@
     }
     return (hash >>> 0).toString(16).padStart(8, "0");
   }
-  function createProcessedDocumentCacheKey(html, theme, hasMermaid) {
-    if (hasMermaid === true) {
-      return void 0;
-    }
+  function createProcessedDocumentCacheKey(html, theme) {
     return `${theme}|${html.length}|${hashDocumentHtml(html)}`;
   }
   function getCachedProcessedDocumentFragment(cacheKey) {
@@ -1164,7 +1266,7 @@
     currentDocumentCacheKey = cacheKey;
   }
   function preserveCurrentProcessedDocument() {
-    if (!currentDocumentCacheKey || !initialRenderPipelineCompleted) {
+    if (!currentDocumentCacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
       return;
     }
     const main = document.querySelector("main.mm-document");
@@ -1411,13 +1513,23 @@
     emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
     const katex = hostWindow.katex ?? void 0;
     const controller = renderMath({ katex, documentRoot: document });
-    currentController = controller;
-    schedulePhaseBRebuild({
+    const phaseBGeneration = layoutReadyGeneration;
+    const initialVisualSettleReady = schedulePhaseBRebuild({
       allMathRendered: controller.allMathRendered,
       getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
       getCachedDocumentHeight: () => minimapDocumentHeight,
-      refresh: refreshMinimapContent
+      refresh: (phase) => {
+        if (phaseBGeneration !== layoutReadyGeneration || controller.isCancelled()) {
+          return;
+        }
+        refreshMinimapContent(phase);
+      }
     });
+    const readinessController = {
+      ...controller,
+      initialVisualSettleReady
+    };
+    currentController = readinessController;
     controller.initialVisibleReady.then(() => {
       emitMark("mm-initial-visible-ready", {
         visibleCount: controller.initialVisibleNodes.size,
@@ -1439,7 +1551,7 @@
         cancelled: controller.isCancelled()
       });
     });
-    return controller;
+    return readinessController;
   }
   function getCurrentTheme() {
     const theme = document.documentElement.dataset.theme;
@@ -1457,25 +1569,87 @@
     });
   }
   async function renderMermaid() {
+    disconnectMermaidLazyObserver();
     const mermaid = hostWindow.mermaid;
     if (!mermaid) return;
     const allNodes = Array.from(document.querySelectorAll("pre.mm-mermaid"));
-    const nodes = allNodes.slice(0, MAX_MERMAID_DIAGRAMS);
-    if (nodes.length === 0) return;
+    if (allNodes.length === 0) return;
     const generation = ++mermaidRenderGeneration;
+    mermaidLazyRenderQueue = Promise.resolve();
+    const viewportHeight = getViewportHeightForMermaid();
+    const eagerNodes = allNodes.filter((node) => isMermaidNodeNearViewport(node, viewportHeight, MERMAID_EAGER_VIEWPORT_MARGIN_PX));
+    const eagerSet = new Set(eagerNodes);
+    const lazyNodes = allNodes.filter((node) => !eagerSet.has(node));
+    postPerfMark("mm-mermaid-visible-first", {
+      total: allNodes.length,
+      eager: eagerNodes.length,
+      lazy: lazyNodes.length
+    });
+    installLazyMermaidObserver(lazyNodes, generation, mermaid);
+    if (eagerNodes.length === 0) return;
     const watchdog = window.setTimeout(() => {
       if (generation === mermaidRenderGeneration) {
         ++mermaidRenderGeneration;
       }
     }, MERMAID_WATCHDOG_MS);
     try {
-      for (const node of nodes) {
+      for (const node of eagerNodes) {
         await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
         if (generation !== mermaidRenderGeneration) return;
       }
     } finally {
       window.clearTimeout(watchdog);
     }
+  }
+  function getViewportHeightForMermaid() {
+    const root = document.scrollingElement ?? document.documentElement;
+    return root.clientHeight || window.innerHeight || 0;
+  }
+  function disconnectMermaidLazyObserver() {
+    mermaidLazyObserver?.disconnect();
+    mermaidLazyObserver = null;
+  }
+  function installLazyMermaidObserver(nodes, generation, mermaid) {
+    if (nodes.length === 0) return;
+    postPerfMark("mm-mermaid-lazy-observe", {
+      total: nodes.length,
+      rootMarginPx: MERMAID_LAZY_ROOT_MARGIN_PX
+    });
+    if (typeof window.IntersectionObserver !== "function") {
+      for (const node of nodes) {
+        enqueueLazyMermaidRender(node, generation, mermaid);
+      }
+      return;
+    }
+    mermaidLazyObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const node = entry.target;
+        mermaidLazyObserver?.unobserve(node);
+        enqueueLazyMermaidRender(node, generation, mermaid);
+      }
+    }, {
+      root: null,
+      rootMargin: `${MERMAID_LAZY_ROOT_MARGIN_PX}px 0px ${MERMAID_LAZY_ROOT_MARGIN_PX}px 0px`,
+      threshold: 0
+    });
+    for (const node of nodes) {
+      mermaidLazyObserver.observe(node);
+    }
+  }
+  function enqueueLazyMermaidRender(node, generation, mermaid) {
+    if (generation !== mermaidRenderGeneration) return;
+    const marker = String(generation);
+    if (node.dataset.mmMermaidRenderQueued === marker) return;
+    node.dataset.mmMermaidRenderQueued = marker;
+    mermaidLazyRenderQueue = mermaidLazyRenderQueue.catch(() => void 0).then(async () => {
+      if (generation !== mermaidRenderGeneration) return;
+      postPerfMark("mm-mermaid-lazy-render-start");
+      await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+      if (generation === mermaidRenderGeneration) {
+        postPerfMark("mm-mermaid-lazy-render-end");
+      }
+    });
   }
   function renderCodeBlocks() {
     const hljs = hostWindow.hljs;
@@ -1496,10 +1670,61 @@
       }
     }
   }
-  async function handleThemeChange(theme) {
+  function deferPostReadyEnhancements(work) {
+    postLayoutReadyWorkQueue.push({ generation: layoutReadyGeneration, work });
+  }
+  function postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs) {
+    postReadyEnhancementsCompleted = true;
+    const message = {
+      type: "post-ready-enhancements-complete",
+      hasMermaid: hasMermaid === true,
+      hasHljs: hasHljs === true
+    };
+    if (renderId !== void 0) {
+      message.renderId = renderId;
+    }
+    postHostMessage(message);
+  }
+  function hasMermaidNodes() {
+    return document.querySelector("pre.mm-mermaid") !== null;
+  }
+  function scheduleThemeMermaidRefresh(theme) {
+    const generation = ++themeMermaidRefreshGeneration;
+    ++mermaidRenderGeneration;
+    if (themeMermaidRefreshTimer !== void 0) {
+      window.clearTimeout(themeMermaidRefreshTimer);
+      themeMermaidRefreshTimer = void 0;
+    }
+    if (!hostWindow.mermaid || !hasMermaidNodes()) {
+      postPerfMark("mm-theme-mermaid-refresh-skipped", {
+        theme,
+        reason: hostWindow.mermaid ? "no-mermaid-nodes" : "no-mermaid-api"
+      });
+      return;
+    }
+    postPerfMark("mm-theme-mermaid-refresh-scheduled", {
+      theme,
+      delayMs: THEME_MERMAID_REFRESH_DELAY_MS
+    });
+    themeMermaidRefreshTimer = window.setTimeout(() => {
+      themeMermaidRefreshTimer = void 0;
+      if (generation !== themeMermaidRefreshGeneration) {
+        return;
+      }
+      postPerfMark("mm-theme-mermaid-refresh-start", { theme });
+      void renderMermaid().finally(() => {
+        if (generation === themeMermaidRefreshGeneration) {
+          postPerfMark("mm-theme-mermaid-refresh-end", { theme });
+        }
+      });
+    }, THEME_MERMAID_REFRESH_DELAY_MS);
+  }
+  function handleThemeChange(theme) {
+    postPerfMark("mm-theme-change-start", { theme });
     applyTheme(theme);
     initMermaidWithTheme(theme);
-    await renderMermaid();
+    postPerfMark("mm-theme-change-applied", { theme });
+    scheduleThemeMermaidRefresh(theme);
   }
   function getScrollState() {
     const root = document.scrollingElement ?? document.documentElement;
@@ -1613,6 +1838,7 @@
       ...scrollState
     });
     postPerfMark("mm-layout-ready");
+    flushPostLayoutReadyWork();
   }
   function postCachedLayoutReady() {
     restoredCachedLayoutState = null;
@@ -1636,6 +1862,27 @@
       cached: true
     });
     postPerfMark("mm-layout-ready", { cached: true });
+    flushPostLayoutReadyWork();
+  }
+  function flushPostLayoutReadyWork() {
+    if (postLayoutReadyWorkQueue.length === 0) {
+      return;
+    }
+    const flushGeneration = layoutReadyGeneration;
+    const workItems = postLayoutReadyWorkQueue.filter((item) => item.generation === flushGeneration);
+    postLayoutReadyWorkQueue = postLayoutReadyWorkQueue.filter((item) => item.generation !== flushGeneration);
+    const delayMs = viewerChromeEnabled ? 0 : POST_LAYOUT_READY_EDIT_PREVIEW_DELAY_MS;
+    if (delayMs > 0) {
+      postPerfMark("post-ready-enhancements-deferred", { delayMs, viewerChromeEnabled });
+    }
+    window.setTimeout(() => {
+      if (flushGeneration !== layoutReadyGeneration) {
+        return;
+      }
+      for (const item of workItems) {
+        item.work();
+      }
+    }, delayMs);
   }
   function restoreCachedScrollPosition() {
     const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
@@ -2381,6 +2628,7 @@
       scheduleHeavyLiveUpdate();
     }
     if (!hadHostPreferences && !initialRenderPipelineCompleted) {
+      const pipelineGeneration = ++initialRenderPipelineGeneration;
       void runInitialRenderPipeline({
         getCurrentTheme,
         applyTheme,
@@ -2388,10 +2636,16 @@
         renderMath: renderMath2,
         renderMermaid,
         renderCodeBlocks,
+        deferPostReadyWork: deferPostReadyEnhancements,
         scheduleLayoutReady: () => {
           initialRenderPipelineCompleted = true;
           scheduleLayoutReady(skipFrameWait);
-        }
+        },
+        postPerfMark,
+        notifyPostReadyEnhancementsComplete: () => {
+          postPostReadyEnhancementsComplete(void 0, void 0, void 0);
+        },
+        isCurrent: () => pipelineGeneration === initialRenderPipelineGeneration
       });
     }
   }
@@ -2484,14 +2738,13 @@
       if (message.hasMermaid !== void 0) {
         loadMessage.hasMermaid = message.hasMermaid;
       }
-      const cacheKey = createProcessedDocumentCacheKey(
-        message.html,
-        message.theme ?? getCurrentTheme(),
-        message.hasMermaid
-      );
-      if (cacheKey !== void 0) {
-        loadMessage.cacheKey = cacheKey;
+      if (message.hasHljs !== void 0) {
+        loadMessage.hasHljs = message.hasHljs;
       }
+      loadMessage.cacheKey = createProcessedDocumentCacheKey(
+        message.html,
+        message.theme ?? getCurrentTheme()
+      );
       applyLoadDocument(loadMessage, buildLoadDocumentDeps());
       return;
     }
@@ -2659,7 +2912,9 @@
     applyReadingPreferences(preferences);
   }
   function resetModuleGlobalsForLoadDocument() {
+    ++initialRenderPipelineGeneration;
     initialRenderPipelineCompleted = false;
+    postReadyEnhancementsCompleted = false;
     currentController?.cancel();
     currentController = null;
     restoredCachedLayoutState = null;
@@ -2670,6 +2925,14 @@
       window.clearTimeout(layoutReadyTimer);
       layoutReadyTimer = void 0;
     }
+    postLayoutReadyWorkQueue = [];
+    if (themeMermaidRefreshTimer !== void 0) {
+      window.clearTimeout(themeMermaidRefreshTimer);
+      themeMermaidRefreshTimer = void 0;
+    }
+    ++themeMermaidRefreshGeneration;
+    disconnectMermaidLazyObserver();
+    mermaidLazyRenderQueue = Promise.resolve();
     ++mermaidRenderGeneration;
     minimapDocumentHeight = 0;
     lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
@@ -2706,7 +2969,8 @@
       // skips mermaid init+render for docs without mermaid blocks. Undefined
       // passes through to the pipeline's `!== false` default, preserving the
       // pre-G behavior for any caller that doesn't carry the flag.
-      runInitialRenderPipeline: async (hasMermaid, skipFrameWait) => {
+      runInitialRenderPipeline: async (hasMermaid, skipFrameWait, renderId, hasHljs) => {
+        const pipelineGeneration = ++initialRenderPipelineGeneration;
         await runInitialRenderPipeline({
           getCurrentTheme,
           applyTheme,
@@ -2714,6 +2978,7 @@
           renderMath: renderMath2,
           renderMermaid,
           renderCodeBlocks,
+          deferPostReadyWork: deferPostReadyEnhancements,
           scheduleLayoutReady: () => {
             initialRenderPipelineCompleted = true;
             scheduleLayoutReady(skipFrameWait === true);
@@ -2723,7 +2988,11 @@
             });
           },
           hasMermaid,
-          postPerfMark
+          postPerfMark,
+          notifyPostReadyEnhancementsComplete: () => {
+            postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
+          },
+          isCurrent: () => pipelineGeneration === initialRenderPipelineGeneration
         });
       },
       cancelCurrentMathController: () => {
@@ -2751,14 +3020,16 @@
       getCachedDocumentFragment: getCachedProcessedDocumentFragment,
       setCurrentDocumentCacheKey: setCurrentProcessedDocumentCacheKey,
       restoreCachedScrollPosition,
-      completeCachedDocumentLoad: () => {
+      completeCachedDocumentLoad: (renderId, hasMermaid, hasHljs) => {
         initialRenderPipelineCompleted = true;
         hasInitialLayoutSettled = true;
+        postReadyEnhancementsCompleted = true;
         postHostMessage({
           type: "document-ready",
           mathCount: document.querySelectorAll("[data-tex]").length
         });
         postCachedLayoutReady();
+        postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
       }
     };
   }

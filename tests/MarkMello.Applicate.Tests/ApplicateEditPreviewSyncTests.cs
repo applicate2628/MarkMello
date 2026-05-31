@@ -31,6 +31,20 @@ public sealed class ApplicateEditPreviewSyncTests
     }
 
     [Fact]
+    public void EditPreviewDefersLargeTocHeadingUpdatesBehindRendererReveal()
+    {
+        var codeBehind = ReadEditPreviewCodeBehind();
+        var handler = ExtractMethodBody(codeBehind, "private void OnSharedHeadingsChanged(");
+        var unwireSharedHostEvents = ExtractMethodBody(codeBehind, "private void UnwireSharedHostEvents()");
+        var rendered = ExtractMethodBody(codeBehind, "private void OnSharedDocumentRendered(object? sender, EventArgs e)");
+
+        Assert.Contains("_headingUpdater.Apply(", handler, StringComparison.Ordinal);
+        Assert.Contains("ReferenceEquals(_viewModel, viewModel)", handler, StringComparison.Ordinal);
+        Assert.Contains("_headingUpdater.FlushPending();", rendered, StringComparison.Ordinal);
+        Assert.Contains("_headingUpdater.Invalidate();", unwireSharedHostEvents, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void EditPreviewForwardsShellTocScrollRequestsToRenderer()
     {
         var codeBehind = ReadEditPreviewCodeBehind();
