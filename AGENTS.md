@@ -2,6 +2,10 @@
 
 These repo-local rules supplement the user's global rules. Keep them short, practical, and specific to this repository.
 
+## Session Quickstart
+
+Before substantial work in this repository, read `docs/agent-quickstart.md`.
+
 ## Commit Messages
 
 Commit messages should follow the rules defined in:
