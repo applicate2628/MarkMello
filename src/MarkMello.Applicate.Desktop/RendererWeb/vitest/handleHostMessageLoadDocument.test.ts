@@ -69,17 +69,17 @@ describe("handleHostMessage(load-document)", () => {
 
   it("keeps offscreen mermaid diagrams out of the blocking post-ready path", () => {
     const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
-    const renderStart = source.indexOf("async function renderMermaid(): Promise<void>");
+    const renderStart = source.indexOf("async function renderMermaidNodes(");
     const renderEnd = source.indexOf("function renderCodeBlocks", renderStart);
-    const renderMermaid = source.slice(renderStart, renderEnd);
+    const renderMermaidNodes = source.slice(renderStart, renderEnd);
 
     expect(renderStart).toBeGreaterThanOrEqual(0);
     expect(renderEnd).toBeGreaterThan(renderStart);
-    expect(renderMermaid).toContain("isMermaidNodeNearViewport");
-    expect(renderMermaid).toContain("installLazyMermaidObserver(lazyNodes, generation, mermaid);");
-    expect(renderMermaid).toContain("mm-mermaid-visible-first");
-    expect(renderMermaid).toContain("mm-mermaid-lazy-observe");
-    expect(renderMermaid).not.toContain("allNodes.slice");
+    expect(renderMermaidNodes).toContain("isMermaidNodeNearViewport");
+    expect(renderMermaidNodes).toContain("installLazyMermaidObserver(lazyNodes, generation, mermaid);");
+    expect(renderMermaidNodes).toContain("mm-mermaid-visible-first");
+    expect(renderMermaidNodes).toContain("mm-mermaid-lazy-observe");
+    expect(renderMermaidNodes).not.toContain("allNodes.slice");
   });
 
   it("does not rebuild a full-DOM minimap clone twice before first reveal", () => {
@@ -175,7 +175,7 @@ describe("handleHostMessage(load-document)", () => {
     expect(visibilityRefreshIndex).toBeGreaterThanOrEqual(0);
     expect(paintGateCallIndex).toBeGreaterThan(visibilityRefreshIndex);
     expect(paintGate).toContain("updateMinimapViewport();");
-    expect(paintGate).toContain("updateWidthHandlePosition();");
+    expect(paintGate).toContain("updateWidthHandlePositionForCurrentLayout();");
   });
 
   it("defers edit-preview post-ready work behind mode-settle messages", () => {

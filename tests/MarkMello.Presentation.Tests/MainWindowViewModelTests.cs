@@ -1,3 +1,5 @@
+using MarkMello.Application.Abstractions;
+using MarkMello.Application.Diagnostics;
 using MarkMello.Application.UseCases;
 using MarkMello.Application.Updates;
 using MarkMello.Domain;
@@ -612,6 +614,26 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task InitializeAsyncExposesOpeningPathWhileStartupCacheHitWaitsForRenderer()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", $"startup-{Guid.NewGuid():N}.md");
+        var readiness = new ManualRendererReadinessService();
+        var harness = CreateHarness(rendererReadiness: readiness);
+        harness.CommandLine.ActivationPath = path;
+        EarlyDocumentCache.Deposit(path, CreateSource(path, "# Startup\n\nbody"));
+
+        var initializeTask = harness.ViewModel.InitializeAsync();
+
+        Assert.False(initializeTask.IsCompleted);
+        Assert.True(harness.ViewModel.IsOpeningPath(path));
+
+        readiness.SetReady();
+        await initializeTask;
+
+        Assert.False(harness.ViewModel.IsOpeningPath(path));
+    }
+
+    [Fact]
     public async Task DownloadUpdateCommandWhenSuccessfulShowsNativeAction()
     {
         var harness = CreateHarness();
@@ -925,11 +947,12 @@ public sealed class MainWindowViewModelTests
             ArchitectureName: "x64",
             InstallAction: AppUpdateInstallAction.LaunchInstaller);
 
-    private static TestHarness CreateHarness()
+    private static TestHarness CreateHarness(IRendererReadinessService? rendererReadiness = null)
     {
         var loader = new StubDocumentLoader();
         var saver = new RecordingDocumentSaver();
         var picker = new StubFilePicker();
+        var commandLine = new StubCommandLineActivation();
         var settings = new InMemorySettingsStore();
         var localization = new LocalizationService(AppLanguage.English);
         var themeService = new RecordingThemeService();
@@ -939,21 +962,23 @@ public sealed class MainWindowViewModelTests
             new OpenDocumentUseCase(loader),
             new SaveDocumentUseCase(saver),
             picker,
-            new StubCommandLineActivation(),
+            commandLine,
             localization,
             settings,
             themeService,
             startupMetrics,
             new RenderMarkdownDocumentUseCase(new TestMarkdownRenderer()),
-            updateService);
+            updateService,
+            rendererReadiness: rendererReadiness);
 
-        return new TestHarness(loader, saver, picker, settings, startupMetrics, updateService, viewModel);
+        return new TestHarness(loader, saver, picker, commandLine, settings, startupMetrics, updateService, viewModel);
     }
 
     private sealed record TestHarness(
         StubDocumentLoader Loader,
         RecordingDocumentSaver DocumentSaver,
         StubFilePicker FilePicker,
+        StubCommandLineActivation CommandLine,
         InMemorySettingsStore Settings,
         RecordingStartupMetrics StartupMetrics,
         StubUpdateService UpdateService,

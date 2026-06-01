@@ -10,7 +10,7 @@ namespace MarkMello.Applicate.Desktop.Views;
 internal sealed class ApplicateDeferredHeadingUpdater
 {
     private const int LargeHeadingUpdateThreshold = 250;
-    private static readonly TimeSpan LargeHeadingFlushDelay = TimeSpan.FromMilliseconds(350);
+    private static readonly TimeSpan LargeHeadingFlushDelay = TimeSpan.FromMilliseconds(80);
     private int _version;
     private int _pendingVersion;
     private DocumentHeading[]? _pendingHeadings;

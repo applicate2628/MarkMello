@@ -15,6 +15,8 @@ namespace MarkMello.Applicate.Desktop.Rendering;
 /// <inheritdoc cref="IApplicateSharedWebViewHost"/>
 public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IApplicateModeRevealSignal
 {
+    private const int RendererFrameWaitSkipDocumentContentLength = 1024 * 1024;
+
     private Panel? _warmupParent;
     private Panel? _currentParent;
     private ApplicateWebMountIntent _currentIntent = new(
@@ -383,6 +385,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         ApplicateTrace.ModeToggle(
             $"SharedHost.RequestRender gen={newGeneration} source={(source?.Path ?? "(null)")} slot={(_currentParent is null ? "(null)" : _currentParent.GetType().Name)}");
 
+        var skipRendererFrameWait = ShouldSkipRendererFrameWait(source, transactionGeneration);
         View.UpdateInputs(
             source: source,
             readingPreferences: request.ReadingPreferences,
@@ -392,7 +395,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
             documentScrollEnabled: _currentIntent.DocumentScrollEnabled,
             wheelProxyEnabled: _currentIntent.WheelProxyEnabled,
             deferLivePreferencesUntilModeSettleProbe: transactionGeneration > 0,
-            skipFrameWaitUntilRenderReady: transactionGeneration > 0);
+            skipFrameWaitUntilRenderReady: skipRendererFrameWait);
         _activeTransactionSkipsRendererFrameSettle =
             ShouldSkipRendererFrameSettleForTransaction(transactionGeneration);
 
@@ -439,6 +442,10 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         // Waiting for another renderer rAF while the target WebView HWND is
         // intentionally hidden can deadlock tab switches.
         => transactionGeneration > 0;
+
+    internal static bool ShouldSkipRendererFrameWait(MarkdownSource? source, long transactionGeneration)
+        => transactionGeneration > 0
+            || source?.Content.Length > RendererFrameWaitSkipDocumentContentLength;
 
     public void SuppressNativeRendererForModeSwitch()
     {

@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -73,6 +74,10 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private double _lastViewModelContentWidth;
     private double _lastReadingProgress;
     private double? _pendingScrollRestoreProgress;
+    private Stopwatch? _widthDragPerfStopwatch;
+    private int _widthDragMoveEvents;
+    private int _widthDragApplyCalls;
+    private double _widthDragMaxApplyMs;
     // F-04 fix: initialize to 0.0; SyncFromViewModel is the sole writer.
     // The previous 144.0 default was a phantom value mirroring the
     // edit-preview's hardcoded padding sum; it was always overwritten
@@ -651,8 +656,37 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
     private void ApplyWidthDragDelta(double deltaX)
     {
-        _manualContentWidth = ClampManualContentWidth(CalculateWidthDragContentWidth(_dragStartWidth, deltaX));
+        UpdateWidthDragManualContentWidth(deltaX);
+        var applyStart = Stopwatch.GetTimestamp();
         ApplyColumnWidth();
+        var applyMs = Stopwatch.GetElapsedTime(applyStart).TotalMilliseconds;
+        _widthDragApplyCalls++;
+        _widthDragMaxApplyMs = SysMath.Max(_widthDragMaxApplyMs, applyMs);
+    }
+
+    private void UpdateWidthDragManualContentWidth(double deltaX)
+        => _manualContentWidth = ClampManualContentWidth(CalculateWidthDragContentWidth(_dragStartWidth, deltaX));
+
+    private void BeginWidthDragPerf()
+    {
+        _widthDragPerfStopwatch = Stopwatch.StartNew();
+        _widthDragMoveEvents = 0;
+        _widthDragApplyCalls = 0;
+        _widthDragMaxApplyMs = 0;
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "host-width-drag-start",
+            $"startWidth={_dragStartWidth:F0} contentLength={_viewModel?.Document?.Content.Length ?? 0}");
+    }
+
+    private void CompleteWidthDragPerf(double deltaX)
+    {
+        var durationMs = _widthDragPerfStopwatch?.Elapsed.TotalMilliseconds ?? 0;
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "host-width-drag-end",
+            $"durationMs={durationMs:F1} moveEvents={_widthDragMoveEvents} applyCalls={_widthDragApplyCalls} maxApplyMs={_widthDragMaxApplyMs:F1} deltaX={deltaX:F1} finalWidth={_manualContentWidth:F0}");
+        _widthDragPerfStopwatch = null;
     }
 
     private void SetWebDocumentHitTestingForWidthDrag(bool enabled)
@@ -861,6 +895,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         {
             _isDraggingWidth = true;
             _dragStartWidth = _manualContentWidth ?? _viewModel.ContentWidthSetting;
+            BeginWidthDragPerf();
             return;
         }
 
@@ -869,10 +904,18 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
             return;
         }
 
+        if (e.Phase == ApplicateWebWidthDragPhase.Move)
+        {
+            _widthDragMoveEvents++;
+            UpdateWidthDragManualContentWidth(e.DeltaX);
+            return;
+        }
+
         ApplyWidthDragDelta(e.DeltaX);
         if (e.Phase == ApplicateWebWidthDragPhase.End)
         {
             FinishWidthHandleDrag();
+            CompleteWidthDragPerf(e.DeltaX);
         }
     }
 

@@ -170,6 +170,20 @@ describe("renderer chrome race handling", () => {
     load({ ...makePreferences(true, minimapMode), type: "mode-settle-probe" });
   }
 
+  function makePointerEvent(type: string, clientX: number): MouseEvent {
+    const event = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX,
+    });
+    Object.defineProperty(event, "pointerId", {
+      configurable: true,
+      value: 1,
+    });
+    return event;
+  }
+
   async function settleInitialVisibleLayout(): Promise<void> {
     load({ type: "reading-preferences", ...makePreferences(true) });
     flushNextRaf();
@@ -198,23 +212,67 @@ describe("renderer chrome race handling", () => {
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
       webview: { postMessage: (message: unknown) => messages.push(message) }
     };
+    document.documentElement.style.setProperty("--mm-minimap-width", "136px");
+    document.documentElement.style.setProperty("--mm-minimap-gap", "16px");
 
     setDocumentMetrics(2400, 600);
     await loadDocumentWithMinimapPolicy(1000);
+    const minimap = document.querySelector<HTMLElement>(".mm-minimap");
+    const minimapContent = document.querySelector<HTMLElement>(".mm-minimap-content");
+    const documentElement = document.querySelector<HTMLElement>(".mm-document");
+    expect(minimap).not.toBeNull();
+    expect(minimapContent).not.toBeNull();
+    expect(documentElement).not.toBeNull();
+    Object.defineProperty(minimap!, "clientHeight", {
+      configurable: true,
+      get: () => {
+        throw new Error("heavy minimap transition measured minimap height");
+      },
+    });
+    Object.defineProperty(minimap!, "clientWidth", {
+      configurable: true,
+      get: () => {
+        throw new Error("heavy minimap transition measured minimap width");
+      },
+    });
+    Object.defineProperty(documentElement!, "clientWidth", {
+      configurable: true,
+      get: () => {
+        throw new Error("heavy minimap transition measured source width");
+      },
+    });
+    vi.spyOn(minimap!, "getBoundingClientRect").mockImplementation(() => {
+      throw new Error("minimap-state forced minimap layout");
+    });
+    vi.spyOn(documentElement!, "getBoundingClientRect").mockImplementation(() => {
+      throw new Error("heavy minimap transition forced document layout");
+    });
+    Object.defineProperty(minimapContent!, "scrollHeight", {
+      configurable: true,
+      get: () => {
+        throw new Error("heavy minimap refresh forced full clone layout");
+      },
+    });
     messages.length = 0;
 
     loadModeSettleProbe("on");
-    flushQueuedRafs();
+    expect(() => flushQueuedRafs()).not.toThrow();
 
     const minimapStates = messages.filter((message): message is { type: "minimap-state"; visible: boolean; reservedWidth: number } =>
       typeof message === "object" && message !== null && (message as { type?: string }).type === "minimap-state");
     const latestState = minimapStates.at(-1);
 
     expect(document.body.classList.contains("mm-has-minimap")).toBe(true);
+    expect(document.querySelector(".mm-minimap-content .mm-document")).toBeNull();
+    expect(document.querySelector(".mm-minimap-content svg")).not.toBeNull();
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "perf-mark",
+      name: "mm-minimap-heavy-schematic",
+    }));
     expect(latestState).toEqual({
       type: "minimap-state",
       visible: true,
-      reservedWidth: expect.any(Number),
+      reservedWidth: 168,
     });
     expect(Object.keys(latestState ?? {}).sort()).toEqual(["reservedWidth", "type", "visible"]);
   });
@@ -227,6 +285,182 @@ describe("renderer chrome race handling", () => {
     flushQueuedRafs();
 
     expect(document.body.classList.contains("mm-has-minimap")).toBe(false);
+  });
+
+  it("does not build the detailed minimap clone for auto-hidden heavy documents", async () => {
+    vi.useFakeTimers();
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+    setDocumentMetrics(2400, 600);
+
+    load({ type: "reading-preferences", ...makePreferences(true, "auto") });
+    flushQueuedRafs();
+    loadMinimapPolicy(1000);
+    messages.length = 0;
+
+    load({ type: "load-document", html: "<p>Heavy document</p>", hasMermaid: false });
+    await Promise.resolve();
+    await Promise.resolve();
+    flushQueuedRafs();
+
+    expect(document.querySelector(".mm-minimap-content .mm-document")).toBeNull();
+    const skippedRefreshMark = messages.find((message): message is { type: string; name: string; detail: string } =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: string }).type === "perf-mark"
+      && (message as { name?: string }).name === "mm-minimap-refresh-skipped"
+      && typeof (message as { detail?: unknown }).detail === "string");
+    expect(skippedRefreshMark?.detail).toContain('"reason":"auto-heavy"');
+
+    load({ type: "reading-preferences", ...makePreferences(true, "on") });
+    flushQueuedRafs();
+    await vi.advanceTimersByTimeAsync(100);
+    flushQueuedRafs();
+
+    expect(document.querySelector(".mm-minimap-content .mm-document")).toBeNull();
+    expect(document.querySelector(".mm-minimap-content svg")).not.toBeNull();
+  });
+
+  it("does not remeasure the detailed minimap clone on every width-handle drag frame", async () => {
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+    setDocumentMetrics(2400, 600);
+    await loadDocumentWithMinimapPolicy(10000);
+    loadModeSettleProbe("on");
+    flushQueuedRafs();
+
+    const handle = document.querySelector<HTMLElement>(".mm-width-handle");
+    const minimap = document.querySelector<HTMLElement>(".mm-minimap");
+    const minimapContent = document.querySelector<HTMLElement>(".mm-minimap-content");
+    const documentElement = document.querySelector<HTMLElement>(".mm-document");
+    expect(handle).not.toBeNull();
+    expect(minimap).not.toBeNull();
+    expect(minimapContent).not.toBeNull();
+    expect(documentElement).not.toBeNull();
+    Object.defineProperty(handle!, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(handle!, "releasePointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+
+    Object.defineProperty(minimap!, "clientHeight", {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(minimap!, "clientWidth", {
+      configurable: true,
+      value: 80,
+    });
+    Object.defineProperty(documentElement!, "clientWidth", {
+      configurable: true,
+      value: 720,
+    });
+
+    let allowDocumentMeasure = true;
+    let documentMeasureCount = 0;
+    vi.spyOn(documentElement!, "getBoundingClientRect").mockImplementation(() => {
+      documentMeasureCount++;
+      if (!allowDocumentMeasure) {
+        throw new Error("width drag frame measured full document layout");
+      }
+      return {
+        x: 120,
+        y: 0,
+        width: 720,
+        height: 1600,
+        top: 0,
+        right: 840,
+        bottom: 1600,
+        left: 120,
+        toJSON: () => ({}),
+      } as DOMRect;
+    });
+
+    let allowMinimapMeasure = false;
+    let minimapMeasureCount = 0;
+    Object.defineProperty(minimapContent!, "scrollHeight", {
+      configurable: true,
+      get: () => {
+        minimapMeasureCount++;
+        if (!allowMinimapMeasure) {
+          throw new Error("width drag frame measured detailed minimap clone");
+        }
+        return 2400;
+      },
+    });
+
+    handle!.dispatchEvent(makePointerEvent("pointerdown", 100));
+    const documentMeasureCountAfterPointerDown = documentMeasureCount;
+    allowDocumentMeasure = false;
+    handle!.dispatchEvent(makePointerEvent("pointermove", 140));
+
+    expect(() => flushQueuedRafs()).not.toThrow();
+    expect(documentMeasureCount).toBe(documentMeasureCountAfterPointerDown);
+    expect(minimapMeasureCount).toBe(0);
+
+    allowDocumentMeasure = true;
+    allowMinimapMeasure = true;
+    handle!.dispatchEvent(makePointerEvent("pointerup", 140));
+    flushQueuedRafs();
+
+    expect(documentMeasureCount).toBeGreaterThan(documentMeasureCountAfterPointerDown);
+    expect(minimapMeasureCount).toBeGreaterThan(0);
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "perf-mark",
+      name: "mm-width-drag-start",
+    }));
+    const endMark = messages.find((message): message is { type: string; name: string; detail: string } =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: unknown }).type === "perf-mark"
+      && (message as { name?: unknown }).name === "mm-width-drag-end");
+    expect(endMark).toBeTruthy();
+    expect(JSON.parse(endMark!.detail)).toMatchObject({
+      moveEvents: 1,
+      movePosts: 1,
+      applyFrames: 1,
+      deltaX: 40,
+    });
+  });
+
+  it("does not measure document layout for viewport-only updates while heavy auto minimap is hidden", async () => {
+    vi.useFakeTimers();
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+    setDocumentMetrics(2400, 600);
+
+    load({ type: "reading-preferences", ...makePreferences(true, "auto") });
+    flushQueuedRafs();
+    loadMinimapPolicy(1000);
+
+    load({ type: "load-document", html: "<p>Heavy document</p>", hasMermaid: false });
+    await Promise.resolve();
+    await Promise.resolve();
+    flushQueuedRafs();
+
+    const documentElement = document.querySelector<HTMLElement>(".mm-document");
+    expect(documentElement).not.toBeNull();
+    Object.defineProperty(documentElement!, "clientWidth", {
+      configurable: true,
+      get: () => {
+        throw new Error("hidden minimap viewport update measured source layout");
+      },
+    });
+
+    load({ type: "reading-preferences", ...makePreferences(true, "auto"), maxWidth: 760 });
+    flushQueuedRafs();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(() => flushQueuedRafs()).not.toThrow();
   });
 
   it("keeps minimap hidden when mode is off", async () => {
@@ -410,6 +644,30 @@ describe("renderer chrome race handling", () => {
     expect(rafCallbacks.length).toBeGreaterThan(0);
     flushQueuedRafs();
     expect(findMessageIndex("layout-ready", messages)).toBeGreaterThanOrEqual(0);
+  });
+
+  it("non-transactional load-document emits layout-ready from fallback when animation frames are throttled", async () => {
+    vi.useFakeTimers();
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+
+    load({
+      type: "load-document",
+      html: "<h1>Hidden WebView</h1><p>Ready</p>",
+      hasMermaid: false,
+      renderId: 16,
+    });
+
+    await advanceLayoutReadyTimer();
+
+    expect(findMessageIndex("layout-ready", messages)).toBe(-1);
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(findMessageIndex("layout-ready", messages)).toBeGreaterThanOrEqual(0);
+    expect(messages.some((message: { type?: string; name?: string } | null) =>
+      message?.type === "perf-mark" && message.name === "mm-layout-ready-frame-fallback")).toBe(true);
   });
 
   it("applies preferences carried by the settle probe before ack", async () => {

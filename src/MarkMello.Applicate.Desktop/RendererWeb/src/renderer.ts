@@ -17,7 +17,7 @@ import { renderMath as renderMathInit } from "./mathRenderInit";
 import { schedulePhaseBRebuild } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
 import { createScrollCoalescer } from "./scrollCoalescer";
-import { calculateWidthHandleLeft } from "./widthHandleLayout";
+import { calculateWidthHandleLeft, clampWidthHandleLeft } from "./widthHandleLayout";
 import { createFindBar, type FindBarController } from "./findBar";
 import {
   findScrollTopForSourceLine,
@@ -30,6 +30,7 @@ import {
   restoreMinimapSnapshot,
   type CachedMinimapSnapshot
 } from "./minimapCache";
+import { renderSchematicSvg, type DocumentBlock, type DocumentBlockKind } from "./schematicMinimap";
 
 type KatexApi = {
   render: (
@@ -198,6 +199,9 @@ let hasReceivedHostPreferences = false;
 let hasInitialLayoutSettled = false;
 let minimapViewportFrameRequested = false;
 let minimapRefreshTimer: number | undefined;
+let minimapContentRefreshTimer: number | undefined;
+let cachedGeometryRefreshTimer: number | undefined;
+let mermaidCacheResumeTimer: number | undefined;
 // Resize coalescing (2026-05-20). The window.addEventListener("resize", ...)
 // handler at module-init bottom and the ResizeObserver watching `.mm-document`
 // + `document.body` both want to refresh chrome positions (width handle) and
@@ -260,8 +264,18 @@ let widthHandleDragging = false;
 let widthHandleStartClientX = 0;
 let widthHandleStartMaxWidth = 0;
 let pendingWidthDragDeltaX = 0;
+let widthHandleDragStartLeft = 0;
+let widthHandleDragHitArea = 24;
+let widthHandleDragMinimapReservedWidth = 0;
 let widthDragFrameRequested = false;
 let widthDragApplyFrameRequested = false;
+let widthDragPerfStartTime: number | undefined;
+let widthDragPerfMoveEvents = 0;
+let widthDragPerfMovePosts = 0;
+let widthDragPerfApplyFrames = 0;
+let widthDragPerfMaxApplyMs = 0;
+let widthDragPerfStartMaxWidth = 0;
+let widthDragPerfLastMaxWidth = 0;
 let layoutReadyGeneration = 0;
 let layoutReadyTimer: number | undefined;
 let postLayoutReadyWorkQueue: Array<{ generation: number; work: () => void }> = [];
@@ -682,7 +696,7 @@ function renderMath(): MathReadinessController {
     // loadDocument.ts reset hasInitialLayoutSettled back to false so the
     // next initialVisibleReady gates again.
     hasInitialLayoutSettled = true;
-    updateWidthHandlePosition();
+    updateWidthHandlePositionForCurrentLayout();
   });
   controller.allMathRendered.then(() => {
     const allMathNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-tex]"));
@@ -713,12 +727,11 @@ function initMermaidWithTheme(theme: RendererTheme): void {
   });
 }
 
-async function renderMermaid(): Promise<void> {
-  disconnectMermaidLazyObserver();
-  const mermaid = hostWindow.mermaid;
-  if (!mermaid) return;
-
-  const allNodes = Array.from(document.querySelectorAll<HTMLElement>("pre.mm-mermaid"));
+async function renderMermaidNodes(
+  allNodes: HTMLElement[],
+  mermaid: MermaidApiLike,
+  perfMarkName = "mm-mermaid-visible-first"
+): Promise<void> {
   if (allNodes.length === 0) return;
 
   const generation = ++mermaidRenderGeneration;
@@ -729,7 +742,7 @@ async function renderMermaid(): Promise<void> {
   const eagerSet = new Set(eagerNodes);
   const lazyNodes = allNodes.filter(node => !eagerSet.has(node));
 
-  postPerfMark("mm-mermaid-visible-first", {
+  postPerfMark(perfMarkName, {
     total: allNodes.length,
     eager: eagerNodes.length,
     lazy: lazyNodes.length
@@ -751,6 +764,45 @@ async function renderMermaid(): Promise<void> {
   } finally {
     window.clearTimeout(watchdog);
   }
+}
+
+async function renderMermaid(): Promise<void> {
+  disconnectMermaidLazyObserver();
+  const mermaid = hostWindow.mermaid;
+  if (!mermaid) return;
+
+  const allNodes = Array.from(document.querySelectorAll<HTMLElement>("pre.mm-mermaid"));
+  await renderMermaidNodes(allNodes, mermaid);
+}
+
+function scheduleCachedMermaidResume(hasMermaid?: boolean): void {
+  if (hasMermaid === false) {
+    return;
+  }
+
+  const cacheKey = currentDocumentCacheKey;
+  window.clearTimeout(mermaidCacheResumeTimer);
+  mermaidCacheResumeTimer = window.setTimeout(() => {
+    mermaidCacheResumeTimer = undefined;
+    if (cacheKey !== currentDocumentCacheKey) {
+      return;
+    }
+
+    disconnectMermaidLazyObserver();
+    const mermaid = hostWindow.mermaid;
+    if (!mermaid) {
+      postPerfMark("mm-mermaid-cache-resume-skipped", { reason: "no-mermaid-api" });
+      return;
+    }
+
+    const missingNodes = Array.from(document.querySelectorAll<HTMLElement>("pre.mm-mermaid:not(.is-rendered)"));
+    if (missingNodes.length === 0) {
+      postPerfMark("mm-mermaid-cache-resume-skipped", { reason: "all-rendered" });
+      return;
+    }
+
+    void renderMermaidNodes(missingNodes, mermaid, "mm-mermaid-cache-resume");
+  }, 0);
 }
 
 function getViewportHeightForMermaid(): number {
@@ -1025,28 +1077,36 @@ function getViewportAnchorY(): number {
 }
 
 function postLayoutReady(): void {
-  const scrollState = getScrollState();
-  const topBlockIndex = findTopVisibleBlockIndex();
-  lastKnownLayoutState = { ...scrollState, topBlockIndex };
-  recordScrollIpc();
-  postHostMessage({
-    type: "scroll",
-    ...scrollState,
-    topBlockIndex
-  });
-  postHostMessage({
-    type: "layout-ready",
-    ...scrollState
-  });
-  postPerfMark("mm-layout-ready");
-  flushPostLayoutReadyWork();
+  try {
+    const scrollState = getScrollState();
+    const topBlockIndex = findTopVisibleBlockIndex();
+    lastKnownLayoutState = { ...scrollState, topBlockIndex };
+    recordScrollIpc();
+    postHostMessage({
+      type: "scroll",
+      ...scrollState,
+      topBlockIndex
+    });
+    postHostMessage({
+      type: "layout-ready",
+      ...scrollState
+    });
+    postPerfMark("mm-layout-ready");
+    flushPostLayoutReadyWork();
+  } catch (error) {
+    postPerfMark("mm-layout-ready-post-error", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
 }
 
 function postCachedLayoutReady(): void {
+  const cachedLayoutState = restoredCachedLayoutState;
   restoredCachedLayoutState = null;
-  const scrollState = getScrollState();
-  const topBlockIndex = findTopVisibleBlockIndex();
-  const layoutState = { ...scrollState, topBlockIndex };
+  const layoutState = cachedLayoutState !== null
+    ? { ...cachedLayoutState }
+    : { ...getScrollState(), topBlockIndex: findTopVisibleBlockIndex() };
   lastKnownLayoutState = { ...layoutState };
   recordScrollIpc();
   postHostMessage({
@@ -1065,6 +1125,32 @@ function postCachedLayoutReady(): void {
   });
   postPerfMark("mm-layout-ready", { cached: true });
   flushPostLayoutReadyWork();
+  if (cachedLayoutState !== null) {
+    queueCachedGeometryRefresh(cachedLayoutState.topBlockIndex);
+  }
+}
+
+function queueCachedGeometryRefresh(topBlockIndex: number | null): void {
+  const cacheKey = currentDocumentCacheKey;
+  window.clearTimeout(cachedGeometryRefreshTimer);
+  cachedGeometryRefreshTimer = window.setTimeout(() => {
+    cachedGeometryRefreshTimer = undefined;
+    if (cacheKey !== currentDocumentCacheKey) {
+      return;
+    }
+
+    const scrollState = getScrollState();
+    const layoutState = { ...scrollState, topBlockIndex };
+    lastKnownLayoutState = { ...layoutState };
+    recordScrollIpc();
+    postHostMessage({
+      type: "scroll",
+      scrollTop: layoutState.scrollTop,
+      scrollHeight: layoutState.scrollHeight,
+      clientHeight: layoutState.clientHeight,
+      topBlockIndex: layoutState.topBlockIndex
+    });
+  }, 180);
 }
 
 function flushPostLayoutReadyWork(): void {
@@ -1102,9 +1188,28 @@ function restoreCachedScrollPosition(): void {
 function scheduleLayoutReady(skipFrameWait = false): void {
   const generation = ++layoutReadyGeneration;
   let completed = false;
+  let posted = false;
+  let frameFallbackTimer: number | undefined;
   if (layoutReadyTimer !== undefined) {
     window.clearTimeout(layoutReadyTimer);
   }
+
+  const post = (path: "skip-frame-wait" | "raf" | "frame-fallback") => {
+    if (posted || generation !== layoutReadyGeneration) {
+      return;
+    }
+
+    posted = true;
+    if (frameFallbackTimer !== undefined) {
+      window.clearTimeout(frameFallbackTimer);
+      frameFallbackTimer = undefined;
+    }
+
+    if (path === "frame-fallback") {
+      postPerfMark("mm-layout-ready-frame-fallback", { generation });
+    }
+    postLayoutReady();
+  };
 
   const complete = () => {
     if (completed || generation !== layoutReadyGeneration) {
@@ -1119,14 +1224,24 @@ function scheduleLayoutReady(skipFrameWait = false): void {
 
     if (skipFrameWait) {
       postPerfMark("mm-layout-ready-frame-wait-skipped");
-      postLayoutReady();
+      post("skip-frame-wait");
       return;
     }
 
+    // WebView2 may throttle requestAnimationFrame while the native child is
+    // hidden behind the startup/document reveal gate. The host is waiting for
+    // layout-ready before revealing that child, so a pure rAF wait can deadlock
+    // until the host's 15s fallback. Keep the two-rAF paint path when frames
+    // flow, but guarantee readiness from a short timer when they do not.
+    frameFallbackTimer = window.setTimeout(() => {
+      post("frame-fallback");
+    }, 120);
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         if (generation === layoutReadyGeneration) {
-          postLayoutReady();
+          post("raf");
+        } else {
+          postPerfMark("mm-layout-ready-frame-stale", { generation, current: layoutReadyGeneration });
         }
       });
     });
@@ -1210,6 +1325,110 @@ function updateWidthHandlePosition(): void {
   widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
 }
 
+function updateWidthHandlePositionFromCssModel(minimapVisible: boolean): void {
+  ensureWidthHandle();
+  if (!widthHandleRoot) {
+    return;
+  }
+
+  widthHandleRoot.hidden = !hasReceivedHostPreferences || !viewerChromeEnabled || !hasInitialLayoutSettled;
+  if (widthHandleRoot.hidden) {
+    return;
+  }
+
+  const documentElement = document.querySelector<HTMLElement>(".mm-document");
+  if (!documentElement) {
+    widthHandleRoot.hidden = true;
+    return;
+  }
+
+  const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
+  const basePadding = readRootPixelVariable("--mm-document-base-padding-x", 72);
+  const minimapReservedWidth = minimapVisible ? readConfiguredMinimapReservedWidth() : 0;
+  const inlineMaxWidth = Number.parseFloat(
+    document.documentElement.style.getPropertyValue("--mm-document-max-width")
+  );
+  const documentMaxWidth = Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0
+    ? inlineMaxWidth
+    : (lastAppliedReadingPreferences?.maxWidth ?? readRootPixelVariable("--mm-document-max-width", 820));
+  const borderBoxWidth = Math.min(
+    Math.max(0, window.innerWidth),
+    Math.max(0, documentMaxWidth + minimapReservedWidth)
+  );
+  const documentRight = (Math.max(0, window.innerWidth) + borderBoxWidth) / 2;
+  const clampedLeft = calculateWidthHandleLeft({
+    documentRight,
+    documentPaddingRight: basePadding + minimapReservedWidth,
+    hitArea,
+    minimapReservedWidth,
+    viewportWidth: window.innerWidth,
+  });
+  widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
+}
+
+function readDocumentMaxWidthFromCssModel(): number {
+  const inlineMaxWidth = Number.parseFloat(
+    document.documentElement.style.getPropertyValue("--mm-document-max-width")
+  );
+  return Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0
+    ? inlineMaxWidth
+    : (lastAppliedReadingPreferences?.maxWidth ?? readRootPixelVariable("--mm-document-max-width", 820));
+}
+
+function calculateDocumentContentWidthFromCssModel(minimapVisible: boolean): number {
+  const basePadding = readRootPixelVariable("--mm-document-base-padding-x", 72);
+  const minimapReservedWidth = minimapVisible ? readConfiguredMinimapReservedWidth() : 0;
+  const borderBoxWidth = Math.min(
+    Math.max(0, window.innerWidth),
+    Math.max(0, readDocumentMaxWidthFromCssModel() + minimapReservedWidth)
+  );
+  return Math.max(1, borderBoxWidth - basePadding * 2 - minimapReservedWidth);
+}
+
+function isPolicyHeavyMinimapDocument(): boolean {
+  return isPolicyHeavyMinimapHeight(minimapDocumentHeight);
+}
+
+function updateWidthHandlePositionForCurrentLayout(): void {
+  if (isPolicyHeavyMinimapDocument()) {
+    updateWidthHandlePositionFromCssModel(minimapRoot ? !minimapRoot.hidden : false);
+    return;
+  }
+
+  updateWidthHandlePosition();
+}
+
+function captureWidthHandleDragGeometry(): void {
+  if (!widthHandleRoot) {
+    widthHandleDragStartLeft = 0;
+    widthHandleDragHitArea = 24;
+    widthHandleDragMinimapReservedWidth = 0;
+    return;
+  }
+
+  const inlineLeft = Number.parseFloat(widthHandleRoot.style.left);
+  widthHandleDragStartLeft = Number.isFinite(inlineLeft)
+    ? inlineLeft
+    : widthHandleRoot.getBoundingClientRect().left;
+  widthHandleDragHitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
+  widthHandleDragMinimapReservedWidth = getCurrentMinimapReservedWidth();
+}
+
+function updateWidthHandleDragPreviewPosition(previewMaxWidth: number): void {
+  if (!widthHandleRoot) {
+    return;
+  }
+
+  const widthDelta = previewMaxWidth - widthHandleStartMaxWidth;
+  const targetLeft = clampWidthHandleLeft({
+    candidateLeft: widthHandleDragStartLeft + widthDelta / 2,
+    hitArea: widthHandleDragHitArea,
+    minimapReservedWidth: widthHandleDragMinimapReservedWidth,
+    viewportWidth: window.innerWidth,
+  });
+  widthHandleRoot.style.transform = `translateX(${Math.round(targetLeft - widthHandleDragStartLeft)}px)`;
+}
+
 function postWidthDragMove(): void {
   if (widthDragFrameRequested) {
     return;
@@ -1218,8 +1437,39 @@ function postWidthDragMove(): void {
   widthDragFrameRequested = true;
   window.requestAnimationFrame(() => {
     widthDragFrameRequested = false;
+    widthDragPerfMovePosts++;
     postHostMessage({ type: "width-drag", phase: "move", deltaX: pendingWidthDragDeltaX });
   });
+}
+
+function resetWidthDragPerf(startMaxWidth: number): void {
+  widthDragPerfStartTime = typeof performance !== "undefined" ? performance.now() : undefined;
+  widthDragPerfMoveEvents = 0;
+  widthDragPerfMovePosts = 0;
+  widthDragPerfApplyFrames = 0;
+  widthDragPerfMaxApplyMs = 0;
+  widthDragPerfStartMaxWidth = startMaxWidth;
+  widthDragPerfLastMaxWidth = startMaxWidth;
+}
+
+function completeWidthDragPerf(reason: "end" | "cancel", deltaX: number): void {
+  const now = typeof performance !== "undefined" ? performance.now() : undefined;
+  const durationMs = widthDragPerfStartTime !== undefined && now !== undefined
+    ? Math.max(0, now - widthDragPerfStartTime)
+    : 0;
+  postPerfMark(`mm-width-drag-${reason}`, {
+    durationMs: Number(durationMs.toFixed(1)),
+    moveEvents: widthDragPerfMoveEvents,
+    movePosts: widthDragPerfMovePosts,
+    applyFrames: widthDragPerfApplyFrames,
+    maxApplyMs: Number(widthDragPerfMaxApplyMs.toFixed(1)),
+    deltaX: Number(deltaX.toFixed(1)),
+    startMaxWidth: Number(widthDragPerfStartMaxWidth.toFixed(1)),
+    finalMaxWidth: Number(widthDragPerfLastMaxWidth.toFixed(1)),
+    minimapVisible: minimapRoot ? !minimapRoot.hidden : false,
+    minimapMode,
+  });
+  widthDragPerfStartTime = undefined;
 }
 
 function handleWidthHandlePointerDown(event: PointerEvent): void {
@@ -1238,6 +1488,13 @@ function handleWidthHandlePointerDown(event: PointerEvent): void {
   widthHandleStartMaxWidth = Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0
     ? inlineMaxWidth
     : (lastAppliedReadingPreferences?.maxWidth ?? 720);
+  captureWidthHandleDragGeometry();
+  resetWidthDragPerf(widthHandleStartMaxWidth);
+  postPerfMark("mm-width-drag-start", {
+    startMaxWidth: Number(widthHandleStartMaxWidth.toFixed(1)),
+    minimapVisible: minimapRoot ? !minimapRoot.hidden : false,
+    minimapMode,
+  });
   widthHandleRoot.classList.add(WIDTH_HANDLE_DRAGGING_CLASS);
   widthHandleRoot.setPointerCapture(event.pointerId);
   postHostMessage({ type: "width-drag", phase: "start", deltaX: 0 });
@@ -1254,6 +1511,7 @@ function handleWidthHandlePointerMove(event: PointerEvent): void {
   // forced sync layout per event, which on heavy formula-dense documents
   // becomes layout-thrashing. Coalesce into a single rAF flush — at most
   // one reflow per animation frame, regardless of pointermove rate.
+  widthDragPerfMoveEvents++;
   pendingWidthDragDeltaX = event.clientX - widthHandleStartClientX;
   scheduleWidthDragApply();
   postWidthDragMove();
@@ -1277,27 +1535,25 @@ function scheduleWidthDragApply(): void {
     // Min mirrors host's clamp (sent via reading-preferences as minMaxWidth);
     // fallback constant matches host's MinManualContentWidth in case the
     // message hasn't arrived yet (drag started before first prefs message).
+    const applyStart = typeof performance !== "undefined" ? performance.now() : undefined;
     const previewMaxWidth = Math.max(hostMinMaxWidth, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
+    widthDragPerfLastMaxWidth = previewMaxWidth;
     document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
-    // Canonical handle re-alignment. ONE source of truth — reads actual
-    // .mm-document.right + paddingRight after the CSS var change, places
-    // handle at textRight + hit-area. The previous synthetic delta-math
-    // (`startLeft + columnDelta/2`) was wrong whenever the rendered column
-    // width disagreed with `previewMaxWidth`: viewport clamps, content
-    // min-width forced by wide formulas/code blocks/tables, or scrollbar-
-    // gutter all break the assumption. Symptom was "handle drifts onto
-    // text during drag, snaps back on release" — the snap was the
-    // canonical re-sync at pointerUp telling the truth. Cost: one forced
-    // layout flush per rAF; the previous path also forced one (via the
-    // minimap reserved-width read), so net cost is unchanged.
-    updateWidthHandlePosition();
-    // Live minimap update — track the source's new wrap during drag. Cost
-    // is one updateMinimapViewport per rAF (sync layout on source +
-    // minimap clone). With content-visibility on source blocks the source
-    // side is ~5%-cost; clone is not c-v-covered so reflow cost depends on
-    // clone block count. If perf regresses on heavy docs, throttle to
-    // every Nth frame here.
-    queueMinimapViewportUpdate();
+    // Keep drag JS under the 100ms budget: do not read .mm-document geometry
+    // after changing --mm-document-max-width. That forced Chromium to lay out
+    // the heavy document inside this frame. The handle follows the preferred
+    // width from the pointerdown snapshot, then pointerup/cancel performs one
+    // canonical geometry read to reconcile exact clamped/content-constrained x.
+    updateWidthHandleDragPreviewPosition(previewMaxWidth);
+    // Do not update the detailed minimap clone on every drag frame. The clone
+    // path reads its full scrollHeight, so heavy documents turn a width drag
+    // into full-document reflow work. Keep the visible minimap stable during
+    // drag and reconcile it once on pointerup/cancel below.
+    if (applyStart !== undefined && typeof performance !== "undefined") {
+      const duration = Math.max(0, performance.now() - applyStart);
+      widthDragPerfMaxApplyMs = Math.max(widthDragPerfMaxApplyMs, duration);
+    }
+    widthDragPerfApplyFrames++;
   });
 }
 
@@ -1309,6 +1565,9 @@ function handleWidthHandlePointerUp(event: PointerEvent): void {
   const deltaX = event.clientX - widthHandleStartClientX;
   widthHandleDragging = false;
   widthHandleRoot?.classList.remove(WIDTH_HANDLE_DRAGGING_CLASS);
+  if (widthHandleRoot) {
+    widthHandleRoot.style.transform = "";
+  }
   try {
     widthHandleRoot?.releasePointerCapture(event.pointerId);
   } catch {
@@ -1342,6 +1601,7 @@ function handleWidthHandlePointerUp(event: PointerEvent): void {
   // So the clone re-wraps to match the new source layout automatically — no
   // cloneNode needed. Saves ~50-100ms per drag-end on heavy formula docs.
   queueMinimapViewportUpdate();
+  completeWidthDragPerf("end", deltaX);
 
   postHostMessage({ type: "width-drag", phase: "end", deltaX });
   event.preventDefault();
@@ -1358,6 +1618,9 @@ function cancelWidthHandleDrag(): void {
 
   widthHandleDragging = false;
   widthHandleRoot?.classList.remove(WIDTH_HANDLE_DRAGGING_CLASS);
+  if (widthHandleRoot) {
+    widthHandleRoot.style.transform = "";
+  }
   // Same state-sync rationale as handleWidthHandlePointerUp.
   if (lastAppliedReadingPreferences !== null) {
     const inlineMaxWidth = parseFloat(
@@ -1372,6 +1635,7 @@ function cancelWidthHandleDrag(): void {
   }
   updateWidthHandlePosition();
   queueMinimapViewportUpdate();
+  completeWidthDragPerf("cancel", pendingWidthDragDeltaX);
   postHostMessage({ type: "width-drag", phase: "end", deltaX: pendingWidthDragDeltaX });
 }
 
@@ -1400,6 +1664,180 @@ function ensureMinimap(): void {
 
 // Read by Task 15 schedulePhaseBRebuild to decide if Phase B rebuild is needed.
 let minimapDocumentHeight = 0;
+
+function getDocumentScrollMetrics(): { documentHeight: number; viewportHeight: number } {
+  const root = document.scrollingElement ?? document.documentElement;
+  return {
+    documentHeight: root.scrollHeight,
+    viewportHeight: root.clientHeight,
+  };
+}
+
+function shouldBuildDetailedMinimapContent(): { allowed: boolean; reason?: string; documentHeight: number } {
+  const source = document.querySelector<HTMLElement>(".mm-document");
+  const { documentHeight, viewportHeight } = getDocumentScrollMetrics();
+  if (!source) {
+    return { allowed: false, reason: "no-source", documentHeight };
+  }
+
+  if (!hasReceivedHostPreferences) {
+    return { allowed: false, reason: "host-prefs-missing", documentHeight };
+  }
+
+  if (!viewerChromeEnabled) {
+    return { allowed: false, reason: "chrome-off", documentHeight };
+  }
+
+  if (minimapMode === "off") {
+    return { allowed: false, reason: "mode-off", documentHeight };
+  }
+
+  if (!minimapPolicy) {
+    return { allowed: false, reason: "policy-missing", documentHeight };
+  }
+
+  if (viewportHeight <= 0 || documentHeight <= viewportHeight) {
+    return { allowed: false, reason: "not-scrollable", documentHeight };
+  }
+
+  if (minimapMode === "auto" && documentHeight > minimapPolicy.maxDetailedDocumentHeight) {
+    return { allowed: false, reason: "auto-heavy", documentHeight };
+  }
+
+  return { allowed: true, documentHeight };
+}
+
+function isPolicyHeavyMinimapHeight(documentHeight: number): boolean {
+  return minimapPolicy !== null && documentHeight > minimapPolicy.maxDetailedDocumentHeight;
+}
+
+function shouldUsePolicyHeavySchematicMinimap(documentHeight: number): boolean {
+  return minimapMode === "on" && isPolicyHeavyMinimapHeight(documentHeight);
+}
+
+function getElementBlockLineCount(element: HTMLElement): number {
+  const sourceLine = Number.parseInt(element.getAttribute("data-mm-source-line") ?? "", 10);
+  const sourceEndLine = Number.parseInt(element.getAttribute("data-mm-source-end-line") ?? "", 10);
+  if (Number.isFinite(sourceLine) && Number.isFinite(sourceEndLine) && sourceEndLine >= sourceLine) {
+    return Math.max(1, sourceEndLine - sourceLine + 1);
+  }
+
+  return 1;
+}
+
+function mapElementToHeavySchematicKind(element: HTMLElement): DocumentBlockKind | null {
+  if (element.classList.contains("mm-mermaid")) {
+    return "mermaid";
+  }
+
+  const blockKind = element.getAttribute("data-mm-block-kind");
+  switch (blockKind) {
+    case "heading": {
+      const match = /^H([1-6])$/i.exec(element.tagName);
+      const level = match ? Number.parseInt(match[1] ?? "2", 10) : 2;
+      return (`heading-${level}`) as DocumentBlockKind;
+    }
+    case "paragraph": return "paragraph";
+    case "code": return "code";
+    case "math": return "math-display";
+    case "table": return "table";
+    case "list": return "list";
+    case "quote": return "quote";
+    case "rule": return "hr";
+    case "image":
+    case "unknown":
+      return "paragraph";
+    default:
+      return null;
+  }
+}
+
+function estimateHeavySchematicBlockWeight(kind: DocumentBlockKind, lineCount: number): number {
+  const lines = Math.max(1, lineCount);
+  if (kind.startsWith("heading-")) {
+    return 34 + lines * 10;
+  }
+
+  switch (kind) {
+    case "paragraph": return 18 + lines * 20;
+    case "code": return 36 + lines * 18;
+    case "math-display": return 74;
+    case "mermaid": return 128 + lines * 10;
+    case "table": return 42 + lines * 24;
+    case "list": return 24 + lines * 20;
+    case "quote": return 28 + lines * 20;
+    case "hr": return 24;
+    default: return 32;
+  }
+}
+
+function buildHeavySchematicBlocksFromDom(source: HTMLElement, documentHeight: number): DocumentBlock[] {
+  const seeds: Array<{ kind: DocumentBlockKind; weight: number }> = [];
+  for (let index = 0; index < source.children.length; index++) {
+    const child = source.children[index];
+    if (!(child instanceof HTMLElement)) {
+      continue;
+    }
+
+    const kind = mapElementToHeavySchematicKind(child);
+    if (!kind) {
+      continue;
+    }
+
+    seeds.push({
+      kind,
+      weight: estimateHeavySchematicBlockWeight(kind, getElementBlockLineCount(child)),
+    });
+  }
+
+  if (seeds.length === 0) {
+    return [{ kind: "paragraph", top: 0, height: Math.max(1, documentHeight) }];
+  }
+
+  const totalWeight = seeds.reduce((sum, seed) => sum + seed.weight, 0);
+  if (!Number.isFinite(totalWeight) || totalWeight <= 0) {
+    return [{ kind: "paragraph", top: 0, height: Math.max(1, documentHeight) }];
+  }
+
+  let top = 0;
+  return seeds.map((seed, index) => {
+    const isLast = index === seeds.length - 1;
+    const height = isLast
+      ? Math.max(1, documentHeight - top)
+      : Math.max(1, documentHeight * (seed.weight / totalWeight));
+    const block: DocumentBlock = {
+      kind: seed.kind,
+      top,
+      height,
+    };
+    top += height;
+    return block;
+  });
+}
+
+function refreshPolicyHeavySchematicMinimap(phase: "A" | "B", documentHeight: number): boolean {
+  const source = document.querySelector<HTMLElement>(".mm-document");
+  if (!source || !minimapContent) {
+    minimapSourceReady = false;
+    return false;
+  }
+
+  const documentWidth = calculateDocumentContentWidthFromCssModel(true);
+  const blocks = buildHeavySchematicBlocksFromDom(source, Math.max(1, documentHeight));
+  const svg = renderSchematicSvg(blocks, documentWidth, Math.max(1, documentHeight));
+  minimapContent.style.width = `${documentWidth}px`;
+  minimapContent.replaceChildren(svg);
+  minimapDocumentHeight = Math.max(1, documentHeight);
+  minimapSourceReady = true;
+  updateMinimapVisibility(true);
+  updateMinimapViewport({ skipVisibilityUpdate: true });
+  postPerfMark("mm-minimap-heavy-schematic", {
+    phase,
+    documentHeight: minimapDocumentHeight,
+    blocks: blocks.length,
+  });
+  return true;
+}
 
 function cloneDocumentForMinimap(): HTMLElement | null {
   const source = document.querySelector<HTMLElement>(".mm-document");
@@ -1454,6 +1892,38 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
     postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-mount" });
     return;
   }
+  const buildDecision = shouldBuildDetailedMinimapContent();
+  if (!buildDecision.allowed) {
+    minimapSourceReady = false;
+    minimapDocumentHeight = buildDecision.documentHeight;
+    minimapContent.replaceChildren();
+    updateMinimapVisibility(true);
+    emitMark("mm-minimap-refresh-skipped", {
+      phase,
+      reason: buildDecision.reason ?? "not-allowed",
+      documentHeight: buildDecision.documentHeight
+    });
+    postPerfMark("mm-minimap-refresh-skipped", {
+      phase,
+      reason: buildDecision.reason ?? "not-allowed",
+      documentHeight: buildDecision.documentHeight
+    });
+    return;
+  }
+  if (shouldUsePolicyHeavySchematicMinimap(buildDecision.documentHeight)
+    && refreshPolicyHeavySchematicMinimap(phase, buildDecision.documentHeight)) {
+    emitMark("mm-minimap-refresh-end", {
+      phase,
+      documentHeight: minimapDocumentHeight,
+      schematic: true
+    });
+    postPerfMark("mm-minimap-refresh-end", {
+      phase,
+      documentHeight: minimapDocumentHeight,
+      schematic: true
+    });
+    return;
+  }
   const clone = cloneDocumentForMinimap();
   if (!clone) {
     emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
@@ -1462,11 +1932,26 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   }
   const root = document.scrollingElement ?? document.documentElement;
   minimapDocumentHeight = root.scrollHeight;
+  if (isPolicyHeavyMinimapDocument()) {
+    minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
+  }
   minimapContent.replaceChildren(clone);
   updateMinimapVisibility(true);
-  updateMinimapViewport();
+  updateMinimapViewport({ skipVisibilityUpdate: true });
   emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
   postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
+}
+
+function ensureDetailedMinimapContentForVisiblePath(phase: "A" | "B" = "A"): void {
+  if (minimapSourceReady || !shouldBuildDetailedMinimapContent().allowed) {
+    return;
+  }
+
+  if (minimapContentRefreshTimer !== undefined) {
+    window.clearTimeout(minimapContentRefreshTimer);
+    minimapContentRefreshTimer = undefined;
+  }
+  refreshMinimapContent(phase);
 }
 
 function refreshInitialVisibleMinimapContent(): void {
@@ -1538,7 +2023,7 @@ function restoreCachedMinimapContent(): boolean {
 
     updateMinimapVisibility(true);
     updateMinimapViewport();
-    updateWidthHandlePosition();
+    updateWidthHandlePositionForCurrentLayout();
   });
   return true;
 }
@@ -1759,9 +2244,19 @@ function updateMinimapVisibility(forcePostState = false): boolean {
   // visibility actually transitioned.
   const changed = wasVisible !== visible || hadClass !== visible;
   if (changed) {
-    updateWidthHandlePosition();
+    updateWidthHandlePositionForCurrentLayout();
   }
   return changed;
+}
+
+function readConfiguredMinimapReservedWidth(): number {
+  const minimapGap = readRootPixelVariable("--mm-minimap-gap", 0);
+  const configuredMinimapWidth = readRootPixelVariable("--mm-minimap-width", 0);
+  if (configuredMinimapWidth > 0) {
+    return Math.max(0, configuredMinimapWidth + minimapGap * 2);
+  }
+
+  return 0;
 }
 
 function getCurrentMinimapReservedWidth(): number {
@@ -1769,8 +2264,13 @@ function getCurrentMinimapReservedWidth(): number {
     return 0;
   }
 
-  const minimapWidth = minimapRoot.getBoundingClientRect().width || readRootPixelVariable("--mm-minimap-width", 0);
+  const configuredReservedWidth = readConfiguredMinimapReservedWidth();
+  if (configuredReservedWidth > 0) {
+    return configuredReservedWidth;
+  }
+
   const minimapGap = readRootPixelVariable("--mm-minimap-gap", 0);
+  const minimapWidth = minimapRoot.getBoundingClientRect().width;
   return Math.max(0, minimapWidth + minimapGap * 2);
 }
 
@@ -1790,8 +2290,9 @@ function postTransactionMinimapSettled(transactionGeneration: number): void {
     return;
   }
 
+  ensureDetailedMinimapContentForVisiblePath();
   updateMinimapVisibility(true);
-  updateMinimapViewport();
+  updateMinimapViewport({ skipVisibilityUpdate: true });
   const visible = minimapRoot ? !minimapRoot.hidden : false;
   const reservedWidth = visible ? getCurrentMinimapReservedWidth() : 0;
   postHostMessage({
@@ -1802,49 +2303,79 @@ function postTransactionMinimapSettled(transactionGeneration: number): void {
   });
 }
 
-function updateMinimapViewport(): void {
+function shouldMeasureMinimapCloneHeight(documentScrollHeight: number): boolean {
+  return !minimapPolicy || documentScrollHeight <= minimapPolicy.maxDetailedDocumentHeight;
+}
+
+type MinimapViewportUpdateOptions = {
+  skipVisibilityUpdate?: boolean;
+};
+
+function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void {
   ensureMinimap();
   if (!minimapRoot || !minimapContent || !minimapViewport) {
     return;
   }
 
-  const root = document.scrollingElement ?? document.documentElement;
-  const source = document.querySelector<HTMLElement>(".mm-document");
-  if (!source) {
+  if (options.skipVisibilityUpdate !== true) {
+    updateMinimapVisibility();
+  }
+  if (minimapRoot.hidden) {
+    currentMinimapLayout = null;
     return;
   }
 
-  const minimapHeight = minimapRoot.clientHeight;
-  const minimapWidth = minimapRoot.clientWidth;
+  const root = document.scrollingElement ?? document.documentElement;
   // root.scrollHeight / root.scrollTop describe the REAL scroll range the user
   // scrolls over; keep them as the basis for scroll PROGRESS so the thumb
   // tracks actual user scroll (thumb correctness is not negotiable).
-  const documentScrollHeight = root.scrollHeight;
-  const sourceStyle = getComputedStyle(source);
-  const documentWidth = calculateMinimapDocumentWidth({
-    borderBoxWidth: source.clientWidth || source.getBoundingClientRect().width,
-    paddingLeft: readPixelValue(sourceStyle.paddingLeft),
-    paddingRight: readPixelValue(sourceStyle.paddingRight),
-  });
-  const viewportHeight = root.clientHeight;
+  const knownPolicyHeavyDocument = isPolicyHeavyMinimapDocument();
+  const documentScrollHeight = knownPolicyHeavyDocument && minimapDocumentHeight > 0
+    ? minimapDocumentHeight
+    : root.scrollHeight;
+  const policyHeavyDocument = knownPolicyHeavyDocument
+    || (minimapPolicy !== null && documentScrollHeight > minimapPolicy.maxDetailedDocumentHeight);
+  const source = policyHeavyDocument ? null : document.querySelector<HTMLElement>(".mm-document");
+  if (!policyHeavyDocument && !source) {
+    return;
+  }
+  const minimapWidth = policyHeavyDocument
+    ? readRootPixelVariable("--mm-minimap-width", 136)
+    : minimapRoot.clientWidth;
+  const minimapHeight = policyHeavyDocument
+    ? Math.max(0, window.innerHeight - 128)
+    : minimapRoot.clientHeight;
+  const documentWidth = policyHeavyDocument
+    ? calculateDocumentContentWidthFromCssModel(!minimapRoot.hidden)
+    : (() => {
+        const sourceElement = source!;
+        const sourceStyle = getComputedStyle(sourceElement);
+        return calculateMinimapDocumentWidth({
+          borderBoxWidth: sourceElement.clientWidth || sourceElement.getBoundingClientRect().width,
+          paddingLeft: readPixelValue(sourceStyle.paddingLeft),
+          paddingRight: readPixelValue(sourceStyle.paddingRight),
+        });
+      })();
+  const viewportHeight = policyHeavyDocument
+    ? Math.max(0, window.innerHeight)
+    : root.clientHeight;
   if (minimapHeight <= 0 || minimapWidth <= 0 || documentScrollHeight <= 0 || viewportHeight <= 0) {
     return;
   }
 
   // Content height must be the CLONE's true rendered height, not
-  // root.scrollHeight. The minimap clone is intentionally NOT content-
-  // visibility-covered (the `body > main.mm-document > *` rule in renderer.css
-  // does not match the clone under aside.mm-minimap), so it renders every block
-  // at full height. root.scrollHeight, by contrast, is the content-visibility
-  // ESTIMATE (`contain-intrinsic-size: auto 120px` per not-yet-rendered block)
-  // and badly underestimates a heavy document until every block has scrolled
-  // into view. Driving the content translate from root.scrollHeight stopped the
-  // minimap short of the bottom ("content doesn't reach the middle at full
-  // scroll"). Lay the clone out at the source width first, then measure it.
-  // Re-setting width to the same value on plain scroll is a no-op, so the
-  // scrollHeight read stays cheap (no per-frame clone reflow).
-  minimapContent.style.width = `${documentWidth}px`;
-  const measuredContentHeight = minimapContent.scrollHeight;
+  // root.scrollHeight for ordinary documents: the minimap clone is intentionally
+  // NOT content-visibility-covered, so exact clone height keeps bottom mapping
+  // precise. On policy-heavy documents in explicit `on` mode, that first clone
+  // scrollHeight read is itself a full-clone synchronous layout; use the source
+  // scroll range instead and keep interaction under the 100ms heavy-doc budget.
+  const nextContentWidth = `${documentWidth}px`;
+  if (minimapContent.style.width !== nextContentWidth) {
+    minimapContent.style.width = nextContentWidth;
+  }
+  const measuredContentHeight = shouldMeasureMinimapCloneHeight(documentScrollHeight)
+    ? minimapContent.scrollHeight
+    : 0;
   const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
 
   // Bridge the two coordinate systems (real content-visibility scroll range vs.
@@ -2002,6 +2533,14 @@ function queueMinimapRefreshAfterLayoutSettles(): void {
   }, MINIMAP_REFRESH_DEBOUNCE_MS);
 }
 
+function queueMinimapContentRefreshAfterLayoutSettles(phase: "A" | "B" = "A"): void {
+  window.clearTimeout(minimapContentRefreshTimer);
+  minimapContentRefreshTimer = window.setTimeout(() => {
+    minimapContentRefreshTimer = undefined;
+    refreshMinimapContent(phase);
+  }, MINIMAP_REFRESH_DEBOUNCE_MS);
+}
+
 // Coalesces resize-time reactive work to at most one synchronous-layout pass
 // per frame. Both `window.addEventListener("resize", ...)` and the
 // ResizeObserver watching .mm-document + body route through this. Without
@@ -2023,12 +2562,12 @@ function scheduleResizeReactions(): void {
   window.requestAnimationFrame(() => {
     resizeReactFrameRequested = false;
     if (widthHandleDragging) {
-      // The drag pipeline (scheduleWidthDragApply) already calls
-      // updateWidthHandlePosition + queueMinimapViewportUpdate canonically
-      // each rAF. Resize ticks during drag must not double-process.
+      // The drag pipeline owns width preview during pointer drag and performs
+      // canonical handle/minimap reconciliation on release.
+      // Resize ticks during drag must not double-process.
       return;
     }
-    updateWidthHandlePosition();
+    updateWidthHandlePositionForCurrentLayout();
     queueMinimapViewportUpdate();
   });
 }
@@ -2090,7 +2629,7 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
     viewerChromeEnabled = false;
     applyViewerChromeState();
     updateMinimapVisibility(true);
-    updateWidthHandlePosition();
+    updateWidthHandlePositionForCurrentLayout();
   }
   if (applyPrefsFrameRequested) return;
   applyPrefsFrameRequested = true;
@@ -2151,9 +2690,9 @@ function flushPendingReadingPreferences(): void {
     // is resized (Codex polish-05 r1 finding).
     if (!viewerChromeEnabled) {
       updateMinimapVisibility(true);
-      updateWidthHandlePosition();
+      updateWidthHandlePositionForCurrentLayout();
     } else {
-      updateWidthHandlePosition();
+      updateWidthHandlePositionForCurrentLayout();
     }
   }
   if (documentScrollChanged) {
@@ -2189,7 +2728,11 @@ function flushPendingReadingPreferences(): void {
     || minimapModeChanged
     || viewerChromeChanged;
   if (layoutAffectingChange) {
-    scheduleHeavyLiveUpdate();
+    if (!minimapSourceReady && shouldBuildDetailedMinimapContent().allowed) {
+      queueMinimapContentRefreshAfterLayoutSettles();
+    } else {
+      scheduleHeavyLiveUpdate();
+    }
   }
 
   if (!hadHostPreferences && !initialRenderPipelineCompleted) {
@@ -2252,7 +2795,11 @@ function handleHostMessage(raw: unknown): void {
 
   if (message.type === "minimap-policy") {
     minimapPolicy = message.minimapPolicy;
-    queueMinimapViewportUpdate();
+    if (!minimapSourceReady && shouldBuildDetailedMinimapContent().allowed) {
+      queueMinimapContentRefreshAfterLayoutSettles();
+    } else {
+      queueMinimapViewportUpdate();
+    }
     return;
   }
 
@@ -2398,6 +2945,7 @@ function handleHostMessage(raw: unknown): void {
       }
     };
     flushPendingReadingPreferences();
+    ensureDetailedMinimapContentForVisiblePath();
     if (message.skipFrameWait === true) {
       postPerfMark("mm-mode-settle-frame-wait-skipped", {
         transactionGeneration,
@@ -2412,7 +2960,7 @@ function handleHostMessage(raw: unknown): void {
       }
 
       updateMinimapViewport();
-      updateWidthHandlePosition();
+      updateWidthHandlePositionForCurrentLayout();
       window.requestAnimationFrame(() => {
         if (!isCurrentProbe()) {
           return;
@@ -2442,9 +2990,10 @@ function handleHostMessage(raw: unknown): void {
 
       postPerfMark("mm-mode-settle-first-raf");
       flushPendingReadingPreferences();
+      ensureDetailedMinimapContentForVisiblePath();
       updateMinimapVisibility();
       updateMinimapViewport();
-      updateWidthHandlePosition();
+      updateWidthHandlePositionForCurrentLayout();
 
       if (!viewerChromeEnabled) {
         completeModeToggleSettleAfterPaint();
@@ -2458,9 +3007,10 @@ function handleHostMessage(raw: unknown): void {
 
         postPerfMark("mm-mode-settle-second-raf");
         flushPendingReadingPreferences();
+        ensureDetailedMinimapContentForVisiblePath();
         updateMinimapVisibility();
         updateMinimapViewport();
-        updateWidthHandlePosition();
+        updateWidthHandlePositionForCurrentLayout();
         completeModeToggleSettleAfterPaint();
       });
     };
@@ -2574,6 +3124,18 @@ function resetModuleGlobalsForLoadDocument(): void {
     window.clearTimeout(layoutReadyTimer);
     layoutReadyTimer = undefined;
   }
+  if (minimapContentRefreshTimer !== undefined) {
+    window.clearTimeout(minimapContentRefreshTimer);
+    minimapContentRefreshTimer = undefined;
+  }
+  if (cachedGeometryRefreshTimer !== undefined) {
+    window.clearTimeout(cachedGeometryRefreshTimer);
+    cachedGeometryRefreshTimer = undefined;
+  }
+  if (mermaidCacheResumeTimer !== undefined) {
+    window.clearTimeout(mermaidCacheResumeTimer);
+    mermaidCacheResumeTimer = undefined;
+  }
   postLayoutReadyWorkQueue = [];
   if (themeMermaidRefreshTimer !== undefined) {
     window.clearTimeout(themeMermaidRefreshTimer);
@@ -2624,7 +3186,7 @@ function ensureChromeNodes(useCachedDocumentState = false): void {
   ensureDropOverlay();
   // Width-handle X depends on the new .mm-document bounding rect after innerHTML
   // swap; ensureWidthHandle only ensures the node exists.
-  updateWidthHandlePosition();
+  updateWidthHandlePositionForCurrentLayout();
   // Cold path still needs a synchronous Phase A seed because cancelled async
   // pipelines may never reach initialVisibleReady. Cache hits carry the already
   // rendered minimap DOM, so restore it here and defer geometry reconciliation
@@ -2709,6 +3271,7 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
       });
       postCachedLayoutReady();
       postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
+      scheduleCachedMermaidResume(hasMermaid);
     },
   };
 }
@@ -3080,12 +3643,12 @@ document.addEventListener("DOMContentLoaded", () => {
   //     appearing/disappearing as content-visibility blocks settle their real
   //     heights → shifts .mm-document's centered position without changing
   //     its own size, invisible to the .mm-document observer)
-  // Gated during drag because scheduleWidthDragApply already calls
-  // updateWidthHandlePosition canonically each rAF — we don't want to
-  // double-update during drag AND we want to skip the heavy minimap rebuild
-  // until drag settles. Minimap visibility toggles call updateWidthHandle-
-  // Position directly (see updateMinimapVisibility) so they don't depend on
-  // this observer landing in the same frame as the body class change.
+  // Gated during drag because scheduleWidthDragApply owns the live preview
+  // without synchronous .mm-document geometry reads; canonical handle position
+  // and minimap viewport are reconciled once the drag settles. Minimap
+  // visibility toggles call updateWidthHandlePosition directly (see
+  // updateMinimapVisibility) so they don't depend on this observer landing in
+  // the same frame as the body class change.
   const documentElement = document.querySelector<HTMLElement>(".mm-document");
   if (documentElement) {
     const resizeObserver = new ResizeObserver(() => {

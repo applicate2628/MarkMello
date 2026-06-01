@@ -5,6 +5,7 @@ using System.ComponentModel;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Templates;
 using Avalonia.Controls.Shapes;
 using Avalonia.Input;
 using Avalonia.Layout;
@@ -38,12 +39,13 @@ namespace MarkMello.Applicate.Desktop.Views;
 public sealed class ApplicateTocPanel : UserControl
 {
     private readonly ScrollViewer _scroll;
-    private readonly StackPanel _itemsHost;
+    private readonly ItemsControl _itemsControl;
     private readonly TextBlock _emptyState;
     private readonly Border _rootBorder;
     private readonly Border _separator;
     private MainWindowViewModel? _viewModel;
     private readonly Dictionary<string, Border> _rowsById = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _rowIndexById = new(StringComparer.Ordinal);
 
     // Cached theme brushes — refreshed in ApplyThemeBrushes() on attach and
     // on every theme-variant change. A single resolve cycle covers every
@@ -71,25 +73,25 @@ public sealed class ApplicateTocPanel : UserControl
             IsVisible = false,
         };
 
-        _itemsHost = new StackPanel
+        _itemsControl = new ItemsControl
         {
-            Orientation = Orientation.Vertical,
             // Top padding = 8 keeps first heading row visually breathing
             // against the panel top edge without re-introducing the header
             // bar. The close button overlay (top-right) sits in the same
             // visual band but is hit-test isolated.
             Margin = new Thickness(4, 8, 4, 16),
+            ItemsPanel = new FuncTemplate<Panel?>(() => new VirtualizingStackPanel
+            {
+                Orientation = Orientation.Vertical,
+            }),
+            ItemTemplate = new FuncDataTemplate<DocumentHeading>(
+                (heading, _) => BuildHeadingRow(heading),
+                false),
         };
 
-        var scrollContent = new StackPanel
-        {
-            Orientation = Orientation.Vertical,
-            Children =
-            {
-                _emptyState,
-                _itemsHost,
-            },
-        };
+        var scrollContent = new Grid();
+        scrollContent.Children.Add(_itemsControl);
+        scrollContent.Children.Add(_emptyState);
 
         _scroll = new ScrollViewer
         {
@@ -226,8 +228,9 @@ public sealed class ApplicateTocPanel : UserControl
         }
         else
         {
-            _itemsHost.Children.Clear();
+            _itemsControl.ItemsSource = null;
             _rowsById.Clear();
+            _rowIndexById.Clear();
             _emptyState.IsVisible = false;
         }
     }
@@ -279,14 +282,15 @@ public sealed class ApplicateTocPanel : UserControl
 
     private void RebuildRows(IEnumerable<DocumentHeading> headings)
     {
-        _itemsHost.Children.Clear();
         _rowsById.Clear();
+        _rowIndexById.Clear();
+        var index = 0;
         foreach (var heading in headings)
         {
-            var row = BuildHeadingRow(heading);
-            _itemsHost.Children.Add(row);
-            _rowsById[heading.Id] = row;
+            _rowIndexById[heading.Id] = index;
+            index++;
         }
+        _itemsControl.ItemsSource = headings;
     }
 
     private Border BuildHeadingRow(DocumentHeading heading)
@@ -332,11 +336,27 @@ public sealed class ApplicateTocPanel : UserControl
             Child = contentGrid,
         };
 
+        _rowsById[heading.Id] = row;
         row.PointerEntered += OnRowPointerEntered;
         row.PointerExited += OnRowPointerExited;
         row.PointerPressed += OnRowPointerPressed;
+        row.DetachedFromVisualTree += OnRowDetached;
+        RefreshRowVisuals(row);
 
         return row;
+    }
+
+    private void OnRowDetached(object? sender, VisualTreeAttachmentEventArgs e)
+    {
+        if (sender is not Border row || row.Tag is not DocumentHeading heading)
+        {
+            return;
+        }
+
+        if (_rowsById.TryGetValue(heading.Id, out var current) && ReferenceEquals(current, row))
+        {
+            _rowsById.Remove(heading.Id);
+        }
     }
 
     private void OnRowPointerEntered(object? sender, PointerEventArgs e)
@@ -400,6 +420,9 @@ public sealed class ApplicateTocPanel : UserControl
     }
 
     private void HighlightActiveHeading(string? activeId)
+        => HighlightActiveHeading(activeId, allowVirtualizedScroll: true);
+
+    private void HighlightActiveHeading(string? activeId, bool allowVirtualizedScroll)
     {
         foreach (var pair in _rowsById)
         {
@@ -409,11 +432,20 @@ public sealed class ApplicateTocPanel : UserControl
             ApplyRowVisuals(row, isActive);
             if (isActive)
             {
-                // Scroll the active row into view so the user always sees
-                // their current position. Dispatch via UI thread to avoid
-                // racing the layout pass that places the row.
                 Dispatcher.UIThread.Post(() => ScrollRowIntoView(row), DispatcherPriority.Background);
+                return;
             }
+        }
+
+        if (allowVirtualizedScroll && !string.IsNullOrEmpty(activeId) && _rowIndexById.TryGetValue(activeId, out var index))
+        {
+            Dispatcher.UIThread.Post(
+                () =>
+                {
+                    _itemsControl.ScrollIntoView(index);
+                    Dispatcher.UIThread.Post(() => HighlightActiveHeading(activeId, allowVirtualizedScroll: false), DispatcherPriority.Background);
+                },
+                DispatcherPriority.Background);
         }
     }
 

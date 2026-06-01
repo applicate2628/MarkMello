@@ -625,6 +625,26 @@
   }
 
   // RendererWeb/src/schematicMinimap.ts
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function renderSchematicSvg(blocks, documentWidth, documentHeight) {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", `0 0 ${documentWidth} ${documentHeight}`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.style.width = `${documentWidth}px`;
+    svg.style.height = `${documentHeight}px`;
+    svg.style.display = "block";
+    for (const block of blocks) {
+      const rect = document.createElementNS(SVG_NS, "rect");
+      rect.setAttribute("x", "0");
+      rect.setAttribute("y", String(block.top));
+      rect.setAttribute("width", String(documentWidth));
+      rect.setAttribute("height", String(block.height));
+      rect.setAttribute("class", `mm-schematic-${block.kind}`);
+      rect.setAttribute("fill", `var(--mm-minimap-${block.kind}, currentColor)`);
+      svg.appendChild(rect);
+    }
+    return svg;
+  }
   var PHASE_B_HEIGHT_DELTA_THRESHOLD_PX = 100;
   function shouldTriggerPhaseB(currentHeight, cachedHeight) {
     if (cachedHeight <= 0) return false;
@@ -1173,6 +1193,9 @@
   var hasInitialLayoutSettled = false;
   var minimapViewportFrameRequested = false;
   var minimapRefreshTimer;
+  var minimapContentRefreshTimer;
+  var cachedGeometryRefreshTimer;
+  var mermaidCacheResumeTimer;
   var resizeReactFrameRequested = false;
   var modeToggleProbeFrameRequested = false;
   var modeToggleProbeToken = 0;
@@ -1215,8 +1238,18 @@
   var widthHandleStartClientX = 0;
   var widthHandleStartMaxWidth = 0;
   var pendingWidthDragDeltaX = 0;
+  var widthHandleDragStartLeft = 0;
+  var widthHandleDragHitArea = 24;
+  var widthHandleDragMinimapReservedWidth = 0;
   var widthDragFrameRequested = false;
   var widthDragApplyFrameRequested = false;
+  var widthDragPerfStartTime;
+  var widthDragPerfMoveEvents = 0;
+  var widthDragPerfMovePosts = 0;
+  var widthDragPerfApplyFrames = 0;
+  var widthDragPerfMaxApplyMs = 0;
+  var widthDragPerfStartMaxWidth = 0;
+  var widthDragPerfLastMaxWidth = 0;
   var layoutReadyGeneration = 0;
   var layoutReadyTimer;
   var postLayoutReadyWorkQueue = [];
@@ -1541,7 +1574,7 @@
       });
       refreshMinimapContent("A");
       hasInitialLayoutSettled = true;
-      updateWidthHandlePosition();
+      updateWidthHandlePositionForCurrentLayout();
     });
     controller.allMathRendered.then(() => {
       const allMathNodes = Array.from(document.querySelectorAll("[data-tex]"));
@@ -1568,11 +1601,7 @@
       maxTextSize: 1e5
     });
   }
-  async function renderMermaid() {
-    disconnectMermaidLazyObserver();
-    const mermaid = hostWindow.mermaid;
-    if (!mermaid) return;
-    const allNodes = Array.from(document.querySelectorAll("pre.mm-mermaid"));
+  async function renderMermaidNodes(allNodes, mermaid, perfMarkName = "mm-mermaid-visible-first") {
     if (allNodes.length === 0) return;
     const generation = ++mermaidRenderGeneration;
     mermaidLazyRenderQueue = Promise.resolve();
@@ -1580,7 +1609,7 @@
     const eagerNodes = allNodes.filter((node) => isMermaidNodeNearViewport(node, viewportHeight, MERMAID_EAGER_VIEWPORT_MARGIN_PX));
     const eagerSet = new Set(eagerNodes);
     const lazyNodes = allNodes.filter((node) => !eagerSet.has(node));
-    postPerfMark("mm-mermaid-visible-first", {
+    postPerfMark(perfMarkName, {
       total: allNodes.length,
       eager: eagerNodes.length,
       lazy: lazyNodes.length
@@ -1600,6 +1629,38 @@
     } finally {
       window.clearTimeout(watchdog);
     }
+  }
+  async function renderMermaid() {
+    disconnectMermaidLazyObserver();
+    const mermaid = hostWindow.mermaid;
+    if (!mermaid) return;
+    const allNodes = Array.from(document.querySelectorAll("pre.mm-mermaid"));
+    await renderMermaidNodes(allNodes, mermaid);
+  }
+  function scheduleCachedMermaidResume(hasMermaid) {
+    if (hasMermaid === false) {
+      return;
+    }
+    const cacheKey = currentDocumentCacheKey;
+    window.clearTimeout(mermaidCacheResumeTimer);
+    mermaidCacheResumeTimer = window.setTimeout(() => {
+      mermaidCacheResumeTimer = void 0;
+      if (cacheKey !== currentDocumentCacheKey) {
+        return;
+      }
+      disconnectMermaidLazyObserver();
+      const mermaid = hostWindow.mermaid;
+      if (!mermaid) {
+        postPerfMark("mm-mermaid-cache-resume-skipped", { reason: "no-mermaid-api" });
+        return;
+      }
+      const missingNodes = Array.from(document.querySelectorAll("pre.mm-mermaid:not(.is-rendered)"));
+      if (missingNodes.length === 0) {
+        postPerfMark("mm-mermaid-cache-resume-skipped", { reason: "all-rendered" });
+        return;
+      }
+      void renderMermaidNodes(missingNodes, mermaid, "mm-mermaid-cache-resume");
+    }, 0);
   }
   function getViewportHeightForMermaid() {
     const root = document.scrollingElement ?? document.documentElement;
@@ -1824,27 +1885,33 @@
     return Math.max(24, Math.min(viewportHeight * 0.38, viewportHeight - 24));
   }
   function postLayoutReady() {
-    const scrollState = getScrollState();
-    const topBlockIndex = findTopVisibleBlockIndex();
-    lastKnownLayoutState = { ...scrollState, topBlockIndex };
-    recordScrollIpc();
-    postHostMessage({
-      type: "scroll",
-      ...scrollState,
-      topBlockIndex
-    });
-    postHostMessage({
-      type: "layout-ready",
-      ...scrollState
-    });
-    postPerfMark("mm-layout-ready");
-    flushPostLayoutReadyWork();
+    try {
+      const scrollState = getScrollState();
+      const topBlockIndex = findTopVisibleBlockIndex();
+      lastKnownLayoutState = { ...scrollState, topBlockIndex };
+      recordScrollIpc();
+      postHostMessage({
+        type: "scroll",
+        ...scrollState,
+        topBlockIndex
+      });
+      postHostMessage({
+        type: "layout-ready",
+        ...scrollState
+      });
+      postPerfMark("mm-layout-ready");
+      flushPostLayoutReadyWork();
+    } catch (error) {
+      postPerfMark("mm-layout-ready-post-error", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
   }
   function postCachedLayoutReady() {
+    const cachedLayoutState = restoredCachedLayoutState;
     restoredCachedLayoutState = null;
-    const scrollState = getScrollState();
-    const topBlockIndex = findTopVisibleBlockIndex();
-    const layoutState = { ...scrollState, topBlockIndex };
+    const layoutState = cachedLayoutState !== null ? { ...cachedLayoutState } : { ...getScrollState(), topBlockIndex: findTopVisibleBlockIndex() };
     lastKnownLayoutState = { ...layoutState };
     recordScrollIpc();
     postHostMessage({
@@ -1863,6 +1930,30 @@
     });
     postPerfMark("mm-layout-ready", { cached: true });
     flushPostLayoutReadyWork();
+    if (cachedLayoutState !== null) {
+      queueCachedGeometryRefresh(cachedLayoutState.topBlockIndex);
+    }
+  }
+  function queueCachedGeometryRefresh(topBlockIndex) {
+    const cacheKey = currentDocumentCacheKey;
+    window.clearTimeout(cachedGeometryRefreshTimer);
+    cachedGeometryRefreshTimer = window.setTimeout(() => {
+      cachedGeometryRefreshTimer = void 0;
+      if (cacheKey !== currentDocumentCacheKey) {
+        return;
+      }
+      const scrollState = getScrollState();
+      const layoutState = { ...scrollState, topBlockIndex };
+      lastKnownLayoutState = { ...layoutState };
+      recordScrollIpc();
+      postHostMessage({
+        type: "scroll",
+        scrollTop: layoutState.scrollTop,
+        scrollHeight: layoutState.scrollHeight,
+        clientHeight: layoutState.clientHeight,
+        topBlockIndex: layoutState.topBlockIndex
+      });
+    }, 180);
   }
   function flushPostLayoutReadyWork() {
     if (postLayoutReadyWorkQueue.length === 0) {
@@ -1895,9 +1986,25 @@
   function scheduleLayoutReady(skipFrameWait = false) {
     const generation = ++layoutReadyGeneration;
     let completed = false;
+    let posted = false;
+    let frameFallbackTimer;
     if (layoutReadyTimer !== void 0) {
       window.clearTimeout(layoutReadyTimer);
     }
+    const post = (path) => {
+      if (posted || generation !== layoutReadyGeneration) {
+        return;
+      }
+      posted = true;
+      if (frameFallbackTimer !== void 0) {
+        window.clearTimeout(frameFallbackTimer);
+        frameFallbackTimer = void 0;
+      }
+      if (path === "frame-fallback") {
+        postPerfMark("mm-layout-ready-frame-fallback", { generation });
+      }
+      postLayoutReady();
+    };
     const complete = () => {
       if (completed || generation !== layoutReadyGeneration) {
         return;
@@ -1909,13 +2016,18 @@
       }
       if (skipFrameWait) {
         postPerfMark("mm-layout-ready-frame-wait-skipped");
-        postLayoutReady();
+        post("skip-frame-wait");
         return;
       }
+      frameFallbackTimer = window.setTimeout(() => {
+        post("frame-fallback");
+      }, 120);
       window.requestAnimationFrame(() => {
         window.requestAnimationFrame(() => {
           if (generation === layoutReadyGeneration) {
-            postLayoutReady();
+            post("raf");
+          } else {
+            postPerfMark("mm-layout-ready-frame-stale", { generation, current: layoutReadyGeneration });
           }
         });
       });
@@ -1981,6 +2093,91 @@
     });
     widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
   }
+  function updateWidthHandlePositionFromCssModel(minimapVisible) {
+    ensureWidthHandle();
+    if (!widthHandleRoot) {
+      return;
+    }
+    widthHandleRoot.hidden = !hasReceivedHostPreferences || !viewerChromeEnabled || !hasInitialLayoutSettled;
+    if (widthHandleRoot.hidden) {
+      return;
+    }
+    const documentElement = document.querySelector(".mm-document");
+    if (!documentElement) {
+      widthHandleRoot.hidden = true;
+      return;
+    }
+    const hitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
+    const basePadding = readRootPixelVariable("--mm-document-base-padding-x", 72);
+    const minimapReservedWidth = minimapVisible ? readConfiguredMinimapReservedWidth() : 0;
+    const inlineMaxWidth = Number.parseFloat(
+      document.documentElement.style.getPropertyValue("--mm-document-max-width")
+    );
+    const documentMaxWidth = Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0 ? inlineMaxWidth : lastAppliedReadingPreferences?.maxWidth ?? readRootPixelVariable("--mm-document-max-width", 820);
+    const borderBoxWidth = Math.min(
+      Math.max(0, window.innerWidth),
+      Math.max(0, documentMaxWidth + minimapReservedWidth)
+    );
+    const documentRight = (Math.max(0, window.innerWidth) + borderBoxWidth) / 2;
+    const clampedLeft = calculateWidthHandleLeft({
+      documentRight,
+      documentPaddingRight: basePadding + minimapReservedWidth,
+      hitArea,
+      minimapReservedWidth,
+      viewportWidth: window.innerWidth
+    });
+    widthHandleRoot.style.left = `${Math.round(clampedLeft)}px`;
+  }
+  function readDocumentMaxWidthFromCssModel() {
+    const inlineMaxWidth = Number.parseFloat(
+      document.documentElement.style.getPropertyValue("--mm-document-max-width")
+    );
+    return Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0 ? inlineMaxWidth : lastAppliedReadingPreferences?.maxWidth ?? readRootPixelVariable("--mm-document-max-width", 820);
+  }
+  function calculateDocumentContentWidthFromCssModel(minimapVisible) {
+    const basePadding = readRootPixelVariable("--mm-document-base-padding-x", 72);
+    const minimapReservedWidth = minimapVisible ? readConfiguredMinimapReservedWidth() : 0;
+    const borderBoxWidth = Math.min(
+      Math.max(0, window.innerWidth),
+      Math.max(0, readDocumentMaxWidthFromCssModel() + minimapReservedWidth)
+    );
+    return Math.max(1, borderBoxWidth - basePadding * 2 - minimapReservedWidth);
+  }
+  function isPolicyHeavyMinimapDocument() {
+    return isPolicyHeavyMinimapHeight(minimapDocumentHeight);
+  }
+  function updateWidthHandlePositionForCurrentLayout() {
+    if (isPolicyHeavyMinimapDocument()) {
+      updateWidthHandlePositionFromCssModel(minimapRoot ? !minimapRoot.hidden : false);
+      return;
+    }
+    updateWidthHandlePosition();
+  }
+  function captureWidthHandleDragGeometry() {
+    if (!widthHandleRoot) {
+      widthHandleDragStartLeft = 0;
+      widthHandleDragHitArea = 24;
+      widthHandleDragMinimapReservedWidth = 0;
+      return;
+    }
+    const inlineLeft = Number.parseFloat(widthHandleRoot.style.left);
+    widthHandleDragStartLeft = Number.isFinite(inlineLeft) ? inlineLeft : widthHandleRoot.getBoundingClientRect().left;
+    widthHandleDragHitArea = readRootPixelVariable("--mm-width-handle-hit-area", 24);
+    widthHandleDragMinimapReservedWidth = getCurrentMinimapReservedWidth();
+  }
+  function updateWidthHandleDragPreviewPosition(previewMaxWidth) {
+    if (!widthHandleRoot) {
+      return;
+    }
+    const widthDelta = previewMaxWidth - widthHandleStartMaxWidth;
+    const targetLeft = clampWidthHandleLeft({
+      candidateLeft: widthHandleDragStartLeft + widthDelta / 2,
+      hitArea: widthHandleDragHitArea,
+      minimapReservedWidth: widthHandleDragMinimapReservedWidth,
+      viewportWidth: window.innerWidth
+    });
+    widthHandleRoot.style.transform = `translateX(${Math.round(targetLeft - widthHandleDragStartLeft)}px)`;
+  }
   function postWidthDragMove() {
     if (widthDragFrameRequested) {
       return;
@@ -1988,8 +2185,35 @@
     widthDragFrameRequested = true;
     window.requestAnimationFrame(() => {
       widthDragFrameRequested = false;
+      widthDragPerfMovePosts++;
       postHostMessage({ type: "width-drag", phase: "move", deltaX: pendingWidthDragDeltaX });
     });
+  }
+  function resetWidthDragPerf(startMaxWidth) {
+    widthDragPerfStartTime = typeof performance !== "undefined" ? performance.now() : void 0;
+    widthDragPerfMoveEvents = 0;
+    widthDragPerfMovePosts = 0;
+    widthDragPerfApplyFrames = 0;
+    widthDragPerfMaxApplyMs = 0;
+    widthDragPerfStartMaxWidth = startMaxWidth;
+    widthDragPerfLastMaxWidth = startMaxWidth;
+  }
+  function completeWidthDragPerf(reason, deltaX) {
+    const now = typeof performance !== "undefined" ? performance.now() : void 0;
+    const durationMs = widthDragPerfStartTime !== void 0 && now !== void 0 ? Math.max(0, now - widthDragPerfStartTime) : 0;
+    postPerfMark(`mm-width-drag-${reason}`, {
+      durationMs: Number(durationMs.toFixed(1)),
+      moveEvents: widthDragPerfMoveEvents,
+      movePosts: widthDragPerfMovePosts,
+      applyFrames: widthDragPerfApplyFrames,
+      maxApplyMs: Number(widthDragPerfMaxApplyMs.toFixed(1)),
+      deltaX: Number(deltaX.toFixed(1)),
+      startMaxWidth: Number(widthDragPerfStartMaxWidth.toFixed(1)),
+      finalMaxWidth: Number(widthDragPerfLastMaxWidth.toFixed(1)),
+      minimapVisible: minimapRoot ? !minimapRoot.hidden : false,
+      minimapMode
+    });
+    widthDragPerfStartTime = void 0;
   }
   function handleWidthHandlePointerDown(event) {
     if (event.button !== 0 || !widthHandleRoot) {
@@ -2002,6 +2226,13 @@
       document.documentElement.style.getPropertyValue("--mm-document-max-width")
     );
     widthHandleStartMaxWidth = Number.isFinite(inlineMaxWidth) && inlineMaxWidth > 0 ? inlineMaxWidth : lastAppliedReadingPreferences?.maxWidth ?? 720;
+    captureWidthHandleDragGeometry();
+    resetWidthDragPerf(widthHandleStartMaxWidth);
+    postPerfMark("mm-width-drag-start", {
+      startMaxWidth: Number(widthHandleStartMaxWidth.toFixed(1)),
+      minimapVisible: minimapRoot ? !minimapRoot.hidden : false,
+      minimapMode
+    });
     widthHandleRoot.classList.add(WIDTH_HANDLE_DRAGGING_CLASS);
     widthHandleRoot.setPointerCapture(event.pointerId);
     postHostMessage({ type: "width-drag", phase: "start", deltaX: 0 });
@@ -2011,6 +2242,7 @@
     if (!widthHandleDragging) {
       return;
     }
+    widthDragPerfMoveEvents++;
     pendingWidthDragDeltaX = event.clientX - widthHandleStartClientX;
     scheduleWidthDragApply();
     postWidthDragMove();
@@ -2026,10 +2258,16 @@
       if (!widthHandleDragging) {
         return;
       }
+      const applyStart = typeof performance !== "undefined" ? performance.now() : void 0;
       const previewMaxWidth = Math.max(hostMinMaxWidth, widthHandleStartMaxWidth + 2 * pendingWidthDragDeltaX);
+      widthDragPerfLastMaxWidth = previewMaxWidth;
       document.documentElement.style.setProperty("--mm-document-max-width", `${previewMaxWidth}px`);
-      updateWidthHandlePosition();
-      queueMinimapViewportUpdate();
+      updateWidthHandleDragPreviewPosition(previewMaxWidth);
+      if (applyStart !== void 0 && typeof performance !== "undefined") {
+        const duration = Math.max(0, performance.now() - applyStart);
+        widthDragPerfMaxApplyMs = Math.max(widthDragPerfMaxApplyMs, duration);
+      }
+      widthDragPerfApplyFrames++;
     });
   }
   function handleWidthHandlePointerUp(event) {
@@ -2039,6 +2277,9 @@
     const deltaX = event.clientX - widthHandleStartClientX;
     widthHandleDragging = false;
     widthHandleRoot?.classList.remove(WIDTH_HANDLE_DRAGGING_CLASS);
+    if (widthHandleRoot) {
+      widthHandleRoot.style.transform = "";
+    }
     try {
       widthHandleRoot?.releasePointerCapture(event.pointerId);
     } catch {
@@ -2056,6 +2297,7 @@
     }
     updateWidthHandlePosition();
     queueMinimapViewportUpdate();
+    completeWidthDragPerf("end", deltaX);
     postHostMessage({ type: "width-drag", phase: "end", deltaX });
     event.preventDefault();
   }
@@ -2068,6 +2310,9 @@
     }
     widthHandleDragging = false;
     widthHandleRoot?.classList.remove(WIDTH_HANDLE_DRAGGING_CLASS);
+    if (widthHandleRoot) {
+      widthHandleRoot.style.transform = "";
+    }
     if (lastAppliedReadingPreferences !== null) {
       const inlineMaxWidth = parseFloat(
         document.documentElement.style.getPropertyValue("--mm-document-max-width")
@@ -2081,6 +2326,7 @@
     }
     updateWidthHandlePosition();
     queueMinimapViewportUpdate();
+    completeWidthDragPerf("cancel", pendingWidthDragDeltaX);
     postHostMessage({ type: "width-drag", phase: "end", deltaX: pendingWidthDragDeltaX });
   }
   function ensureMinimap() {
@@ -2102,6 +2348,169 @@
     minimapRoot.addEventListener("pointercancel", handleMinimapPointerUp);
   }
   var minimapDocumentHeight = 0;
+  function getDocumentScrollMetrics() {
+    const root = document.scrollingElement ?? document.documentElement;
+    return {
+      documentHeight: root.scrollHeight,
+      viewportHeight: root.clientHeight
+    };
+  }
+  function shouldBuildDetailedMinimapContent() {
+    const source = document.querySelector(".mm-document");
+    const { documentHeight, viewportHeight } = getDocumentScrollMetrics();
+    if (!source) {
+      return { allowed: false, reason: "no-source", documentHeight };
+    }
+    if (!hasReceivedHostPreferences) {
+      return { allowed: false, reason: "host-prefs-missing", documentHeight };
+    }
+    if (!viewerChromeEnabled) {
+      return { allowed: false, reason: "chrome-off", documentHeight };
+    }
+    if (minimapMode === "off") {
+      return { allowed: false, reason: "mode-off", documentHeight };
+    }
+    if (!minimapPolicy) {
+      return { allowed: false, reason: "policy-missing", documentHeight };
+    }
+    if (viewportHeight <= 0 || documentHeight <= viewportHeight) {
+      return { allowed: false, reason: "not-scrollable", documentHeight };
+    }
+    if (minimapMode === "auto" && documentHeight > minimapPolicy.maxDetailedDocumentHeight) {
+      return { allowed: false, reason: "auto-heavy", documentHeight };
+    }
+    return { allowed: true, documentHeight };
+  }
+  function isPolicyHeavyMinimapHeight(documentHeight) {
+    return minimapPolicy !== null && documentHeight > minimapPolicy.maxDetailedDocumentHeight;
+  }
+  function shouldUsePolicyHeavySchematicMinimap(documentHeight) {
+    return minimapMode === "on" && isPolicyHeavyMinimapHeight(documentHeight);
+  }
+  function getElementBlockLineCount(element) {
+    const sourceLine = Number.parseInt(element.getAttribute("data-mm-source-line") ?? "", 10);
+    const sourceEndLine = Number.parseInt(element.getAttribute("data-mm-source-end-line") ?? "", 10);
+    if (Number.isFinite(sourceLine) && Number.isFinite(sourceEndLine) && sourceEndLine >= sourceLine) {
+      return Math.max(1, sourceEndLine - sourceLine + 1);
+    }
+    return 1;
+  }
+  function mapElementToHeavySchematicKind(element) {
+    if (element.classList.contains("mm-mermaid")) {
+      return "mermaid";
+    }
+    const blockKind = element.getAttribute("data-mm-block-kind");
+    switch (blockKind) {
+      case "heading": {
+        const match = /^H([1-6])$/i.exec(element.tagName);
+        const level = match ? Number.parseInt(match[1] ?? "2", 10) : 2;
+        return `heading-${level}`;
+      }
+      case "paragraph":
+        return "paragraph";
+      case "code":
+        return "code";
+      case "math":
+        return "math-display";
+      case "table":
+        return "table";
+      case "list":
+        return "list";
+      case "quote":
+        return "quote";
+      case "rule":
+        return "hr";
+      case "image":
+      case "unknown":
+        return "paragraph";
+      default:
+        return null;
+    }
+  }
+  function estimateHeavySchematicBlockWeight(kind, lineCount) {
+    const lines = Math.max(1, lineCount);
+    if (kind.startsWith("heading-")) {
+      return 34 + lines * 10;
+    }
+    switch (kind) {
+      case "paragraph":
+        return 18 + lines * 20;
+      case "code":
+        return 36 + lines * 18;
+      case "math-display":
+        return 74;
+      case "mermaid":
+        return 128 + lines * 10;
+      case "table":
+        return 42 + lines * 24;
+      case "list":
+        return 24 + lines * 20;
+      case "quote":
+        return 28 + lines * 20;
+      case "hr":
+        return 24;
+      default:
+        return 32;
+    }
+  }
+  function buildHeavySchematicBlocksFromDom(source, documentHeight) {
+    const seeds = [];
+    for (let index = 0; index < source.children.length; index++) {
+      const child = source.children[index];
+      if (!(child instanceof HTMLElement)) {
+        continue;
+      }
+      const kind = mapElementToHeavySchematicKind(child);
+      if (!kind) {
+        continue;
+      }
+      seeds.push({
+        kind,
+        weight: estimateHeavySchematicBlockWeight(kind, getElementBlockLineCount(child))
+      });
+    }
+    if (seeds.length === 0) {
+      return [{ kind: "paragraph", top: 0, height: Math.max(1, documentHeight) }];
+    }
+    const totalWeight = seeds.reduce((sum, seed) => sum + seed.weight, 0);
+    if (!Number.isFinite(totalWeight) || totalWeight <= 0) {
+      return [{ kind: "paragraph", top: 0, height: Math.max(1, documentHeight) }];
+    }
+    let top = 0;
+    return seeds.map((seed, index) => {
+      const isLast = index === seeds.length - 1;
+      const height = isLast ? Math.max(1, documentHeight - top) : Math.max(1, documentHeight * (seed.weight / totalWeight));
+      const block = {
+        kind: seed.kind,
+        top,
+        height
+      };
+      top += height;
+      return block;
+    });
+  }
+  function refreshPolicyHeavySchematicMinimap(phase, documentHeight) {
+    const source = document.querySelector(".mm-document");
+    if (!source || !minimapContent) {
+      minimapSourceReady = false;
+      return false;
+    }
+    const documentWidth = calculateDocumentContentWidthFromCssModel(true);
+    const blocks = buildHeavySchematicBlocksFromDom(source, Math.max(1, documentHeight));
+    const svg = renderSchematicSvg(blocks, documentWidth, Math.max(1, documentHeight));
+    minimapContent.style.width = `${documentWidth}px`;
+    minimapContent.replaceChildren(svg);
+    minimapDocumentHeight = Math.max(1, documentHeight);
+    minimapSourceReady = true;
+    updateMinimapVisibility(true);
+    updateMinimapViewport({ skipVisibilityUpdate: true });
+    postPerfMark("mm-minimap-heavy-schematic", {
+      phase,
+      documentHeight: minimapDocumentHeight,
+      blocks: blocks.length
+    });
+    return true;
+  }
   function cloneDocumentForMinimap() {
     const source = document.querySelector(".mm-document");
     if (!source) {
@@ -2138,6 +2547,37 @@
       postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-mount" });
       return;
     }
+    const buildDecision = shouldBuildDetailedMinimapContent();
+    if (!buildDecision.allowed) {
+      minimapSourceReady = false;
+      minimapDocumentHeight = buildDecision.documentHeight;
+      minimapContent.replaceChildren();
+      updateMinimapVisibility(true);
+      emitMark("mm-minimap-refresh-skipped", {
+        phase,
+        reason: buildDecision.reason ?? "not-allowed",
+        documentHeight: buildDecision.documentHeight
+      });
+      postPerfMark("mm-minimap-refresh-skipped", {
+        phase,
+        reason: buildDecision.reason ?? "not-allowed",
+        documentHeight: buildDecision.documentHeight
+      });
+      return;
+    }
+    if (shouldUsePolicyHeavySchematicMinimap(buildDecision.documentHeight) && refreshPolicyHeavySchematicMinimap(phase, buildDecision.documentHeight)) {
+      emitMark("mm-minimap-refresh-end", {
+        phase,
+        documentHeight: minimapDocumentHeight,
+        schematic: true
+      });
+      postPerfMark("mm-minimap-refresh-end", {
+        phase,
+        documentHeight: minimapDocumentHeight,
+        schematic: true
+      });
+      return;
+    }
     const clone = cloneDocumentForMinimap();
     if (!clone) {
       emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
@@ -2146,11 +2586,24 @@
     }
     const root = document.scrollingElement ?? document.documentElement;
     minimapDocumentHeight = root.scrollHeight;
+    if (isPolicyHeavyMinimapDocument()) {
+      minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
+    }
     minimapContent.replaceChildren(clone);
     updateMinimapVisibility(true);
-    updateMinimapViewport();
+    updateMinimapViewport({ skipVisibilityUpdate: true });
     emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
     postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
+  }
+  function ensureDetailedMinimapContentForVisiblePath(phase = "A") {
+    if (minimapSourceReady || !shouldBuildDetailedMinimapContent().allowed) {
+      return;
+    }
+    if (minimapContentRefreshTimer !== void 0) {
+      window.clearTimeout(minimapContentRefreshTimer);
+      minimapContentRefreshTimer = void 0;
+    }
+    refreshMinimapContent(phase);
   }
   function postCachedMinimapState(state2) {
     ensureMinimap();
@@ -2193,7 +2646,7 @@
       }
       updateMinimapVisibility(true);
       updateMinimapViewport();
-      updateWidthHandlePosition();
+      updateWidthHandlePositionForCurrentLayout();
     });
     return true;
   }
@@ -2346,16 +2799,28 @@
     postMinimapState(visible, forcePostState);
     const changed = wasVisible !== visible || hadClass !== visible;
     if (changed) {
-      updateWidthHandlePosition();
+      updateWidthHandlePositionForCurrentLayout();
     }
     return changed;
+  }
+  function readConfiguredMinimapReservedWidth() {
+    const minimapGap = readRootPixelVariable("--mm-minimap-gap", 0);
+    const configuredMinimapWidth = readRootPixelVariable("--mm-minimap-width", 0);
+    if (configuredMinimapWidth > 0) {
+      return Math.max(0, configuredMinimapWidth + minimapGap * 2);
+    }
+    return 0;
   }
   function getCurrentMinimapReservedWidth() {
     if (!minimapRoot || minimapRoot.hidden) {
       return 0;
     }
-    const minimapWidth = minimapRoot.getBoundingClientRect().width || readRootPixelVariable("--mm-minimap-width", 0);
+    const configuredReservedWidth = readConfiguredMinimapReservedWidth();
+    if (configuredReservedWidth > 0) {
+      return configuredReservedWidth;
+    }
     const minimapGap = readRootPixelVariable("--mm-minimap-gap", 0);
+    const minimapWidth = minimapRoot.getBoundingClientRect().width;
     return Math.max(0, minimapWidth + minimapGap * 2);
   }
   function postMinimapState(visible, force = false) {
@@ -2371,8 +2836,9 @@
     if (!Number.isFinite(transactionGeneration) || transactionGeneration <= 0) {
       return;
     }
+    ensureDetailedMinimapContentForVisiblePath();
     updateMinimapVisibility(true);
-    updateMinimapViewport();
+    updateMinimapViewport({ skipVisibilityUpdate: true });
     const visible = minimapRoot ? !minimapRoot.hidden : false;
     const reservedWidth = visible ? getCurrentMinimapReservedWidth() : 0;
     postHostMessage({
@@ -2382,31 +2848,49 @@
       reservedWidth
     });
   }
-  function updateMinimapViewport() {
+  function shouldMeasureMinimapCloneHeight(documentScrollHeight) {
+    return !minimapPolicy || documentScrollHeight <= minimapPolicy.maxDetailedDocumentHeight;
+  }
+  function updateMinimapViewport(options = {}) {
     ensureMinimap();
     if (!minimapRoot || !minimapContent || !minimapViewport) {
       return;
     }
-    const root = document.scrollingElement ?? document.documentElement;
-    const source = document.querySelector(".mm-document");
-    if (!source) {
+    if (options.skipVisibilityUpdate !== true) {
+      updateMinimapVisibility();
+    }
+    if (minimapRoot.hidden) {
+      currentMinimapLayout = null;
       return;
     }
-    const minimapHeight = minimapRoot.clientHeight;
-    const minimapWidth = minimapRoot.clientWidth;
-    const documentScrollHeight = root.scrollHeight;
-    const sourceStyle = getComputedStyle(source);
-    const documentWidth = calculateMinimapDocumentWidth({
-      borderBoxWidth: source.clientWidth || source.getBoundingClientRect().width,
-      paddingLeft: readPixelValue(sourceStyle.paddingLeft),
-      paddingRight: readPixelValue(sourceStyle.paddingRight)
-    });
-    const viewportHeight = root.clientHeight;
+    const root = document.scrollingElement ?? document.documentElement;
+    const knownPolicyHeavyDocument = isPolicyHeavyMinimapDocument();
+    const documentScrollHeight = knownPolicyHeavyDocument && minimapDocumentHeight > 0 ? minimapDocumentHeight : root.scrollHeight;
+    const policyHeavyDocument = knownPolicyHeavyDocument || minimapPolicy !== null && documentScrollHeight > minimapPolicy.maxDetailedDocumentHeight;
+    const source = policyHeavyDocument ? null : document.querySelector(".mm-document");
+    if (!policyHeavyDocument && !source) {
+      return;
+    }
+    const minimapWidth = policyHeavyDocument ? readRootPixelVariable("--mm-minimap-width", 136) : minimapRoot.clientWidth;
+    const minimapHeight = policyHeavyDocument ? Math.max(0, window.innerHeight - 128) : minimapRoot.clientHeight;
+    const documentWidth = policyHeavyDocument ? calculateDocumentContentWidthFromCssModel(!minimapRoot.hidden) : (() => {
+      const sourceElement = source;
+      const sourceStyle = getComputedStyle(sourceElement);
+      return calculateMinimapDocumentWidth({
+        borderBoxWidth: sourceElement.clientWidth || sourceElement.getBoundingClientRect().width,
+        paddingLeft: readPixelValue(sourceStyle.paddingLeft),
+        paddingRight: readPixelValue(sourceStyle.paddingRight)
+      });
+    })();
+    const viewportHeight = policyHeavyDocument ? Math.max(0, window.innerHeight) : root.clientHeight;
     if (minimapHeight <= 0 || minimapWidth <= 0 || documentScrollHeight <= 0 || viewportHeight <= 0) {
       return;
     }
-    minimapContent.style.width = `${documentWidth}px`;
-    const measuredContentHeight = minimapContent.scrollHeight;
+    const nextContentWidth = `${documentWidth}px`;
+    if (minimapContent.style.width !== nextContentWidth) {
+      minimapContent.style.width = nextContentWidth;
+    }
+    const measuredContentHeight = shouldMeasureMinimapCloneHeight(documentScrollHeight) ? minimapContent.scrollHeight : 0;
     const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
     const realMaxScrollTop = Math.max(0, documentScrollHeight - viewportHeight);
     const scrollProgress = realMaxScrollTop > 0 ? Math.min(1, Math.max(0, root.scrollTop / realMaxScrollTop)) : 0;
@@ -2517,6 +3001,13 @@
       queueMinimapViewportUpdate();
     }, MINIMAP_REFRESH_DEBOUNCE_MS);
   }
+  function queueMinimapContentRefreshAfterLayoutSettles(phase = "A") {
+    window.clearTimeout(minimapContentRefreshTimer);
+    minimapContentRefreshTimer = window.setTimeout(() => {
+      minimapContentRefreshTimer = void 0;
+      refreshMinimapContent(phase);
+    }, MINIMAP_REFRESH_DEBOUNCE_MS);
+  }
   function scheduleResizeReactions() {
     if (resizeReactFrameRequested) {
       return;
@@ -2530,7 +3021,7 @@
       if (widthHandleDragging) {
         return;
       }
-      updateWidthHandlePosition();
+      updateWidthHandlePositionForCurrentLayout();
       queueMinimapViewportUpdate();
     });
   }
@@ -2567,7 +3058,7 @@
       viewerChromeEnabled = false;
       applyViewerChromeState();
       updateMinimapVisibility(true);
-      updateWidthHandlePosition();
+      updateWidthHandlePositionForCurrentLayout();
     }
     if (applyPrefsFrameRequested) return;
     applyPrefsFrameRequested = true;
@@ -2603,9 +3094,9 @@
       applyViewerChromeState();
       if (!viewerChromeEnabled) {
         updateMinimapVisibility(true);
-        updateWidthHandlePosition();
+        updateWidthHandlePositionForCurrentLayout();
       } else {
-        updateWidthHandlePosition();
+        updateWidthHandlePositionForCurrentLayout();
       }
     }
     if (documentScrollChanged) {
@@ -2625,7 +3116,11 @@
     lastAppliedReadingPreferences = next;
     const layoutAffectingChange = fontFamilyChanged || fontSizeChanged || lineHeightChanged || maxWidthChanged || minimapModeChanged || viewerChromeChanged;
     if (layoutAffectingChange) {
-      scheduleHeavyLiveUpdate();
+      if (!minimapSourceReady && shouldBuildDetailedMinimapContent().allowed) {
+        queueMinimapContentRefreshAfterLayoutSettles();
+      } else {
+        scheduleHeavyLiveUpdate();
+      }
     }
     if (!hadHostPreferences && !initialRenderPipelineCompleted) {
       const pipelineGeneration = ++initialRenderPipelineGeneration;
@@ -2674,7 +3169,11 @@
     }
     if (message.type === "minimap-policy") {
       minimapPolicy = message.minimapPolicy;
-      queueMinimapViewportUpdate();
+      if (!minimapSourceReady && shouldBuildDetailedMinimapContent().allowed) {
+        queueMinimapContentRefreshAfterLayoutSettles();
+      } else {
+        queueMinimapViewportUpdate();
+      }
       return;
     }
     if (message.type === "reading-preferences") {
@@ -2785,6 +3284,7 @@
         }
       };
       flushPendingReadingPreferences();
+      ensureDetailedMinimapContentForVisiblePath();
       if (message.skipFrameWait === true) {
         postPerfMark("mm-mode-settle-frame-wait-skipped", {
           transactionGeneration
@@ -2797,7 +3297,7 @@
           return;
         }
         updateMinimapViewport();
-        updateWidthHandlePosition();
+        updateWidthHandlePositionForCurrentLayout();
         window.requestAnimationFrame(() => {
           if (!isCurrentProbe()) {
             return;
@@ -2823,9 +3323,10 @@
         }
         postPerfMark("mm-mode-settle-first-raf");
         flushPendingReadingPreferences();
+        ensureDetailedMinimapContentForVisiblePath();
         updateMinimapVisibility();
         updateMinimapViewport();
-        updateWidthHandlePosition();
+        updateWidthHandlePositionForCurrentLayout();
         if (!viewerChromeEnabled) {
           completeModeToggleSettleAfterPaint();
           return;
@@ -2836,9 +3337,10 @@
           }
           postPerfMark("mm-mode-settle-second-raf");
           flushPendingReadingPreferences();
+          ensureDetailedMinimapContentForVisiblePath();
           updateMinimapVisibility();
           updateMinimapViewport();
-          updateWidthHandlePosition();
+          updateWidthHandlePositionForCurrentLayout();
           completeModeToggleSettleAfterPaint();
         });
       };
@@ -2925,6 +3427,18 @@
       window.clearTimeout(layoutReadyTimer);
       layoutReadyTimer = void 0;
     }
+    if (minimapContentRefreshTimer !== void 0) {
+      window.clearTimeout(minimapContentRefreshTimer);
+      minimapContentRefreshTimer = void 0;
+    }
+    if (cachedGeometryRefreshTimer !== void 0) {
+      window.clearTimeout(cachedGeometryRefreshTimer);
+      cachedGeometryRefreshTimer = void 0;
+    }
+    if (mermaidCacheResumeTimer !== void 0) {
+      window.clearTimeout(mermaidCacheResumeTimer);
+      mermaidCacheResumeTimer = void 0;
+    }
     postLayoutReadyWorkQueue = [];
     if (themeMermaidRefreshTimer !== void 0) {
       window.clearTimeout(themeMermaidRefreshTimer);
@@ -2953,7 +3467,7 @@
     ensureMinimap();
     ensureWidthHandle();
     ensureDropOverlay();
-    updateWidthHandlePosition();
+    updateWidthHandlePositionForCurrentLayout();
     if (!useCachedDocumentState || !restoreCachedMinimapContent()) {
       refreshMinimapContent("A");
     }
@@ -3030,6 +3544,7 @@
         });
         postCachedLayoutReady();
         postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
+        scheduleCachedMermaidResume(hasMermaid);
       }
     };
   }

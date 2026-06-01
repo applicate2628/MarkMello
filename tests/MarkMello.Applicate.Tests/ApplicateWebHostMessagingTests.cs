@@ -110,13 +110,23 @@ public sealed class ApplicateWebHostMessagingTests
         var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
         var rendererSource = File.ReadAllText(RendererSourcePath);
 
-        Assert.Contains("skipFrameWaitUntilRenderReady: transactionGeneration > 0", hostSource, StringComparison.Ordinal);
+        Assert.Contains("ShouldSkipRendererFrameWait(source, transactionGeneration)", hostSource, StringComparison.Ordinal);
+        Assert.Contains("skipFrameWaitUntilRenderReady: skipRendererFrameWait", hostSource, StringComparison.Ordinal);
         Assert.Contains("bool skipFrameWaitUntilRenderReady = false", viewSource, StringComparison.Ordinal);
         Assert.Contains("QueueRender(skipFrameWaitUntilRenderReady)", viewSource, StringComparison.Ordinal);
         Assert.Contains("skipFrameWait = true", viewSource, StringComparison.Ordinal);
         Assert.Contains("skipFrameWait?: boolean", rendererSource, StringComparison.Ordinal);
         Assert.Contains("mm-layout-ready-frame-wait-skipped", rendererSource, StringComparison.Ordinal);
         Assert.Contains("scheduleLayoutReady(skipFrameWait === true)", rendererSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void VeryHeavyRenderLoadDocumentSkipsRendererLayoutFrameWait()
+    {
+        var hostSource = File.ReadAllText(SharedWebViewHostSourcePath);
+
+        Assert.Contains("RendererFrameWaitSkipDocumentContentLength = 1024 * 1024", hostSource, StringComparison.Ordinal);
+        Assert.Contains("source?.Content.Length > RendererFrameWaitSkipDocumentContentLength", hostSource, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -150,6 +160,29 @@ public sealed class ApplicateWebHostMessagingTests
 
         Assert.DoesNotContain("TrySetCanceled", source, StringComparison.Ordinal);
         Assert.Contains("_shellReady.Task.WaitAsync(cancellationToken)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ShellReadyReentrantCallsWaitForPendingDocumentReady()
+    {
+        var source = File.ReadAllText(WebDocumentViewSourcePath);
+        var ensureShellReady = ExtractMethodBody(source, "internal async Task EnsureShellReadyAsync(");
+        var reentrantBranch = ExtractFromMarker(ensureShellReady, "if (_shellNavigated)");
+
+        Assert.Contains("if (_shellReady is not null)", reentrantBranch, StringComparison.Ordinal);
+        Assert.Contains("await _shellReady.Task.WaitAsync(cancellationToken).ConfigureAwait(true);", reentrantBranch, StringComparison.Ordinal);
+        Assert.DoesNotContain("if (_shellNavigated)\r\n        {\r\n            return;\r\n        }", ensureShellReady, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ShellPrewarmUsesPerViewGeneratedShellFile()
+    {
+        var source = File.ReadAllText(WebDocumentViewSourcePath);
+        var navigateShell = ExtractMethodBody(source, "private async Task NavigateToShellAsync(");
+
+        Assert.Contains("Interlocked.Increment(ref s_shellDocumentSequence)", source, StringComparison.Ordinal);
+        Assert.Contains("renderer-shell-{_shellDocumentId}.html", navigateShell, StringComparison.Ordinal);
+        Assert.DoesNotContain("Path.Combine(folder, \"renderer-shell.html\")", navigateShell, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -210,6 +243,33 @@ public sealed class ApplicateWebHostMessagingTests
     }
 
     [Fact]
+    public void ProgramPrimesActiveDocumentRenderedBodyCacheAfterPreRead()
+    {
+        var programSource = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Program.cs"));
+
+        var preReadCall = programSource.IndexOf("StartActiveDocumentPreRead(args, services);", StringComparison.Ordinal);
+        var primeMethod = programSource.IndexOf("PrimeActiveDocumentRenderedBodyCacheAsync", StringComparison.Ordinal);
+        var cacheResolve = programSource.IndexOf("GetRequiredService<ApplicateRenderedBodyCache>()", StringComparison.Ordinal);
+        var rendererResolve = programSource.IndexOf("GetRequiredService<IApplicateHtmlMarkdownRenderer>()", StringComparison.Ordinal);
+        var cacheRender = programSource.IndexOf(".GetOrRenderAsync(", StringComparison.Ordinal);
+
+        Assert.True(preReadCall >= 0, "Active-document pre-read should receive the DI provider.");
+        Assert.True(primeMethod > preReadCall, "Program should prime the rendered-body cache from the pre-read source.");
+        Assert.True(cacheResolve > primeMethod, "Body prime should use the shared rendered-body cache.");
+        Assert.True(rendererResolve > primeMethod, "Body prime should use the shared HTML renderer.");
+        Assert.True(cacheRender > primeMethod, "Body prime should populate through the cache owner.");
+    }
+
+    [Fact]
     public void DocumentSwitchCoverWaitsForPostReadyRevealSignal()
     {
         var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
@@ -228,5 +288,39 @@ public sealed class ApplicateWebHostMessagingTests
 
         Assert.Contains("postReadyEnhancementsCompleted", rendererSource, StringComparison.Ordinal);
         Assert.Contains("post-ready-enhancements-complete", rendererSource, StringComparison.Ordinal);
+    }
+
+    private static string ExtractFromMarker(string source, string marker)
+    {
+        var start = source.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{marker} should exist.");
+        return source[start..];
+    }
+
+    private static string ExtractMethodBody(string source, string signature)
+    {
+        var start = source.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{signature} should exist.");
+
+        var braceStart = source.IndexOf('{', start);
+        Assert.True(braceStart >= 0, $"{signature} should have a body.");
+
+        var depth = 0;
+        for (var index = braceStart; index < source.Length; index++)
+        {
+            depth += source[index] switch
+            {
+                '{' => 1,
+                '}' => -1,
+                _ => 0,
+            };
+
+            if (depth == 0)
+            {
+                return source[braceStart..(index + 1)];
+            }
+        }
+
+        throw new InvalidOperationException($"{signature} body was not closed.");
     }
 }

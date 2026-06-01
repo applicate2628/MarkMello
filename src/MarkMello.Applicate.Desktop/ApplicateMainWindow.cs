@@ -56,11 +56,12 @@ public sealed class ApplicateMainWindow : MainWindow
     // The inactive edit-preview prime warms Ctrl+E by rendering the active
     // document on the edit WebView before the user switches modes. Small docs
     // can prime immediately; heavy docs wait until the viewer has committed
-    // and the UI has had a short quiet period, so startup/tab reveal is not
-    // taxed but the first edit transition is still warmed when the user pauses
-    // on the document.
+    // and had one short post-reveal quiet period, so startup/tab reveal is not
+    // taxed but the first edit transition is warmed without a visible pause.
     private const int InactiveEditPrimeImmediateMaxDocumentContentLength = 256 * 1024;
-    private static readonly TimeSpan InactiveEditPrimeHeavyDelay = TimeSpan.FromMilliseconds(1400);
+    private const int InactiveEditPrimeVeryHeavyDocumentContentLength = 1024 * 1024;
+    private static readonly TimeSpan InactiveEditPrimeHeavyDelay = TimeSpan.FromMilliseconds(300);
+    private static readonly TimeSpan InactiveEditPrimeVeryHeavyDelay = TimeSpan.FromMilliseconds(1200);
 
     private Panel? _tabsContentPanel;
     private ApplicateSiblingMountBridge? _siblingMountBridge;
@@ -196,7 +197,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 () =>
                 {
                     waitForHeadings = viewModel.IsTocPreferredVisible && headings.Count > 0;
-                    headingsReady = !waitForHeadings || viewModel.HasDocumentHeadings;
+                    headingsReady = !waitForHeadings || headings.Count > 0;
                     TryRelease("headings-reported");
                 },
                 DispatcherPriority.Background);
@@ -1591,10 +1592,9 @@ public sealed class ApplicateMainWindow : MainWindow
             delayedHeavyPrimeViewportSize = viewportSize;
             delayedHeavyPrimeReady = false;
 
-            delayedHeavyPrimeTimer ??= new Avalonia.Threading.DispatcherTimer
-            {
-                Interval = InactiveEditPrimeHeavyDelay,
-            };
+            var delay = ResolveInactiveEditPrimeDelay(document.Content.Length);
+            delayedHeavyPrimeTimer ??= new Avalonia.Threading.DispatcherTimer();
+            delayedHeavyPrimeTimer.Interval = delay;
             delayedHeavyPrimeTimer.Tick -= OnDelayedHeavyPrimeTimerTick;
             delayedHeavyPrimeTimer.Tick += OnDelayedHeavyPrimeTimerTick;
             delayedHeavyPrimeTimer.Stop();
@@ -1603,8 +1603,13 @@ public sealed class ApplicateMainWindow : MainWindow
             ApplicateTrace.DiagMs(
                 "pane-seq",
                 "editpreview-inactive-prime-delayed-heavy",
-                $"source={document.Path} contentLength={document.Content.Length} threshold={InactiveEditPrimeImmediateMaxDocumentContentLength} delayMs={InactiveEditPrimeHeavyDelay.TotalMilliseconds:F0} viewport={viewportSize.Width:F0}x{viewportSize.Height:F0}");
+                $"source={document.Path} contentLength={document.Content.Length} threshold={InactiveEditPrimeImmediateMaxDocumentContentLength} veryHeavyThreshold={InactiveEditPrimeVeryHeavyDocumentContentLength} delayMs={delay.TotalMilliseconds:F0} viewport={viewportSize.Width:F0}x{viewportSize.Height:F0}");
         }
+
+        TimeSpan ResolveInactiveEditPrimeDelay(int contentLength)
+            => contentLength > InactiveEditPrimeVeryHeavyDocumentContentLength
+                ? InactiveEditPrimeVeryHeavyDelay
+                : InactiveEditPrimeHeavyDelay;
 
         void OnDelayedHeavyPrimeTimerTick(object? sender, EventArgs e)
         {
@@ -2415,7 +2420,9 @@ public sealed class ApplicateMainWindow : MainWindow
                     inVmMirror = false;
                 }
 
-                if (!string.Equals(viewModel.Document?.Path, toActivate.FilePath, System.StringComparison.OrdinalIgnoreCase))
+                var startupLoadIsPending = viewModel.IsOpeningPath(toActivate.FilePath);
+                if (!string.Equals(viewModel.Document?.Path, toActivate.FilePath, System.StringComparison.OrdinalIgnoreCase)
+                    && !startupLoadIsPending)
                 {
                     inServiceLoad = true;
                     try

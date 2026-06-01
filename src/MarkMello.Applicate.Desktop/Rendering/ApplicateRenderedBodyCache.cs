@@ -7,6 +7,7 @@ internal sealed class ApplicateRenderedBodyCache
 {
     private const int DefaultMaxEntries = 4;
     private readonly Dictionary<CacheKey, LinkedListNode<CacheEntry>> _entries = new();
+    private readonly Dictionary<CacheKey, Task<ApplicateRenderedBody>> _inFlight = new();
     private readonly object _gate = new();
     private readonly LinkedList<CacheEntry> _lru = new();
     private readonly int _maxEntries;
@@ -27,12 +28,15 @@ internal sealed class ApplicateRenderedBodyCache
         ArgumentNullException.ThrowIfNull(preferences);
         ArgumentNullException.ThrowIfNull(renderBodyAsync);
 
-        if (_maxEntries == 0 || imageSourceResolver is not null && MayResolveImages(source.Content))
+        if (!CanCache(source, imageSourceResolver))
         {
             return await renderBodyAsync(cancellationToken).ConfigureAwait(false);
         }
 
         var key = CacheKey.Create(source);
+        Task<ApplicateRenderedBody> renderTask;
+        TaskCompletionSource<ApplicateRenderedBody>? renderCompletion = null;
+        var createdRenderTask = false;
         lock (_gate)
         {
             if (_entries.TryGetValue(key, out var node))
@@ -41,38 +45,95 @@ internal sealed class ApplicateRenderedBodyCache
                 _lru.AddFirst(node);
                 return node.Value.Body;
             }
+
+            if (_inFlight.TryGetValue(key, out renderTask!))
+            {
+            }
+            else
+            {
+                renderCompletion = new TaskCompletionSource<ApplicateRenderedBody>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                renderTask = renderCompletion.Task;
+                _inFlight[key] = renderTask;
+                createdRenderTask = true;
+            }
         }
 
-        var body = await renderBodyAsync(cancellationToken).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        lock (_gate)
+        if (!createdRenderTask)
         {
-            if (_entries.TryGetValue(key, out var existingNode))
-            {
-                _lru.Remove(existingNode);
-                _lru.AddFirst(existingNode);
-                return existingNode.Value.Body;
-            }
+            return await renderTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
 
-            var node = new LinkedListNode<CacheEntry>(new CacheEntry(key, body));
-            _lru.AddFirst(node);
-            _entries[key] = node;
+        try
+        {
+            var body = await RenderAndStoreAsync(key, renderBodyAsync, cancellationToken).ConfigureAwait(false);
+            renderCompletion!.TrySetResult(body);
+            return body;
+        }
+        catch (OperationCanceledException)
+        {
+            renderCompletion!.TrySetCanceled(cancellationToken);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            renderCompletion!.TrySetException(ex);
+            throw;
+        }
+    }
 
-            while (_entries.Count > _maxEntries)
+    public bool CanCache(MarkdownSource source, IImageSourceResolver? imageSourceResolver)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        return _maxEntries > 0
+            && (imageSourceResolver is null || !MayResolveImages(source.Content));
+    }
+
+    private async Task<ApplicateRenderedBody> RenderAndStoreAsync(
+        CacheKey key,
+        Func<CancellationToken, Task<ApplicateRenderedBody>> renderBodyAsync,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var body = await renderBodyAsync(cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            lock (_gate)
             {
-                var last = _lru.Last;
-                if (last is null)
+                if (_entries.TryGetValue(key, out var existingNode))
                 {
-                    break;
+                    _lru.Remove(existingNode);
+                    _lru.AddFirst(existingNode);
+                    return existingNode.Value.Body;
                 }
 
-                _lru.RemoveLast();
-                _entries.Remove(last.Value.Key);
+                var node = new LinkedListNode<CacheEntry>(new CacheEntry(key, body));
+                _lru.AddFirst(node);
+                _entries[key] = node;
+
+                while (_entries.Count > _maxEntries)
+                {
+                    var last = _lru.Last;
+                    if (last is null)
+                    {
+                        break;
+                    }
+
+                    _lru.RemoveLast();
+                    _entries.Remove(last.Value.Key);
+                }
+            }
+
+            return body;
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                _inFlight.Remove(key);
             }
         }
-
-        return body;
     }
 
     private readonly record struct CacheEntry(CacheKey Key, ApplicateRenderedBody Body);

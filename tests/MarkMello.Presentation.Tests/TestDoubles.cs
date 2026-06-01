@@ -72,6 +72,17 @@ internal sealed class StubCommandLineActivation : ICommandLineActivation
     public string? GetActivationFilePath() => ActivationPath;
 }
 
+internal sealed class ManualRendererReadinessService : IRendererReadinessService
+{
+    private readonly TaskCompletionSource _ready = new();
+
+    public Task WaitReadyAsync(CancellationToken cancellationToken = default)
+        => _ready.Task.WaitAsync(cancellationToken);
+
+    public void SetReady()
+        => _ready.TrySetResult();
+}
+
 internal sealed class InMemorySettingsStore : ISettingsStore
 {
     public ReadingPreferences Preferences { get; set; } = ReadingPreferences.Default;

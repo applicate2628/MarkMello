@@ -5,6 +5,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text;
+using System.Threading;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -33,6 +34,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private const string CoreWebView2InteropTypeName = "Avalonia.Controls.Win.WebView2.Interop.ICoreWebView2";
     private static readonly int CoreWebView2PostWebMessageAsJsonVtableSlot =
         ResolveCoreWebView2PostWebMessageAsJsonVtableSlot();
+    private static int s_shellDocumentSequence;
 
     public static readonly StyledProperty<MarkdownSource?> SourceProperty =
         AvaloniaProperty.Register<ApplicateWebMarkdownDocumentView, MarkdownSource?>(nameof(Source));
@@ -62,6 +64,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private readonly NativeWebView _webView;
     private CancellationTokenSource? _renderCancellation;
     private string? _currentGeneratedDocumentPath;
+    private readonly int _shellDocumentId = Interlocked.Increment(ref s_shellDocumentSequence);
     private bool _isLoadingGeneratedDocument;
     private bool _hasLoadedDocument;
     private bool _awaitingLayoutReady;
@@ -1202,7 +1205,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         var folder = GetGeneratedDocumentFolder();
         Directory.CreateDirectory(folder);
-        var shellPath = Path.Combine(folder, "renderer-shell.html");
+        var shellPath = Path.Combine(folder, $"renderer-shell-{_shellDocumentId}.html");
         await File.WriteAllTextAsync(shellPath, html, Encoding.UTF8, cancellationToken).ConfigureAwait(true);
 
         _currentGeneratedDocumentPath = shellPath;
@@ -1239,11 +1242,16 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
-        // Idempotency guard. Mirrors the same _shellNavigated check at
-        // QueueRenderShellAsync:521 so the pre-warm path and the lazy path
-        // converge on the same shell instance.
+        // Idempotency guard. When navigation is already in flight, converge on
+        // the same shell-ready TCS instead of treating "Navigate() was issued"
+        // as "document-ready IPC has arrived".
         if (_shellNavigated)
         {
+            if (_shellReady is not null)
+            {
+                await _shellReady.Task.WaitAsync(cancellationToken).ConfigureAwait(true);
+            }
+
             return;
         }
 

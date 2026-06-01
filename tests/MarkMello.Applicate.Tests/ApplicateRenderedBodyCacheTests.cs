@@ -40,6 +40,47 @@ public sealed class ApplicateRenderedBodyCacheTests
     }
 
     [Fact]
+    public async Task GetOrRenderAsyncCoalescesConcurrentRendersForSameSource()
+    {
+        var cache = new ApplicateRenderedBodyCache(maxEntries: 2);
+        var source = new MarkdownSource("doc.md", "doc.md", "# Title");
+        var releaseRender = new TaskCompletionSource();
+        var calls = 0;
+
+        var first = cache.GetOrRenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            async _ =>
+            {
+                calls++;
+                await releaseRender.Task;
+                return Rendered("<h1>Title</h1>");
+            },
+            CancellationToken.None);
+        var second = cache.GetOrRenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            _ =>
+            {
+                calls++;
+                return Task.FromResult(Rendered("<h1>Duplicate</h1>"));
+            },
+            CancellationToken.None);
+
+        await Task.Delay(50);
+        Assert.Equal(1, calls);
+
+        releaseRender.SetResult();
+        var results = await Task.WhenAll(first, second);
+
+        Assert.Same(results[0], results[1]);
+        Assert.Equal("<h1>Title</h1>", results[1].BodyHtml);
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
     public async Task GetOrRenderAsyncRendersAgainWhenSourceContentChanges()
     {
         var cache = new ApplicateRenderedBodyCache(maxEntries: 2);

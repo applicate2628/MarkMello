@@ -38,6 +38,8 @@ public partial class MainWindowViewModel : ObservableObject
     private bool _secondaryFeaturesMarked;
     private bool _editorActivationMarked;
     private string? _currentPath;
+    private readonly object _openingPathsGate = new();
+    private readonly Dictionary<string, int> _openingPathCounts = new(StringComparer.OrdinalIgnoreCase);
     private Func<Task>? _pendingDirtyAction;
     private readonly bool _showCustomTitleBar = OperatingSystem.IsWindows();
     private readonly string _aboutVersion;
@@ -1219,6 +1221,20 @@ public partial class MainWindowViewModel : ObservableObject
     public async Task OpenPathAsync(string path)
         => await LoadDocumentAsync(path, preserveEditModeAfterLoad: false).ConfigureAwait(true);
 
+    public bool IsOpeningPath(string? path)
+    {
+        var key = NormalizeOpeningPath(path);
+        if (key is null)
+        {
+            return false;
+        }
+
+        lock (_openingPathsGate)
+        {
+            return _openingPathCounts.ContainsKey(key);
+        }
+    }
+
     public bool TryQueueCloseRequest()
     {
         if (IsDirtyPromptOpen)
@@ -1525,69 +1541,132 @@ public partial class MainWindowViewModel : ObservableObject
 
     private async Task LoadDocumentAsync(string path, bool preserveEditModeAfterLoad)
     {
-        // PE r2 §2 item D — consume the EarlyDocumentCache entry if Program.Main
-        // pre-read this path on a thread-pool task. The pre-read starts right
-        // after singleInstance.StartListening() and typically completes before
-        // the VM async path reaches here, overlapping the file read + parse cost
-        // with Avalonia init / window-open (saves ~150-250 ms per PE r2 §1 P2).
-        //
-        // On hit: skip _openDocument.ExecuteAsync entirely and dispatch the
-        // cached source through the existing ApplyOpenResult / ApplyLoadedDocument
-        // pipeline so all downstream invariants (state machine, edit-mode
-        // preservation, startup metrics, bridge reconcile gating) stay
-        // identical to the cold path.
-        //
-        // On miss: fall through to _openDocument.ExecuteAsync (FileDocumentLoader)
-        // which retains the full typed-error handling for I/O / parse failures.
-        if (!string.IsNullOrWhiteSpace(path)
-            && EarlyDocumentCache.TryConsume(path, out var cached)
-            && cached is not null)
+        var openingPath = NormalizeOpeningPath(path);
+        TrackOpeningPath(openingPath);
+        try
         {
-            StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit", $"path={cached.Path}");
-
-            // Renderer-readiness rendezvous (D-phase race fix). The cache-hit
-            // completes the file-I/O cost in ~0 ms, so without an explicit
-            // rendezvous Document/State get published BEFORE the WebView2
-            // environment finishes initialising and the shell HTML loads. The
-            // renderer pipeline then starts mid-load; a moment later
-            // session-restoration triggers an edit-mode reconcile that
-            // reparents the WebView into the edit slot, interrupting the
-            // in-flight initial-visible-ready pass and stalling
-            // first-paint by 10+ s (smoke d_fix_clean3, .scratch/startup-perf/).
+            // PE r2 §2 item D — consume the EarlyDocumentCache entry if Program.Main
+            // pre-read this path on a thread-pool task. The pre-read starts right
+            // after singleInstance.StartListening() and typically completes before
+            // the VM async path reaches here, overlapping the file read + parse cost
+            // with Avalonia init / window-open (saves ~150-250 ms per PE r2 §1 P2).
             //
-            // The previous Dispatcher.UIThread.InvokeAsync(..., Loaded) yield
-            // was a layout-rendezvous that incidentally paid for a slice of
-            // shell-init on slow paths but did NOT actually gate on shell
-            // readiness, so it left the race window open whenever the cache
-            // hit fired before EnvironmentRequested. Replacing with the
-            // explicit shell-ready signal owned by the WebView host closes
-            // both the WebView2-environment race and the in-flight-render
-            // reparent race in one rendezvous.
+            // On hit: skip _openDocument.ExecuteAsync entirely and dispatch the
+            // cached source through the existing ApplyOpenResult / ApplyLoadedDocument
+            // pipeline so all downstream invariants (state machine, edit-mode
+            // preservation, startup metrics, bridge reconcile gating) stay
+            // identical to the cold path.
             //
-            // _rendererReadiness is null in test contexts that construct the
-            // VM directly without the desktop DI graph; in that case fall back
-            // to a single dispatcher yield so behavior matches the previous
-            // path closely enough for VM unit tests.
-            StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-wait-renderer", $"path={cached.Path}");
-            if (_rendererReadiness is not null)
+            // On miss: fall through to _openDocument.ExecuteAsync (FileDocumentLoader)
+            // which retains the full typed-error handling for I/O / parse failures.
+            if (!string.IsNullOrWhiteSpace(path)
+                && EarlyDocumentCache.TryConsume(path, out var cached)
+                && cached is not null)
             {
-                await _rendererReadiness.WaitReadyAsync().ConfigureAwait(true);
-            }
-            else
-            {
-                await Dispatcher.UIThread.InvokeAsync(
-                    () => { },
-                    DispatcherPriority.Background);
-            }
-            StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-renderer-ready", $"path={cached.Path}");
+                StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit", $"path={cached.Path}");
 
-            ApplyOpenResult(new OpenDocumentResult.Success(cached), preserveEditModeAfterLoad);
+                // Renderer-readiness rendezvous (D-phase race fix). The cache-hit
+                // completes the file-I/O cost in ~0 ms, so without an explicit
+                // rendezvous Document/State get published BEFORE the WebView2
+                // environment finishes initialising and the shell HTML loads. The
+                // renderer pipeline then starts mid-load; a moment later
+                // session-restoration triggers an edit-mode reconcile that
+                // reparents the WebView into the edit slot, interrupting the
+                // in-flight initial-visible-ready pass and stalling
+                // first-paint by 10+ s (smoke d_fix_clean3, .scratch/startup-perf/).
+                //
+                // The previous Dispatcher.UIThread.InvokeAsync(..., Loaded) yield
+                // was a layout-rendezvous that incidentally paid for a slice of
+                // shell-init on slow paths but did NOT actually gate on shell
+                // readiness, so it left the race window open whenever the cache
+                // hit fired before EnvironmentRequested. Replacing with the
+                // explicit shell-ready signal owned by the WebView host closes
+                // both the WebView2-environment race and the in-flight-render
+                // reparent race in one rendezvous.
+                //
+                // _rendererReadiness is null in test contexts that construct the
+                // VM directly without the desktop DI graph; in that case fall back
+                // to a single dispatcher yield so behavior matches the previous
+                // path closely enough for VM unit tests.
+                StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-wait-renderer", $"path={cached.Path}");
+                if (_rendererReadiness is not null)
+                {
+                    await _rendererReadiness.WaitReadyAsync().ConfigureAwait(true);
+                }
+                else
+                {
+                    await Dispatcher.UIThread.InvokeAsync(
+                        () => { },
+                        DispatcherPriority.Background);
+                }
+                StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-renderer-ready", $"path={cached.Path}");
+                ApplyOpenResult(new OpenDocumentResult.Success(cached), preserveEditModeAfterLoad);
+                return;
+            }
+
+            StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-miss", $"path={path}");
+            var result = await _openDocument.ExecuteAsync(path).ConfigureAwait(true);
+            ApplyOpenResult(result, preserveEditModeAfterLoad);
+        }
+        finally
+        {
+            UntrackOpeningPath(openingPath);
+        }
+    }
+
+    private static string? NormalizeOpeningPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            return Path.GetFullPath(path);
+        }
+        catch
+        {
+            return path;
+        }
+    }
+
+    private void TrackOpeningPath(string? path)
+    {
+        if (path is null)
+        {
             return;
         }
 
-        StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-miss", $"path={path}");
-        var result = await _openDocument.ExecuteAsync(path).ConfigureAwait(true);
-        ApplyOpenResult(result, preserveEditModeAfterLoad);
+        lock (_openingPathsGate)
+        {
+            _openingPathCounts.TryGetValue(path, out var count);
+            _openingPathCounts[path] = count + 1;
+        }
+    }
+
+    private void UntrackOpeningPath(string? path)
+    {
+        if (path is null)
+        {
+            return;
+        }
+
+        lock (_openingPathsGate)
+        {
+            if (!_openingPathCounts.TryGetValue(path, out var count))
+            {
+                return;
+            }
+
+            if (count <= 1)
+            {
+                _openingPathCounts.Remove(path);
+                return;
+            }
+
+            _openingPathCounts[path] = count - 1;
+        }
     }
 
     private void ApplyOpenResult(OpenDocumentResult result, bool preserveEditModeAfterLoad)

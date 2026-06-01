@@ -69,10 +69,10 @@ internal static class Program
             //    FileDocumentLoader canonicalization
             //  - skip entirely when no argv path is available (no benefit,
             //    no risk)
-            //  - no service provider available yet at this line (DI is built
-            //    inside ConfigureServices below), hence the static cache and
-            //    direct instantiation of CommandLineActivation
-            StartActiveDocumentPreRead(args);
+            //  - HTML body prime uses the already-built DI provider but keeps
+            //    the file source rendezvous in EarlyDocumentCache so VM load
+            //    behavior remains unchanged.
+            StartActiveDocumentPreRead(args, services);
 
             // Multi-tab startup-scaling polish: also pre-read every path
             // listed in the persisted session file (OpenPaths) on the
@@ -112,8 +112,10 @@ internal static class Program
     /// on failure the cache stays empty and the view model's existing
     /// <c>FileDocumentLoader</c> path runs unchanged.
     /// </summary>
-    private static void StartActiveDocumentPreRead(string[] args)
+    private static void StartActiveDocumentPreRead(string[] args, IServiceProvider services)
     {
+        ArgumentNullException.ThrowIfNull(services);
+
         string? activationPath;
         try
         {
@@ -136,7 +138,7 @@ internal static class Program
         // MainWindowViewModel.LoadDocumentAsync. The task must not propagate
         // any exception (no unhandled async exception crash) — both the read
         // and the deposit are wrapped in a single catch-all.
-        _ = Task.Run(() =>
+        _ = Task.Run(async () =>
         {
             try
             {
@@ -157,6 +159,8 @@ internal static class Program
 
                 EarlyDocumentCache.Deposit(canonical, source);
                 ApplicateTrace.DiagMs("startup-pre-window", "perf-doc read-done", $"bytes={content.Length}");
+                await PrimeActiveDocumentRenderedBodyCacheAsync(services, source, CancellationToken.None)
+                    .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -165,6 +169,54 @@ internal static class Program
                 ApplicateTrace.Diag("startup-pre-window", $"perf-doc read-failed ex={ex.GetType().Name} msg={ex.Message}");
             }
         });
+    }
+
+    private static async Task PrimeActiveDocumentRenderedBodyCacheAsync(
+        IServiceProvider services,
+        MarkdownSource source,
+        CancellationToken cancellationToken)
+    {
+        var cache = services.GetRequiredService<ApplicateRenderedBodyCache>();
+        var imageSourceResolver = services.GetService<IImageSourceResolver>();
+        if (!cache.CanCache(source, imageSourceResolver))
+        {
+            ApplicateTrace.DiagMs(
+                "startup-pre-window",
+                "perf-doc body-prime-skipped",
+                $"path={source.Path} reason=uncacheable");
+            return;
+        }
+
+        var renderer = services.GetRequiredService<IApplicateHtmlMarkdownRenderer>();
+        var settings = services.GetRequiredService<ISettingsStore>();
+        var preferences = await settings.LoadPreferencesAsync(cancellationToken).ConfigureAwait(false);
+        var renderedFromMarkdown = false;
+        await cache.GetOrRenderAsync(
+                source,
+                preferences,
+                imageSourceResolver,
+                async ct =>
+                {
+                    renderedFromMarkdown = true;
+                    ApplicateTrace.DiagMs(
+                        "startup-pre-window",
+                        "perf-doc body-prime-render-start",
+                        $"path={source.Path}");
+                    var body = await renderer.RenderBodyAsync(source, preferences, imageSourceResolver, ct)
+                        .ConfigureAwait(false);
+                    ApplicateTrace.DiagMs(
+                        "startup-pre-window",
+                        "perf-doc body-prime-render-end",
+                        $"path={source.Path} htmlLength={body.BodyHtml.Length}");
+                    return body;
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        ApplicateTrace.DiagMs(
+            "startup-pre-window",
+            renderedFromMarkdown ? "perf-doc body-prime-stored" : "perf-doc body-prime-cache-hit",
+            $"path={source.Path}");
     }
 
     /// <summary>

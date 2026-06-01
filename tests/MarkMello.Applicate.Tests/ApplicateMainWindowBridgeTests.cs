@@ -52,6 +52,24 @@ public sealed class ApplicateMainWindowBridgeTests
     }
 
     [Fact]
+    public void SessionRestoreDoesNotDuplicateViewModelOpenForAlreadyOpeningPath()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var restoreApply = ExtractFromMarker(bridge, "var startupLoadIsPending =");
+
+        var pendingIndex = restoreApply.IndexOf("var startupLoadIsPending =", StringComparison.Ordinal);
+        var openingPathIndex = restoreApply.IndexOf("viewModel.IsOpeningPath(toActivate.FilePath)", StringComparison.Ordinal);
+        var guardIndex = restoreApply.IndexOf("&& !startupLoadIsPending", StringComparison.Ordinal);
+        var openPathIndex = restoreApply.IndexOf("await viewModel.OpenPathAsync(toActivate.FilePath).ConfigureAwait(true);", StringComparison.Ordinal);
+
+        Assert.True(pendingIndex >= 0, "Startup restore should detect an already pending ViewModel open.");
+        Assert.True(openingPathIndex > pendingIndex, "Pending detection should be based on the ViewModel opening path.");
+        Assert.True(guardIndex > openingPathIndex, "The duplicate-open guard should be part of the restore apply condition.");
+        Assert.True(openPathIndex > guardIndex, "OpenPathAsync should remain only after the pending-load guard.");
+    }
+
+    [Fact]
     public void StartupArgvDocumentKeepsWindowCoveredUntilViewerRevealReady()
     {
         var codeBehind = ReadMainWindowCodeBehind();
@@ -71,7 +89,8 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("startupViewerHost.View.HeadingsChanged += OnHeadingsChanged;", gate, StringComparison.Ordinal);
         Assert.Contains("startupViewerHost.RendererFailed += OnRendererFailed;", gate, StringComparison.Ordinal);
         Assert.Contains("viewModel.PropertyChanged += OnViewModelPropertyChanged;", gate, StringComparison.Ordinal);
-        Assert.Contains("viewModel.HasDocumentHeadings", gate, StringComparison.Ordinal);
+        Assert.Contains("headingsReady = !waitForHeadings || headings.Count > 0;", gate, StringComparison.Ordinal);
+        Assert.Contains("TryRelease(\"headings-reported\");", gate, StringComparison.Ordinal);
         Assert.Contains("new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) }", gate, StringComparison.Ordinal);
         Assert.Contains("Opacity = 1;", gate, StringComparison.Ordinal);
         Assert.Contains("startupCover.Hide();", gate, StringComparison.Ordinal);
@@ -170,6 +189,10 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("primedPreferences = preferences;", sizeOnlySkip, StringComparison.Ordinal);
         Assert.Contains("primedViewportSize = viewportSize;", sizeOnlySkip, StringComparison.Ordinal);
         Assert.Contains("InactiveEditPrimeHeavyDelay", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("TimeSpan.FromMilliseconds(300)", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("InactiveEditPrimeVeryHeavyDelay", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("TimeSpan.FromMilliseconds(1200)", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("ResolveInactiveEditPrimeDelay(document.Content.Length)", primeInstaller, StringComparison.Ordinal);
         Assert.Contains("\"editpreview-inactive-prime-delayed-heavy\"", primeInstaller, StringComparison.Ordinal);
         Assert.DoesNotContain("\"editpreview-inactive-prime-skipped-heavy\"", tryPrime, StringComparison.Ordinal);
     }

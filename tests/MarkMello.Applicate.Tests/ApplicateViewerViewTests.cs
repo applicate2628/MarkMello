@@ -134,12 +134,15 @@ public sealed class ApplicateViewerViewTests
         var sizeChanged = ExtractMethodBody(codeBehind, "protected override void OnSizeChanged(");
         var syncFromViewModel = ExtractMethodBody(codeBehind, "private void SyncFromViewModel()");
         var widthDrag = ExtractMethodBody(codeBehind, "private void ApplyWidthDragDelta(");
+        var hostWidthDrag = ExtractMethodBody(codeBehind, "private void OnHostWidthDragRequested(");
         var applyColumnWidth = ExtractMethodBody(codeBehind, "private void ApplyColumnWidth(");
         var debounceGate = ExtractMethodBody(codeBehind, "private bool ShouldDebounceLiveWebWidthUpdates()");
 
         Assert.Contains("ApplyColumnWidth(deferWebContentWidth: ShouldDebounceLiveWebWidthUpdates());", sizeChanged, StringComparison.Ordinal);
         Assert.Contains("ApplyColumnWidth();", syncFromViewModel, StringComparison.Ordinal);
         Assert.Contains("ApplyColumnWidth();", widthDrag, StringComparison.Ordinal);
+        Assert.Contains("UpdateWidthDragManualContentWidth(e.DeltaX);", hostWidthDrag, StringComparison.Ordinal);
+        Assert.Contains("return;", ExtractFromMarker(hostWidthDrag, "if (e.Phase == ApplicateWebWidthDragPhase.Move)"), StringComparison.Ordinal);
         Assert.Contains("ScheduleDeferredWebAvailableContentWidth(availableContentWidth);", applyColumnWidth, StringComparison.Ordinal);
         Assert.Contains("ApplyWebAvailableContentWidth(availableContentWidth);", applyColumnWidth, StringComparison.Ordinal);
         Assert.Contains("Content.Length: > HeavyDocumentResizeContentLengthThreshold", debounceGate, StringComparison.Ordinal);
@@ -169,11 +172,34 @@ public sealed class ApplicateViewerViewTests
         Assert.Contains("_headingUpdater.FlushPending();", rendered, StringComparison.Ordinal);
         Assert.Contains("_headingUpdater.Invalidate();", unwire, StringComparison.Ordinal);
         Assert.Contains("LargeHeadingUpdateThreshold = 250", updater, StringComparison.Ordinal);
-        Assert.Contains("LargeHeadingFlushDelay = TimeSpan.FromMilliseconds(350)", updater, StringComparison.Ordinal);
+        Assert.Contains("LargeHeadingFlushDelay = TimeSpan.FromMilliseconds(80)", updater, StringComparison.Ordinal);
         Assert.Contains("Task.Delay(LargeHeadingFlushDelay)", updater, StringComparison.Ordinal);
         Assert.Contains("DispatcherPriority.Background", updater, StringComparison.Ordinal);
         Assert.Contains("public void FlushPending()", updater, StringComparison.Ordinal);
         Assert.Contains("viewModel.UpdateDocumentHeadings(snapshot);", updater, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TocPanelVirtualizesHeadingRows()
+    {
+        var tocPanel = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Views",
+            "ApplicateTocPanel.cs"));
+
+        Assert.Contains("ItemsControl _itemsControl", tocPanel, StringComparison.Ordinal);
+        Assert.Contains("new VirtualizingStackPanel", tocPanel, StringComparison.Ordinal);
+        Assert.Contains("_itemsControl.ItemsSource = headings;", tocPanel, StringComparison.Ordinal);
+        Assert.Contains("_rowIndexById[heading.Id] = index;", tocPanel, StringComparison.Ordinal);
+        Assert.Contains("_itemsControl.ScrollIntoView(index);", tocPanel, StringComparison.Ordinal);
+        Assert.DoesNotContain("_itemsHost.Children.Add(row);", tocPanel, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -230,5 +256,12 @@ public sealed class ApplicateViewerViewTests
         }
 
         throw new InvalidOperationException($"{signature} body was not closed.");
+    }
+
+    private static string ExtractFromMarker(string source, string marker)
+    {
+        var start = source.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{marker} should exist.");
+        return source[start..];
     }
 }
