@@ -293,8 +293,19 @@ public sealed class ApplicateTocPanel : UserControl
         _itemsControl.ItemsSource = headings;
     }
 
-    private Border BuildHeadingRow(DocumentHeading heading)
+    private Border BuildHeadingRow(DocumentHeading? heading)
     {
+        if (heading is null)
+        {
+            // Avalonia can invoke the item template with null while recycling
+            // virtualized containers during ItemsSource replacement.
+            return new Border
+            {
+                IsVisible = false,
+                IsHitTestVisible = false,
+            };
+        }
+
         var levelDot = new Ellipse
         {
             Width = 4,

@@ -203,6 +203,21 @@ public sealed class ApplicateViewerViewTests
     }
 
     [Fact]
+    public void TocPanelVirtualizedRowFactoryToleratesNullRecycleItem()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var panel = new ApplicateTocPanel();
+            var method = typeof(ApplicateTocPanel).GetMethod("BuildHeadingRow", BindingFlags.Instance | BindingFlags.NonPublic);
+
+            var row = method?.Invoke(panel, [null]);
+
+            Assert.NotNull(row);
+        }, CancellationToken.None);
+    }
+
+    [Fact]
     public void TransactionGenerationContextInheritsToConsumerWebSlot()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());

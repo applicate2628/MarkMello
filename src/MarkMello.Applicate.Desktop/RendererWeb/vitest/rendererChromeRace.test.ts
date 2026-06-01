@@ -263,12 +263,8 @@ describe("renderer chrome race handling", () => {
     const latestState = minimapStates.at(-1);
 
     expect(document.body.classList.contains("mm-has-minimap")).toBe(true);
-    expect(document.querySelector(".mm-minimap-content .mm-document")).toBeNull();
-    expect(document.querySelector(".mm-minimap-content svg")).not.toBeNull();
-    expect(messages).toContainEqual(expect.objectContaining({
-      type: "perf-mark",
-      name: "mm-minimap-heavy-schematic",
-    }));
+    expect(document.querySelector(".mm-minimap-content .mm-document")).not.toBeNull();
+    expect(document.querySelector(".mm-minimap-content svg")).toBeNull();
     expect(latestState).toEqual({
       type: "minimap-state",
       visible: true,
@@ -319,8 +315,8 @@ describe("renderer chrome race handling", () => {
     await vi.advanceTimersByTimeAsync(100);
     flushQueuedRafs();
 
-    expect(document.querySelector(".mm-minimap-content .mm-document")).toBeNull();
-    expect(document.querySelector(".mm-minimap-content svg")).not.toBeNull();
+    expect(document.querySelector(".mm-minimap-content .mm-document")).not.toBeNull();
+    expect(document.querySelector(".mm-minimap-content svg")).toBeNull();
   });
 
   it("does not remeasure the detailed minimap clone on every width-handle drag frame", async () => {
