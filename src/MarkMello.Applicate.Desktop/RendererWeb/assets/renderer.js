@@ -1210,6 +1210,7 @@
   var mermaidLazyRenderQueue = Promise.resolve();
   var themeMermaidRefreshGeneration = 0;
   var themeMermaidRefreshTimer;
+  var themeAppliedAckGeneration = 0;
   var initialRenderPipelineGeneration = 0;
   var initialRenderPipelineCompleted = false;
   var postReadyEnhancementsCompleted = false;
@@ -1219,6 +1220,7 @@
   var MERMAID_EAGER_VIEWPORT_MARGIN_PX = 700;
   var MERMAID_LAZY_ROOT_MARGIN_PX = 1400;
   var THEME_MERMAID_REFRESH_DELAY_MS = 160;
+  var THEME_APPLIED_ACK_FALLBACK_MS = 120;
   var POST_LAYOUT_READY_EDIT_PREVIEW_DELAY_MS = 120;
   var widthResizerVisibility = "on-hover";
   var viewerChromeEnabled = false;
@@ -1772,11 +1774,28 @@
       });
     }, THEME_MERMAID_REFRESH_DELAY_MS);
   }
-  function handleThemeChange(theme) {
+  function postThemeAppliedAfterPaint(theme, requestId) {
+    if (requestId === void 0 || !Number.isFinite(requestId) || requestId <= 0) {
+      return;
+    }
+    const generation = ++themeAppliedAckGeneration;
+    let posted = false;
+    const postAck = () => {
+      if (posted || generation !== themeAppliedAckGeneration) {
+        return;
+      }
+      posted = true;
+      postHostMessage({ type: "theme-applied", theme, requestId });
+    };
+    window.requestAnimationFrame(() => window.requestAnimationFrame(postAck));
+    window.setTimeout(postAck, THEME_APPLIED_ACK_FALLBACK_MS);
+  }
+  function handleThemeChange(theme, requestId) {
     postPerfMark("mm-theme-change-start", { theme });
     applyTheme(theme);
     initMermaidWithTheme(theme);
     postPerfMark("mm-theme-change-applied", { theme });
+    postThemeAppliedAfterPaint(theme, requestId);
     scheduleThemeMermaidRefresh(theme);
   }
   function getScrollState() {
@@ -3038,9 +3057,10 @@
     }
     if (message.type === "theme") {
       if (initialRenderPipelineCompleted) {
-        void handleThemeChange(message.theme);
+        void handleThemeChange(message.theme, message.requestId);
       } else {
         document.documentElement.dataset.theme = message.theme;
+        postThemeAppliedAfterPaint(message.theme, message.requestId);
       }
       return;
     }

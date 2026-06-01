@@ -115,8 +115,13 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("() => viewModel.IsViewer && viewModel.IsEditMode", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("clearHeadingsOnRendererFailure: false", installSiblingViews, StringComparison.Ordinal);
 
+        Assert.Contains("_viewerThemeSwitchRevealCoordinator = new ApplicateThemeSwitchRevealCoordinator(", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("_editThemeSwitchRevealCoordinator = new ApplicateThemeSwitchRevealCoordinator(", installSiblingViews, StringComparison.Ordinal);
+
         Assert.Contains("_viewerDocumentSwitchRevealCoordinator?.Dispose();", disposeHandler, StringComparison.Ordinal);
         Assert.Contains("_editDocumentSwitchRevealCoordinator?.Dispose();", disposeHandler, StringComparison.Ordinal);
+        Assert.Contains("_viewerThemeSwitchRevealCoordinator?.Dispose();", disposeHandler, StringComparison.Ordinal);
+        Assert.Contains("_editThemeSwitchRevealCoordinator?.Dispose();", disposeHandler, StringComparison.Ordinal);
     }
 
     [Fact]

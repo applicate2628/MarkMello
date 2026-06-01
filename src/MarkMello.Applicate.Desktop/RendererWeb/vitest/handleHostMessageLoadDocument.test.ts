@@ -50,7 +50,7 @@ describe("handleHostMessage(load-document)", () => {
 
   it("applies live theme before deferred mermaid refresh", () => {
     const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
-    const themeStart = source.indexOf("function handleThemeChange(theme: RendererTheme): void");
+    const themeStart = source.indexOf("function handleThemeChange(theme: RendererTheme, requestId?: number): void");
     const themeEnd = source.indexOf("function getScrollState", themeStart);
     const themeHandler = source.slice(themeStart, themeEnd);
     const schedulerStart = source.indexOf("function scheduleThemeMermaidRefresh(");
@@ -65,6 +65,29 @@ describe("handleHostMessage(load-document)", () => {
     expect(scheduler).toContain("window.setTimeout");
     expect(scheduler).toContain("THEME_MERMAID_REFRESH_DELAY_MS");
     expect(scheduler).toContain("++mermaidRenderGeneration;");
+  });
+
+  it("acks theme messages after paint with the matching request id", () => {
+    const rafCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      rafCallbacks.push(callback);
+      return rafCallbacks.length;
+    });
+
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+    const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
+
+    load({ type: "theme", theme: "dark", requestId: 42 });
+
+    expect(messages.some((message: { type?: string } | null) => message?.type === "theme-applied")).toBe(false);
+    rafCallbacks.shift()?.(0);
+    expect(messages.some((message: { type?: string } | null) => message?.type === "theme-applied")).toBe(false);
+    rafCallbacks.shift()?.(16);
+
+    expect(messages).toContainEqual({ type: "theme-applied", theme: "dark", requestId: 42 });
   });
 
   it("keeps offscreen mermaid diagrams out of the blocking post-ready path", () => {

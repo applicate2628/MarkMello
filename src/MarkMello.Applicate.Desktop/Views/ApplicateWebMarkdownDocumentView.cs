@@ -25,6 +25,20 @@ using SysMath = System.Math;
 
 namespace MarkMello.Applicate.Desktop.Views;
 
+public sealed class ApplicateWebThemeChangeSentEventArgs(string theme, long requestId) : EventArgs
+{
+    public string Theme { get; } = theme;
+
+    public long RequestId { get; } = requestId;
+}
+
+public sealed class ApplicateWebThemeAppliedEventArgs(string theme, long requestId) : EventArgs
+{
+    public string Theme { get; } = theme;
+
+    public long RequestId { get; } = requestId;
+}
+
 public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 {
     private const double MaxRendererReportedMinimapReservedWidth = 2000;
@@ -99,6 +113,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private string? _inlinedTheme;
     private string? _lastPostedTheme;
     private long _lastPostedThemeTimestamp;
+    private long _themeRequestSequence;
     private bool _isWebWidthDragging;
     private long _renderSequence;
     private NativeWindowPlacement? _pendingNativeHiddenPaintPlacement;
@@ -212,6 +227,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     public event EventHandler? DocumentRendered;
 
     public event EventHandler? DocumentRevealReady;
+
+    public event EventHandler<ApplicateWebThemeChangeSentEventArgs>? ThemeChangeSent;
+
+    public event EventHandler<ApplicateWebThemeAppliedEventArgs>? ThemeApplied;
 
     public event EventHandler? DocumentRenderInvalidated;
 
@@ -1582,6 +1601,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 return;
             }
 
+            if (type == "theme-applied")
+            {
+                HandleThemeAppliedMessage(document.RootElement);
+                return;
+            }
+
             if (type == "perf-mark")
             {
                 // Round-2 perf-engineer plan item C, [renderer-perf] group.
@@ -2148,6 +2173,27 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         CompleteDocumentRevealReady();
     }
 
+    private void HandleThemeAppliedMessage(JsonElement root)
+    {
+        if (!root.TryGetProperty("theme", out var themeProperty)
+            || themeProperty.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(themeProperty.GetString())
+            || !root.TryGetProperty("requestId", out var requestIdProperty)
+            || requestIdProperty.ValueKind != JsonValueKind.Number
+            || !requestIdProperty.TryGetInt64(out var requestId)
+            || requestId <= 0)
+        {
+            return;
+        }
+
+        var theme = NormalizeRendererThemeName(themeProperty.GetString()!);
+        ApplicateTrace.DiagMs(
+            "renderer-perf",
+            "theme-applied-ack",
+            $"theme={theme} requestId={requestId}");
+        ThemeApplied?.Invoke(this, new ApplicateWebThemeAppliedEventArgs(theme, requestId));
+    }
+
     private void HandleDocumentCacheMissMessage(JsonElement root)
     {
         if (!root.TryGetProperty("renderId", out var renderIdProperty)
@@ -2508,9 +2554,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void SendTheme(string theme, long timestamp)
     {
+        var requestId = ++_themeRequestSequence;
         _lastPostedTheme = theme;
         _lastPostedThemeTimestamp = timestamp;
-        PostRendererMessage(new { type = "theme", theme });
+        ThemeChangeSent?.Invoke(this, new ApplicateWebThemeChangeSentEventArgs(theme, requestId));
+        PostRendererMessage(new { type = "theme", theme, requestId });
     }
 
     internal static bool IsDuplicateThemePostWithinWindow(

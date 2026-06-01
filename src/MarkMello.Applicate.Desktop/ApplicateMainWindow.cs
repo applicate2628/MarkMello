@@ -68,6 +68,8 @@ public sealed class ApplicateMainWindow : MainWindow
     private ApplicateModeTransactionHostRouter? _modeTransactionHostRouter;
     private ApplicateDocumentSwitchRevealCoordinator? _viewerDocumentSwitchRevealCoordinator;
     private ApplicateDocumentSwitchRevealCoordinator? _editDocumentSwitchRevealCoordinator;
+    private ApplicateThemeSwitchRevealCoordinator? _viewerThemeSwitchRevealCoordinator;
+    private ApplicateThemeSwitchRevealCoordinator? _editThemeSwitchRevealCoordinator;
     private bool _editModeHotkeyDown;
 
     public ApplicateMainWindow(
@@ -1247,6 +1249,11 @@ public sealed class ApplicateMainWindow : MainWindow
                 // Reader surface only: IsViewer is `State == Viewing`, which is
                 // also true in edit mode (edit is a sub-mode of Viewing).
                 () => viewModel.IsViewer && !viewModel.IsEditMode);
+            _viewerThemeSwitchRevealCoordinator = new ApplicateThemeSwitchRevealCoordinator(
+                siblingPanel,
+                viewerHostForMode,
+                viewModel,
+                () => viewModel.IsViewer && !viewModel.IsEditMode);
         }
         if (editHost is not null)
         {
@@ -1257,6 +1264,11 @@ public sealed class ApplicateMainWindow : MainWindow
                 ApplicateMode.Edit,
                 () => viewModel.IsViewer && viewModel.IsEditMode,
                 clearHeadingsOnRendererFailure: false);
+            _editThemeSwitchRevealCoordinator = new ApplicateThemeSwitchRevealCoordinator(
+                siblingPanel,
+                editHost,
+                viewModel,
+                () => viewModel.IsViewer && viewModel.IsEditMode);
         }
 
         InstallInactiveEditPreviewPrime(
@@ -1798,6 +1810,10 @@ public sealed class ApplicateMainWindow : MainWindow
         _viewerDocumentSwitchRevealCoordinator = null;
         _editDocumentSwitchRevealCoordinator?.Dispose();
         _editDocumentSwitchRevealCoordinator = null;
+        _viewerThemeSwitchRevealCoordinator?.Dispose();
+        _viewerThemeSwitchRevealCoordinator = null;
+        _editThemeSwitchRevealCoordinator?.Dispose();
+        _editThemeSwitchRevealCoordinator = null;
         _siblingMountBridge?.Dispose();
         _siblingMountBridge = null;
         _modeTransactionHostRouter?.Dispose();

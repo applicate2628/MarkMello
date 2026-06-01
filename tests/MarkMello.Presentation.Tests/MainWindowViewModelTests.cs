@@ -211,7 +211,7 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public async Task OpeningDifferentDocumentKeepsTableOfContentsAndActiveHeadingUntilRendererReportsHeadings()
+    public async Task OpeningDifferentDocumentSelectsFirstNewHeadingUntilRendererReportsActiveHeading()
     {
         var harness = CreateHarness();
         var firstPath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "toc-first.md");
@@ -240,7 +240,15 @@ public sealed class MainWindowViewModelTests
         Assert.Single(harness.ViewModel.DocumentHeadings);
         Assert.Equal("second", harness.ViewModel.DocumentHeadings[0].Id);
         Assert.True(harness.ViewModel.IsTocVisible);
-        Assert.Equal(string.Empty, harness.ViewModel.ActiveHeadingId);
+        Assert.Equal("second", harness.ViewModel.ActiveHeadingId);
+
+        harness.ViewModel.UpdateDocumentHeadings([
+            new DocumentHeading("second", 1, "Second", 0),
+            new DocumentHeading("details", 2, "Details", 12),
+        ]);
+        harness.ViewModel.UpdateActiveHeadingFromRenderer("details");
+
+        Assert.Equal("details", harness.ViewModel.ActiveHeadingId);
     }
 
     [Fact]
@@ -948,6 +956,24 @@ public sealed class MainWindowViewModelTests
         Assert.Equal(ThemeMode.Light, harness.ViewModel.Theme);
         Assert.False(harness.ViewModel.IsOriginalPaletteSelected);
         Assert.True(harness.ViewModel.IsWhitePaletteSelected);
+    }
+
+    [Fact]
+    public void ThemeToggleRaisesTransitionBeforeEffectiveThemeMutates()
+    {
+        var harness = CreateHarness();
+        ThemeTransitionStartingEventArgs? transition = null;
+        harness.ViewModel.ThemeTransitionStarting += (_, e) =>
+        {
+            transition = e;
+            Assert.Equal(ThemeMode.Light, harness.ViewModel.EffectiveTheme);
+        };
+
+        harness.ViewModel.CycleThemeCommand.Execute(null);
+
+        Assert.NotNull(transition);
+        Assert.Equal(ThemeMode.Dark, transition.TargetEffectiveTheme);
+        Assert.Equal(ThemeMode.Dark, harness.ViewModel.EffectiveTheme);
     }
 
     private static MarkdownSource CreateSource(string path, string content)

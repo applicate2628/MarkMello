@@ -71,6 +71,7 @@ type RendererMessage =
   | { type: "document-ready"; mathCount: number }
   | { type: "layout-ready"; scrollTop: number; scrollHeight: number; clientHeight: number; cached?: boolean }
   | { type: "post-ready-enhancements-complete"; renderId?: number; hasMermaid: boolean; hasHljs: boolean }
+  | { type: "theme-applied"; theme: RendererTheme; requestId: number }
   | { type: "link-clicked"; href: string; button: number; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }
   | { type: "minimap-state"; visible: boolean; reservedWidth: number }
   | { type: "minimap-settled"; transactionGeneration: number; visible: boolean; reservedWidth: number }
@@ -114,7 +115,7 @@ type MinimapPolicy = {
 type FontFamilyMode = "serif" | "sans" | "mono";
 
 type HostMessage =
-  | { type: "theme"; theme: RendererTheme }
+  | { type: "theme"; theme: RendererTheme; requestId?: number }
   | { type: "minimap-policy"; minimapPolicy: MinimapPolicy }
   | {
       type: "reading-preferences";
@@ -242,6 +243,7 @@ let mermaidLazyObserver: IntersectionObserver | null = null;
 let mermaidLazyRenderQueue: Promise<void> = Promise.resolve();
 let themeMermaidRefreshGeneration = 0;
 let themeMermaidRefreshTimer: number | undefined;
+let themeAppliedAckGeneration = 0;
 let initialRenderPipelineGeneration = 0;
 let initialRenderPipelineCompleted = false;
 let postReadyEnhancementsCompleted = false;
@@ -251,6 +253,7 @@ const MERMAID_WATCHDOG_MS = 15_000;
 const MERMAID_EAGER_VIEWPORT_MARGIN_PX = 700;
 const MERMAID_LAZY_ROOT_MARGIN_PX = 1400;
 const THEME_MERMAID_REFRESH_DELAY_MS = 160;
+const THEME_APPLIED_ACK_FALLBACK_MS = 120;
 const POST_LAYOUT_READY_EDIT_PREVIEW_DELAY_MS = 120;
 let widthResizerVisibility: WidthResizerVisibility = "on-hover";
 let viewerChromeEnabled = false;
@@ -954,11 +957,32 @@ function scheduleThemeMermaidRefresh(theme: RendererTheme): void {
   }, THEME_MERMAID_REFRESH_DELAY_MS);
 }
 
-function handleThemeChange(theme: RendererTheme): void {
+function postThemeAppliedAfterPaint(theme: RendererTheme, requestId?: number): void {
+  if (requestId === undefined || !Number.isFinite(requestId) || requestId <= 0) {
+    return;
+  }
+
+  const generation = ++themeAppliedAckGeneration;
+  let posted = false;
+  const postAck = () => {
+    if (posted || generation !== themeAppliedAckGeneration) {
+      return;
+    }
+
+    posted = true;
+    postHostMessage({ type: "theme-applied", theme, requestId });
+  };
+
+  window.requestAnimationFrame(() => window.requestAnimationFrame(postAck));
+  window.setTimeout(postAck, THEME_APPLIED_ACK_FALLBACK_MS);
+}
+
+function handleThemeChange(theme: RendererTheme, requestId?: number): void {
   postPerfMark("mm-theme-change-start", { theme });
   applyTheme(theme);
   initMermaidWithTheme(theme);
   postPerfMark("mm-theme-change-applied", { theme });
+  postThemeAppliedAfterPaint(theme, requestId);
   scheduleThemeMermaidRefresh(theme);
 }
 
@@ -2652,11 +2676,12 @@ function handleHostMessage(raw: unknown): void {
 
   if (message.type === "theme") {
     if (initialRenderPipelineCompleted) {
-      void handleThemeChange(message.theme);
+      void handleThemeChange(message.theme, message.requestId);
     } else {
       // Pre-pipeline theme — just set the attribute; the pipeline will
       // re-initialize Mermaid with the right theme when it runs.
       document.documentElement.dataset.theme = message.theme;
+      postThemeAppliedAfterPaint(message.theme, message.requestId);
     }
     return;
   }

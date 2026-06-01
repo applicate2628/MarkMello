@@ -24,7 +24,7 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
     private DispatcherTimer? _hideTimer;
     private long _hideGeneration;
 
-    public bool Show(Control host)
+    public bool Show(Control host, ThemeVariant? themeVariant = null)
     {
         ArgumentNullException.ThrowIfNull(host);
 
@@ -50,7 +50,7 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
         var topLeft = host.PointToScreen(new Point(0, 0));
         var size = new Size(bounds.Width, bounds.Height);
         var pixelSize = ResolveHostPixelSize(host, size);
-        var background = ResolveShieldBrush(host);
+        var background = ResolveShieldBrush(host, themeVariant);
         _owner = owner;
         _host = host;
         _pixelSize = pixelSize;
@@ -191,6 +191,20 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
             $"durationMs={duration.TotalMilliseconds:F0}");
     }
 
+    public bool UpdateBrush(Control host, ThemeVariant? themeVariant = null)
+    {
+        if (_window is null || _shield is null)
+        {
+            return false;
+        }
+
+        var background = ResolveShieldBrush(host, themeVariant);
+        _window.Background = background;
+        _shield.Background = background;
+        ApplicateTrace.DiagMs("pane-seq", "bridge-cover-window-brush-updated", $"brush={DescribeBrush(background)}");
+        return true;
+    }
+
     public void Dispose()
         => Hide();
 
@@ -241,23 +255,25 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
             SysMath.Max(1, (int)SysMath.Round(size.Height * scaling, MidpointRounding.AwayFromZero)));
     }
 
-    private static IBrush ResolveShieldBrush(Control host)
+    private static IBrush ResolveShieldBrush(Control host, ThemeVariant? themeVariant = null)
     {
         const string backgroundBrushKey = "MmBackgroundBrush";
-        if (host.TryFindResource(backgroundBrushKey, host.ActualThemeVariant, out var resource)
+        var resolvedHostVariant = themeVariant ?? host.ActualThemeVariant;
+        if (host.TryFindResource(backgroundBrushKey, resolvedHostVariant, out var resource)
             && resource is IBrush brush)
         {
             return brush;
         }
 
         var app = Avalonia.Application.Current;
-        if (app?.TryGetResource(backgroundBrushKey, app.ActualThemeVariant, out var appResource) == true
+        var resolvedAppVariant = themeVariant ?? app?.ActualThemeVariant;
+        if (app?.TryGetResource(backgroundBrushKey, resolvedAppVariant, out var appResource) == true
             && appResource is IBrush appBrush)
         {
             return appBrush;
         }
 
-        return IsDarkVariant(host.ActualThemeVariant ?? app?.ActualThemeVariant)
+        return IsDarkVariant(themeVariant ?? host.ActualThemeVariant ?? app?.ActualThemeVariant)
             ? FallbackDarkBrush
             : FallbackLightBrush;
     }

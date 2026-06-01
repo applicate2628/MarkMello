@@ -166,14 +166,16 @@ public partial class MainWindowViewModel
         // ObservableCollection per heading makes the panel handle N
         // CollectionChanged events and rebuild all rows on every item.
         DocumentHeadings = new ObservableCollection<DocumentHeading>(headings);
-        // Keep the active row stable across document switches when the new
-        // heading payload still contains the same id. Clearing on every
+        // Keep a valid active row across document switches. Clearing on every
         // replacement makes the TOC visibly blink "active -> none -> active"
-        // while the document-switch cover is doing its job beside it.
+        // while the renderer's active-heading observer is still settling.
+        // If the old id is absent from the new document, select the first new
+        // heading as a temporary anchor until the renderer reports the exact
+        // visible heading.
         _pendingScrollToHeadingId = null;
         if (string.IsNullOrEmpty(activeHeadingId) || !ContainsHeadingId(headings, activeHeadingId))
         {
-            ActiveHeadingId = string.Empty;
+            ActiveHeadingId = headings.Count > 0 ? headings[0].Id : string.Empty;
         }
     }
 

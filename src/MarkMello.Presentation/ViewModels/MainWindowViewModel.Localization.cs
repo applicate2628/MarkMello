@@ -331,6 +331,7 @@ public partial class MainWindowViewModel
             return;
         }
 
+        RaiseThemeTransitionStartingIfEffectiveThemeWillChange(normalized, ReadingPreferences.LightPalette);
         ApplyTheme(normalized);
 
         if (persist)

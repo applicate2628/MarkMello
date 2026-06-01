@@ -14,6 +14,11 @@ using System.ComponentModel;
 
 namespace MarkMello.Presentation.ViewModels;
 
+public sealed class ThemeTransitionStartingEventArgs(ThemeMode targetEffectiveTheme) : EventArgs
+{
+    public ThemeMode TargetEffectiveTheme { get; } = targetEffectiveTheme;
+}
+
 /// <summary>
 /// View model главного окна. Отвечает за state machine (NoDocument/Viewing/LoadError),
 /// тему, reading preferences, команды open/reload, lazy edit mode и dirty/save flow.
@@ -62,6 +67,13 @@ public partial class MainWindowViewModel : ObservableObject
     /// dependency on the Applicate-side coordinator.
     /// </summary>
     public event EventHandler? DocumentTransitionStarting;
+
+    /// <summary>
+    /// Raised immediately BEFORE a user-driven theme/palette change mutates
+    /// Avalonia's effective theme. Applicate uses it to cover the native
+    /// WebView until the renderer acks the matching theme paint.
+    /// </summary>
+    public event EventHandler<ThemeTransitionStartingEventArgs>? ThemeTransitionStarting;
 
     public MainWindowViewModel(
         OpenDocumentUseCase openDocument,
@@ -1921,6 +1933,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     private void ApplyLightPalette(LightPaletteMode palette)
     {
+        RaiseThemeTransitionStartingIfEffectiveThemeWillChange(Theme, palette);
         _selectedLightPalette = palette;
         ApplyReadingPreferences(ReadingPreferences with { LightPalette = palette });
         _themeService.Apply(Theme, palette);
@@ -1928,6 +1941,30 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(IsOriginalPaletteSelected));
         OnPropertyChanged(nameof(IsWhitePaletteSelected));
     }
+
+    private void RaiseThemeTransitionStartingIfEffectiveThemeWillChange(
+        ThemeMode theme,
+        LightPaletteMode lightPalette)
+    {
+        var target = ResolveEffectiveTheme(theme, lightPalette);
+        if (target == ThemeMode.System || target == EffectiveTheme)
+        {
+            return;
+        }
+
+        ThemeTransitionStarting?.Invoke(this, new ThemeTransitionStartingEventArgs(target));
+    }
+
+    private static ThemeMode ResolveEffectiveTheme(ThemeMode theme, LightPaletteMode lightPalette)
+        => theme switch
+        {
+            ThemeMode.Dark => ThemeMode.Dark,
+            ThemeMode.Light => lightPalette == LightPaletteMode.White
+                ? ThemeMode.ClassicWhite
+                : ThemeMode.Light,
+            ThemeMode.ClassicWhite => ThemeMode.ClassicWhite,
+            _ => ThemeMode.System
+        };
 
     private void ApplyReadingPreferences(ReadingPreferences preferences)
     {
