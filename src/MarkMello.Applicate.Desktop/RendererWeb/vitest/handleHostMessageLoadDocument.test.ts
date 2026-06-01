@@ -94,7 +94,7 @@ describe("handleHostMessage(load-document)", () => {
     expect(renderMathStart).toBeGreaterThanOrEqual(0);
     expect(renderMathEnd).toBeGreaterThan(renderMathStart);
     expect(renderMath).toContain("refreshInitialVisibleMinimapContent();");
-    expect(helper).toContain("documentWindow || !minimapSourceReady");
+    expect(helper).toContain("if (!minimapSourceReady)");
     expect(helper).toContain('postPerfMark("mm-minimap-refresh-skipped"');
     expect(helper).toContain("updateMinimapViewport();");
   });

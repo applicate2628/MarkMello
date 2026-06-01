@@ -625,26 +625,6 @@
   }
 
   // RendererWeb/src/schematicMinimap.ts
-  var SVG_NS = "http://www.w3.org/2000/svg";
-  function renderSchematicSvg(blocks, documentWidth, documentHeight) {
-    const svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", `0 0 ${documentWidth} ${documentHeight}`);
-    svg.setAttribute("preserveAspectRatio", "none");
-    svg.style.width = `${documentWidth}px`;
-    svg.style.height = `${documentHeight}px`;
-    svg.style.display = "block";
-    for (const block of blocks) {
-      const rect = document.createElementNS(SVG_NS, "rect");
-      rect.setAttribute("x", "0");
-      rect.setAttribute("y", String(block.top));
-      rect.setAttribute("width", String(documentWidth));
-      rect.setAttribute("height", String(block.height));
-      rect.setAttribute("class", `mm-schematic-${block.kind}`);
-      rect.setAttribute("fill", `var(--mm-minimap-${block.kind}, currentColor)`);
-      svg.appendChild(rect);
-    }
-    return svg;
-  }
   var PHASE_B_HEIGHT_DELTA_THRESHOLD_PX = 100;
   function shouldTriggerPhaseB(currentHeight, cachedHeight) {
     if (cachedHeight <= 0) return false;
@@ -1572,7 +1552,7 @@
         visibleCount: controller.initialVisibleNodes.size,
         failedCount: countFailedInSet(controller.initialVisibleNodes)
       });
-      refreshMinimapContent("A");
+      refreshInitialVisibleMinimapContent();
       hasInitialLayoutSettled = true;
       updateWidthHandlePositionForCurrentLayout();
     });
@@ -2464,6 +2444,26 @@
       minimapContentRefreshTimer = void 0;
     }
     refreshMinimapContent(phase);
+  }
+  function refreshInitialVisibleMinimapContent() {
+    if (!minimapSourceReady) {
+      refreshMinimapContent("A");
+      return;
+    }
+    const root = document.scrollingElement ?? document.documentElement;
+    minimapDocumentHeight = root.scrollHeight;
+    updateMinimapVisibility(true);
+    updateMinimapViewport();
+    emitMark("mm-minimap-refresh-skipped", {
+      phase: "A",
+      reason: "initial-source-ready",
+      documentHeight: minimapDocumentHeight
+    });
+    postPerfMark("mm-minimap-refresh-skipped", {
+      phase: "A",
+      reason: "initial-source-ready",
+      documentHeight: minimapDocumentHeight
+    });
   }
   function postCachedMinimapState(state2) {
     ensureMinimap();

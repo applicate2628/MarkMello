@@ -685,10 +685,11 @@ function renderMath(): MathReadinessController {
       visibleCount: controller.initialVisibleNodes.size,
       failedCount: countFailedInSet(controller.initialVisibleNodes),
     });
-    // Phase A minimap rebuild now happens here — once initial-visible math has
-    // reached terminal state (heights stable), clone the document for the minimap.
-    // This replaces the old katexHasRun gate without racing the rAF in queueMinimapRefresh.
-    refreshMinimapContent("A");
+    // Phase A minimap settle now happens here — once initial-visible math has
+    // reached terminal state. Full-DOM documents already seeded minimap content
+    // immediately after load, so this path only refreshes geometry unless the
+    // source was not ready.
+    refreshInitialVisibleMinimapContent();
     // Polish #5 — first-layout-settled gate for width-handle reveal. Now that
     // .mm-document has settled at its final width, updateWidthHandlePosition
     // computes the correct x. Flipping this once is enough: subsequent calls
