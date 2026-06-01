@@ -66,6 +66,13 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - The WebView renderer hides the document body, minimap, and width-resizer handle until the bootstrap pipeline finishes math + mermaid + code-block rendering and posts `layout-ready`. Without this gate the user briefly sees a fallback state on tab switch and fresh launch (web fonts not yet swapped, `\[ ... \]` math placeholders, raw mermaid source, width handle at a stale X coordinate). The reveal uses a 120ms CSS opacity transition shared by all three surfaces.
 - The hide-rule is scoped to `body > main.mm-document` (and the minimap aside, and the width-handle div) so that the minimap's cloned `.mm-document` subtree is not affected; the clone always renders at full opacity inside the minimap container.
 
+## Bugfix Release Scope (v0.3.3-applicate)
+
+- Heavy WebView documents keep the previous rendered surface visible until the replacement document, mode, or tab state is ready, avoiding blank or raw intermediate frames on startup, tab switch, and reading/edit transitions.
+- Renderer body caching and deferred post-ready work reduce repeated Markdown rendering, Mermaid/code highlighting, theme switching, and width-resizer latency on large documents without enabling the future virtualization feature.
+- The WebView minimap remains detailed when explicitly enabled, while automatic heavy-document policy can use a schematic path to avoid expensive hidden clones.
+- The host-side Table of Contents keeps its panel stable during tab switches and tolerates virtualized Avalonia row recycling without crashing.
+
 ## Bugfix Release Scope (v0.3.2-applicate)
 
 - The Updates entry in the application menu now opens a Settings-style overlay panel. The manual `Check now`, download, and open-release actions live inside that panel instead of expanding inline in the menu.
