@@ -93,8 +93,30 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("TryRelease(\"headings-reported\");", gate, StringComparison.Ordinal);
         Assert.Contains("new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) }", gate, StringComparison.Ordinal);
         Assert.Contains("Opacity = 1;", gate, StringComparison.Ordinal);
-        Assert.Contains("startupCover.Hide();", gate, StringComparison.Ordinal);
+        Assert.Contains("startupCover.Hide(ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences));", gate, StringComparison.Ordinal);
         Assert.Contains("startup-window-reveal-released", gate, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DocumentSwitchCoverIsInstalledForReaderAndEditSurfaces()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var installSiblingViews = ExtractMethodBody(codeBehind, "private void InstallSiblingMountedViews(MainWindowViewModel viewModel)");
+        var disposeHandler = ExtractMethodBody(codeBehind, "private void OnApplicateMainWindowClosed(object? sender, EventArgs e)");
+
+        Assert.Contains("_viewerDocumentSwitchRevealCoordinator = new ApplicateDocumentSwitchRevealCoordinator(", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("viewerHostForMode,", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("ApplicateMode.Viewer,", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("() => viewModel.IsViewer && !viewModel.IsEditMode", installSiblingViews, StringComparison.Ordinal);
+
+        Assert.Contains("_editDocumentSwitchRevealCoordinator = new ApplicateDocumentSwitchRevealCoordinator(", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("editHost,", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("ApplicateMode.Edit,", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("() => viewModel.IsViewer && viewModel.IsEditMode", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("clearHeadingsOnRendererFailure: false", installSiblingViews, StringComparison.Ordinal);
+
+        Assert.Contains("_viewerDocumentSwitchRevealCoordinator?.Dispose();", disposeHandler, StringComparison.Ordinal);
+        Assert.Contains("_editDocumentSwitchRevealCoordinator?.Dispose();", disposeHandler, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -115,6 +115,20 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
+    public void BridgeModeRevealCoverSupportsAnimatedRelease()
+    {
+        var bridge = File.ReadAllText(BridgeSourcePath);
+        var cover = File.ReadAllText(CoverWindowSourcePath);
+
+        Assert.Contains("public void Hide(TimeSpan duration)", cover, StringComparison.Ordinal);
+        Assert.Contains("new DoubleTransition", cover, StringComparison.Ordinal);
+        Assert.Contains("Visual.OpacityProperty", cover, StringComparison.Ordinal);
+        Assert.Contains("new DispatcherTimer", cover, StringComparison.Ordinal);
+        Assert.Contains("HideModeRevealCoverAnimated()", bridge, StringComparison.Ordinal);
+        Assert.Contains("ApplicateMotion.ModeSwitchDuration(_getReadingPreferences())", bridge, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BridgeModeRevealCoverFallbackPaletteMatchesRendererDocumentBackground()
     {
         var cover = File.ReadAllText(CoverWindowSourcePath);
@@ -287,7 +301,7 @@ public sealed class ApplicateSiblingMountTests
             source.IndexOf("private void CommitQueuedModeTransaction()", StringComparison.Ordinal));
 
         var disarm = commit.IndexOf("_modeRevealCoverArmed = false;", StringComparison.Ordinal);
-        var hide = commit.IndexOf("HideModeRevealCover();", StringComparison.Ordinal);
+        var hide = commit.IndexOf("HideModeRevealCoverAnimated();", StringComparison.Ordinal);
 
         Assert.True(disarm >= 0);
         Assert.True(hide > disarm);

@@ -35,7 +35,7 @@ internal sealed class ApplicateDeferredHeadingUpdater
         var version = unchecked(_version + 1);
         _version = version;
 
-        if (headings.Count < LargeHeadingUpdateThreshold)
+        if (!ShouldDefer(headings))
         {
             ClearPending();
             viewModel.UpdateDocumentHeadings(headings);
@@ -47,6 +47,9 @@ internal sealed class ApplicateDeferredHeadingUpdater
         _pendingViewModel = viewModel;
         _pendingCanApply = canApply;
     }
+
+    private static bool ShouldDefer(IReadOnlyList<DocumentHeading> headings)
+        => headings.Count == 0 || headings.Count >= LargeHeadingUpdateThreshold;
 
     public void FlushPending()
     {

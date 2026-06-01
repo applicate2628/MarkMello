@@ -1,8 +1,11 @@
 using Avalonia;
+using Avalonia.Animation;
 using Avalonia.Controls;
 using Avalonia.Media;
 using Avalonia.Styling;
 using MarkMello.Applicate.Desktop.Diagnostics;
+using MarkMello.Applicate.Desktop.Views;
+using Avalonia.Threading;
 using System.Runtime.InteropServices;
 using SysMath = System.Math;
 
@@ -18,6 +21,8 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
     private Window? _owner;
     private Control? _host;
     private PixelSize _pixelSize;
+    private DispatcherTimer? _hideTimer;
+    private long _hideGeneration;
 
     public bool Show(Control host)
     {
@@ -69,6 +74,7 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
             ShowActivated = false,
             ShowInTaskbar = false,
             Topmost = true,
+            Opacity = 1.0,
             Width = size.Width,
             WindowDecorations = WindowDecorations.None,
             WindowStartupLocation = WindowStartupLocation.Manual
@@ -109,6 +115,7 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
 
     public void Hide()
     {
+        CancelAnimatedHide();
         if (_owner is not null)
         {
             _owner.PositionChanged -= OnOwnerPositionChanged;
@@ -127,6 +134,61 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
         _window = null;
         _shield = null;
         _pixelSize = default;
+    }
+
+    public void Hide(TimeSpan duration)
+    {
+        if (duration <= TimeSpan.Zero || _window is null)
+        {
+            Hide();
+            return;
+        }
+
+        CancelAnimatedHide();
+        var generation = ++_hideGeneration;
+        var window = _window;
+        window.Transitions =
+        [
+            new DoubleTransition
+            {
+                Property = Visual.OpacityProperty,
+                Duration = duration,
+                Easing = ApplicateMotion.Easing
+            }
+        ];
+        window.Opacity = 0.0;
+
+        DispatcherTimer? timer = null;
+        EventHandler? tick = null;
+        tick = (_, _) =>
+        {
+            if (timer is not null)
+            {
+                timer.Stop();
+                timer.Tick -= tick;
+            }
+            if (ReferenceEquals(_hideTimer, timer))
+            {
+                _hideTimer = null;
+            }
+            if (generation == _hideGeneration)
+            {
+                Hide();
+            }
+        };
+
+        timer = new DispatcherTimer
+        {
+            Interval = duration + TimeSpan.FromMilliseconds(40)
+        };
+        timer.Tick += tick;
+        _hideTimer = timer;
+        timer.Start();
+
+        ApplicateTrace.DiagMs(
+            "pane-seq",
+            "bridge-cover-window-hide-animated",
+            $"durationMs={duration.TotalMilliseconds:F0}");
     }
 
     public void Dispose()
@@ -207,6 +269,18 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
         => brush is ISolidColorBrush solid
             ? $"#{solid.Color.R:X2}{solid.Color.G:X2}{solid.Color.B:X2}"
             : brush.GetType().Name;
+
+    private void CancelAnimatedHide()
+    {
+        _hideGeneration++;
+        if (_hideTimer is null)
+        {
+            return;
+        }
+
+        _hideTimer.Stop();
+        _hideTimer = null;
+    }
 
     private static bool TryGetPlatformHandle(Window window, out IntPtr handle)
     {

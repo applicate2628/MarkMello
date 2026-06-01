@@ -1,5 +1,5 @@
 export type LoadDocumentMessage = {
-  html: string;
+  html?: string;
   documentName?: string;
   theme?: "light" | "dark" | "classic-white";
   renderId?: number;
@@ -34,6 +34,7 @@ export type LoadDocumentDeps = {
   setCurrentDocumentCacheKey?: (cacheKey: string | null) => void;
   restoreCachedScrollPosition?: () => void;
   completeCachedDocumentLoad?: (renderId?: number, hasMermaid?: boolean, hasHljs?: boolean) => void;
+  notifyDocumentCacheMiss?: (renderId?: number, cacheKey?: string) => void;
 };
 
 export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocumentDeps): void {
@@ -44,15 +45,28 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
 
   deps.emitMark("mm-load-document", {
     documentName: message.documentName ?? "",
-    htmlLength: message.html.length,
+    htmlLength: message.html?.length ?? 0,
     renderId: message.renderId ?? null,
   });
-  deps.debugLog(`load-document:start id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${message.theme ?? "(none)"} currentTheme=${document.documentElement.dataset.theme ?? "(none)"} htmlLength=${message.html.length}`);
+  deps.debugLog(`load-document:start id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${message.theme ?? "(none)"} currentTheme=${document.documentElement.dataset.theme ?? "(none)"} htmlLength=${message.html?.length ?? 0}`);
 
   // Cancel before swap — the in-flight MathReadinessController owns Promises
   // that observers will resolve from the about-to-be-discarded DOM nodes.
   // Failing to cancel keeps frozen initialVisibleNodes pointing into the
   // detached subtree, producing phantom math marks against the previous doc.
+  const restoreOnly = message.html === undefined;
+  let cachedFragment = restoreOnly && message.cacheKey
+    ? deps.getCachedDocumentFragment?.(message.cacheKey)
+    : undefined;
+  if (cachedFragment === undefined && restoreOnly) {
+    deps.emitMark("mm-load-document-cache-miss", {
+      documentName: message.documentName ?? "",
+      renderId: message.renderId ?? null,
+    });
+    deps.notifyDocumentCacheMiss?.(message.renderId, message.cacheKey);
+    return;
+  }
+
   deps.preserveCurrentDocumentCache?.();
   deps.cancelCurrentMathController();
   deps.resetModuleGlobals();
@@ -60,9 +74,10 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
     deps.applyTheme(message.theme);
   }
 
-  const cachedFragment = message.cacheKey
-    ? deps.getCachedDocumentFragment?.(message.cacheKey)
-    : undefined;
+  if (!restoreOnly && message.cacheKey) {
+    cachedFragment = deps.getCachedDocumentFragment?.(message.cacheKey);
+  }
+
   if (cachedFragment !== undefined) {
     deps.emitMark("mm-load-document-cache-hit", {
       documentName: message.documentName ?? "",
@@ -78,7 +93,7 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
   if (cachedFragment !== undefined) {
     main.replaceChildren(cachedFragment);
   } else {
-    main.innerHTML = message.html;
+    main.innerHTML = message.html ?? "";
   }
   deps.setCurrentDocumentCacheKey?.(message.cacheKey ?? null);
   const firstHeading = main.querySelector("h1,h2,h3")?.textContent?.trim().replace(/\s+/g, " ").slice(0, 120) ?? "";

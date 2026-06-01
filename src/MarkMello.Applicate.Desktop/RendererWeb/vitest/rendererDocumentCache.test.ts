@@ -22,6 +22,15 @@ async function letPipelineSettle(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 700));
 }
 
+function rendererCacheKey(html: string, theme: "light" | "dark" | "classic-white"): string {
+  let hash = 2166136261;
+  for (let index = 0; index < html.length; index++) {
+    hash ^= html.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${theme}|${html.length}|${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
 beforeEach(() => {
   delete (window as unknown as { chrome?: unknown }).chrome;
 });
@@ -264,6 +273,96 @@ describe("renderer document cache", () => {
 
     expect(perfMarks).toContain("mm-load-document-cache-hit");
     expect(postReadyComplete).toMatchObject({ renderId: 3 });
+  });
+
+  it("restores cached documents by key without receiving the full html body again", async () => {
+    const { load, messages } = await loadRendererWithMessages();
+    const firstHtml = "<h1 id='first'>First</h1><p>cached document</p>";
+    const secondHtml = "<h1 id='second'>Second</h1><p>other document</p>";
+
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+    await letPipelineSettle();
+
+    messages.length = 0;
+    load({
+      type: "load-cached-document",
+      cacheKey: rendererCacheKey(firstHtml, "light"),
+      documentName: "first.md",
+      theme: "light",
+      hasMermaid: false,
+      renderId: 3,
+    });
+    await letPipelineSettle();
+
+    expect(document.querySelector("main.mm-document")?.textContent).toContain("First");
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "perf-mark",
+      name: "mm-load-document-cache-hit",
+    }));
+    expect(messages).not.toContainEqual(expect.objectContaining({
+      type: "document-cache-miss",
+    }));
+  });
+
+  it("re-extracts headings from cached DOM when the cached heading snapshot is empty", async () => {
+    const { load, messages } = await loadRendererWithMessages();
+    const firstHtml = "<p>cached document</p>";
+    const secondHtml = "<h1 id='second'>Second</h1><p>other document</p>";
+
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+    document.querySelector("main.mm-document")!.innerHTML = "<h1 id='late'>Late heading</h1><p>cached document</p>";
+
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+    await letPipelineSettle();
+
+    messages.length = 0;
+    load({
+      type: "load-cached-document",
+      cacheKey: rendererCacheKey(firstHtml, "light"),
+      documentName: "first.md",
+      theme: "light",
+      hasMermaid: false,
+      renderId: 3,
+    });
+    await letPipelineSettle();
+
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "headings-updated",
+      headings: [expect.objectContaining({ id: "late", text: "Late heading" })],
+    }));
+  });
+
+  it("leaves the current document in place and asks the host for fallback html when a key restore misses", async () => {
+    const { load, messages } = await loadRendererWithMessages();
+    const currentHtml = "<h1 id='current'>Current</h1>";
+
+    load({ type: "load-document", html: currentHtml, documentName: "current.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+
+    messages.length = 0;
+    load({
+      type: "load-cached-document",
+      cacheKey: "light|123|deadbeef",
+      documentName: "missing.md",
+      theme: "light",
+      hasMermaid: false,
+      renderId: 2,
+    });
+    await letPipelineSettle();
+
+    expect(document.querySelector("main.mm-document")?.textContent).toContain("Current");
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "document-cache-miss",
+      renderId: 2,
+      cacheKey: "light|123|deadbeef",
+    }));
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "perf-mark",
+      name: "mm-load-document-cache-miss",
+    }));
   });
 
   it("resumes lazy mermaid rendering for missing diagrams after a processed document cache hit", async () => {

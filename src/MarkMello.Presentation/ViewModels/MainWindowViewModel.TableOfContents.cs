@@ -159,16 +159,37 @@ public partial class MainWindowViewModel
     {
         ArgumentNullException.ThrowIfNull(headings);
 
+        var activeHeadingId = ActiveHeadingId;
+
         // Replace the collection wholesale so the TOC panel rebuilds rows once
         // via DocumentHeadings PropertyChanged. Mutating the existing
         // ObservableCollection per heading makes the panel handle N
         // CollectionChanged events and rebuild all rows on every item.
         DocumentHeadings = new ObservableCollection<DocumentHeading>(headings);
-        // Clear active heading id when the document changes; the
-        // renderer's IntersectionObserver emits a fresh active-heading-
-        // changed shortly after this on its first scroll.
+        // Keep the active row stable across document switches when the new
+        // heading payload still contains the same id. Clearing on every
+        // replacement makes the TOC visibly blink "active -> none -> active"
+        // while the document-switch cover is doing its job beside it.
         _pendingScrollToHeadingId = null;
-        ActiveHeadingId = string.Empty;
+        if (string.IsNullOrEmpty(activeHeadingId) || !ContainsHeadingId(headings, activeHeadingId))
+        {
+            ActiveHeadingId = string.Empty;
+        }
+    }
+
+    private static bool ContainsHeadingId(
+        System.Collections.Generic.IEnumerable<DocumentHeading> headings,
+        string headingId)
+    {
+        foreach (var heading in headings)
+        {
+            if (string.Equals(heading.Id, headingId, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void ClearDocumentHeadings()

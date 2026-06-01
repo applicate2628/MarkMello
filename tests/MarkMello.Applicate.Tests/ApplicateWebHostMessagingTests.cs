@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using MarkMello.Applicate.Desktop.Rendering;
 using Xunit;
 
 namespace MarkMello.Applicate.Tests;
@@ -114,7 +115,7 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("skipFrameWaitUntilRenderReady: skipRendererFrameWait", hostSource, StringComparison.Ordinal);
         Assert.Contains("bool skipFrameWaitUntilRenderReady = false", viewSource, StringComparison.Ordinal);
         Assert.Contains("QueueRender(skipFrameWaitUntilRenderReady)", viewSource, StringComparison.Ordinal);
-        Assert.Contains("skipFrameWait = true", viewSource, StringComparison.Ordinal);
+        Assert.Contains("skipFrameWait = skipFrameWaitUntilRenderReady", viewSource, StringComparison.Ordinal);
         Assert.Contains("skipFrameWait?: boolean", rendererSource, StringComparison.Ordinal);
         Assert.Contains("mm-layout-ready-frame-wait-skipped", rendererSource, StringComparison.Ordinal);
         Assert.Contains("scheduleLayoutReady(skipFrameWait === true)", rendererSource, StringComparison.Ordinal);
@@ -191,12 +192,43 @@ public sealed class ApplicateWebHostMessagingTests
         var source = File.ReadAllText(WebDocumentViewSourcePath);
         var cacheLookup = source.IndexOf("_renderedBodyCache", StringComparison.Ordinal);
         var renderBody = source.IndexOf(".RenderBodyAsync(source, readingPreferences, imageSourceResolver, ct)", StringComparison.Ordinal);
-        var postLoad = source.IndexOf("PostRendererMessage(loadDocumentMessage)", StringComparison.Ordinal);
+        var postLoad = source.IndexOf("PostRendererMessage(rendererMessage)", StringComparison.Ordinal);
 
         Assert.True(cacheLookup >= 0, "Shell render should keep a rendered-body cache before load-document IPC.");
         Assert.True(renderBody > cacheLookup, "Markdown-to-HTML rendering should run behind the rendered-body cache.");
         Assert.True(postLoad > renderBody, "The cached or freshly rendered body should be resolved before load-document IPC.");
         Assert.Contains("render-body-cache-hit", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ShellRenderCanRestoreRendererDocumentCacheByKeyBeforePostingFullHtmlFallback()
+    {
+        var source = File.ReadAllText(WebDocumentViewSourcePath);
+        var rendererSource = File.ReadAllText(RendererSourcePath);
+
+        Assert.Contains("_postedRendererDocumentCacheKeys", source, StringComparison.Ordinal);
+        Assert.Contains("_pendingRendererCacheFallbackLoads[renderId] = fullLoadDocumentMessage;", source, StringComparison.Ordinal);
+        Assert.Contains("type = \"load-cached-document\"", source, StringComparison.Ordinal);
+        Assert.Contains("HandleDocumentCacheMissMessage", source, StringComparison.Ordinal);
+        Assert.Contains("type == \"document-cache-miss\"", source, StringComparison.Ordinal);
+        Assert.Contains("PostRendererMessage(fallbackLoad)", source, StringComparison.Ordinal);
+
+        Assert.Contains("\"load-cached-document\"", rendererSource, StringComparison.Ordinal);
+        Assert.Contains("notifyDocumentCacheMiss", rendererSource, StringComparison.Ordinal);
+        Assert.Contains("mm-load-document-cache-miss", rendererSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RendererDocumentCacheKeyIncludesDocumentIdentity()
+    {
+        var suffix = ApplicateRendererDocumentCacheKeys.CreateSuffix("<h1>Same rendered body</h1>");
+
+        var first = ApplicateRendererDocumentCacheKeys.Create("classic-white", @"D:\docs\first.md", suffix);
+        var second = ApplicateRendererDocumentCacheKeys.Create("classic-white", @"D:\docs\second.md", suffix);
+
+        Assert.NotEqual(first, second);
+        Assert.StartsWith("classic-white|", first, StringComparison.Ordinal);
+        Assert.EndsWith("|" + suffix, first, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -275,16 +307,28 @@ public sealed class ApplicateWebHostMessagingTests
         var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
         var coordinatorSource = File.ReadAllText(DocumentSwitchRevealCoordinatorSourcePath);
         var rendererSource = File.ReadAllText(RendererSourcePath);
+        var completeLayoutReady = ExtractMethodBody(viewSource, "private void CompleteLayoutReady()");
+        var completeDocumentRenderVisualReady = ExtractMethodBody(viewSource, "private void CompleteDocumentRenderVisualReady()");
 
         Assert.Contains("public event EventHandler? DocumentRevealReady;", viewSource, StringComparison.Ordinal);
         Assert.Contains("\"post-ready-enhancements-complete\"", viewSource, StringComparison.Ordinal);
         Assert.Contains("CompleteDocumentRevealReady()", viewSource, StringComparison.Ordinal);
         Assert.Contains("DocumentRevealReady?.Invoke", viewSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("RevealNativeDocument(TimeSpan.Zero);", completeLayoutReady, StringComparison.Ordinal);
+        Assert.DoesNotContain("DocumentRendered?.Invoke", completeLayoutReady, StringComparison.Ordinal);
+        Assert.Contains("_postReadyEnhancementsComplete", completeDocumentRenderVisualReady, StringComparison.Ordinal);
+        Assert.Contains("RevealNativeDocument(TimeSpan.Zero);", completeDocumentRenderVisualReady, StringComparison.Ordinal);
+        Assert.Contains("DocumentRendered?.Invoke", completeDocumentRenderVisualReady, StringComparison.Ordinal);
 
         Assert.Contains("_host.View.DocumentRevealReady += OnDocumentRevealReady;", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("ApplicateMode _mode", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("e.Mode != _mode", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("clearHeadingsOnRendererFailure", coordinatorSource, StringComparison.Ordinal);
         Assert.Contains("_commitCompletedForCover", coordinatorSource, StringComparison.Ordinal);
         Assert.Contains("_documentRevealReadyForCover", coordinatorSource, StringComparison.Ordinal);
         Assert.Contains("TryHideCoverAfterCommitAndRevealReady()", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("ApplicateMotion.ModeSwitchDuration(_viewModel.ReadingPreferences)", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("_cover.Hide(duration)", coordinatorSource, StringComparison.Ordinal);
 
         Assert.Contains("postReadyEnhancementsCompleted", rendererSource, StringComparison.Ordinal);
         Assert.Contains("post-ready-enhancements-complete", rendererSource, StringComparison.Ordinal);

@@ -23,4 +23,5 @@ public sealed record ApplicateRenderedBody(
     IReadOnlyList<ApplicateHtmlHeading> Headings,
     IReadOnlyList<ApplicateHtmlBlockMarker> Blocks,
     bool HasMermaidBlock,
-    bool HasCodeBlockWithSyntax);
+    bool HasCodeBlockWithSyntax,
+    string? RendererCacheKeySuffix = null);

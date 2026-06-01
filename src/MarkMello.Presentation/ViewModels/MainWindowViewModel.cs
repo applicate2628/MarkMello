@@ -54,14 +54,12 @@ public partial class MainWindowViewModel : ObservableObject
     public event EventHandler? CloseRequested;
 
     /// <summary>
-    /// Raised immediately BEFORE a viewer document load mutates
+    /// Raised immediately BEFORE a document load mutates
     /// <see cref="Document"/>. The Applicate document-switch reveal coordinator
-    /// subscribes to raise its transition cover FIRST, so the synchronous
-    /// teardown that follows (the generated <c>OnDocumentChanged</c> clears the
-    /// TOC, then the render pipeline swaps the WebView document) happens UNDER
-    /// the cover instead of as a visible staged teardown (render gone -> TOC
-    /// gone -> blank). Presentation-layer event so the VM keeps no dependency
-    /// on the Applicate-side coordinator.
+    /// subscribes to raise the active surface's transition cover FIRST, so the
+    /// synchronous teardown that follows happens UNDER the cover instead of as
+    /// a visible staged teardown. Presentation-layer event so the VM keeps no
+    /// dependency on the Applicate-side coordinator.
     /// </summary>
     public event EventHandler? DocumentTransitionStarting;
 
@@ -1275,7 +1273,6 @@ public partial class MainWindowViewModel : ObservableObject
         else
         {
             _pendingScrollToHeadingId = null;
-            ActiveHeadingId = string.Empty;
         }
         RefreshDocumentSummary();
         OnPropertyChanged(nameof(ShowsEditToggle));

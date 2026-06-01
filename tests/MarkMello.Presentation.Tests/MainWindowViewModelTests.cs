@@ -211,7 +211,7 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public async Task OpeningDifferentDocumentKeepsTableOfContentsUntilRendererReportsHeadings()
+    public async Task OpeningDifferentDocumentKeepsTableOfContentsAndActiveHeadingUntilRendererReportsHeadings()
     {
         var harness = CreateHarness();
         var firstPath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "toc-first.md");
@@ -231,7 +231,7 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("first", harness.ViewModel.DocumentHeadings[0].Id);
         Assert.True(harness.ViewModel.HasDocumentHeadings);
         Assert.True(harness.ViewModel.IsTocVisible);
-        Assert.Equal(string.Empty, harness.ViewModel.ActiveHeadingId);
+        Assert.Equal("first", harness.ViewModel.ActiveHeadingId);
 
         harness.ViewModel.UpdateDocumentHeadings([
             new DocumentHeading("second", 1, "Second", 0),
@@ -240,6 +240,25 @@ public sealed class MainWindowViewModelTests
         Assert.Single(harness.ViewModel.DocumentHeadings);
         Assert.Equal("second", harness.ViewModel.DocumentHeadings[0].Id);
         Assert.True(harness.ViewModel.IsTocVisible);
+        Assert.Equal(string.Empty, harness.ViewModel.ActiveHeadingId);
+    }
+
+    [Fact]
+    public void UpdateDocumentHeadingsKeepsActiveHeadingWhenReplacementStillContainsIt()
+    {
+        var harness = CreateHarness();
+        harness.ViewModel.UpdateDocumentHeadings([
+            new DocumentHeading("intro", 1, "Intro", 0),
+            new DocumentHeading("details", 2, "Details", 12),
+        ]);
+        harness.ViewModel.ScrollToHeadingCommand.Execute("details");
+
+        harness.ViewModel.UpdateDocumentHeadings([
+            new DocumentHeading("intro", 1, "Intro updated", 0),
+            new DocumentHeading("details", 2, "Details updated", 12),
+        ]);
+
+        Assert.Equal("details", harness.ViewModel.ActiveHeadingId);
     }
 
     [Fact]

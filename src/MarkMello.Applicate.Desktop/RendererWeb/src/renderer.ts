@@ -93,6 +93,7 @@ type RendererMessage =
   | { type: "active-heading-changed"; id: string }
   | { type: "preview-source-line"; sourceLine: number }
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number }
+  | { type: "document-cache-miss"; renderId?: number; cacheKey?: string }
   // Mode-toggle reveal gate (2026-05-20). Posted in response to a host-sent
   // `mode-settle-probe` message after the renderer has applied pending reading
   // preferences and let layout chrome such as the minimap paint at the new slot
@@ -133,7 +134,8 @@ type HostMessage =
   | { type: "scroll-to-block"; blockIndex: number }
   | { type: "scroll-to"; anchor: string }
   | { type: "scroll-to-progress"; progressPercent: number }
-  | { type: "load-document"; html: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; skipFrameWait?: boolean }
+  | { type: "load-document"; html: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; skipFrameWait?: boolean; cacheKey?: string | null }
+  | { type: "load-cached-document"; cacheKey: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; skipFrameWait?: boolean }
   | { type: "clear-document" }
   | { type: "scroll-to-heading"; id: string }
   | { type: "scroll-to-source-line"; sourceLine: number }
@@ -1932,8 +1934,15 @@ function extractAndPostHeadings(): void {
 }
 
 function postCachedHeadings(): void {
-  const headings = restoredCachedHeadings ?? [];
+  const cachedHeadings = restoredCachedHeadings;
   restoredCachedHeadings = null;
+
+  if (cachedHeadings === null || cachedHeadings.length === 0) {
+    extractAndPostHeadings();
+    return;
+  }
+
+  const headings = cachedHeadings;
   lastExtractedHeadings = headings.map(heading => ({ ...heading }));
   postHostMessage({ type: "headings-updated", headings });
   if (activeHeadingObserver) {
@@ -2750,9 +2759,39 @@ function handleHostMessage(raw: unknown): void {
     if (message.hasHljs !== undefined) {
       loadMessage.hasHljs = message.hasHljs;
     }
-    loadMessage.cacheKey = createProcessedDocumentCacheKey(
-      message.html,
-      message.theme ?? getCurrentTheme());
+    if (typeof message.cacheKey === "string" && message.cacheKey.length > 0) {
+      loadMessage.cacheKey = message.cacheKey;
+    } else {
+      loadMessage.cacheKey = createProcessedDocumentCacheKey(
+        message.html,
+        message.theme ?? getCurrentTheme());
+    }
+    applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+    return;
+  }
+
+  if (message.type === "load-cached-document") {
+    const loadMessage: import("./loadDocument").LoadDocumentMessage = {
+      cacheKey: message.cacheKey,
+    };
+    if (message.documentName !== undefined) {
+      loadMessage.documentName = message.documentName;
+    }
+    if (message.theme !== undefined) {
+      loadMessage.theme = message.theme;
+    }
+    if (message.renderId !== undefined) {
+      loadMessage.renderId = message.renderId;
+    }
+    if (message.skipFrameWait !== undefined) {
+      loadMessage.skipFrameWait = message.skipFrameWait;
+    }
+    if (message.hasMermaid !== undefined) {
+      loadMessage.hasMermaid = message.hasMermaid;
+    }
+    if (message.hasHljs !== undefined) {
+      loadMessage.hasHljs = message.hasHljs;
+    }
     applyLoadDocument(loadMessage, buildLoadDocumentDeps());
     return;
   }
@@ -3109,7 +3148,9 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
     // semantic anchor rather than centralized here.
     emitMark: (name, detail) => {
       emitMark(name, detail);
-      if (name === "mm-load-document" || name === "mm-load-document-cache-hit") {
+      if (name === "mm-load-document"
+        || name === "mm-load-document-cache-hit"
+        || name === "mm-load-document-cache-miss") {
         postPerfMark(name, (detail as Record<string, unknown> | undefined) ?? undefined);
       }
     },
@@ -3131,6 +3172,18 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
       postCachedLayoutReady();
       postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
       scheduleCachedMermaidResume(hasMermaid);
+    },
+    notifyDocumentCacheMiss: (renderId, cacheKey) => {
+      const message: RendererMessage = {
+        type: "document-cache-miss",
+      };
+      if (renderId !== undefined) {
+        message.renderId = renderId;
+      }
+      if (cacheKey !== undefined) {
+        message.cacheKey = cacheKey;
+      }
+      postHostMessage(message);
     },
   };
 }

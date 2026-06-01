@@ -66,7 +66,8 @@ public sealed class ApplicateMainWindow : MainWindow
     private Panel? _tabsContentPanel;
     private ApplicateSiblingMountBridge? _siblingMountBridge;
     private ApplicateModeTransactionHostRouter? _modeTransactionHostRouter;
-    private ApplicateDocumentSwitchRevealCoordinator? _documentSwitchRevealCoordinator;
+    private ApplicateDocumentSwitchRevealCoordinator? _viewerDocumentSwitchRevealCoordinator;
+    private ApplicateDocumentSwitchRevealCoordinator? _editDocumentSwitchRevealCoordinator;
     private bool _editModeHotkeyDown;
 
     public ApplicateMainWindow(
@@ -257,7 +258,7 @@ public sealed class ApplicateMainWindow : MainWindow
             Dispatcher.UIThread.Post(
                 () =>
                 {
-                    startupCover.Hide();
+                    startupCover.Hide(ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences));
                     ApplicateTrace.DiagMs("startup-applicate-window", "startup-window-reveal-released", $"reason={reason}");
                 },
                 DispatcherPriority.Render);
@@ -1238,14 +1239,24 @@ public sealed class ApplicateMainWindow : MainWindow
         // swaps its row model in place.
         if (viewerHostForMode is not null)
         {
-            _documentSwitchRevealCoordinator = new ApplicateDocumentSwitchRevealCoordinator(
+            _viewerDocumentSwitchRevealCoordinator = new ApplicateDocumentSwitchRevealCoordinator(
                 siblingPanel,
                 viewerHostForMode,
-                // Reader surface only: IsViewer is `State == Viewing`, which is
-                // also true in edit mode (edit is a sub-mode of Viewing), so the
-                // !IsEditMode clause keeps the cover off the edit workspace.
                 viewModel,
+                ApplicateMode.Viewer,
+                // Reader surface only: IsViewer is `State == Viewing`, which is
+                // also true in edit mode (edit is a sub-mode of Viewing).
                 () => viewModel.IsViewer && !viewModel.IsEditMode);
+        }
+        if (editHost is not null)
+        {
+            _editDocumentSwitchRevealCoordinator = new ApplicateDocumentSwitchRevealCoordinator(
+                siblingPanel,
+                editHost,
+                viewModel,
+                ApplicateMode.Edit,
+                () => viewModel.IsViewer && viewModel.IsEditMode,
+                clearHeadingsOnRendererFailure: false);
         }
 
         InstallInactiveEditPreviewPrime(
@@ -1783,8 +1794,10 @@ public sealed class ApplicateMainWindow : MainWindow
 
     private void OnApplicateMainWindowClosed(object? sender, EventArgs e)
     {
-        _documentSwitchRevealCoordinator?.Dispose();
-        _documentSwitchRevealCoordinator = null;
+        _viewerDocumentSwitchRevealCoordinator?.Dispose();
+        _viewerDocumentSwitchRevealCoordinator = null;
+        _editDocumentSwitchRevealCoordinator?.Dispose();
+        _editDocumentSwitchRevealCoordinator = null;
         _siblingMountBridge?.Dispose();
         _siblingMountBridge = null;
         _modeTransactionHostRouter?.Dispose();

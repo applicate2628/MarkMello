@@ -73,6 +73,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _lastLayoutReadyWasCached;
     private bool _requiresPostReadyEnhancements;
     private bool _postReadyEnhancementsComplete = true;
+    private bool _documentRenderedRaised;
     private bool _documentRevealReadyRaised;
     private long _activeRevealRenderId;
     private bool _disposed;
@@ -102,6 +103,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private long _renderSequence;
     private NativeWindowPlacement? _pendingNativeHiddenPaintPlacement;
     private bool _documentRevealPending;
+    private readonly HashSet<string> _postedRendererDocumentCacheKeys = new(StringComparer.Ordinal);
+    private readonly Dictionary<long, object> _pendingRendererCacheFallbackLoads = new();
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -1035,6 +1038,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _activeRevealRenderId = renderId;
         _requiresPostReadyEnhancements = false;
         _postReadyEnhancementsComplete = true;
+        _documentRenderedRaised = false;
         _documentRevealReadyRaised = false;
         _scrollTop = 0;
         _scrollHeight = 0;
@@ -1146,29 +1150,51 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             ConfigureDocumentRevealGate(
                 renderId,
                 requiresPostReadyEnhancements: body.HasMermaidBlock || body.HasCodeBlockWithSyntax);
-            object loadDocumentMessage = skipFrameWaitUntilRenderReady
-                ? new
+            var theme = GetThemeName();
+            var rendererCacheKey = body.RendererCacheKeySuffix is { Length: > 0 } suffix
+                ? ApplicateRendererDocumentCacheKeys.Create(theme, source.Path, suffix)
+                : null;
+            object fullLoadDocumentMessage = new
+            {
+                type = "load-document",
+                html = body.BodyHtml,
+                documentName = source.FileName,
+                theme,
+                hasMermaid = body.HasMermaidBlock,
+                hasHljs = body.HasCodeBlockWithSyntax,
+                renderId,
+                skipFrameWait = skipFrameWaitUntilRenderReady,
+                cacheKey = rendererCacheKey
+            };
+            object rendererMessage = fullLoadDocumentMessage;
+
+            if (rendererCacheKey is not null && _postedRendererDocumentCacheKeys.Contains(rendererCacheKey))
+            {
+                rendererMessage = new
                 {
-                    type = "load-document",
-                    html = body.BodyHtml,
+                    type = "load-cached-document",
+                    cacheKey = rendererCacheKey,
                     documentName = source.FileName,
-                    theme = GetThemeName(),
+                    theme,
                     hasMermaid = body.HasMermaidBlock,
                     hasHljs = body.HasCodeBlockWithSyntax,
                     renderId,
-                    skipFrameWait = true
-                }
-                : new
-                {
-                    type = "load-document",
-                    html = body.BodyHtml,
-                    documentName = source.FileName,
-                    theme = GetThemeName(),
-                    hasMermaid = body.HasMermaidBlock,
-                    hasHljs = body.HasCodeBlockWithSyntax,
-                    renderId
+                    skipFrameWait = skipFrameWaitUntilRenderReady
                 };
-            PostRendererMessage(loadDocumentMessage);
+                _pendingRendererCacheFallbackLoads[renderId] = fullLoadDocumentMessage;
+                ApplicateTrace.ModeToggle($"Web.RenderShell post-cached-load id={renderId} source={source.Path} cacheKey={rendererCacheKey}");
+            }
+            else
+            {
+                if (rendererCacheKey is not null)
+                {
+                    _postedRendererDocumentCacheKeys.Add(rendererCacheKey);
+                }
+
+                _pendingRendererCacheFallbackLoads.Remove(renderId);
+            }
+
+            PostRendererMessage(rendererMessage);
             ApplicateTrace.ModeToggle($"Web.RenderShell post-load id={renderId} source={source.Path}");
         }
         catch (OperationCanceledException)
@@ -1581,6 +1607,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                         ApplicateTrace.DiagMs("renderer-perf", name, extras);
                     }
                 }
+                return;
+            }
+
+            if (type == "document-cache-miss")
+            {
+                HandleDocumentCacheMissMessage(document.RootElement);
                 return;
             }
 
@@ -2081,6 +2113,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _activeRevealRenderId = renderId;
         _requiresPostReadyEnhancements = requiresPostReadyEnhancements;
         _postReadyEnhancementsComplete = !requiresPostReadyEnhancements;
+        _documentRenderedRaised = false;
         _documentRevealReadyRaised = false;
         ApplicateTrace.DiagMs(
             "diag-gate",
@@ -2115,6 +2148,33 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         CompleteDocumentRevealReady();
     }
 
+    private void HandleDocumentCacheMissMessage(JsonElement root)
+    {
+        if (!root.TryGetProperty("renderId", out var renderIdProperty)
+            || renderIdProperty.ValueKind != JsonValueKind.Number
+            || !renderIdProperty.TryGetInt64(out var renderId)
+            || renderId <= 0)
+        {
+            return;
+        }
+
+        if (renderId != _activeRevealRenderId)
+        {
+            _pendingRendererCacheFallbackLoads.Remove(renderId);
+            ApplicateTrace.ModeToggle($"Web.RenderShell cached-load-miss-stale id={renderId} active={_activeRevealRenderId}");
+            return;
+        }
+
+        if (!_pendingRendererCacheFallbackLoads.Remove(renderId, out var fallbackLoad))
+        {
+            ApplicateTrace.ModeToggle($"Web.RenderShell cached-load-miss-no-fallback id={renderId}");
+            return;
+        }
+
+        ApplicateTrace.ModeToggle($"Web.RenderShell cached-load-miss-fallback id={renderId}");
+        PostRendererMessage(fallbackLoad);
+    }
+
     private void CompleteLayoutReady()
     {
         ApplicateTrace.DiagMs("diag-gate", "complete-layout-ready-enter",
@@ -2126,9 +2186,22 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         _awaitingLayoutReady = false;
+        CompleteDocumentRevealReady();
+    }
+
+    private void CompleteDocumentRenderVisualReady()
+    {
+        if (_documentRenderedRaised
+            || !_hasLoadedDocument
+            || !_hasLayoutReady
+            || !_postReadyEnhancementsComplete)
+        {
+            return;
+        }
+
+        _documentRenderedRaised = true;
         RevealNativeDocument(TimeSpan.Zero);
         DocumentRendered?.Invoke(this, EventArgs.Empty);
-        CompleteDocumentRevealReady();
     }
 
     private void CompleteDocumentRevealReady()
@@ -2141,7 +2214,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
+        CompleteDocumentRenderVisualReady();
         _documentRevealReadyRaised = true;
+        _pendingRendererCacheFallbackLoads.Remove(_activeRevealRenderId);
         ApplicateTrace.DiagMs(
             "diag-gate",
             "document-reveal-ready",

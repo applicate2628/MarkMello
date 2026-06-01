@@ -4,36 +4,37 @@ using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Threading;
 using MarkMello.Applicate.Desktop.Diagnostics;
+using MarkMello.Applicate.Desktop.Views;
 using MarkMello.Domain;
 using MarkMello.Presentation.ViewModels;
 
 namespace MarkMello.Applicate.Desktop.Rendering;
 
 /// <summary>
-/// Holds a solid theme-background cover over the document region during a
-/// viewer DOCUMENT switch (tab change, startup, reload) so the user sees an
-/// atomic document reveal instead of the staged sequence "blank pane → content
-/// paints in chunks".
+/// Holds a solid theme-background cover over the active document region during
+/// a DOCUMENT switch (tab change, startup, reload) so the user sees an atomic
+/// document reveal instead of the staged sequence "blank pane → content paints
+/// in chunks".
 ///
 /// <para>Background: the app reuses a single WebView across every tab. On a
-/// document switch the renderer clears and re-renders in place while the host
-/// keeps the slot visible (the non-transactional path in
+/// document switch the renderer clears and re-renders in place while the active
+/// host keeps the slot visible (the non-transactional path in
 /// <see cref="ApplicateSharedWebViewHost"/>). The Avalonia TOC keeps its
 /// existing shell column and swaps its rows when new headings arrive; this
-/// cover intentionally targets only the document slot. The mode-toggle path
-/// already runs a covered/gated
+/// cover intentionally targets only the document/edit content slot. The
+/// mode-toggle path already runs a covered/gated
 /// reveal via <see cref="ApplicateSiblingMountBridge"/>; document switches did
 /// not. This coordinator closes that asymmetry for the document-switch path
 /// WITHOUT touching the host state machine or the mode-toggle reveal — it is
 /// purely additive: show a cover, then drop it once the new document has
 /// committed and painted.</para>
 ///
-/// <para>Scope guard: it only acts on real <see cref="MainWindowViewModel.Document"/>
-/// changes while the viewer is the active surface, and only hides on
-/// non-transactional commits (<c>TransactionGeneration == 0</c>). Mode toggles
-/// keep the same document, so they never trigger this coordinator, and their
-/// transactional commits are ignored here — the bridge stays the sole owner of
-/// the mode-toggle cover.</para>
+/// <para>Scope guard: each coordinator instance only acts on real
+/// <see cref="MainWindowViewModel.Document"/> changes while its wired surface
+/// is active, and only hides on that surface's non-transactional commits
+/// (<c>TransactionGeneration == 0</c>). Mode toggles keep the same document,
+/// so they never trigger this coordinator, and their transactional commits are
+/// ignored here — the bridge stays the sole owner of the mode-toggle cover.</para>
 /// </summary>
 internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
 {
@@ -46,7 +47,9 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
     private readonly Control _coverHost;
     private readonly IApplicateSharedWebViewHost _host;
     private readonly MainWindowViewModel _viewModel;
-    private readonly Func<bool> _isViewer;
+    private readonly ApplicateMode _mode;
+    private readonly Func<bool> _isActiveSurface;
+    private readonly bool _clearHeadingsOnRendererFailure;
     private readonly ApplicateModeRevealCoverWindow _cover = new();
 
     private MarkdownSource? _lastSource;
@@ -64,12 +67,16 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         Control coverHost,
         IApplicateSharedWebViewHost host,
         MainWindowViewModel viewModel,
-        Func<bool> isViewer)
+        ApplicateMode mode,
+        Func<bool> isActiveSurface,
+        bool clearHeadingsOnRendererFailure = true)
     {
         _coverHost = coverHost ?? throw new ArgumentNullException(nameof(coverHost));
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
-        _isViewer = isViewer ?? throw new ArgumentNullException(nameof(isViewer));
+        _mode = mode;
+        _isActiveSurface = isActiveSurface ?? throw new ArgumentNullException(nameof(isActiveSurface));
+        _clearHeadingsOnRendererFailure = clearHeadingsOnRendererFailure;
 
         _lastSource = viewModel.Document;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
@@ -88,7 +95,7 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
     // after teardown had already started on screen.
     private void OnDocumentTransitionStarting(object? sender, EventArgs e)
     {
-        if (_disposed || !_isViewer())
+        if (_disposed || !_isActiveSurface())
         {
             return;
         }
@@ -104,13 +111,13 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         // commit that would normally hide it never fires for the edit surface,
         // so it would otherwise obscure the editor until the 8s fallback.
         // (`IsViewer` is `State == Viewing`, which is ALSO true in edit mode —
-        // edit is a sub-mode of Viewing — so `_isViewer()` already excludes
-        // edit via `&& !IsEditMode` at the wiring site; this catches the case
-        // where edit is entered AFTER the cover is already up.)
+        // edit is a sub-mode of Viewing — so the active-surface predicate at
+        // the wiring site distinguishes reader vs. edit and this catches the
+        // case where the user leaves that surface AFTER the cover is already up.)
         if (e.PropertyName is nameof(MainWindowViewModel.IsEditMode)
             or nameof(MainWindowViewModel.IsViewer))
         {
-            if (_covered && !_isViewer())
+            if (_covered && !_isActiveSurface())
             {
                 HideCover();
             }
@@ -129,9 +136,9 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         }
         _lastSource = next;
 
-        // No document (welcome / closed), or not on the active reader surface
-        // (edit mode) — nothing to reveal under a cover here.
-        if (next is null || !_isViewer())
+        // No document (welcome / closed), or not on this coordinator's active
+        // surface — nothing to reveal under a cover here.
+        if (next is null || !_isActiveSurface())
         {
             HideCover();
             return;
@@ -222,7 +229,7 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         // mode-toggle bridge owns those; (b) non-viewer commits, e.g. the
         // off-screen edit-preview prime which ALSO uses generation 0 and would
         // otherwise hide the cover before the viewer's real commit.
-        if (e.TransactionGeneration > 0 || e.Mode != ApplicateMode.Viewer)
+        if (e.TransactionGeneration > 0 || e.Mode != _mode)
         {
             return;
         }
@@ -261,6 +268,11 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         // A failure routes to the failure view; do not keep the user behind a
         // blank cover.
         HideCover();
+
+        if (!_clearHeadingsOnRendererFailure)
+        {
+            return;
+        }
 
         // R1 (atomic-transition safety net): with the eager OnDocumentChanged TOC
         // clear removed (C3), the old document's headings would otherwise persist
@@ -307,10 +319,10 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         {
             return;
         }
-        HideCover();
+        HideCover(animated: true);
     }
 
-    private void HideCover()
+    private void HideCover(bool animated = false)
     {
         ReleaseFallback();
         if (_pendingShowOnBounds)
@@ -326,7 +338,10 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         _covered = false;
         _commitCompletedForCover = false;
         _documentRevealReadyForCover = false;
-        _cover.Hide();
+        var duration = animated
+            ? ApplicateMotion.ModeSwitchDuration(_viewModel.ReadingPreferences)
+            : TimeSpan.Zero;
+        _cover.Hide(duration);
         ApplicateTrace.DiagMs("pane-seq", "doc-switch-cover-hidden");
     }
 

@@ -797,7 +797,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
             generation,
             mode,
             reason: "success");
-        HideModeRevealCover();
+        HideModeRevealCoverAnimated();
         ApplicateTrace.DiagMs(
             "pane-seq",
             "bridge-transaction-committed",
@@ -1001,12 +1001,22 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
 
     private void HideModeRevealCover()
     {
+        HideModeRevealCover(TimeSpan.Zero);
+    }
+
+    private void HideModeRevealCoverAnimated()
+    {
+        HideModeRevealCover(ApplicateMotion.ModeSwitchDuration(_getReadingPreferences()));
+    }
+
+    private void HideModeRevealCover(TimeSpan duration)
+    {
         if (_modeRevealCoverWindow is null)
         {
             return;
         }
 
-        _modeRevealCoverWindow.Hide();
+        _modeRevealCoverWindow.Hide(duration);
         ApplicateTrace.DiagMs("pane-seq", "bridge-cover-hidden");
     }
 

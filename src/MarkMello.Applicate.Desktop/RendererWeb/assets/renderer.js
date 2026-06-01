@@ -224,17 +224,29 @@
     }
     deps.emitMark("mm-load-document", {
       documentName: message.documentName ?? "",
-      htmlLength: message.html.length,
+      htmlLength: message.html?.length ?? 0,
       renderId: message.renderId ?? null
     });
-    deps.debugLog(`load-document:start id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${message.theme ?? "(none)"} currentTheme=${document.documentElement.dataset.theme ?? "(none)"} htmlLength=${message.html.length}`);
+    deps.debugLog(`load-document:start id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${message.theme ?? "(none)"} currentTheme=${document.documentElement.dataset.theme ?? "(none)"} htmlLength=${message.html?.length ?? 0}`);
+    const restoreOnly = message.html === void 0;
+    let cachedFragment = restoreOnly && message.cacheKey ? deps.getCachedDocumentFragment?.(message.cacheKey) : void 0;
+    if (cachedFragment === void 0 && restoreOnly) {
+      deps.emitMark("mm-load-document-cache-miss", {
+        documentName: message.documentName ?? "",
+        renderId: message.renderId ?? null
+      });
+      deps.notifyDocumentCacheMiss?.(message.renderId, message.cacheKey);
+      return;
+    }
     deps.preserveCurrentDocumentCache?.();
     deps.cancelCurrentMathController();
     deps.resetModuleGlobals();
     if (message.theme) {
       deps.applyTheme(message.theme);
     }
-    const cachedFragment = message.cacheKey ? deps.getCachedDocumentFragment?.(message.cacheKey) : void 0;
+    if (!restoreOnly && message.cacheKey) {
+      cachedFragment = deps.getCachedDocumentFragment?.(message.cacheKey);
+    }
     if (cachedFragment !== void 0) {
       deps.emitMark("mm-load-document-cache-hit", {
         documentName: message.documentName ?? "",
@@ -245,7 +257,7 @@
     if (cachedFragment !== void 0) {
       main.replaceChildren(cachedFragment);
     } else {
-      main.innerHTML = message.html;
+      main.innerHTML = message.html ?? "";
     }
     deps.setCurrentDocumentCacheKey?.(message.cacheKey ?? null);
     const firstHeading = main.querySelector("h1,h2,h3")?.textContent?.trim().replace(/\s+/g, " ").slice(0, 120) ?? "";
@@ -2541,8 +2553,13 @@
     rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
   }
   function postCachedHeadings() {
-    const headings = restoredCachedHeadings ?? [];
+    const cachedHeadings = restoredCachedHeadings;
     restoredCachedHeadings = null;
+    if (cachedHeadings === null || cachedHeadings.length === 0) {
+      extractAndPostHeadings();
+      return;
+    }
+    const headings = cachedHeadings;
     lastExtractedHeadings = headings.map((heading) => ({ ...heading }));
     postHostMessage({ type: "headings-updated", headings });
     if (activeHeadingObserver) {
@@ -3100,10 +3117,39 @@
       if (message.hasHljs !== void 0) {
         loadMessage.hasHljs = message.hasHljs;
       }
-      loadMessage.cacheKey = createProcessedDocumentCacheKey(
-        message.html,
-        message.theme ?? getCurrentTheme()
-      );
+      if (typeof message.cacheKey === "string" && message.cacheKey.length > 0) {
+        loadMessage.cacheKey = message.cacheKey;
+      } else {
+        loadMessage.cacheKey = createProcessedDocumentCacheKey(
+          message.html,
+          message.theme ?? getCurrentTheme()
+        );
+      }
+      applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+      return;
+    }
+    if (message.type === "load-cached-document") {
+      const loadMessage = {
+        cacheKey: message.cacheKey
+      };
+      if (message.documentName !== void 0) {
+        loadMessage.documentName = message.documentName;
+      }
+      if (message.theme !== void 0) {
+        loadMessage.theme = message.theme;
+      }
+      if (message.renderId !== void 0) {
+        loadMessage.renderId = message.renderId;
+      }
+      if (message.skipFrameWait !== void 0) {
+        loadMessage.skipFrameWait = message.skipFrameWait;
+      }
+      if (message.hasMermaid !== void 0) {
+        loadMessage.hasMermaid = message.hasMermaid;
+      }
+      if (message.hasHljs !== void 0) {
+        loadMessage.hasHljs = message.hasHljs;
+      }
       applyLoadDocument(loadMessage, buildLoadDocumentDeps());
       return;
     }
@@ -3383,7 +3429,7 @@
       // semantic anchor rather than centralized here.
       emitMark: (name, detail) => {
         emitMark(name, detail);
-        if (name === "mm-load-document" || name === "mm-load-document-cache-hit") {
+        if (name === "mm-load-document" || name === "mm-load-document-cache-hit" || name === "mm-load-document-cache-miss") {
           postPerfMark(name, detail ?? void 0);
         }
       },
@@ -3405,6 +3451,18 @@
         postCachedLayoutReady();
         postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
         scheduleCachedMermaidResume(hasMermaid);
+      },
+      notifyDocumentCacheMiss: (renderId, cacheKey) => {
+        const message = {
+          type: "document-cache-miss"
+        };
+        if (renderId !== void 0) {
+          message.renderId = renderId;
+        }
+        if (cacheKey !== void 0) {
+          message.cacheKey = cacheKey;
+        }
+        postHostMessage(message);
       }
     };
   }

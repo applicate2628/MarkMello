@@ -79,13 +79,15 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         CancellationToken cancellationToken)
     {
         var context = await RenderMarkdownToContextAsync(source, imageSourceResolver, cancellationToken).ConfigureAwait(false);
+        var bodyHtml = context.Html.ToString();
         return new ApplicateRenderedBody(
-            BodyHtml: context.Html.ToString(),
+            BodyHtml: bodyHtml,
             PlainText: context.PlainText.ToString(),
             Headings: context.Headings,
             Blocks: context.Blocks,
             HasMermaidBlock: context.HasMermaidBlock,
-            HasCodeBlockWithSyntax: context.HasCodeBlockWithSyntax);
+            HasCodeBlockWithSyntax: context.HasCodeBlockWithSyntax,
+            RendererCacheKeySuffix: ApplicateRendererDocumentCacheKeys.CreateSuffix(bodyHtml));
     }
 
     private async Task<RenderContext> RenderMarkdownToContextAsync(

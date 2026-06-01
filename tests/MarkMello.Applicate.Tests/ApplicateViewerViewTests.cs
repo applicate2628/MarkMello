@@ -180,6 +180,25 @@ public sealed class ApplicateViewerViewTests
     }
 
     [Fact]
+    public void TocHeadingUpdaterDefersEmptyPayloadsToAvoidCollapseFlash()
+    {
+        var updater = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Views",
+            "ApplicateDeferredHeadingUpdater.cs"));
+
+        Assert.Contains("headings.Count == 0", updater, StringComparison.Ordinal);
+        Assert.Contains("ShouldDefer(headings)", updater, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TocPanelVirtualizesHeadingRows()
     {
         var tocPanel = File.ReadAllText(Path.Combine(
