@@ -104,7 +104,9 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallTabsAndWelcome();
         ApplicateTrace.DiagMs("startup-applicate-window", "install-tabs-end");
         ApplicateTrace.DiagMs("startup-applicate-window", "install-sibling-views-start");
-        InstallSiblingMountedViews(viewModel);
+        InstallSiblingMountedViews(
+            viewModel,
+            skipInitialViewerDocumentSwitchCover: holdStartupDocumentReveal);
         ApplicateTrace.DiagMs("startup-applicate-window", "install-sibling-views-end");
         if (holdStartupDocumentReveal)
         {
@@ -181,6 +183,7 @@ public sealed class ApplicateMainWindow : MainWindow
         var startupViewerHost = viewerHost;
         var startupCover = new ApplicateModeRevealCoverWindow();
         var released = false;
+        var startupWindowOpened = false;
         var documentRevealReady = false;
         var waitForHeadings = viewModel.IsTocPreferredVisible;
         var headingsReady = !waitForHeadings || viewModel.HasDocumentHeadings;
@@ -196,10 +199,20 @@ public sealed class ApplicateMainWindow : MainWindow
         fallbackTimer.Start();
 
         void OnStartupWindowOpened(object? sender, EventArgs e)
-            => QueueStartupCover("opened");
+        {
+            startupWindowOpened = true;
+            QueueStartupCover("opened");
+        }
 
         void OnStartupWindowSizeChanged(object? sender, SizeChangedEventArgs e)
-            => QueueStartupCover("size-changed");
+        {
+            if (!startupWindowOpened)
+            {
+                return;
+            }
+
+            QueueStartupCover("size-changed");
+        }
 
         void QueueStartupCover(string reason)
             => Dispatcher.UIThread.Post(
@@ -210,7 +223,7 @@ public sealed class ApplicateMainWindow : MainWindow
                         return;
                     }
 
-                    var shown = startupCover.Show(this);
+                    var shown = startupCover.ShowStartupSplash(this, viewModel.Document?.FileName);
                     ApplicateTrace.DiagMs(
                         "startup-applicate-window",
                         "startup-window-cover-shown",
@@ -276,7 +289,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 return;
             }
 
-            Release(reason);
+            ReleaseAfterPaint(reason);
         }
 
         void Release(string reason)
@@ -290,12 +303,70 @@ public sealed class ApplicateMainWindow : MainWindow
             Cleanup();
             Opacity = 1;
             Dispatcher.UIThread.Post(
-                () =>
-                {
-                    startupCover.Hide(ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences));
-                    ApplicateTrace.DiagMs("startup-applicate-window", "startup-window-reveal-released", $"reason={reason}");
-                },
+                () => HideStartupCover(reason),
                 DispatcherPriority.Render);
+        }
+
+        void ReleaseAfterPaint(string reason)
+        {
+            if (released)
+            {
+                return;
+            }
+
+            released = true;
+            Cleanup();
+            Opacity = 1;
+
+            // Keep the full-window startup cover aligned with the document-
+            // switch cover's paint gate. Otherwise startup can expose the tab
+            // chrome while the document region is still under its blank cover.
+            var hidden = false;
+            var fallbackTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+            void HideOnce(string releaseReason)
+            {
+                if (hidden)
+                {
+                    return;
+                }
+
+                hidden = true;
+                fallbackTimer.Stop();
+                fallbackTimer.Tick -= OnReleaseFallbackTick;
+                HideStartupCover(releaseReason);
+            }
+
+            void OnReleaseFallbackTick(object? sender, EventArgs e)
+                => HideOnce(reason + "-fallback");
+
+            fallbackTimer.Tick += OnReleaseFallbackTick;
+            fallbackTimer.Start();
+
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel is null)
+            {
+                HideOnce(reason);
+                return;
+            }
+
+            topLevel.RequestAnimationFrame(_ =>
+            {
+                if (hidden)
+                {
+                    return;
+                }
+
+                topLevel.RequestAnimationFrame(_ =>
+                    Dispatcher.UIThread.Post(
+                        () => HideOnce(reason),
+                        DispatcherPriority.Render));
+            });
+        }
+
+        void HideStartupCover(string reason)
+        {
+            startupCover.Hide(ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences));
+            ApplicateTrace.DiagMs("startup-applicate-window", "startup-window-reveal-released", $"reason={reason}");
         }
 
         void Cleanup()
@@ -1104,7 +1175,9 @@ public sealed class ApplicateMainWindow : MainWindow
         }
     }
 
-    private void InstallSiblingMountedViews(MainWindowViewModel viewModel)
+    private void InstallSiblingMountedViews(
+        MainWindowViewModel viewModel,
+        bool skipInitialViewerDocumentSwitchCover = false)
     {
         var contentPanel = _tabsContentPanel;
         if (contentPanel is null)
@@ -1280,7 +1353,8 @@ public sealed class ApplicateMainWindow : MainWindow
                 ApplicateMode.Viewer,
                 // Reader surface only: IsViewer is `State == Viewing`, which is
                 // also true in edit mode (edit is a sub-mode of Viewing).
-                () => viewModel.IsViewer && !viewModel.IsEditMode);
+                () => viewModel.IsViewer && !viewModel.IsEditMode,
+                skipInitialCoverSession: skipInitialViewerDocumentSwitchCover);
             _viewerThemeSwitchRevealCoordinator = new ApplicateThemeSwitchRevealCoordinator(
                 siblingPanel,
                 viewerHostForMode,
@@ -1363,6 +1437,7 @@ public sealed class ApplicateMainWindow : MainWindow
         {
             viewerCommitHost.CommitCompleted += OnViewerHostCommitCompleted;
             viewerCommitHost.View.DocumentRevealReady += OnViewerDocumentRevealReady;
+            viewerCommitHost.View.ProgressiveAppendCompleted += OnViewerProgressiveAppendCompleted;
         }
 
         Closed += OnPrimeClosed;
@@ -1419,6 +1494,7 @@ public sealed class ApplicateMainWindow : MainWindow
             {
                 viewerCommitHost.CommitCompleted -= OnViewerHostCommitCompleted;
                 viewerCommitHost.View.DocumentRevealReady -= OnViewerDocumentRevealReady;
+                viewerCommitHost.View.ProgressiveAppendCompleted -= OnViewerProgressiveAppendCompleted;
             }
 
             Closed -= OnPrimeClosed;
@@ -1451,6 +1527,9 @@ public sealed class ApplicateMainWindow : MainWindow
             revealReadyPreferences = viewModel.ReadingPreferences;
             QueuePrime();
         }
+
+        void OnViewerProgressiveAppendCompleted(object? sender, EventArgs e)
+            => QueuePrime();
 
         void QueuePrime()
         {
@@ -1538,6 +1617,11 @@ public sealed class ApplicateMainWindow : MainWindow
                     "pane-seq",
                     "editpreview-inactive-prime-gated-reveal",
                     $"source={document.Path} contentLength={document.Content.Length}");
+                return;
+            }
+
+            if (isHeavyDocument && IsViewerProgressiveAppendPendingForPrime(document))
+            {
                 return;
             }
 
@@ -1630,6 +1714,20 @@ public sealed class ApplicateMainWindow : MainWindow
         bool IsViewerRevealReadyForPrime(MarkdownSource document, ReadingPreferences preferences)
             => ReferenceEquals(revealReadyDocument, document)
                 && Equals(revealReadyPreferences, preferences);
+
+        bool IsViewerProgressiveAppendPendingForPrime(MarkdownSource document)
+        {
+            if (viewerCommitHost?.View.HasPendingProgressiveAppend != true)
+            {
+                return false;
+            }
+
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "editpreview-inactive-prime-gated-progressive",
+                $"source={document.Path}");
+            return true;
+        }
 
         void ScheduleDelayedHeavyPrime(MarkdownSource document, ReadingPreferences preferences, Size viewportSize)
         {

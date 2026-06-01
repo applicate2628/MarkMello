@@ -1,7 +1,11 @@
 using Avalonia;
 using Avalonia.Animation;
 using Avalonia.Controls;
+using Avalonia.Controls.Documents;
+using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.Styling;
 using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Views;
@@ -15,6 +19,13 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
 {
     private static readonly IBrush FallbackLightBrush = new SolidColorBrush(Color.FromRgb(0xFC, 0xFA, 0xF6));
     private static readonly IBrush FallbackDarkBrush = new SolidColorBrush(Color.FromRgb(0x14, 0x11, 0x0E));
+    private static readonly IBrush FallbackLightTextBrush = new SolidColorBrush(Color.FromRgb(0x1F, 0x19, 0x15));
+    private static readonly IBrush FallbackDarkTextBrush = new SolidColorBrush(Color.FromRgb(0xE7, 0xE4, 0xDF));
+    private static readonly IBrush FallbackLightSoftTextBrush = new SolidColorBrush(Color.FromRgb(0x5A, 0x54, 0x4F));
+    private static readonly IBrush FallbackDarkSoftTextBrush = new SolidColorBrush(Color.FromRgb(0xA2, 0x9E, 0x98));
+    private static readonly IBrush FallbackLightAccentBrush = new SolidColorBrush(Color.FromRgb(0xBD, 0x59, 0x2F));
+    private static readonly IBrush FallbackDarkAccentBrush = new SolidColorBrush(Color.FromRgb(0xE3, 0x8A, 0x67));
+    private static readonly Uri StartupLogoUri = new("avares://MarkMello.Presentation/Assets/Images/logo.png");
 
     private Window? _window;
     private Border? _shield;
@@ -25,6 +36,16 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
     private long _hideGeneration;
 
     public bool Show(Control host, ThemeVariant? themeVariant = null)
+        => Show(host, themeVariant, content: null, contentKind: "shield");
+
+    public bool ShowStartupSplash(Control host, string? documentName = null, ThemeVariant? themeVariant = null)
+        => Show(
+            host,
+            themeVariant,
+            CreateStartupSplashContent(host, themeVariant, documentName),
+            contentKind: "startup-splash");
+
+    private bool Show(Control host, ThemeVariant? themeVariant, Control? content, string contentKind)
     {
         ArgumentNullException.ThrowIfNull(host);
 
@@ -57,6 +78,7 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
         _shield = new Border
         {
             Background = background,
+            Child = content,
             ClipToBounds = true,
             Focusable = false,
             Height = size.Height,
@@ -109,7 +131,7 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
         ApplicateTrace.DiagMs(
             "pane-seq",
             "bridge-cover-window-shown",
-            $"screen={topLeft.X},{topLeft.Y} size={size.Width:F0}x{size.Height:F0} px={pixelSize.Width}x{pixelSize.Height} brush={DescribeBrush(background)}");
+            $"screen={topLeft.X},{topLeft.Y} size={size.Width:F0}x{size.Height:F0} px={pixelSize.Width}x{pixelSize.Height} brush={DescribeBrush(background)} content={contentKind}");
         return true;
     }
 
@@ -256,10 +278,49 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
     }
 
     private static IBrush ResolveShieldBrush(Control host, ThemeVariant? themeVariant = null)
+        => ResolveThemeBrush(
+            host,
+            "MmBackgroundBrush",
+            themeVariant,
+            IsDarkVariant(themeVariant ?? host.ActualThemeVariant ?? Avalonia.Application.Current?.ActualThemeVariant)
+                ? FallbackDarkBrush
+                : FallbackLightBrush);
+
+    private static IBrush ResolveTextBrush(Control host, ThemeVariant? themeVariant = null)
+        => ResolveThemeBrush(
+            host,
+            "MmTextBrush",
+            themeVariant,
+            IsDarkVariant(themeVariant ?? host.ActualThemeVariant ?? Avalonia.Application.Current?.ActualThemeVariant)
+                ? FallbackDarkTextBrush
+                : FallbackLightTextBrush);
+
+    private static IBrush ResolveSoftTextBrush(Control host, ThemeVariant? themeVariant = null)
+        => ResolveThemeBrush(
+            host,
+            "MmTextSoftBrush",
+            themeVariant,
+            IsDarkVariant(themeVariant ?? host.ActualThemeVariant ?? Avalonia.Application.Current?.ActualThemeVariant)
+                ? FallbackDarkSoftTextBrush
+                : FallbackLightSoftTextBrush);
+
+    private static IBrush ResolveAccentBrush(Control host, ThemeVariant? themeVariant = null)
+        => ResolveThemeBrush(
+            host,
+            "MmAccentBrush",
+            themeVariant,
+            IsDarkVariant(themeVariant ?? host.ActualThemeVariant ?? Avalonia.Application.Current?.ActualThemeVariant)
+                ? FallbackDarkAccentBrush
+                : FallbackLightAccentBrush);
+
+    private static IBrush ResolveThemeBrush(
+        Control host,
+        string resourceKey,
+        ThemeVariant? themeVariant,
+        IBrush fallback)
     {
-        const string backgroundBrushKey = "MmBackgroundBrush";
         var resolvedHostVariant = themeVariant ?? host.ActualThemeVariant;
-        if (host.TryFindResource(backgroundBrushKey, resolvedHostVariant, out var resource)
+        if (host.TryFindResource(resourceKey, resolvedHostVariant, out var resource)
             && resource is IBrush brush)
         {
             return brush;
@@ -267,19 +328,132 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
 
         var app = Avalonia.Application.Current;
         var resolvedAppVariant = themeVariant ?? app?.ActualThemeVariant;
-        if (app?.TryGetResource(backgroundBrushKey, resolvedAppVariant, out var appResource) == true
+        if (app?.TryGetResource(resourceKey, resolvedAppVariant, out var appResource) == true
             && appResource is IBrush appBrush)
         {
             return appBrush;
         }
 
-        return IsDarkVariant(themeVariant ?? host.ActualThemeVariant ?? app?.ActualThemeVariant)
-            ? FallbackDarkBrush
-            : FallbackLightBrush;
+        return fallback;
+    }
+
+    private static FontFamily ResolveFontFamily(Control host, string resourceKey, string fallback)
+    {
+        if (host.TryFindResource(resourceKey, host.ActualThemeVariant, out var resource)
+            && resource is FontFamily family)
+        {
+            return family;
+        }
+
+        var app = Avalonia.Application.Current;
+        if (app?.TryGetResource(resourceKey, app.ActualThemeVariant, out var appResource) == true
+            && appResource is FontFamily appFamily)
+        {
+            return appFamily;
+        }
+
+        return new FontFamily(fallback);
     }
 
     private static bool IsDarkVariant(ThemeVariant? variant)
         => variant == ThemeVariant.Dark;
+
+    private static Control CreateStartupSplashContent(
+        Control host,
+        ThemeVariant? themeVariant,
+        string? documentName)
+    {
+        var textBrush = ResolveTextBrush(host, themeVariant);
+        var softTextBrush = ResolveSoftTextBrush(host, themeVariant);
+        var accentBrush = ResolveAccentBrush(host, themeVariant);
+        var titleFont = ResolveFontFamily(host, "MmDocumentSerifFontFamily", "Georgia, Cambria, serif");
+        var bodyFont = ResolveFontFamily(host, "MmDocumentSansFontFamily", "Segoe UI, system-ui, sans-serif");
+        var status = string.IsNullOrWhiteSpace(documentName)
+            ? "Preparing document..."
+            : $"Preparing {documentName}...";
+
+        var wordmark = new TextBlock
+        {
+            FontFamily = titleFont,
+            FontSize = 44,
+            FontWeight = FontWeight.Bold,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextAlignment = TextAlignment.Center,
+        };
+        wordmark.Inlines!.Add(new Run
+        {
+            Text = "Mark",
+            Foreground = textBrush,
+        });
+        wordmark.Inlines.Add(new Run
+        {
+            Text = "Mello",
+            Foreground = accentBrush,
+        });
+
+        var content = new StackPanel
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(32),
+            MaxWidth = 520,
+            Spacing = 6,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        if (TryCreateStartupLogo() is { } logo)
+        {
+            content.Children.Add(logo);
+        }
+
+        content.Children.Add(wordmark);
+        content.Children.Add(new TextBlock
+        {
+            FontFamily = bodyFont,
+            FontSize = 13,
+            Foreground = softTextBrush,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 0),
+            MaxWidth = 420,
+            Text = status,
+            TextAlignment = TextAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap,
+        });
+
+        return new Grid
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            Children =
+            {
+                content,
+            },
+        };
+    }
+
+    private static Image? TryCreateStartupLogo()
+    {
+        try
+        {
+            using var stream = AssetLoader.Open(StartupLogoUri);
+            return new Image
+            {
+                Height = 160,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, -15),
+                Source = new Bitmap(stream),
+                Width = 160,
+            };
+        }
+        catch (Exception ex)
+        {
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "startup-splash-logo-load-failed",
+                $"ex={ex.GetType().Name}");
+            return null;
+        }
+    }
 
     private static string DescribeBrush(IBrush brush)
         => brush is ISolidColorBrush solid

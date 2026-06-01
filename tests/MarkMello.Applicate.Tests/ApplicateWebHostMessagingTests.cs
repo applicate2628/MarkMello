@@ -379,6 +379,10 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("ApplicateMode _mode", coordinatorSource, StringComparison.Ordinal);
         Assert.Contains("e.Mode != _mode", coordinatorSource, StringComparison.Ordinal);
         Assert.Contains("clearHeadingsOnRendererFailure", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("skipInitialCoverSession", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("_skipNextCoverSession", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("_skipNextDocumentChangeCover", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("\"doc-switch-cover-skipped\"", coordinatorSource, StringComparison.Ordinal);
         Assert.Contains("_commitCompletedForCover", coordinatorSource, StringComparison.Ordinal);
         Assert.Contains("_documentRevealReadyForCover", coordinatorSource, StringComparison.Ordinal);
         Assert.Contains("TryHideCoverAfterCommitAndRevealReady()", coordinatorSource, StringComparison.Ordinal);
@@ -387,6 +391,25 @@ public sealed class ApplicateWebHostMessagingTests
 
         Assert.Contains("postReadyEnhancementsCompleted", rendererSource, StringComparison.Ordinal);
         Assert.Contains("post-ready-enhancements-complete", rendererSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LayoutReadyCanRecoverDroppedDocumentReadyForActiveRender()
+    {
+        var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
+        var layoutReadyHandler = ExtractFromMarker(viewSource, "if (IsLayoutReadyMessage(document.RootElement))");
+
+        Assert.Contains("layout-ready-promoted-loaded", layoutReadyHandler, StringComparison.Ordinal);
+        Assert.Contains("if (!_hasLoadedDocument && _activeRevealRenderId > 0)", layoutReadyHandler, StringComparison.Ordinal);
+
+        var promoteIndex = layoutReadyHandler.IndexOf("_hasLoadedDocument = true;", StringComparison.Ordinal);
+        var awaitIndex = layoutReadyHandler.IndexOf("BeginAwaitingLayoutReady();", StringComparison.Ordinal);
+        var layoutIndex = layoutReadyHandler.IndexOf("_hasLayoutReady = true;", StringComparison.Ordinal);
+        var completeIndex = layoutReadyHandler.IndexOf("CompleteLayoutReady();", StringComparison.Ordinal);
+        Assert.True(promoteIndex >= 0, "layout-ready should promote active renders to loaded when document-ready was dropped.");
+        Assert.True(awaitIndex > promoteIndex, "promotion should restore the layout-ready await gate.");
+        Assert.True(layoutIndex > awaitIndex, "layout-ready should set layout after restoring loaded/awaiting state.");
+        Assert.True(completeIndex > layoutIndex, "completion should run after both loaded and layout are true.");
     }
 
     [Fact]

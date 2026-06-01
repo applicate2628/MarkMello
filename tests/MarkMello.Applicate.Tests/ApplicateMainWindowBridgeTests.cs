@@ -82,21 +82,28 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("ShouldHoldStartupDocumentReveal()", constructor, StringComparison.Ordinal);
         Assert.DoesNotContain("Opacity = 0;", constructor, StringComparison.Ordinal);
         Assert.Contains("InstallStartupDocumentRevealGate(viewModel);", constructor, StringComparison.Ordinal);
+        Assert.Contains("skipInitialViewerDocumentSwitchCover: holdStartupDocumentReveal", constructor, StringComparison.Ordinal);
         Assert.Contains("GetService<ICommandLineActivation>()?.GetActivationFilePath()", shouldHold, StringComparison.Ordinal);
         Assert.Contains("GetService<IApplicateSessionStore>()", shouldHold, StringComparison.Ordinal);
         Assert.Contains("sessionStore.LoadAsync().AsTask().GetAwaiter().GetResult()", shouldHold, StringComparison.Ordinal);
         Assert.Contains("session.GetStartupDocumentPath()", shouldHold, StringComparison.Ordinal);
         Assert.Contains("System.IO.File.Exists(restoredStartupPath)", shouldHold, StringComparison.Ordinal);
         Assert.Contains("var startupCover = new ApplicateModeRevealCoverWindow();", gate, StringComparison.Ordinal);
+        Assert.Contains("var startupWindowOpened = false;", gate, StringComparison.Ordinal);
         Assert.Contains("Opened += OnStartupWindowOpened;", gate, StringComparison.Ordinal);
         Assert.Contains("SizeChanged += OnStartupWindowSizeChanged;", gate, StringComparison.Ordinal);
-        Assert.Contains("startupCover.Show(this)", gate, StringComparison.Ordinal);
+        Assert.Contains("startupWindowOpened = true;", gate, StringComparison.Ordinal);
+        Assert.Contains("if (!startupWindowOpened)", gate, StringComparison.Ordinal);
+        Assert.Contains("startupCover.ShowStartupSplash(this, viewModel.Document?.FileName)", gate, StringComparison.Ordinal);
         Assert.Contains("startupViewerHost.View.DocumentRevealReady += OnDocumentRevealReady;", gate, StringComparison.Ordinal);
         Assert.Contains("startupViewerHost.View.HeadingsChanged += OnHeadingsChanged;", gate, StringComparison.Ordinal);
         Assert.Contains("startupViewerHost.RendererFailed += OnRendererFailed;", gate, StringComparison.Ordinal);
         Assert.Contains("viewModel.PropertyChanged += OnViewModelPropertyChanged;", gate, StringComparison.Ordinal);
         Assert.Contains("headingsReady = !waitForHeadings || headings.Count > 0;", gate, StringComparison.Ordinal);
         Assert.Contains("TryRelease(\"headings-reported\");", gate, StringComparison.Ordinal);
+        Assert.Contains("ReleaseAfterPaint(reason);", gate, StringComparison.Ordinal);
+        Assert.Contains("topLevel.RequestAnimationFrame", gate, StringComparison.Ordinal);
+        Assert.Contains("new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) }", gate, StringComparison.Ordinal);
         Assert.Contains("new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) }", gate, StringComparison.Ordinal);
         Assert.Contains("Opacity = 1;", gate, StringComparison.Ordinal);
         Assert.Contains("startupCover.Hide(ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences));", gate, StringComparison.Ordinal);
@@ -138,13 +145,15 @@ public sealed class ApplicateMainWindowBridgeTests
     public void DocumentSwitchCoverIsInstalledForReaderAndEditSurfaces()
     {
         var codeBehind = ReadMainWindowCodeBehind();
-        var installSiblingViews = ExtractMethodBody(codeBehind, "private void InstallSiblingMountedViews(MainWindowViewModel viewModel)");
+        var installSiblingViews = ExtractMethodBody(codeBehind, "private void InstallSiblingMountedViews(");
         var disposeHandler = ExtractMethodBody(codeBehind, "private void OnApplicateMainWindowClosed(object? sender, EventArgs e)");
 
+        Assert.Contains("bool skipInitialViewerDocumentSwitchCover = false", codeBehind, StringComparison.Ordinal);
         Assert.Contains("_viewerDocumentSwitchRevealCoordinator = new ApplicateDocumentSwitchRevealCoordinator(", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("viewerHostForMode,", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("ApplicateMode.Viewer,", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("() => viewModel.IsViewer && !viewModel.IsEditMode", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("skipInitialCoverSession: skipInitialViewerDocumentSwitchCover", installSiblingViews, StringComparison.Ordinal);
 
         Assert.Contains("_editDocumentSwitchRevealCoordinator = new ApplicateDocumentSwitchRevealCoordinator(", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("editHost,", installSiblingViews, StringComparison.Ordinal);
@@ -205,7 +214,7 @@ public sealed class ApplicateMainWindowBridgeTests
     public void InactiveEditPreviewPrimeWaitsForVisibleViewerCommit()
     {
         var codeBehind = ReadMainWindowCodeBehind();
-        var installSiblingViews = ExtractMethodBody(codeBehind, "private void InstallSiblingMountedViews(MainWindowViewModel viewModel)");
+        var installSiblingViews = ExtractMethodBody(codeBehind, "private void InstallSiblingMountedViews(");
         var primeInstaller = ExtractMethodBody(codeBehind, "private void InstallInactiveEditPreviewPrime(");
         var tryPrime = ExtractMethodBody(primeInstaller, "void TryPrime()");
         var closeHandler = ExtractMethodBody(primeInstaller, "void OnPrimeClosed(object? sender, EventArgs e)");
@@ -219,20 +228,25 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("IApplicateSharedWebViewHost? editPreviewHost", codeBehind, StringComparison.Ordinal);
         Assert.Contains("viewerCommitHost.CommitCompleted += OnViewerHostCommitCompleted;", primeInstaller, StringComparison.Ordinal);
         Assert.Contains("viewerCommitHost.View.DocumentRevealReady += OnViewerDocumentRevealReady;", primeInstaller, StringComparison.Ordinal);
+        Assert.Contains("viewerCommitHost.View.ProgressiveAppendCompleted += OnViewerProgressiveAppendCompleted;", primeInstaller, StringComparison.Ordinal);
         Assert.Contains("viewerCommitHost.CommitCompleted -= OnViewerHostCommitCompleted;", closeHandler, StringComparison.Ordinal);
         Assert.Contains("viewerCommitHost.View.DocumentRevealReady -= OnViewerDocumentRevealReady;", closeHandler, StringComparison.Ordinal);
+        Assert.Contains("viewerCommitHost.View.ProgressiveAppendCompleted -= OnViewerProgressiveAppendCompleted;", closeHandler, StringComparison.Ordinal);
 
         Assert.Contains("e.TransactionGeneration != 0", commitHandler, StringComparison.Ordinal);
         Assert.Contains("e.Mode != ApplicateMode.Viewer", commitHandler, StringComparison.Ordinal);
         Assert.Contains("QueuePrime();", commitHandler, StringComparison.Ordinal);
         Assert.Contains("viewerCommitHost.View.HasLoadedDocumentForSource(document)", revealHandler, StringComparison.Ordinal);
         Assert.Contains("revealReadyDocument = document;", revealHandler, StringComparison.Ordinal);
+        Assert.Contains("void OnViewerProgressiveAppendCompleted(object? sender, EventArgs e)", primeInstaller, StringComparison.Ordinal);
+        Assert.Contains("=> QueuePrime();", primeInstaller, StringComparison.Ordinal);
 
         var gateIndex = tryPrime.IndexOf("viewerCommitHost.View.HasLoadedDocumentForSource(document)", StringComparison.Ordinal);
         var sharedHostGateIndex = tryPrime.IndexOf("ReferenceEquals(viewerCommitHost, editPreviewHost)", StringComparison.Ordinal);
         var activeViewerSkipIndex = tryPrime.IndexOf("editpreview-inactive-prime-skipped-active-viewer", StringComparison.Ordinal);
         var sizeOnlySkipIndex = tryPrime.IndexOf("TrySkipViewportOnlyPrime(document, preferences, viewportSize)", StringComparison.Ordinal);
         var revealGateIndex = tryPrime.IndexOf("IsViewerRevealReadyForPrime(document, preferences)", StringComparison.Ordinal);
+        var progressiveGateIndex = tryPrime.IndexOf("IsViewerProgressiveAppendPendingForPrime(document)", StringComparison.Ordinal);
         var delayedHeavyIndex = tryPrime.IndexOf("ScheduleDelayedHeavyPrime(document, preferences, viewportSize);", StringComparison.Ordinal);
         var beginLayoutIndex = tryPrime.IndexOf("BeginPrimeLayout(editWorkspaceSize)", StringComparison.Ordinal);
         Assert.True(gateIndex >= 0, "TryPrime should gate on the viewer host's current loaded document.");
@@ -240,10 +254,13 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.True(activeViewerSkipIndex > sharedHostGateIndex, "Inactive prime should not steal a fallback shared WebView from the active viewer.");
         Assert.True(sizeOnlySkipIndex > activeViewerSkipIndex, "A resize-only re-prime should be skipped only after the active-viewer ownership gate.");
         Assert.True(revealGateIndex > sizeOnlySkipIndex, "Heavy edit-preview prime should wait for the viewer reveal-ready gate after the resize-only reuse gate.");
-        Assert.True(delayedHeavyIndex > revealGateIndex, "Heavy edit-preview prime should delay only after the viewer reveal-ready gate passes.");
+        Assert.True(progressiveGateIndex > revealGateIndex, "Heavy edit-preview prime should wait for visible progressive append before arming its delay.");
+        Assert.True(delayedHeavyIndex > progressiveGateIndex, "Heavy edit-preview prime should delay only after visible progressive append is complete.");
         Assert.True(beginLayoutIndex > activeViewerSkipIndex, "Inactive prime should not begin layout before the active-viewer ownership gate.");
         Assert.Contains("Equals(viewerCommitHost.View.ReadingPreferences, preferences)", tryPrime, StringComparison.Ordinal);
         Assert.Contains("\"editpreview-inactive-prime-gated\"", tryPrime, StringComparison.Ordinal);
+        Assert.Contains("\"editpreview-inactive-prime-gated-progressive\"", primeInstaller, StringComparison.Ordinal);
+        Assert.Contains("viewerCommitHost?.View.HasPendingProgressiveAppend", primeInstaller, StringComparison.Ordinal);
         Assert.Contains("\"editpreview-inactive-prime-skipped-active-viewer\"", tryPrime, StringComparison.Ordinal);
         Assert.Contains("\"editpreview-inactive-prime-skipped-size-only\"", sizeOnlySkip, StringComparison.Ordinal);
         Assert.Contains("ApplicateEditPreviewView.CreateWebPreviewPreferences(preferences)", sizeOnlySkip, StringComparison.Ordinal);

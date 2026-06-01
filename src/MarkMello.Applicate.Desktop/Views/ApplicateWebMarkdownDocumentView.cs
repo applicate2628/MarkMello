@@ -1773,6 +1773,16 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             {
                 ApplicateTrace.DiagMs("diag-gate", "ipc-layout-ready",
                     $"awaiting={_awaitingLayoutReady} hasLoaded={_hasLoadedDocument} hasLayoutBefore={_hasLayoutReady} cached={ReadBoolean(document.RootElement, "cached")}");
+                if (!_hasLoadedDocument && _activeRevealRenderId > 0)
+                {
+                    _hasLoadedDocument = true;
+                    BeginAwaitingLayoutReady();
+                    ApplicateTrace.DiagMs(
+                        "diag-gate",
+                        "layout-ready-promoted-loaded",
+                        $"renderId={_activeRevealRenderId}");
+                }
+
                 _lastLayoutReadyWasCached = ReadBoolean(document.RootElement, "cached");
                 HandleScrollMessage(document.RootElement);
                 _hasLayoutReady = true;

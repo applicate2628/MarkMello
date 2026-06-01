@@ -107,10 +107,30 @@ public sealed class ApplicateViewerViewTests
     {
         var codeBehind = ReadViewerCodeBehind();
         var handler = ExtractMethodBody(codeBehind, "private void OnEffectiveVisibilityChanged()");
+        var sizeChanged = ExtractMethodBody(codeBehind, "protected override void OnSizeChanged(");
+        var syncFromViewModel = ExtractMethodBody(codeBehind, "private void SyncFromViewModel()");
+        var ensureMounted = ExtractMethodBody(codeBehind, "private void EnsureSharedHostMountedForRender()");
+        var queueMount = ExtractMethodBody(codeBehind, "private void QueueWebSlotLayoutMount()");
+        var layoutUpdated = ExtractMethodBody(codeBehind, "private void OnWebSlotLayoutUpdatedForMount(");
+        var detached = ExtractMethodBody(codeBehind, "protected override void OnDetachedFromVisualTree(");
 
+        Assert.Contains("SyncFromViewModel();", handler, StringComparison.Ordinal);
         Assert.True(
-            handler.IndexOf("EnsureSharedHostMounted(force: true);", StringComparison.Ordinal)
-            < handler.IndexOf("IssueRenderRequest();", StringComparison.Ordinal));
+            syncFromViewModel.IndexOf("ApplyColumnWidth();", StringComparison.Ordinal)
+            < syncFromViewModel.IndexOf("EnsureSharedHostMountedForRender();", StringComparison.Ordinal));
+        Assert.True(
+            syncFromViewModel.IndexOf("EnsureSharedHostMountedForRender();", StringComparison.Ordinal)
+            < syncFromViewModel.IndexOf("IssueRenderRequest();", StringComparison.Ordinal));
+        Assert.True(
+            sizeChanged.IndexOf("_hasValidBounds = true;", StringComparison.Ordinal)
+            < sizeChanged.IndexOf("SyncFromViewModel();", StringComparison.Ordinal));
+        Assert.Contains("_webSlot.Bounds.Width <= 0 || _webSlot.Bounds.Height <= 0", ensureMounted, StringComparison.Ordinal);
+        Assert.Contains("_documentShell.UpdateLayout();", ensureMounted, StringComparison.Ordinal);
+        Assert.Contains("QueueWebSlotLayoutMount();", ensureMounted, StringComparison.Ordinal);
+        Assert.Contains("EnsureSharedHostMounted(force: true);", ensureMounted, StringComparison.Ordinal);
+        Assert.Contains("_webSlot.LayoutUpdated += OnWebSlotLayoutUpdatedForMount;", queueMount, StringComparison.Ordinal);
+        Assert.Contains("SyncFromViewModel();", layoutUpdated, StringComparison.Ordinal);
+        Assert.Contains("ReleasePendingWebSlotLayoutMount();", detached, StringComparison.Ordinal);
         Assert.DoesNotContain("Opacity", handler, StringComparison.Ordinal);
     }
 

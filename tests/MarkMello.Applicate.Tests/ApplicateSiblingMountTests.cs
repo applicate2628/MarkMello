@@ -104,14 +104,37 @@ public sealed class ApplicateSiblingMountTests
         Assert.DoesNotContain("ApplicateModeTransitionCapture", bridge, StringComparison.Ordinal);
         Assert.DoesNotContain("TryCapture", bridge, StringComparison.Ordinal);
         Assert.DoesNotContain("bridge-cover-capture", bridge, StringComparison.Ordinal);
-        Assert.DoesNotContain("Image", cover, StringComparison.Ordinal);
-        Assert.DoesNotContain("Bitmap", cover, StringComparison.Ordinal);
-        Assert.DoesNotContain("Stretch", cover, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateModeTransitionCapture", cover, StringComparison.Ordinal);
+        Assert.DoesNotContain("TryCapture", cover, StringComparison.Ordinal);
+        Assert.DoesNotContain("Stretch.Uniform", cover, StringComparison.Ordinal);
         Assert.Contains("new Border", cover, StringComparison.Ordinal);
         Assert.Contains("MmBackgroundBrush", cover, StringComparison.Ordinal);
         Assert.Contains("ResolveHostPixelSize", cover, StringComparison.Ordinal);
         Assert.Contains("NativeMethods.SetWindowPos", cover, StringComparison.Ordinal);
         Assert.Contains("bridge-cover-window-shown", cover, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StartupCoverCanShowSplashWithoutChangingTransitionShieldPath()
+    {
+        var bridge = File.ReadAllText(BridgeSourcePath);
+        var cover = File.ReadAllText(CoverWindowSourcePath);
+
+        Assert.Contains("public bool Show(Control host, ThemeVariant? themeVariant = null)", cover, StringComparison.Ordinal);
+        Assert.Contains("public bool ShowStartupSplash(Control host, string? documentName = null, ThemeVariant? themeVariant = null)", cover, StringComparison.Ordinal);
+        Assert.Contains("CreateStartupSplashContent", cover, StringComparison.Ordinal);
+        Assert.Contains("StartupLogoUri", cover, StringComparison.Ordinal);
+        Assert.Contains("logo.png", cover, StringComparison.Ordinal);
+        Assert.Contains("new Image", cover, StringComparison.Ordinal);
+        Assert.Contains("new Bitmap(stream)", cover, StringComparison.Ordinal);
+        Assert.Contains("Text = \"Mark\"", cover, StringComparison.Ordinal);
+        Assert.Contains("Text = \"Mello\"", cover, StringComparison.Ordinal);
+        Assert.Contains("Foreground = accentBrush", cover, StringComparison.Ordinal);
+        Assert.Contains("\"Preparing document...\"", cover, StringComparison.Ordinal);
+        Assert.Contains("\"startup-splash\"", cover, StringComparison.Ordinal);
+        Assert.Contains("TryPrimeModeRevealCover", bridge, StringComparison.Ordinal);
+        Assert.Contains("_modeRevealCoverWindow.Show(_modeRevealCoverHost)", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("ShowStartupSplash", bridge, StringComparison.Ordinal);
     }
 
     [Fact]

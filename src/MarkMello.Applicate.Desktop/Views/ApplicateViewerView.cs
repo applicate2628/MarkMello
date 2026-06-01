@@ -89,6 +89,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private bool _hostEventsWired;
     private bool _isAttachedToHost;
     private bool _hasValidBounds;
+    private bool _pendingWebSlotLayoutMount;
     private double _pendingAvailableContentWidth = double.NaN;
 
     public ApplicateViewerView(
@@ -202,6 +203,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         DetachedFromVisualTree -= OnAnyAttachmentChange;
         PropertyChanged -= OnViewerPropertyChanged;
         DetachAncestorVisibilityListeners();
+        ReleasePendingWebSlotLayoutMount();
         UnwireSharedHostEvents();
         _resizeContentWidthTimer.Stop();
         _pendingAvailableContentWidth = double.NaN;
@@ -256,12 +258,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     {
         if (IsEffectivelyVisible)
         {
-            // Always re-AttachTo on visibility — the host's AttachTo is a
-            // no-op when the target panel is already its current parent,
-            // and a reparent when not. This handles the edit-preview→viewer
-            // mode toggle where edit had stolen the WebView previously.
-            EnsureSharedHostMounted(force: true);
-            IssueRenderRequest();
+            SyncFromViewModel();
         }
         else
         {
@@ -372,8 +369,74 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
         _lastViewModelContentWidth = viewModelContentWidth;
 
-        IssueRenderRequest();
         ApplyColumnWidth();
+        EnsureSharedHostMountedForRender();
+        IssueRenderRequest();
+    }
+
+    private void EnsureSharedHostMountedForRender()
+    {
+        if (_sharedHost is null || !_hasValidBounds || !IsEffectivelyVisible)
+        {
+            return;
+        }
+
+        if (_webSlot.Bounds.Width <= 0 || _webSlot.Bounds.Height <= 0)
+        {
+            _documentShell.UpdateLayout();
+        }
+
+        if (_webSlot.Bounds.Width <= 0 || _webSlot.Bounds.Height <= 0)
+        {
+            QueueWebSlotLayoutMount();
+            return;
+        }
+
+        ReleasePendingWebSlotLayoutMount();
+        // Always re-AttachTo on visibility — the host's AttachTo is a no-op
+        // when the target panel is already its current parent, and a reparent
+        // when not. This handles the edit-preview→viewer mode toggle where
+        // edit had stolen the WebView previously.
+        EnsureSharedHostMounted(force: true);
+    }
+
+    private void QueueWebSlotLayoutMount()
+    {
+        if (_pendingWebSlotLayoutMount)
+        {
+            return;
+        }
+
+        _pendingWebSlotLayoutMount = true;
+        _webSlot.LayoutUpdated += OnWebSlotLayoutUpdatedForMount;
+    }
+
+    private void OnWebSlotLayoutUpdatedForMount(object? sender, EventArgs e)
+    {
+        if (!_pendingWebSlotLayoutMount)
+        {
+            _webSlot.LayoutUpdated -= OnWebSlotLayoutUpdatedForMount;
+            return;
+        }
+
+        if (_webSlot.Bounds.Width <= 0 || _webSlot.Bounds.Height <= 0)
+        {
+            return;
+        }
+
+        ReleasePendingWebSlotLayoutMount();
+        SyncFromViewModel();
+    }
+
+    private void ReleasePendingWebSlotLayoutMount()
+    {
+        if (!_pendingWebSlotLayoutMount)
+        {
+            return;
+        }
+
+        _pendingWebSlotLayoutMount = false;
+        _webSlot.LayoutUpdated -= OnWebSlotLayoutUpdatedForMount;
     }
 
     private void IssueRenderRequest()

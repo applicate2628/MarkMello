@@ -60,6 +60,8 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
     private bool _pendingShowOnBounds;
     private bool _commitCompletedForCover;
     private bool _documentRevealReadyForCover;
+    private bool _skipNextCoverSession;
+    private bool _skipNextDocumentChangeCover;
     private DispatcherTimer? _fallbackTimer;
     private bool _disposed;
 
@@ -69,7 +71,8 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         MainWindowViewModel viewModel,
         ApplicateMode mode,
         Func<bool> isActiveSurface,
-        bool clearHeadingsOnRendererFailure = true)
+        bool clearHeadingsOnRendererFailure = true,
+        bool skipInitialCoverSession = false)
     {
         _coverHost = coverHost ?? throw new ArgumentNullException(nameof(coverHost));
         _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -77,6 +80,7 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         _mode = mode;
         _isActiveSurface = isActiveSurface ?? throw new ArgumentNullException(nameof(isActiveSurface));
         _clearHeadingsOnRendererFailure = clearHeadingsOnRendererFailure;
+        _skipNextCoverSession = skipInitialCoverSession;
 
         _lastSource = viewModel.Document;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
@@ -99,6 +103,15 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         {
             return;
         }
+
+        if (_skipNextCoverSession)
+        {
+            _skipNextCoverSession = false;
+            _skipNextDocumentChangeCover = true;
+            ApplicateTrace.DiagMs("pane-seq", "doc-switch-cover-skipped", "reason=startup-full-cover");
+            return;
+        }
+
         BeginCoverSession();
         ShowCover();
     }
@@ -141,6 +154,14 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         if (next is null || !_isActiveSurface())
         {
             HideCover();
+            return;
+        }
+
+        if (_skipNextCoverSession || _skipNextDocumentChangeCover)
+        {
+            _skipNextCoverSession = false;
+            _skipNextDocumentChangeCover = false;
+            ApplicateTrace.DiagMs("pane-seq", "doc-switch-cover-skipped", "reason=startup-full-cover");
             return;
         }
 
