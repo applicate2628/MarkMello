@@ -435,6 +435,7 @@ public sealed class ApplicateTocPanel : UserControl
 
     private void HighlightActiveHeading(string? activeId, bool allowVirtualizedScroll)
     {
+        Border? activeRow = null;
         foreach (var pair in _rowsById)
         {
             var row = pair.Value;
@@ -443,12 +444,16 @@ public sealed class ApplicateTocPanel : UserControl
             ApplyRowVisuals(row, isActive);
             if (isActive)
             {
-                Dispatcher.UIThread.Post(() => ScrollRowIntoView(row), DispatcherPriority.Background);
-                return;
+                activeRow = row;
             }
         }
 
-        if (allowVirtualizedScroll && !string.IsNullOrEmpty(activeId) && _rowIndexById.TryGetValue(activeId, out var index))
+        if (activeRow is not null)
+        {
+            var rowToScroll = activeRow;
+            Dispatcher.UIThread.Post(() => ScrollRowIntoView(rowToScroll), DispatcherPriority.Background);
+        }
+        else if (allowVirtualizedScroll && !string.IsNullOrEmpty(activeId) && _rowIndexById.TryGetValue(activeId, out var index))
         {
             Dispatcher.UIThread.Post(
                 () =>

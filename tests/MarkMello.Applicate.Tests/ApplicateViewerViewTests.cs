@@ -1,8 +1,11 @@
 using System.Reflection;
 using System.Threading;
+using Avalonia.Controls;
 using Avalonia.Headless;
+using Avalonia.Media;
 using MarkMello.Applicate.Desktop;
 using MarkMello.Applicate.Desktop.Views;
+using MarkMello.Presentation.ViewModels;
 using Xunit;
 
 namespace MarkMello.Applicate.Tests;
@@ -237,6 +240,55 @@ public sealed class ApplicateViewerViewTests
     }
 
     [Fact]
+    public void TocPanelActiveHeadingRefreshClearsAllMaterializedRowsBeforeScrolling()
+    {
+        var tocPanel = ReadTocPanelCodeBehind();
+        var refresh = ExtractMethodBody(tocPanel, "private void HighlightActiveHeading(string? activeId, bool allowVirtualizedScroll)");
+        var virtualizedScrollStart = refresh.IndexOf("if (allowVirtualizedScroll", StringComparison.Ordinal);
+
+        Assert.True(virtualizedScrollStart >= 0, "HighlightActiveHeading should keep virtualized-row scroll fallback.");
+        Assert.DoesNotContain("return;", refresh[..virtualizedScrollStart], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TocPanelClearsPreviouslyActiveMaterializedRowsAfterNewActiveRow()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var panel = new ApplicateTocPanel();
+            var buildHeadingRow = typeof(ApplicateTocPanel).GetMethod(
+                "BuildHeadingRow",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var highlightActiveHeading = typeof(ApplicateTocPanel).GetMethod(
+                "HighlightActiveHeading",
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                [typeof(string), typeof(bool)],
+                modifiers: null);
+
+            var first = Assert.IsType<Border>(buildHeadingRow?.Invoke(panel, [
+                new DocumentHeading("first", 1, "First", 0),
+            ]));
+            var second = Assert.IsType<Border>(buildHeadingRow?.Invoke(panel, [
+                new DocumentHeading("second", 2, "Second", 10),
+            ]));
+            var third = Assert.IsType<Border>(buildHeadingRow?.Invoke(panel, [
+                new DocumentHeading("third", 2, "Third", 20),
+            ]));
+
+            highlightActiveHeading?.Invoke(panel, ["third", false]);
+            Assert.Same(Brushes.LightYellow, third.Background);
+
+            highlightActiveHeading?.Invoke(panel, ["first", false]);
+
+            Assert.Same(Brushes.LightYellow, first.Background);
+            Assert.Same(Brushes.Transparent, second.Background);
+            Assert.Same(Brushes.Transparent, third.Background);
+        }, CancellationToken.None);
+    }
+
+    [Fact]
     public void TransactionGenerationContextInheritsToConsumerWebSlot()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
@@ -264,6 +316,19 @@ public sealed class ApplicateViewerViewTests
             "MarkMello.Applicate.Desktop",
             "Views",
             "ApplicateViewerView.cs"));
+
+    private static string ReadTocPanelCodeBehind()
+        => File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Views",
+            "ApplicateTocPanel.cs"));
 
     private static string ExtractMethodBody(string source, string signature)
     {

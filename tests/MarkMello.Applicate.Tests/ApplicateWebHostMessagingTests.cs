@@ -301,12 +301,59 @@ public sealed class ApplicateWebHostMessagingTests
         var cacheResolve = programSource.IndexOf("GetRequiredService<ApplicateRenderedBodyCache>()", StringComparison.Ordinal);
         var rendererResolve = programSource.IndexOf("GetRequiredService<IApplicateHtmlMarkdownRenderer>()", StringComparison.Ordinal);
         var cacheRender = programSource.IndexOf(".GetOrRenderAsync(", StringComparison.Ordinal);
+        var nativePrime = programSource.IndexOf("PrimeActiveDocumentNativeModelCache", StringComparison.Ordinal);
 
         Assert.True(preReadCall >= 0, "Active-document pre-read should receive the DI provider.");
         Assert.True(primeMethod > preReadCall, "Program should prime the rendered-body cache from the pre-read source.");
         Assert.True(cacheResolve > primeMethod, "Body prime should use the shared rendered-body cache.");
         Assert.True(rendererResolve > primeMethod, "Body prime should use the shared HTML renderer.");
         Assert.True(cacheRender > primeMethod, "Body prime should populate through the cache owner.");
+        Assert.Equal(-1, nativePrime);
+    }
+
+    [Fact]
+    public void ProgramPrimesRestoredStartupDocumentBodyCacheOnlyWhenArgvDoesNotWin()
+    {
+        var programSource = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Program.cs"));
+
+        var sessionCall = programSource.IndexOf("StartSessionStartupDocumentPreRead(args, services);", StringComparison.Ordinal);
+        var sessionMethod = programSource.IndexOf("private static void StartSessionStartupDocumentPreRead(string[] args, IServiceProvider services)", StringComparison.Ordinal);
+        var argvSkip = programSource.IndexOf("perf-session-prefetch skipped reason=argv-doc", sessionMethod, StringComparison.Ordinal);
+        var sessionPrime = programSource.IndexOf("PrimeActiveDocumentRenderedBodyCacheAsync(services, source, CancellationToken.None)", sessionMethod, StringComparison.Ordinal);
+
+        Assert.True(sessionCall >= 0, "Session startup pre-read should receive argv plus the DI provider.");
+        Assert.True(sessionMethod > sessionCall, "Session startup pre-read method should stay after the Program.Main call.");
+        Assert.True(argvSkip > sessionMethod, "Session pre-read should skip when argv already selects the startup document.");
+        Assert.True(sessionPrime > argvSkip, "Restored-session startup documents should prime the rendered-body cache.");
+        Assert.DoesNotContain("PrimeActiveDocumentNativeModelCache", programSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WebRenderShellUsesChunkedProgressiveAppendForVeryHeavyDocuments()
+    {
+        var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
+
+        Assert.Contains("TryCreateProgressiveRenderBody(body,", viewSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("!ViewerChromeEnabled", viewSource, StringComparison.Ordinal);
+        Assert.Contains("ProgressiveAppendChunkTargetHtmlLength", viewSource, StringComparison.Ordinal);
+        Assert.Contains("cacheKey = (string?)null", viewSource, StringComparison.Ordinal);
+        Assert.Contains("type = \"append-document\"", viewSource, StringComparison.Ordinal);
+        Assert.Contains("chunk={index + 1}/{appendChunks.Count}", viewSource, StringComparison.Ordinal);
+        Assert.Contains("isFinal", viewSource, StringComparison.Ordinal);
+        Assert.Contains("DocumentRevealReady += OnProgressiveDocumentRevealReady;", viewSource, StringComparison.Ordinal);
+        Assert.Contains("public event EventHandler? ProgressiveAppendCompleted;", viewSource, StringComparison.Ordinal);
+        Assert.Contains("public bool HasPendingProgressiveAppend => _progressiveAppendPending;", viewSource, StringComparison.Ordinal);
+        Assert.Contains("CompleteProgressiveAppend(renderId);", viewSource, StringComparison.Ordinal);
+        Assert.Contains("cacheKey = isFinal ? rendererCacheKey : null", viewSource, StringComparison.Ordinal);
     }
 
     [Fact]

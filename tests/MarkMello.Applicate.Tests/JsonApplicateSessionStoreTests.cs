@@ -60,6 +60,24 @@ public sealed class JsonApplicateSessionStoreTests : IDisposable
     }
 
     [Fact]
+    public void StartupDocumentPathPrefersActivePathThenFirstOpenPath()
+    {
+        var session = new ApplicateSession
+        {
+            OpenPaths = new List<string> { "", @"C:\a\one.md" },
+            ActivePath = @"C:\a\two.md",
+        };
+        var legacySession = new ApplicateSession
+        {
+            OpenPaths = new List<string> { "", @"C:\a\one.md" },
+        };
+
+        Assert.Equal(@"C:\a\two.md", session.GetStartupDocumentPath());
+        Assert.Equal(@"C:\a\one.md", legacySession.GetStartupDocumentPath());
+        Assert.Null(ApplicateSession.Empty.GetStartupDocumentPath());
+    }
+
+    [Fact]
     public async Task LoadCorruptFileReturnsEmpty()
     {
         var sessionFile = Path.Combine(_tempRoot, "applicate-session.json");

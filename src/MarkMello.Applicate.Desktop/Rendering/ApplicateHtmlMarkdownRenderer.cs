@@ -85,6 +85,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             PlainText: context.PlainText.ToString(),
             Headings: context.Headings,
             Blocks: context.Blocks,
+            TopLevelBlockEndOffsets: context.TopLevelBlockEndOffsets,
             HasMermaidBlock: context.HasMermaidBlock,
             HasCodeBlockWithSyntax: context.HasCodeBlockWithSyntax,
             RendererCacheKeySuffix: ApplicateRendererDocumentCacheKeys.CreateSuffix(bodyHtml));
@@ -102,6 +103,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         foreach (var block in rendered.Blocks)
         {
             await RenderBlockAsync(context, block).ConfigureAwait(false);
+            context.TopLevelBlockEndOffsets.Add(context.Html.Length);
         }
 
         return context;
@@ -631,6 +633,8 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         public List<ApplicateHtmlHeading> Headings { get; } = [];
 
         public List<ApplicateHtmlBlockMarker> Blocks { get; } = [];
+
+        public List<int> TopLevelBlockEndOffsets { get; } = [];
 
         public IImageSourceResolver? ImageSourceResolver { get; } = imageSourceResolver;
 

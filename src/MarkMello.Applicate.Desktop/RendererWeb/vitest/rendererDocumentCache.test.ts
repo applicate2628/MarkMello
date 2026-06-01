@@ -42,6 +42,37 @@ afterEach(() => {
 });
 
 describe("renderer document cache", () => {
+  it("prestores the prepared active document so leaving a tab refreshes state instead of moving DOM", async () => {
+    const root = document.documentElement;
+    Object.defineProperty(root, "scrollHeight", { configurable: true, value: 2400 });
+    Object.defineProperty(root, "clientHeight", { configurable: true, value: 800 });
+
+    const { load, messages } = await loadRendererWithMessages();
+    const firstHtml = "<h1 id='first'>First</h1><p>cached document</p>";
+    const secondHtml = "<h1 id='second'>Second</h1><p>other document</p>";
+
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "perf-mark",
+      name: "mm-document-cache-prestore",
+    }));
+
+    messages.length = 0;
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+    await letPipelineSettle();
+
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "perf-mark",
+      name: "mm-document-cache-refresh",
+    }));
+    expect(messages).not.toContainEqual(expect.objectContaining({
+      type: "perf-mark",
+      name: "mm-document-cache-store",
+    }));
+  });
+
   it("reports cached geometry immediately and refreshes current geometry after cached reveal", async () => {
     const root = document.documentElement;
     Object.defineProperty(root, "scrollHeight", { configurable: true, value: 2000 });
@@ -304,6 +335,66 @@ describe("renderer document cache", () => {
     expect(messages).not.toContainEqual(expect.objectContaining({
       type: "document-cache-miss",
     }));
+  });
+
+  it("keeps cached minimap snapshots alive through load-cached-document reset", async () => {
+    const root = document.documentElement;
+    Object.defineProperty(root, "scrollHeight", { configurable: true, value: 2400 });
+    Object.defineProperty(root, "clientHeight", { configurable: true, value: 800 });
+
+    const { load, messages } = await loadRendererWithMessages();
+    const firstHtml = "<h1 id='first'>First</h1><p>cached document</p>";
+    const secondHtml = "<h1 id='second'>Second</h1><p>other document</p>";
+
+    load({
+      type: "reading-preferences",
+      fontFamily: "serif",
+      fontSize: 16,
+      lineHeight: 1.6,
+      maxWidth: 820,
+      minMaxWidth: 320,
+      minimapMode: "on",
+      viewerChromeEnabled: true,
+      documentScrollEnabled: true,
+      wheelProxyEnabled: true,
+      widthResizerVisibility: "on-hover",
+      viewportWidth: 1200,
+      viewportHeight: 800,
+    });
+    load({
+      type: "minimap-policy",
+      minimapPolicy: {
+        minHostWidth: 0,
+        minScrollableViewportRatio: 1,
+        maxDetailedDocumentHeight: 10000,
+      },
+    });
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+    await letPipelineSettle();
+
+    messages.length = 0;
+    load({
+      type: "load-cached-document",
+      cacheKey: rendererCacheKey(firstHtml, "light"),
+      documentName: "first.md",
+      theme: "light",
+      hasMermaid: false,
+      renderId: 3,
+    });
+    await letPipelineSettle();
+
+    const perfMarks = messages
+      .filter((message): message is { type: "perf-mark"; name: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: unknown }).type === "perf-mark")
+      .map(message => message.name);
+
+    expect(perfMarks).toContain("mm-load-document-cache-hit");
+    expect(perfMarks).toContain("mm-minimap-cache-hit");
+    expect(perfMarks).not.toContain("mm-minimap-refresh-start");
   });
 
   it("re-extracts headings from cached DOM when the cached heading snapshot is empty", async () => {

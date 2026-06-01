@@ -48,6 +48,65 @@ describe("handleHostMessage(load-document)", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
   });
 
+  it("appends progressive document html without replacing the initial body", async () => {
+    const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
+
+    load({ type: "load-document", html: "<h1>Intro</h1>", renderId: 1, hasMermaid: false, hasHljs: false });
+    load({ type: "append-document", html: "<h2>Later</h2>", renderId: 1, cacheKey: "full-cache" });
+    await new Promise(r => setTimeout(r, 20));
+
+    const main = document.querySelector("main.mm-document");
+    expect(main?.querySelector("h1")?.textContent).toBe("Intro");
+    expect(main?.querySelector("h2")?.textContent).toBe("Later");
+  });
+
+  it("accepts progressive append chunks and finalizes on the last chunk", async () => {
+    const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
+
+    load({ type: "load-document", html: "<h1>Intro</h1>", renderId: 1, hasMermaid: false, hasHljs: false });
+    load({ type: "append-document", html: "<h2>Middle</h2>", renderId: 1, isFinal: false });
+    load({ type: "append-document", html: "<h3>Final</h3>", renderId: 1, isFinal: true, cacheKey: "full-cache" });
+    await new Promise(r => setTimeout(r, 20));
+
+    const main = document.querySelector("main.mm-document");
+    expect(main?.querySelector("h1")?.textContent).toBe("Intro");
+    expect(main?.querySelector("h2")?.textContent).toBe("Middle");
+    expect(main?.querySelector("h3")?.textContent).toBe("Final");
+  });
+
+  it("highlights progressive code chunks once instead of rescanning finished chunks", async () => {
+    const highlightElement = vi.fn((node: HTMLElement) => {
+      node.classList.add("hljs");
+    });
+    (window as unknown as {
+      hljs: { getLanguage: (language: string) => boolean; highlightElement: (node: HTMLElement) => void };
+    }).hljs = {
+      getLanguage: () => true,
+      highlightElement,
+    };
+    const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
+
+    load({ type: "load-document", html: "<h1>Intro</h1>", renderId: 1, hasMermaid: false, hasHljs: true });
+    load({
+      type: "append-document",
+      html: `<pre><code data-mm-code class="language-js">const a = 1;</code></pre>`,
+      renderId: 1,
+      isFinal: false,
+      hasHljs: true,
+    });
+    load({
+      type: "append-document",
+      html: `<pre><code data-mm-code class="language-js">const b = 2;</code></pre>`,
+      renderId: 1,
+      isFinal: true,
+      hasHljs: true,
+      cacheKey: "full-cache",
+    });
+    await new Promise(r => setTimeout(r, 20));
+
+    expect(highlightElement).toHaveBeenCalledTimes(2);
+  });
+
   it("applies live theme before deferred mermaid refresh", () => {
     const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
     const themeStart = source.indexOf("function handleThemeChange(theme: RendererTheme, requestId?: number): void");

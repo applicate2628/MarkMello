@@ -44,7 +44,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private const double MaxRendererReportedMinimapReservedWidth = 2000;
     private const int NativeOffscreenMargin = 512;
     private const int IUnknownVtableSlotCount = 3;
+    private const int ProgressiveViewerBodyHtmlLengthThreshold = 1024 * 1024;
+    private const int ProgressiveViewerInitialTopLevelBlockCount = 96;
+    private const int ProgressiveViewerMinimumAppendHtmlLength = 128 * 1024;
+    private const int ProgressiveAppendChunkTargetHtmlLength = 64 * 1024;
     private static readonly TimeSpan DuplicateThemePostWindow = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan ProgressiveAppendChunkDelay = TimeSpan.FromMilliseconds(16);
     private const string CoreWebView2InteropTypeName = "Avalonia.Controls.Win.WebView2.Interop.ICoreWebView2";
     private static readonly int CoreWebView2PostWebMessageAsJsonVtableSlot =
         ResolveCoreWebView2PostWebMessageAsJsonVtableSlot();
@@ -89,6 +94,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _postReadyEnhancementsComplete = true;
     private bool _documentRenderedRaised;
     private bool _documentRevealReadyRaised;
+    private bool _progressiveAppendPending;
     private long _activeRevealRenderId;
     private bool _disposed;
     private double _scrollTop;
@@ -227,6 +233,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     public event EventHandler? DocumentRendered;
 
     public event EventHandler? DocumentRevealReady;
+
+    public event EventHandler? ProgressiveAppendCompleted;
+
+    public bool HasPendingProgressiveAppend => _progressiveAppendPending;
 
     public event EventHandler<ApplicateWebThemeChangeSentEventArgs>? ThemeChangeSent;
 
@@ -1203,6 +1213,36 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 _pendingRendererCacheFallbackLoads[renderId] = fullLoadDocumentMessage;
                 ApplicateTrace.ModeToggle($"Web.RenderShell post-cached-load id={renderId} source={source.Path} cacheKey={rendererCacheKey}");
             }
+            else if (TryCreateProgressiveRenderBody(body, out var initialHtml, out var appendChunks))
+            {
+                if (rendererCacheKey is not null)
+                {
+                    _postedRendererDocumentCacheKeys.Add(rendererCacheKey);
+                }
+
+                rendererMessage = new
+                {
+                    type = "load-document",
+                    html = initialHtml,
+                    documentName = source.FileName,
+                    theme,
+                    hasMermaid = body.HasMermaidBlock,
+                    hasHljs = body.HasCodeBlockWithSyntax,
+                    renderId,
+                    skipFrameWait = skipFrameWaitUntilRenderReady,
+                    cacheKey = (string?)null
+                };
+                QueueProgressiveAppendAfterReveal(
+                    renderId,
+                    appendChunks,
+                    body.HasMermaidBlock,
+                    body.HasCodeBlockWithSyntax,
+                    rendererCacheKey,
+                    cancellationToken);
+                _pendingRendererCacheFallbackLoads.Remove(renderId);
+                ApplicateTrace.ModeToggle(
+                    $"Web.RenderShell progressive-body-split id={renderId} source={source.Path} initialLength={initialHtml.Length} appendLength={appendChunks.Sum(static chunk => chunk.Length)} appendChunks={appendChunks.Count}");
+            }
             else
             {
                 if (rendererCacheKey is not null)
@@ -1225,6 +1265,171 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             FallbackRequested?.Invoke(this, EventArgs.Empty);
         }
+    }
+
+    private bool TryCreateProgressiveRenderBody(
+        ApplicateRenderedBody body,
+        out string initialHtml,
+        out IReadOnlyList<string> appendChunks)
+    {
+        initialHtml = string.Empty;
+        appendChunks = Array.Empty<string>();
+
+        if (body.BodyHtml.Length < ProgressiveViewerBodyHtmlLengthThreshold
+            || body.TopLevelBlockEndOffsets.Count <= ProgressiveViewerInitialTopLevelBlockCount)
+        {
+            return false;
+        }
+
+        var splitOffset = body.TopLevelBlockEndOffsets[ProgressiveViewerInitialTopLevelBlockCount - 1];
+        if (splitOffset <= 0
+            || splitOffset >= body.BodyHtml.Length
+            || body.BodyHtml.Length - splitOffset < ProgressiveViewerMinimumAppendHtmlLength)
+        {
+            return false;
+        }
+
+        initialHtml = body.BodyHtml[..splitOffset];
+        appendChunks = CreateProgressiveAppendChunks(body, splitOffset);
+        if (appendChunks.Count == 0)
+        {
+            initialHtml = string.Empty;
+            appendChunks = Array.Empty<string>();
+            return false;
+        }
+
+        return true;
+    }
+
+    private static IReadOnlyList<string> CreateProgressiveAppendChunks(ApplicateRenderedBody body, int splitOffset)
+    {
+        var chunks = new List<string>();
+        var previousOffset = splitOffset;
+        var offsetIndex = ProgressiveViewerInitialTopLevelBlockCount;
+        while (previousOffset < body.BodyHtml.Length)
+        {
+            var chunkEnd = body.BodyHtml.Length;
+            while (offsetIndex < body.TopLevelBlockEndOffsets.Count)
+            {
+                var candidate = body.TopLevelBlockEndOffsets[offsetIndex++];
+                if (candidate <= previousOffset)
+                {
+                    continue;
+                }
+
+                chunkEnd = candidate;
+                if (chunkEnd - previousOffset >= ProgressiveAppendChunkTargetHtmlLength)
+                {
+                    break;
+                }
+            }
+
+            if (chunkEnd <= previousOffset)
+            {
+                chunkEnd = body.BodyHtml.Length;
+            }
+
+            chunks.Add(body.BodyHtml[previousOffset..chunkEnd]);
+            previousOffset = chunkEnd;
+        }
+
+        return chunks;
+    }
+
+    private void QueueProgressiveAppendAfterReveal(
+        long renderId,
+        IReadOnlyList<string> appendChunks,
+        bool hasMermaidBlock,
+        bool hasCodeBlockWithSyntax,
+        string? rendererCacheKey,
+        CancellationToken cancellationToken)
+    {
+        _progressiveAppendPending = true;
+
+        void OnProgressiveDocumentRevealReady(object? sender, EventArgs e)
+        {
+            DocumentRevealReady -= OnProgressiveDocumentRevealReady;
+            if (_activeRevealRenderId != renderId)
+            {
+                return;
+            }
+
+            Avalonia.Threading.Dispatcher.UIThread.Post(
+                () => _ = PostProgressiveAppendChunksAsync(
+                    renderId,
+                    appendChunks,
+                    hasMermaidBlock,
+                    hasCodeBlockWithSyntax,
+                    rendererCacheKey,
+                    cancellationToken),
+                Avalonia.Threading.DispatcherPriority.Background);
+        }
+
+        DocumentRevealReady += OnProgressiveDocumentRevealReady;
+    }
+
+    private async Task PostProgressiveAppendChunksAsync(
+        long renderId,
+        IReadOnlyList<string> appendChunks,
+        bool hasMermaidBlock,
+        bool hasCodeBlockWithSyntax,
+        string? rendererCacheKey,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            for (var index = 0; index < appendChunks.Count; index++)
+            {
+                if (_disposed || _activeRevealRenderId != renderId)
+                {
+                    return;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                var isFinal = index == appendChunks.Count - 1;
+                PostRendererMessage(new
+                {
+                    type = "append-document",
+                    html = appendChunks[index],
+                    renderId,
+                    hasMermaid = hasMermaidBlock,
+                    hasHljs = hasCodeBlockWithSyntax,
+                    isFinal,
+                    cacheKey = isFinal ? rendererCacheKey : null
+                });
+                ApplicateTrace.ModeToggle(
+                    $"Web.RenderShell progressive-append-post id={renderId} chunk={index + 1}/{appendChunks.Count} length={appendChunks[index].Length} final={isFinal}");
+
+                if (!isFinal)
+                {
+                    await Task.Delay(ProgressiveAppendChunkDelay, cancellationToken).ConfigureAwait(true);
+                    continue;
+                }
+
+                CompleteProgressiveAppend(renderId);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (_activeRevealRenderId == renderId)
+            {
+                _progressiveAppendPending = false;
+            }
+
+            ApplicateTrace.ModeToggle($"Web.RenderShell progressive-append-canceled id={renderId}");
+        }
+    }
+
+    private void CompleteProgressiveAppend(long renderId)
+    {
+        if (_activeRevealRenderId != renderId || !_progressiveAppendPending)
+        {
+            return;
+        }
+
+        _progressiveAppendPending = false;
+        ApplicateTrace.ModeToggle($"Web.RenderShell progressive-append-complete id={renderId}");
+        ProgressiveAppendCompleted?.Invoke(this, EventArgs.Empty);
     }
 
     private async Task NavigateToShellAsync(CancellationToken cancellationToken)
@@ -2140,6 +2345,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _postReadyEnhancementsComplete = !requiresPostReadyEnhancements;
         _documentRenderedRaised = false;
         _documentRevealReadyRaised = false;
+        _progressiveAppendPending = false;
         ApplicateTrace.DiagMs(
             "diag-gate",
             "document-reveal-gate-configured",

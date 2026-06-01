@@ -6,7 +6,7 @@ import {
 } from "../src/minimapCache";
 
 describe("minimap cache", () => {
-  it("moves rendered minimap content into a snapshot and restores it without reading the source document", () => {
+  it("clones rendered minimap content into a reusable snapshot without reading the source document", () => {
     document.body.innerHTML = `
       <main class="mm-document"><h1>source after switch</h1></main>
       <aside class="mm-minimap">
@@ -26,7 +26,7 @@ describe("minimap cache", () => {
     });
 
     expect(snapshot).not.toBeNull();
-    expect(minimapContent?.childNodes.length).toBe(0);
+    expect(minimapContent?.childNodes.length).toBe(1);
 
     document.querySelector<HTMLElement>(".mm-document")!.innerHTML = "<h1>new source should not be cloned</h1>";
 
@@ -49,5 +49,14 @@ describe("minimap cache", () => {
     expect(restoredContent.style.transform).toBe("scale(0.2)");
     expect(restoredViewport.style.height).toBe("44px");
     expect(restoredViewport.style.transform).toBe("translateY(12px)");
+
+    const restoredAgainContent = document.createElement("div");
+    const restoredAgain = restoreMinimapSnapshot(snapshot as CachedMinimapSnapshot, {
+      minimapContent: restoredAgainContent,
+      minimapViewport: document.createElement("div"),
+    });
+
+    expect(restoredAgain?.contentNodeCount).toBe(1);
+    expect(restoredAgainContent.textContent).toContain("cached minimap tree");
   });
 });

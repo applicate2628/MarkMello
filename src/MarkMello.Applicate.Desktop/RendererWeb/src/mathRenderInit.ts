@@ -15,6 +15,8 @@ export type RenderMathDeps = {
 };
 
 const INITIAL_LOOKAHEAD_PX = 500;
+const MATH_RENDER_FRAME_FALLBACK_MS = 32;
+const INITIAL_PAST_VIEWPORT_SCAN_LIMIT = 8;
 
 function complexityScore(tex: string): number {
   let score = 1;
@@ -41,7 +43,26 @@ function getVisibilityElement(node: HTMLElement): HTMLElement {
 }
 
 function rafYield(): Promise<void> {
-  return new Promise(r => window.requestAnimationFrame(() => r()));
+  return new Promise(resolve => {
+    let resolved = false;
+    let timeout: number | undefined;
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      if (timeout !== undefined) {
+        window.clearTimeout(timeout);
+      }
+      resolve();
+    };
+
+    if (typeof window.requestAnimationFrame === "function") {
+      timeout = window.setTimeout(finish, MATH_RENDER_FRAME_FALLBACK_MS);
+      window.requestAnimationFrame(finish);
+      return;
+    }
+
+    timeout = window.setTimeout(finish, 0);
+  });
 }
 
 export function renderMath(deps: RenderMathDeps): MathReadinessController {
@@ -80,24 +101,52 @@ export function renderMath(deps: RenderMathDeps): MathReadinessController {
   //    later in the lifecycle must NOT extend this set.
   const viewportHeight = window.innerHeight;
   const initialVisibleNodes = new Set<HTMLElement>();
+  const rectCache = new Map<HTMLElement, DOMRect>();
+  let stopMeasuringInitialVisibility = false;
+  let consecutivePastViewportElements = 0;
+  let lastMeasuredVisibilityElement: HTMLElement | null = null;
+  const readRect = (element: HTMLElement): DOMRect => {
+    const cached = rectCache.get(element);
+    if (cached) return cached;
+    const rect = element.getBoundingClientRect();
+    rectCache.set(element, rect);
+    return rect;
+  };
   for (const node of mathNodes) {
     if (isTerminalMathState(node.dataset["mmMathRendered"])) {
       continue;
     }
 
     const visEl = getVisibilityElement(node);
-    const rect = visEl.getBoundingClientRect();
     const tex = node.dataset["tex"] ?? "";
     const task: MathRenderTask = {
       node,
       tex,
       displayMode: node.classList.contains("math-display"),
     };
+    if (stopMeasuringInitialVisibility) {
+      queue.enqueue(task, "low");
+      continue;
+    }
+
+    const rect = readRect(visEl);
     if (rect.bottom >= -INITIAL_LOOKAHEAD_PX && rect.top <= viewportHeight + INITIAL_LOOKAHEAD_PX) {
       initialVisibleNodes.add(node);
       queue.enqueue(task, "high");
+      consecutivePastViewportElements = 0;
     } else {
       queue.enqueue(task, "low");
+      if (visEl !== lastMeasuredVisibilityElement) {
+        lastMeasuredVisibilityElement = visEl;
+        if (rect.top > viewportHeight + INITIAL_LOOKAHEAD_PX) {
+          consecutivePastViewportElements++;
+          if (consecutivePastViewportElements >= INITIAL_PAST_VIEWPORT_SCAN_LIMIT) {
+            stopMeasuringInitialVisibility = true;
+          }
+        } else {
+          consecutivePastViewportElements = 0;
+        }
+      }
     }
   }
 

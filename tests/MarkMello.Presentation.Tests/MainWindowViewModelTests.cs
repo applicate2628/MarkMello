@@ -641,7 +641,7 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public async Task InitializeAsyncExposesOpeningPathWhileStartupCacheHitWaitsForRenderer()
+    public async Task InitializeAsyncReaderStartupCacheHitWaitsForPublishGateButNotRendererShell()
     {
         var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", $"startup-{Guid.NewGuid():N}.md");
         var readiness = new ManualRendererReadinessService();
@@ -653,11 +653,80 @@ public sealed class MainWindowViewModelTests
 
         Assert.False(initializeTask.IsCompleted);
         Assert.True(harness.ViewModel.IsOpeningPath(path));
+        Assert.Equal(1, readiness.StartupDocumentPublishWaitCallCount);
+        Assert.Equal(0, readiness.WaitCallCount);
 
-        readiness.SetReady();
+        readiness.SetStartupDocumentPublishReady();
         await initializeTask;
 
         Assert.False(harness.ViewModel.IsOpeningPath(path));
+        Assert.Equal(path, harness.ViewModel.Document?.Path);
+        Assert.Equal(0, readiness.WaitCallCount);
+    }
+
+    [Fact]
+    public async Task InitializeAsyncReaderStartupCacheHitDefersNativeRenderUntilViewReportsReadable()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", $"startup-{Guid.NewGuid():N}.md");
+        var readiness = new ManualRendererReadinessService();
+        using var renderer = new BlockingMarkdownRenderer();
+        var harness = CreateHarness(rendererReadiness: readiness, markdownRenderer: renderer);
+        harness.CommandLine.ActivationPath = path;
+        EarlyDocumentCache.Deposit(path, CreateSource(path, "# Startup\n\nbody"));
+
+        var initializeTask = harness.ViewModel.InitializeAsync();
+
+        Assert.False(initializeTask.IsCompleted);
+        Assert.Equal(1, readiness.StartupDocumentPublishWaitCallCount);
+
+        var releaseGateTask = Task.Run(readiness.SetStartupDocumentPublishReady);
+        try
+        {
+            await releaseGateTask.WaitAsync(TimeSpan.FromSeconds(1));
+            await initializeTask.WaitAsync(TimeSpan.FromSeconds(1));
+
+            Assert.Equal(path, harness.ViewModel.Document?.Path);
+            Assert.Empty(harness.ViewModel.RenderedDocument.Blocks);
+            await Task.Delay(100);
+            Assert.Equal(0, renderer.RenderCallCount);
+
+            harness.ViewModel.MarkReadableDocumentRendered();
+            await renderer.RenderStarted.WaitAsync(TimeSpan.FromSeconds(1));
+        }
+        finally
+        {
+            renderer.Release();
+            await initializeTask.WaitAsync(TimeSpan.FromSeconds(1));
+        }
+
+        Assert.Equal(1, renderer.RenderCallCount);
+    }
+
+    [Fact]
+    public async Task ReloadCacheHitInEditModeStillWaitsForRendererBeforePublishingDocument()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", $"reload-{Guid.NewGuid():N}.md");
+        var readiness = new ManualRendererReadinessService();
+        var harness = CreateHarness(rendererReadiness: readiness);
+        harness.Loader.Sources[path] = CreateSource(path, "# Initial\n\nbody");
+
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        EarlyDocumentCache.Deposit(path, CreateSource(path, "# Reloaded\n\nbody"));
+
+        var reloadTask = harness.ViewModel.ReloadCommand.ExecuteAsync(null);
+
+        Assert.False(reloadTask.IsCompleted);
+        Assert.True(harness.ViewModel.IsOpeningPath(path));
+        Assert.Equal(0, readiness.StartupDocumentPublishWaitCallCount);
+        Assert.Equal(1, readiness.WaitCallCount);
+
+        readiness.SetReady();
+        await reloadTask;
+
+        Assert.False(harness.ViewModel.IsOpeningPath(path));
+        Assert.True(harness.ViewModel.IsEditMode);
+        Assert.Equal("# Reloaded\n\nbody", harness.ViewModel.Document?.Content);
     }
 
     [Fact]
@@ -992,7 +1061,9 @@ public sealed class MainWindowViewModelTests
             ArchitectureName: "x64",
             InstallAction: AppUpdateInstallAction.LaunchInstaller);
 
-    private static TestHarness CreateHarness(IRendererReadinessService? rendererReadiness = null)
+    private static TestHarness CreateHarness(
+        IRendererReadinessService? rendererReadiness = null,
+        IMarkdownDocumentRenderer? markdownRenderer = null)
     {
         var loader = new StubDocumentLoader();
         var saver = new RecordingDocumentSaver();
@@ -1012,7 +1083,7 @@ public sealed class MainWindowViewModelTests
             settings,
             themeService,
             startupMetrics,
-            new RenderMarkdownDocumentUseCase(new TestMarkdownRenderer()),
+            new RenderMarkdownDocumentUseCase(markdownRenderer ?? new TestMarkdownRenderer()),
             updateService,
             rendererReadiness: rendererReadiness);
 

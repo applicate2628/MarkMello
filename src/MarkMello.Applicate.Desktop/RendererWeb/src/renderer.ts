@@ -30,7 +30,6 @@ import {
   restoreMinimapSnapshot,
   type CachedMinimapSnapshot
 } from "./minimapCache";
-import { renderSchematicSvg, type DocumentBlock, type DocumentBlockKind } from "./schematicMinimap";
 
 type KatexApi = {
   render: (
@@ -136,6 +135,7 @@ type HostMessage =
   | { type: "scroll-to"; anchor: string }
   | { type: "scroll-to-progress"; progressPercent: number }
   | { type: "load-document"; html: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; skipFrameWait?: boolean; cacheKey?: string | null }
+  | { type: "append-document"; html: string; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; isFinal?: boolean; cacheKey?: string | null }
   | { type: "load-cached-document"; cacheKey: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; skipFrameWait?: boolean }
   | { type: "clear-document" }
   | { type: "scroll-to-heading"; id: string }
@@ -203,6 +203,8 @@ let hasInitialLayoutSettled = false;
 let minimapViewportFrameRequested = false;
 let minimapRefreshTimer: number | undefined;
 let minimapContentRefreshTimer: number | undefined;
+let minimapDeferredContentRefreshHandle: { kind: "idle" | "timeout"; id: number } | null = null;
+let progressiveMinimapRefreshGeneration = 0;
 let cachedGeometryRefreshTimer: number | undefined;
 let mermaidCacheResumeTimer: number | undefined;
 // Resize coalescing (2026-05-20). The window.addEventListener("resize", ...)
@@ -322,9 +324,12 @@ type CachedLayoutState = {
 
 const processedDocumentCache = new Map<string, ProcessedDocumentCacheEntry>();
 let currentDocumentCacheKey: string | null = null;
+let currentDocumentRenderId: number | null = null;
 let restoredCachedLayoutState: CachedLayoutState | null = null;
 let restoredCachedHeadings: HeadingPayload[] | null = null;
 let restoredCachedMinimapSnapshot: CachedMinimapSnapshot | null = null;
+let processedDocumentCacheCloneGeneration = 0;
+let processedDocumentCacheCloneHandle: { kind: "idle" | "timeout"; id: number } | null = null;
 let lastExtractedHeadings: HeadingPayload[] = [];
 let lastKnownLayoutState: CachedLayoutState = {
   scrollTop: 0,
@@ -353,29 +358,45 @@ function getCachedProcessedDocumentFragment(cacheKey: string): DocumentFragment 
   }
 
   processedDocumentCache.delete(cacheKey);
+  processedDocumentCache.set(cacheKey, cached);
   restoredCachedLayoutState = { ...cached.layoutState };
   restoredCachedHeadings = cached.headings.map(heading => ({ ...heading }));
   restoredCachedMinimapSnapshot = cached.minimapSnapshot;
-  return cached.fragment;
+  return cached.fragment.cloneNode(true) as DocumentFragment;
 }
 
 function setCurrentProcessedDocumentCacheKey(cacheKey: string | null): void {
   currentDocumentCacheKey = cacheKey;
 }
 
-function preserveCurrentProcessedDocument(): void {
-  if (!currentDocumentCacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
+function cancelProcessedDocumentCacheClone(): void {
+  if (!processedDocumentCacheCloneHandle) {
     return;
   }
 
+  const handle = processedDocumentCacheCloneHandle;
+  processedDocumentCacheCloneHandle = null;
+  if (handle.kind === "idle") {
+    (window as Window & { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback?.(handle.id);
+  } else {
+    window.clearTimeout(handle.id);
+  }
+}
+
+function captureCurrentProcessedDocumentCacheEntry(mode: "clone" | "move"): ProcessedDocumentCacheEntry | null {
   const main = document.querySelector<HTMLElement>("main.mm-document");
   if (!main || main.childNodes.length === 0) {
-    return;
+    return null;
   }
 
+  const sourceNodes = Array.from(main.childNodes);
   const fragment = document.createDocumentFragment();
-  const nodes = Array.from(main.childNodes);
-  fragment.append(...nodes);
+  if (mode === "clone") {
+    fragment.append(...sourceNodes.map(node => node.cloneNode(true)));
+  } else {
+    fragment.append(...sourceNodes);
+  }
+
   const minimapSnapshot = captureMinimapSnapshot({
     ownerDocument: document,
     minimapContent,
@@ -383,14 +404,19 @@ function preserveCurrentProcessedDocument(): void {
     documentHeight: minimapDocumentHeight,
     lastPostedState: lastPostedMinimapState,
   });
-  processedDocumentCache.delete(currentDocumentCacheKey);
-  processedDocumentCache.set(currentDocumentCacheKey, {
+
+  return {
     fragment,
-    nodeCount: nodes.length,
+    nodeCount: sourceNodes.length,
     layoutState: { ...lastKnownLayoutState },
     headings: lastExtractedHeadings.map(heading => ({ ...heading })),
     minimapSnapshot,
-  });
+  };
+}
+
+function storeProcessedDocumentCacheEntry(cacheKey: string, entry: ProcessedDocumentCacheEntry): void {
+  processedDocumentCache.delete(cacheKey);
+  processedDocumentCache.set(cacheKey, entry);
   while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
     const oldest = processedDocumentCache.keys().next().value;
     if (oldest === undefined) {
@@ -398,10 +424,125 @@ function preserveCurrentProcessedDocument(): void {
     }
     processedDocumentCache.delete(oldest);
   }
+}
+
+function cachedFragmentIsBehindLiveDocument(cached: ProcessedDocumentCacheEntry): boolean {
+  const main = document.querySelector<HTMLElement>("main.mm-document");
+  if (!main) {
+    return false;
+  }
+
+  if (main.childNodes.length > cached.nodeCount) {
+    return true;
+  }
+
+  const liveHeadingCount = main.querySelectorAll("h1,h2,h3,h4,h5,h6").length;
+  if (liveHeadingCount > cached.headings.length) {
+    return true;
+  }
+
+  return cached.minimapSnapshot === null
+    && minimapContent !== null
+    && minimapContent.childNodes.length > 0;
+}
+
+function refreshProcessedDocumentCacheState(cacheKey: string, markName: string): boolean {
+  const cached = processedDocumentCache.get(cacheKey);
+  if (cached === undefined) {
+    return false;
+  }
+  if (cachedFragmentIsBehindLiveDocument(cached)) {
+    return false;
+  }
+
+  const minimapSnapshot = captureMinimapSnapshot({
+    ownerDocument: document,
+    minimapContent,
+    minimapViewport,
+    documentHeight: minimapDocumentHeight,
+    lastPostedState: lastPostedMinimapState,
+  });
+
+  processedDocumentCache.delete(cacheKey);
+  processedDocumentCache.set(cacheKey, {
+    ...cached,
+    layoutState: { ...lastKnownLayoutState },
+    headings: lastExtractedHeadings.map(heading => ({ ...heading })),
+    minimapSnapshot,
+  });
+  postPerfMark(markName, {
+    entries: processedDocumentCache.size,
+    nodeCount: cached.nodeCount,
+  });
+  return true;
+}
+
+function scheduleCurrentProcessedDocumentCacheClone(delayMs = 240): void {
+  const cacheKey = currentDocumentCacheKey;
+  if (!cacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
+    return;
+  }
+
+  const generation = ++processedDocumentCacheCloneGeneration;
+  cancelProcessedDocumentCacheClone();
+
+  const run = () => {
+    if (generation !== processedDocumentCacheCloneGeneration || currentDocumentCacheKey !== cacheKey) {
+      return;
+    }
+
+    processedDocumentCacheCloneHandle = null;
+    const entry = captureCurrentProcessedDocumentCacheEntry("clone");
+    if (!entry) {
+      return;
+    }
+
+    storeProcessedDocumentCacheEntry(cacheKey, entry);
+    postPerfMark("mm-document-cache-prestore", {
+      entries: processedDocumentCache.size,
+      nodeCount: entry.nodeCount,
+    });
+  };
+
+  const requestIdle = (window as Window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+  }).requestIdleCallback;
+
+  if (requestIdle) {
+    processedDocumentCacheCloneHandle = {
+      kind: "idle",
+      id: requestIdle(run, { timeout: Math.max(delayMs, 1200) }),
+    };
+  } else {
+    processedDocumentCacheCloneHandle = {
+      kind: "timeout",
+      id: window.setTimeout(run, delayMs),
+    };
+  }
+}
+
+function preserveCurrentProcessedDocument(): void {
+  if (!currentDocumentCacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
+    return;
+  }
+
+  const cacheKey = currentDocumentCacheKey;
+  cancelProcessedDocumentCacheClone();
+  if (refreshProcessedDocumentCacheState(cacheKey, "mm-document-cache-refresh")) {
+    currentDocumentCacheKey = null;
+    return;
+  }
+
+  const entry = captureCurrentProcessedDocumentCacheEntry("move");
+  if (!entry) {
+    return;
+  }
+
+  storeProcessedDocumentCacheEntry(cacheKey, entry);
   currentDocumentCacheKey = null;
   postPerfMark("mm-document-cache-store", {
     entries: processedDocumentCache.size,
-    nodeCount: nodes.length,
+    nodeCount: entry.nodeCount,
   });
 }
 
@@ -811,6 +952,43 @@ function scheduleCachedMermaidResume(hasMermaid?: boolean): void {
   }, 0);
 }
 
+function scheduleProgressiveDeferredEnhancements(message: Extract<HostMessage, { type: "append-document" }>): void {
+  const renderId = message.renderId;
+  const run = () => {
+    if (
+      renderId !== undefined
+      && currentDocumentRenderId !== null
+      && renderId !== currentDocumentRenderId
+    ) {
+      postPerfMark("mm-progressive-enhancements-stale", {
+        renderId,
+        currentRenderId: currentDocumentRenderId
+      });
+      return;
+    }
+
+    postPerfMark("mm-progressive-enhancements-start", {
+      renderId: renderId ?? null
+    });
+    renderMath();
+    scheduleCachedMermaidResume(message.hasMermaid);
+    scheduleCurrentProcessedDocumentCacheClone(1200);
+    postPerfMark("mm-progressive-enhancements-end", {
+      renderId: renderId ?? null
+    });
+  };
+
+  const requestIdle = (window as Window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+  }).requestIdleCallback;
+  if (requestIdle) {
+    requestIdle(run, { timeout: 4000 });
+    return;
+  }
+
+  window.setTimeout(run, 800);
+}
+
 function getViewportHeightForMermaid(): number {
   const root = document.scrollingElement ?? document.documentElement;
   return root.clientHeight || window.innerHeight || 0;
@@ -875,25 +1053,35 @@ function enqueueLazyMermaidRender(
       await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
       if (generation === mermaidRenderGeneration) {
         postPerfMark("mm-mermaid-lazy-render-end");
+        scheduleCurrentProcessedDocumentCacheClone();
       }
     });
 }
 
-function renderCodeBlocks(): void {
+function renderCodeBlocks(root: ParentNode = document): void {
   const hljs = hostWindow.hljs;
   if (!hljs) return;
 
-  const nodes = Array.from(document.querySelectorAll<HTMLElement>("code[data-mm-code], code[data-mm-mermaid]"));
+  const nodes = Array.from(root.querySelectorAll<HTMLElement>("code[data-mm-code], code[data-mm-mermaid]"));
   for (const node of nodes) {
+    if (node.dataset["mmHighlighted"] === "true") {
+      continue;
+    }
+
     const langClass = Array.from(node.classList).find(c => c.startsWith("language-"));
     const rawLang = langClass?.slice("language-".length);
     const normalized = normalizeHljsLanguage(rawLang);
-    if (!hljs.getLanguage(normalized)) continue;
+    if (!hljs.getLanguage(normalized)) {
+      node.dataset["mmHighlighted"] = "true";
+      continue;
+    }
+
     if (langClass && langClass !== `language-${normalized}`) {
       node.classList.remove(langClass);
       node.classList.add(`language-${normalized}`);
     }
     try { hljs.highlightElement(node); } catch { /* leave plain */ }
+    node.dataset["mmHighlighted"] = "true";
   }
 }
 
@@ -916,6 +1104,7 @@ function postPostReadyEnhancementsComplete(
     message.renderId = renderId;
   }
   postHostMessage(message);
+  scheduleCurrentProcessedDocumentCacheClone();
 }
 
 function hasMermaidNodes(): boolean {
@@ -955,6 +1144,61 @@ function scheduleThemeMermaidRefresh(theme: RendererTheme): void {
       }
     });
   }, THEME_MERMAID_REFRESH_DELAY_MS);
+}
+
+function appendProgressiveDocumentHtml(message: Extract<HostMessage, { type: "append-document" }>): void {
+  if (
+    message.renderId !== undefined
+    && currentDocumentRenderId !== null
+    && message.renderId !== currentDocumentRenderId
+  ) {
+    postPerfMark("mm-progressive-append-stale", {
+      renderId: message.renderId,
+      currentRenderId: currentDocumentRenderId
+    });
+    return;
+  }
+
+  const main = document.querySelector<HTMLElement>("main.mm-document");
+  if (!main || message.html.length === 0) {
+    return;
+  }
+
+  postPerfMark("mm-progressive-append-start", {
+    htmlLength: message.html.length,
+    renderId: message.renderId ?? null,
+    isFinal: message.isFinal !== false
+  });
+  const template = document.createElement("template");
+  template.innerHTML = message.html;
+  if (message.hasHljs !== false) {
+    renderCodeBlocks(template.content);
+  }
+
+  main.append(template.content);
+
+  const isFinal = message.isFinal !== false;
+  if (!isFinal) {
+    postPerfMark("mm-progressive-append-end", {
+      htmlLength: message.html.length,
+      renderId: message.renderId ?? null,
+      isFinal: false
+    });
+    return;
+  }
+
+  if (typeof message.cacheKey === "string" && message.cacheKey.length > 0) {
+    setCurrentProcessedDocumentCacheKey(message.cacheKey);
+  }
+
+  ensureChromeNodes(false, { refreshMinimap: false });
+  postPerfMark("mm-progressive-append-end", {
+    htmlLength: message.html.length,
+    renderId: message.renderId ?? null,
+    isFinal: true
+  });
+  queueProgressiveMinimapAppendRefresh(message);
+  scheduleProgressiveDeferredEnhancements(message);
 }
 
 function postThemeAppliedAfterPaint(theme: RendererTheme, requestId?: number): void {
@@ -1738,6 +1982,18 @@ function isPolicyHeavyMinimapHeight(documentHeight: number): boolean {
   return minimapPolicy !== null && documentHeight > minimapPolicy.maxDetailedDocumentHeight;
 }
 
+function sanitizeMinimapCloneTree(root: ParentNode): void {
+  root.querySelectorAll<Element>("*").forEach((node) => {
+    const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
+    if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
+    const tag = node.tagName;
+    if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+      node.setAttribute("tabindex", "-1");
+      node.removeAttribute("href");
+    }
+  });
+}
+
 function cloneDocumentForMinimap(): HTMLElement | null {
   const source = document.querySelector<HTMLElement>(".mm-document");
   if (!source) {
@@ -1770,19 +2026,12 @@ function cloneDocumentForMinimap(): HTMLElement | null {
   // ids across source/clone are accepted: the clone is inert and
   // aria-hidden, and SVG `url(#...)` lookups in Chromium resolve to the
   // first DOM match deterministically.
-  clone.querySelectorAll<Element>("*").forEach((node) => {
-    const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
-    if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
-    const tag = node.tagName;
-    if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
-      node.setAttribute("tabindex", "-1");
-      node.removeAttribute("href");
-    }
-  });
+  sanitizeMinimapCloneTree(clone);
   return clone;
 }
 
 function refreshMinimapContent(phase: "A" | "B" = "A"): void {
+  cancelDeferredMinimapContentRefresh();
   emitMark("mm-minimap-refresh-start", { phase });
   postPerfMark("mm-minimap-refresh-start", { phase });
   ensureMinimap();
@@ -1825,6 +2074,7 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   updateMinimapViewport({ skipVisibilityUpdate: true });
   emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
   postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
+  scheduleCurrentProcessedDocumentCacheClone();
 }
 
 function ensureDetailedMinimapContentForVisiblePath(phase: "A" | "B" = "A"): void {
@@ -2425,12 +2675,142 @@ function queueMinimapRefreshAfterLayoutSettles(): void {
   }, MINIMAP_REFRESH_DEBOUNCE_MS);
 }
 
+function cancelDeferredMinimapContentRefresh(invalidate = true): void {
+  if (invalidate) {
+    ++progressiveMinimapRefreshGeneration;
+  }
+
+  const handle = minimapDeferredContentRefreshHandle;
+  minimapDeferredContentRefreshHandle = null;
+  if (!handle) {
+    return;
+  }
+
+  if (handle.kind === "idle") {
+    (window as Window & { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback?.(handle.id);
+  } else {
+    window.clearTimeout(handle.id);
+  }
+}
+
 function queueMinimapContentRefreshAfterLayoutSettles(phase: "A" | "B" = "A"): void {
+  cancelDeferredMinimapContentRefresh();
   window.clearTimeout(minimapContentRefreshTimer);
   minimapContentRefreshTimer = window.setTimeout(() => {
     minimapContentRefreshTimer = undefined;
     refreshMinimapContent(phase);
   }, MINIMAP_REFRESH_DEBOUNCE_MS);
+}
+
+function getExistingMinimapDocumentClone(): HTMLElement | null {
+  if (!minimapContent) {
+    return null;
+  }
+
+  for (const child of Array.from(minimapContent.children)) {
+    if (child instanceof HTMLElement && child.classList.contains("mm-document")) {
+      return child;
+    }
+  }
+
+  return null;
+}
+
+function appendHtmlToExistingMinimapClone(html: string, hasHljs?: boolean): boolean {
+  const clone = getExistingMinimapDocumentClone();
+  if (!clone || !minimapContent) {
+    return false;
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  if (hasHljs !== false) {
+    renderCodeBlocks(template.content);
+  }
+  sanitizeMinimapCloneTree(template.content);
+  clone.append(template.content);
+
+  minimapSourceReady = true;
+  const root = document.scrollingElement ?? document.documentElement;
+  minimapDocumentHeight = root.scrollHeight;
+  if (isPolicyHeavyMinimapDocument()) {
+    minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
+  }
+  updateMinimapVisibility(true);
+  updateMinimapViewport({ skipVisibilityUpdate: true });
+  scheduleCurrentProcessedDocumentCacheClone();
+  return true;
+}
+
+function queueProgressiveMinimapAppendRefresh(message: Extract<HostMessage, { type: "append-document" }>): void {
+  if (message.html.length === 0) {
+    return;
+  }
+
+  const generation = ++progressiveMinimapRefreshGeneration;
+  const renderId = message.renderId;
+  cancelDeferredMinimapContentRefresh(false);
+
+  const run = () => {
+    minimapDeferredContentRefreshHandle = null;
+    if (generation !== progressiveMinimapRefreshGeneration) {
+      return;
+    }
+
+    if (
+      renderId !== undefined
+      && currentDocumentRenderId !== null
+      && renderId !== currentDocumentRenderId
+    ) {
+      postPerfMark("mm-minimap-progressive-append-stale", {
+        renderId,
+        currentRenderId: currentDocumentRenderId
+      });
+      return;
+    }
+
+    emitMark("mm-minimap-progressive-append-start", { renderId: renderId ?? null });
+    postPerfMark("mm-minimap-progressive-append-start", { renderId: renderId ?? null });
+    if (!appendHtmlToExistingMinimapClone(message.html, message.hasHljs)) {
+      refreshMinimapContent("A");
+      emitMark("mm-minimap-progressive-append-end", {
+        renderId: renderId ?? null,
+        fallback: "full-refresh",
+        documentHeight: minimapDocumentHeight,
+      });
+      postPerfMark("mm-minimap-progressive-append-end", {
+        renderId: renderId ?? null,
+        fallback: "full-refresh",
+        documentHeight: minimapDocumentHeight,
+      });
+      return;
+    }
+
+    emitMark("mm-minimap-progressive-append-end", {
+      renderId: renderId ?? null,
+      documentHeight: minimapDocumentHeight,
+    });
+    postPerfMark("mm-minimap-progressive-append-end", {
+      renderId: renderId ?? null,
+      documentHeight: minimapDocumentHeight,
+    });
+  };
+
+  const requestIdle = (window as Window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+  }).requestIdleCallback;
+  if (requestIdle) {
+    minimapDeferredContentRefreshHandle = {
+      kind: "idle",
+      id: requestIdle(run, { timeout: 1200 }),
+    };
+    return;
+  }
+
+  minimapDeferredContentRefreshHandle = {
+    kind: "timeout",
+    id: window.setTimeout(run, 160),
+  };
 }
 
 // Coalesces resize-time reactive work to at most one synchronous-layout pass
@@ -2761,6 +3141,7 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "load-document") {
+    currentDocumentRenderId = message.renderId ?? null;
     const loadMessage: import("./loadDocument").LoadDocumentMessage = { html: message.html };
     if (message.documentName !== undefined) {
       loadMessage.documentName = message.documentName;
@@ -2784,7 +3165,10 @@ function handleHostMessage(raw: unknown): void {
     if (message.hasHljs !== undefined) {
       loadMessage.hasHljs = message.hasHljs;
     }
-    if (typeof message.cacheKey === "string" && message.cacheKey.length > 0) {
+    if (message.cacheKey === null) {
+      // Host intentionally disabled renderer-document caching for a partial
+      // progressive first load. The full key arrives with append-document.
+    } else if (typeof message.cacheKey === "string" && message.cacheKey.length > 0) {
       loadMessage.cacheKey = message.cacheKey;
     } else {
       loadMessage.cacheKey = createProcessedDocumentCacheKey(
@@ -2795,7 +3179,13 @@ function handleHostMessage(raw: unknown): void {
     return;
   }
 
+  if (message.type === "append-document") {
+    appendProgressiveDocumentHtml(message);
+    return;
+  }
+
   if (message.type === "load-cached-document") {
+    currentDocumentRenderId = message.renderId ?? null;
     const loadMessage: import("./loadDocument").LoadDocumentMessage = {
       cacheKey: message.cacheKey,
     };
@@ -2822,6 +3212,7 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "clear-document") {
+    currentDocumentRenderId = null;
     clearModeRevealShield();
     clearDocumentState(buildLoadDocumentDeps());
     return;
@@ -3035,13 +3426,14 @@ function applyModeSettleProbePreferences(message: Extract<HostMessage, { type: "
 
 function resetModuleGlobalsForLoadDocument(): void {
   ++initialRenderPipelineGeneration;
+  ++processedDocumentCacheCloneGeneration;
+  ++progressiveMinimapRefreshGeneration;
+  cancelProcessedDocumentCacheClone();
+  cancelDeferredMinimapContentRefresh(false);
   initialRenderPipelineCompleted = false;
   postReadyEnhancementsCompleted = false;
   currentController?.cancel();
   currentController = null;
-  restoredCachedLayoutState = null;
-  restoredCachedHeadings = null;
-  restoredCachedMinimapSnapshot = null;
   ++layoutReadyGeneration;
   if (layoutReadyTimer !== undefined) {
     window.clearTimeout(layoutReadyTimer);
@@ -3103,7 +3495,11 @@ function resetModuleGlobalsForLoadDocument(): void {
   lastPostedPreviewSourceLine = null;
 }
 
-function ensureChromeNodes(useCachedDocumentState = false): void {
+type EnsureChromeNodesOptions = {
+  refreshMinimap?: boolean;
+};
+
+function ensureChromeNodes(useCachedDocumentState = false, options: EnsureChromeNodesOptions = {}): void {
   ensureMinimap();
   ensureWidthHandle();
   ensureDropOverlay();
@@ -3114,7 +3510,10 @@ function ensureChromeNodes(useCachedDocumentState = false): void {
   // pipelines may never reach initialVisibleReady. Cache hits carry the already
   // rendered minimap DOM, so restore it here and defer geometry reconciliation
   // out of the cache-hit layout-ready path.
-  if (!useCachedDocumentState || !restoreCachedMinimapContent()) {
+  if (options.refreshMinimap === false) {
+    updateMinimapVisibility(true);
+    updateMinimapViewport({ skipVisibilityUpdate: true });
+  } else if (!useCachedDocumentState || !restoreCachedMinimapContent()) {
     refreshMinimapContent("A");
   }
   // v0.3.2 — TOC migrated from renderer-side panel (deleted 4aee666) to

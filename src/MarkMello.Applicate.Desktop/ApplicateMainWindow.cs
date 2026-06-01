@@ -62,6 +62,8 @@ public sealed class ApplicateMainWindow : MainWindow
     private const int InactiveEditPrimeVeryHeavyDocumentContentLength = 1024 * 1024;
     private static readonly TimeSpan InactiveEditPrimeHeavyDelay = TimeSpan.FromMilliseconds(300);
     private static readonly TimeSpan InactiveEditPrimeVeryHeavyDelay = TimeSpan.FromMilliseconds(1200);
+    private static readonly TimeSpan SecondaryWebViewPreWarmDelay = TimeSpan.FromMilliseconds(1200);
+    private static readonly TimeSpan SecondaryWebViewPreWarmFallbackDelay = TimeSpan.FromSeconds(4);
 
     private Panel? _tabsContentPanel;
     private ApplicateSiblingMountBridge? _siblingMountBridge;
@@ -108,6 +110,7 @@ public sealed class ApplicateMainWindow : MainWindow
         {
             InstallStartupDocumentRevealGate(viewModel);
         }
+        MarkStartupDocumentPublishReady();
         InstallHostShortcutBridge(viewModel);
         InstallActiveDocumentBridge(viewModel);
         InstallSingleInstanceActivationBridge(viewModel, singleInstance);
@@ -126,10 +129,39 @@ public sealed class ApplicateMainWindow : MainWindow
         ApplicateTrace.DiagMs("startup-applicate-window", "applicate-ctor-end");
     }
 
+    private static void MarkStartupDocumentPublishReady()
+    {
+        App.Services?
+            .GetService<ApplicateRendererReadinessService>()?
+            .MarkStartupDocumentPublishReady();
+        ApplicateTrace.DiagMs("startup-applicate-window", "startup-document-publish-ready");
+    }
+
     private static bool ShouldHoldStartupDocumentReveal()
     {
         var startupPath = App.Services?.GetService<ICommandLineActivation>()?.GetActivationFilePath();
-        return !string.IsNullOrWhiteSpace(startupPath);
+        if (!string.IsNullOrWhiteSpace(startupPath))
+        {
+            return true;
+        }
+
+        var sessionStore = App.Services?.GetService<IApplicateSessionStore>();
+        if (sessionStore is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var session = sessionStore.LoadAsync().AsTask().GetAwaiter().GetResult();
+            var restoredStartupPath = session.GetStartupDocumentPath();
+            return !string.IsNullOrWhiteSpace(restoredStartupPath)
+                   && System.IO.File.Exists(restoredStartupPath);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void InstallStartupDocumentRevealGate(MainWindowViewModel viewModel)
@@ -2296,16 +2328,13 @@ public sealed class ApplicateMainWindow : MainWindow
             // can be added as lightweight stubs. Argv wins over saved
             // active path because the user just explicitly asked for it
             // (mirrors the existing toActivate priority further below).
-            // When no preferred path is set (legacy session without
-            // ActivePath, or saved.ActivePath empty and no argv) we fall
-            // back to FULL open for every path — the legacy behaviour —
-            // because we cannot tell which one will be activated and
-            // unloaded stubs would risk publishing empty content into
-            // the VM if an upstream change order picks one before the
-            // ensure-loaded handler runs.
+            // When no explicit ActivePath exists (legacy session), fall back
+            // to the first non-empty open path as the startup document. That
+            // keeps cold startup visible-first instead of fully opening every
+            // restored tab before the user sees anything.
             var preferredActivePath = !string.IsNullOrWhiteSpace(argvPath)
                 ? argvPath
-                : saved.ActivePath;
+                : saved.GetStartupDocumentPath();
             var canUseStubs = !string.IsNullOrWhiteSpace(preferredActivePath);
 
             // Open saved paths: the preferred-active path goes through
@@ -2313,9 +2342,9 @@ public sealed class ApplicateMainWindow : MainWindow
             // OpenDocument right here. Non-active paths go through
             // OpenStubAsync (no file read) so cold-startup time does
             // not scale with N tabs. The early-document cache filled
-            // by Program.StartSessionTabsPreRead is the rendezvous
-            // for the active-doc fast path; stubs consume the cache
-            // when the user clicks them later (EnsureLoadedAsync).
+            // by Program.StartSessionStartupDocumentPreRead is the
+            // rendezvous for the active-doc fast path; stubs load when the
+            // user clicks them later (EnsureLoadedAsync).
             inVmMirror = true;
             try
             {
@@ -2408,9 +2437,9 @@ public sealed class ApplicateMainWindow : MainWindow
                 // fallback path (preferredActivePath was empty, missing,
                 // or refused to load and we picked OpenDocuments[0]
                 // which is a stub) the cache hit from
-                // Program.StartSessionTabsPreRead pays for the read; on
-                // a true cache miss EnsureLoadedAsync falls through to
-                // disk. The Activate below fires
+                // Program.StartSessionStartupDocumentPreRead pays for the
+                // startup-tab read; on a true cache miss EnsureLoadedAsync
+                // falls through to disk. The Activate below fires
                 // ActiveDocumentChanged with inVmMirror=true so the
                 // bridge handler does not re-EnsureLoadedAsync on top
                 // of this call.
@@ -2476,25 +2505,173 @@ public sealed class ApplicateMainWindow : MainWindow
 
     // PE r2 item A — pre-warm wiring. Runs once at ctor time, right after
     // InstallSharedWebViewWarmupPanel populated _warmupParent and parented the
-    // shared View under it. The actual Navigate is fire-and-forget (the host's
-    // PreWarmShellAsync swallows its own errors and emits diagnostic markers in
-    // the startup-webview group). The lazy QueueRenderShellAsync path retains
-    // ownership of error recovery on the next user render if pre-warm fails.
+    // shared View under it. The visible reader host gets first claim on cold
+    // WebView2 startup; edit-preview prewarm is deferred until the reader has
+    // revealed or the fallback timer fires. That keeps startup scoped to the
+    // visible surface before background work warms the first Ctrl+E path.
     private void InstallSharedWebViewPreWarm()
     {
-        foreach (var sharedHost in EnumerateSharedWebViewHosts())
+        var provider = App.Services?.GetService<IApplicateSharedWebViewHostProvider>();
+        if (provider is not null)
         {
-            // The Avalonia.Controls.WebView controller initialises lazily once the
-            // View is in a realised visual subtree (warmup panel is in BodyPanel by
-            // this point). Navigate() called now queues internally and fires at
-            // environment-ready; the asset-bundle GetAsync await yields the UI
-            // thread immediately so the remaining ctor work (install-tabs, sibling-
-            // views, install-hooks) proceeds without blocking.
+            _ = provider.ViewerHost.PreWarmShellAsync();
+            if (!ReferenceEquals(provider.ViewerHost, provider.EditPreviewHost))
+            {
+                InstallDeferredSecondaryWebViewPreWarm(provider.ViewerHost, provider.EditPreviewHost);
+            }
+
+            return;
+        }
+
+        var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
+        if (sharedHost is not null)
+        {
             _ = sharedHost.PreWarmShellAsync();
         }
     }
 
+    private void InstallDeferredSecondaryWebViewPreWarm(
+        IApplicateSharedWebViewHost visibleHost,
+        IApplicateSharedWebViewHost secondaryHost)
+    {
+        var queued = false;
+        DispatcherTimer? delayTimer = null;
+        var fallbackTimer = new DispatcherTimer { Interval = SecondaryWebViewPreWarmFallbackDelay };
+        EventHandler? onPrimaryDocumentRevealReady = null;
+        EventHandler? onPrimaryProgressiveAppendCompleted = null;
+        EventHandler<ApplicateRendererFailureEvent>? onPrimaryRendererFailed = null;
+        EventHandler? onWindowClosed = null;
+
+        void CleanupTriggers()
+        {
+            if (onPrimaryDocumentRevealReady is not null)
+            {
+                visibleHost.View.DocumentRevealReady -= onPrimaryDocumentRevealReady;
+            }
+
+            if (onPrimaryProgressiveAppendCompleted is not null)
+            {
+                visibleHost.View.ProgressiveAppendCompleted -= onPrimaryProgressiveAppendCompleted;
+            }
+
+            if (onPrimaryRendererFailed is not null)
+            {
+                visibleHost.RendererFailed -= onPrimaryRendererFailed;
+            }
+
+            fallbackTimer.Stop();
+            fallbackTimer.Tick -= OnFallbackTick;
+        }
+
+        void CleanupAll()
+        {
+            CleanupTriggers();
+            if (delayTimer is not null)
+            {
+                delayTimer.Stop();
+                delayTimer.Tick -= OnDelayTick;
+                delayTimer = null;
+            }
+
+            if (onWindowClosed is not null)
+            {
+                Closed -= onWindowClosed;
+            }
+        }
+
+        void QueueSecondaryPreWarm(string reason)
+        {
+            if (!Dispatcher.UIThread.CheckAccess())
+            {
+                Dispatcher.UIThread.Post(
+                    () => QueueSecondaryPreWarm(reason),
+                    DispatcherPriority.Background);
+                return;
+            }
+
+            if (queued)
+            {
+                return;
+            }
+
+            queued = true;
+            CleanupTriggers();
+            ApplicateTrace.DiagMs(
+                "startup-webview",
+                "secondary-shell-prewarm-deferred",
+                $"reason={reason} delayMs={SecondaryWebViewPreWarmDelay.TotalMilliseconds:F0}");
+
+            delayTimer = new DispatcherTimer { Interval = SecondaryWebViewPreWarmDelay };
+            delayTimer.Tick += OnDelayTick;
+            delayTimer.Start();
+        }
+
+        void QueueSecondaryPreWarmWhenVisibleWorkComplete(string reason)
+        {
+            if (visibleHost.View.HasPendingProgressiveAppend)
+            {
+                ApplicateTrace.DiagMs(
+                    "startup-webview",
+                    "secondary-shell-prewarm-wait-progressive");
+                return;
+            }
+
+            QueueSecondaryPreWarm(reason);
+        }
+
+        void OnDelayTick(object? sender, EventArgs e)
+        {
+            if (delayTimer is not null)
+            {
+                delayTimer.Stop();
+                delayTimer.Tick -= OnDelayTick;
+                delayTimer = null;
+            }
+
+            if (onWindowClosed is not null)
+            {
+                Closed -= onWindowClosed;
+                onWindowClosed = null;
+            }
+
+            ApplicateTrace.DiagMs("startup-webview", "secondary-shell-prewarm-start");
+            InstallWarmupPanelForHost(secondaryHost, index: 1);
+            _ = secondaryHost.PreWarmShellAsync();
+        }
+
+        void OnFallbackTick(object? sender, EventArgs e)
+            => QueueSecondaryPreWarmWhenVisibleWorkComplete("fallback");
+
+        onPrimaryDocumentRevealReady = (_, _) => QueueSecondaryPreWarmWhenVisibleWorkComplete("visible-document-reveal-ready");
+        onPrimaryProgressiveAppendCompleted = (_, _) => QueueSecondaryPreWarm("visible-progressive-append-ready");
+        onPrimaryRendererFailed = (_, _) => QueueSecondaryPreWarm("visible-renderer-failed");
+        onWindowClosed = (_, _) => CleanupAll();
+
+        visibleHost.View.DocumentRevealReady += onPrimaryDocumentRevealReady;
+        visibleHost.View.ProgressiveAppendCompleted += onPrimaryProgressiveAppendCompleted;
+        visibleHost.RendererFailed += onPrimaryRendererFailed;
+        Closed += onWindowClosed;
+        fallbackTimer.Tick += OnFallbackTick;
+        fallbackTimer.Start();
+    }
+
     private void InstallSharedWebViewWarmupPanel()
+    {
+        var provider = App.Services?.GetService<IApplicateSharedWebViewHostProvider>();
+        if (provider is not null)
+        {
+            InstallWarmupPanelForHost(provider.ViewerHost, index: 0);
+            return;
+        }
+
+        var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
+        if (sharedHost is not null)
+        {
+            InstallWarmupPanelForHost(sharedHost, index: 0);
+        }
+    }
+
+    private void InstallWarmupPanelForHost(IApplicateSharedWebViewHost sharedHost, int index)
     {
         var bodyPanel = this.FindControl<Panel>("BodyPanel");
         if (bodyPanel is null)
@@ -2502,48 +2679,22 @@ public sealed class ApplicateMainWindow : MainWindow
             return;
         }
 
-        var index = 0;
-        foreach (var sharedHost in EnumerateSharedWebViewHosts())
+        var warmupPanel = new Panel
         {
-            var warmupPanel = new Panel
-            {
-                Width = WarmupPanelWidth,
-                Height = WarmupPanelHeight,
-                HorizontalAlignment = HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Top,
-                Margin = new Thickness(
-                    WarmupPanelMargin.Left - (WarmupPanelWidth + 32) * index,
-                    WarmupPanelMargin.Top,
-                    WarmupPanelMargin.Right,
-                    WarmupPanelMargin.Bottom),
-                IsHitTestVisible = false,
-                UseLayoutRounding = true
-            };
+            Width = WarmupPanelWidth,
+            Height = WarmupPanelHeight,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(
+                WarmupPanelMargin.Left - (WarmupPanelWidth + 32) * index,
+                WarmupPanelMargin.Top,
+                WarmupPanelMargin.Right,
+                WarmupPanelMargin.Bottom),
+            IsHitTestVisible = false,
+            UseLayoutRounding = true
+        };
 
-            bodyPanel.Children.Add(warmupPanel);
-            sharedHost.SetWarmupParent(warmupPanel);
-            index++;
-        }
-    }
-
-    private static IEnumerable<IApplicateSharedWebViewHost> EnumerateSharedWebViewHosts()
-    {
-        var provider = App.Services?.GetService<IApplicateSharedWebViewHostProvider>();
-        if (provider is not null)
-        {
-            yield return provider.ViewerHost;
-            if (!ReferenceEquals(provider.ViewerHost, provider.EditPreviewHost))
-            {
-                yield return provider.EditPreviewHost;
-            }
-
-            yield break;
-        }
-
-        var sharedHost = App.Services?.GetService<IApplicateSharedWebViewHost>();
-        if (sharedHost is not null)
-        {
-            yield return sharedHost;
-        }
+        bodyPanel.Children.Add(warmupPanel);
+        sharedHost.SetWarmupParent(warmupPanel);
     }
 }

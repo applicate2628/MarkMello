@@ -37,6 +37,7 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly IUpdateService _updateService;
     private readonly IImageSourceResolver? _imageSourceResolver;
     private readonly IRendererReadinessService? _rendererReadiness;
+    private MarkdownSource? _pendingDeferredRenderedDocument;
 
     private bool _documentModelReadyMarked;
     private bool _readableDocumentMarked;
@@ -1464,6 +1465,7 @@ public partial class MainWindowViewModel : ObservableObject
 
     private void CreateNewDocumentCore()
     {
+        _pendingDeferredRenderedDocument = null;
         Document = null;
         RenderedDocument = RenderedMarkdownDocument.Empty;
         _currentPath = null;
@@ -1503,6 +1505,7 @@ public partial class MainWindowViewModel : ObservableObject
         CloseOverlayCore();
         IsEditMode = false;
         EditorSession = null;
+        _pendingDeferredRenderedDocument = null;
         Document = null;
         RenderedDocument = RenderedMarkdownDocument.Empty;
         _currentPath = null;
@@ -1574,15 +1577,13 @@ public partial class MainWindowViewModel : ObservableObject
             {
                 StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit", $"path={cached.Path}");
 
-                // Renderer-readiness rendezvous (D-phase race fix). The cache-hit
-                // completes the file-I/O cost in ~0 ms, so without an explicit
-                // rendezvous Document/State get published BEFORE the WebView2
-                // environment finishes initialising and the shell HTML loads. The
-                // renderer pipeline then starts mid-load; a moment later
-                // session-restoration triggers an edit-mode reconcile that
-                // reparents the WebView into the edit slot, interrupting the
-                // in-flight initial-visible-ready pass and stalling
-                // first-paint by 10+ s (smoke d_fix_clean3, .scratch/startup-perf/).
+                // Renderer-readiness rendezvous (D-phase race fix). Cache hits
+                // complete file I/O in ~0 ms, so edit-preserving loads can
+                // publish Document/State before the WebView2 environment and
+                // shell HTML are ready. If an edit-mode reconcile then reparents
+                // the WebView into the edit slot, it can interrupt the in-flight
+                // initial-visible-ready pass and stall first-paint by 10+ s
+                // (smoke d_fix_clean3, .scratch/startup-perf/).
                 //
                 // The previous Dispatcher.UIThread.InvokeAsync(..., Loaded) yield
                 // was a layout-rendezvous that incidentally paid for a slice of
@@ -1591,25 +1592,55 @@ public partial class MainWindowViewModel : ObservableObject
                 // hit fired before EnvironmentRequested. Replacing with the
                 // explicit shell-ready signal owned by the WebView host closes
                 // both the WebView2-environment race and the in-flight-render
-                // reparent race in one rendezvous.
+                // reparent race in one rendezvous for edit-preserving loads.
+                //
+                // Reader startup has no edit reparent to protect after the
+                // Applicate shell has installed its sibling slots and startup
+                // reveal gate. Publish at that structural-ready point and keep
+                // native RenderedDocument construction off the critical path;
+                // the WebView render path still waits on its own _shellReady
+                // gate before posting load-document.
                 //
                 // _rendererReadiness is null in test contexts that construct the
                 // VM directly without the desktop DI graph; in that case fall back
                 // to a single dispatcher yield so behavior matches the previous
                 // path closely enough for VM unit tests.
-                StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-wait-renderer", $"path={cached.Path}");
-                if (_rendererReadiness is not null)
+                var waitForRendererBeforePublish = preserveEditModeAfterLoad || IsEditMode;
+                if (waitForRendererBeforePublish)
                 {
-                    await _rendererReadiness.WaitReadyAsync().ConfigureAwait(true);
+                    StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-wait-renderer", $"path={cached.Path}");
+                    if (_rendererReadiness is not null)
+                    {
+                        await _rendererReadiness.WaitReadyAsync().ConfigureAwait(true);
+                    }
+                    else
+                    {
+                        await Dispatcher.UIThread.InvokeAsync(
+                            () => { },
+                            DispatcherPriority.Background);
+                    }
+                    StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-renderer-ready", $"path={cached.Path}");
                 }
                 else
                 {
-                    await Dispatcher.UIThread.InvokeAsync(
-                        () => { },
-                        DispatcherPriority.Background);
+                    StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-wait-startup-publish-gate", $"path={cached.Path}");
+                    if (_rendererReadiness is not null)
+                    {
+                        await _rendererReadiness.WaitStartupDocumentPublishReadyAsync().ConfigureAwait(true);
+                    }
+                    else
+                    {
+                        await Dispatcher.UIThread.InvokeAsync(
+                            () => { },
+                            DispatcherPriority.Background);
+                    }
+                    StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-startup-publish-ready", $"path={cached.Path}");
                 }
-                StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-renderer-ready", $"path={cached.Path}");
-                ApplyOpenResult(new OpenDocumentResult.Success(cached), preserveEditModeAfterLoad);
+
+                ApplyOpenResult(
+                    new OpenDocumentResult.Success(cached),
+                    preserveEditModeAfterLoad,
+                    deferRenderedDocument: !waitForRendererBeforePublish);
                 return;
             }
 
@@ -1678,12 +1709,15 @@ public partial class MainWindowViewModel : ObservableObject
         }
     }
 
-    private void ApplyOpenResult(OpenDocumentResult result, bool preserveEditModeAfterLoad)
+    private void ApplyOpenResult(
+        OpenDocumentResult result,
+        bool preserveEditModeAfterLoad,
+        bool deferRenderedDocument = false)
     {
         switch (result)
         {
             case OpenDocumentResult.Success success:
-                ApplyLoadedDocument(success.Source, preserveEditModeAfterLoad);
+                ApplyLoadedDocument(success.Source, preserveEditModeAfterLoad, deferRenderedDocument);
                 break;
 
             case OpenDocumentResult.NotFound:
@@ -1712,7 +1746,10 @@ public partial class MainWindowViewModel : ObservableObject
         ApplyLoadedDocument(source, preserveEditModeAfterLoad: IsEditMode);
     }
 
-    private void ApplyLoadedDocument(MarkdownSource source, bool preserveEditModeAfterLoad)
+    private void ApplyLoadedDocument(
+        MarkdownSource source,
+        bool preserveEditModeAfterLoad,
+        bool deferRenderedDocument = false)
     {
         // PE r2 E1: publish State BEFORE Document so the sibling-mount bridge
         // sees a single Reconcile with viewerVis=true on the Document write,
@@ -1735,10 +1772,23 @@ public partial class MainWindowViewModel : ObservableObject
         // rows until UpdateDocumentHeadings replaces them with the new model.
         DocumentTransitionStarting?.Invoke(this, EventArgs.Empty);
         Document = source;
-        RenderedDocument = _renderMarkdown.Execute(
-            source.Content,
-            baseDirectory: TryGetDirectory(source.Path));
         _currentPath = source.Path;
+        if (deferRenderedDocument)
+        {
+            RenderedDocument = RenderedMarkdownDocument.Empty;
+            _pendingDeferredRenderedDocument = source;
+            StartupDiag.DiagMs(
+                "startup-pre-window",
+                "perf-doc native-render-deferred-pending",
+                $"path={source.Path}");
+        }
+        else
+        {
+            _pendingDeferredRenderedDocument = null;
+            RenderedDocument = _renderMarkdown.Execute(
+                source.Content,
+                baseDirectory: TryGetDirectory(source.Path));
+        }
         ReadingProgress = 0;
         ClearLoadError();
 
@@ -1776,6 +1826,66 @@ public partial class MainWindowViewModel : ObservableObject
         UpdateCommandStates();
     }
 
+    private void QueueDeferredRenderedDocument(MarkdownSource source)
+    {
+        var baseDirectory = TryGetDirectory(source.Path);
+        StartupDiag.DiagMs(
+            "startup-pre-window",
+            "perf-doc native-render-deferred-queued",
+            $"path={source.Path}");
+
+        _ = Task.Run(() =>
+            {
+                StartupDiag.DiagMs(
+                    "startup-pre-window",
+                    "perf-doc native-render-deferred-start",
+                    $"path={source.Path}");
+                var rendered = _renderMarkdown.Execute(source.Content, baseDirectory);
+                StartupDiag.DiagMs(
+                    "startup-pre-window",
+                    "perf-doc native-render-deferred-end",
+                    $"path={source.Path} blocks={rendered.Blocks.Count}");
+                return rendered;
+            })
+            .ContinueWith(
+                task =>
+                {
+                    if (!task.IsCompletedSuccessfully)
+                    {
+                        var exceptionName = task.Exception?.GetBaseException().GetType().Name
+                            ?? (task.IsCanceled ? "Canceled" : "Unknown");
+                        StartupDiag.DiagMs(
+                            "startup-pre-window",
+                            $"perf-doc native-render-deferred-failed path={source.Path} ex={exceptionName}");
+                        return;
+                    }
+
+                    Dispatcher.UIThread.Post(
+                        () =>
+                        {
+                            if (!ReferenceEquals(Document, source)
+                                || !string.Equals(_currentPath, source.Path, StringComparison.Ordinal))
+                            {
+                                StartupDiag.DiagMs(
+                                    "startup-pre-window",
+                                    "perf-doc native-render-deferred-stale",
+                                    $"path={source.Path}");
+                                return;
+                            }
+
+                            RenderedDocument = task.Result;
+                            StartupDiag.DiagMs(
+                                "startup-pre-window",
+                                "perf-doc native-render-deferred-applied",
+                                $"path={source.Path} blocks={task.Result.Blocks.Count}");
+                        },
+                        DispatcherPriority.Background);
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+    }
+
     private void MarkSecondaryFeaturesReady()
     {
         if (_secondaryFeaturesMarked)
@@ -1789,7 +1899,9 @@ public partial class MainWindowViewModel : ObservableObject
 
     public void MarkReadableDocumentRendered()
     {
-        if (_readableDocumentMarked || State != ViewState.Viewing || RenderedDocument.Blocks.Count == 0)
+        StartPendingDeferredRenderedDocument();
+
+        if (_readableDocumentMarked || State != ViewState.Viewing || Document is null)
         {
             return;
         }
@@ -1798,8 +1910,23 @@ public partial class MainWindowViewModel : ObservableObject
         _startupMetrics.Mark(StartupStage.ReadableDocument);
     }
 
+    private void StartPendingDeferredRenderedDocument()
+    {
+        var pending = _pendingDeferredRenderedDocument;
+        if (pending is null
+            || !ReferenceEquals(Document, pending)
+            || !string.Equals(_currentPath, pending.Path, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _pendingDeferredRenderedDocument = null;
+        QueueDeferredRenderedDocument(pending);
+    }
+
     private void ApplySavedDocument(MarkdownSource source)
     {
+        _pendingDeferredRenderedDocument = null;
         Document = source;
         RenderedDocument = _renderMarkdown.Execute(
             source.Content,
@@ -1829,6 +1956,7 @@ public partial class MainWindowViewModel : ObservableObject
         CloseOverlayCore();
         IsEditMode = false;
         EditorSession = null;
+        _pendingDeferredRenderedDocument = null;
         SetLoadError(result);
         RefreshWindowTitle();
         UpdateCommandStates();

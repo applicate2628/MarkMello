@@ -104,6 +104,31 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
+    public async Task RenderBodyReportsTopLevelHtmlEndOffsetsForProgressiveLoads()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        var source = new MarkdownSource(
+            "sample.md",
+            "sample.md",
+            "# Intro\n\nParagraph one.\n\n- item one\n- item two\n\n## Details\n\nTail.");
+
+        var body = await renderer.RenderBodyAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        Assert.Equal(5, body.TopLevelBlockEndOffsets.Count);
+        Assert.Equal(body.BodyHtml.Length, body.TopLevelBlockEndOffsets[^1]);
+        Assert.True(body.TopLevelBlockEndOffsets.Zip(body.TopLevelBlockEndOffsets.Skip(1)).All(pair => pair.First < pair.Second));
+
+        var initial = body.BodyHtml[..body.TopLevelBlockEndOffsets[1]];
+        Assert.Contains("<h1", initial, StringComparison.Ordinal);
+        Assert.Contains("Paragraph one.", initial, StringComparison.Ordinal);
+        Assert.DoesNotContain("<ul", initial, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RenderEscapesRawHtmlScript()
     {
         var renderer = new ApplicateHtmlMarkdownRenderer();

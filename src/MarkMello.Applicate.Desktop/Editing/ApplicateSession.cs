@@ -15,4 +15,22 @@ public sealed class ApplicateSession
     public string? ActivePath { get; init; }
 
     public static ApplicateSession Empty { get; } = new();
+
+    public string? GetStartupDocumentPath()
+    {
+        if (!string.IsNullOrWhiteSpace(ActivePath))
+        {
+            return ActivePath;
+        }
+
+        foreach (var path in OpenPaths)
+        {
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                return path;
+            }
+        }
+
+        return null;
+    }
 }

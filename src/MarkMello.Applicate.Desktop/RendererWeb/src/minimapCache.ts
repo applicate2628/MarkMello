@@ -37,7 +37,7 @@ export function captureMinimapSnapshot(input: {
 
   const nodes = Array.from(input.minimapContent.childNodes);
   const content = input.ownerDocument.createDocumentFragment();
-  content.append(...nodes);
+  content.append(...nodes.map(node => node.cloneNode(true)));
 
   return {
     content,
@@ -66,7 +66,7 @@ export function restoreMinimapSnapshot(
   }
 
   const contentNodeCount = snapshot.content.childNodes.length;
-  input.minimapContent.replaceChildren(snapshot.content);
+  input.minimapContent.replaceChildren(snapshot.content.cloneNode(true));
   input.minimapContent.style.width = snapshot.contentStyle.width;
   input.minimapContent.style.transform = snapshot.contentStyle.transform;
 

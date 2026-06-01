@@ -45,10 +45,12 @@ public sealed class ApplicateMainWindowBridgeTests
             StringComparison.Ordinal);
         var fallbackIndex = restore.IndexOf("argvPath = viewModel.Document?.Path;", StringComparison.Ordinal);
         var preferredIndex = restore.IndexOf("var preferredActivePath = !string.IsNullOrWhiteSpace(argvPath)", StringComparison.Ordinal);
+        var startupFallbackIndex = restore.IndexOf("saved.GetStartupDocumentPath()", StringComparison.Ordinal);
 
         Assert.True(activationIndex >= 0, "Startup restore should read the command-line activation path directly.");
         Assert.True(fallbackIndex > activationIndex, "ViewModel.Document should only be a fallback after direct activation lookup.");
         Assert.True(preferredIndex > fallbackIndex, "The preferred active path should be computed after argv fallback is resolved.");
+        Assert.True(startupFallbackIndex > preferredIndex, "Session restore should use the session-owned startup path fallback.");
     }
 
     [Fact]
@@ -81,6 +83,10 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.DoesNotContain("Opacity = 0;", constructor, StringComparison.Ordinal);
         Assert.Contains("InstallStartupDocumentRevealGate(viewModel);", constructor, StringComparison.Ordinal);
         Assert.Contains("GetService<ICommandLineActivation>()?.GetActivationFilePath()", shouldHold, StringComparison.Ordinal);
+        Assert.Contains("GetService<IApplicateSessionStore>()", shouldHold, StringComparison.Ordinal);
+        Assert.Contains("sessionStore.LoadAsync().AsTask().GetAwaiter().GetResult()", shouldHold, StringComparison.Ordinal);
+        Assert.Contains("session.GetStartupDocumentPath()", shouldHold, StringComparison.Ordinal);
+        Assert.Contains("System.IO.File.Exists(restoredStartupPath)", shouldHold, StringComparison.Ordinal);
         Assert.Contains("var startupCover = new ApplicateModeRevealCoverWindow();", gate, StringComparison.Ordinal);
         Assert.Contains("Opened += OnStartupWindowOpened;", gate, StringComparison.Ordinal);
         Assert.Contains("SizeChanged += OnStartupWindowSizeChanged;", gate, StringComparison.Ordinal);
@@ -95,6 +101,37 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("Opacity = 1;", gate, StringComparison.Ordinal);
         Assert.Contains("startupCover.Hide(ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences));", gate, StringComparison.Ordinal);
         Assert.Contains("startup-window-reveal-released", gate, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StartupPrewarmPrioritizesVisibleViewerBeforeEditPreview()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var preWarm = ExtractMethodBody(codeBehind, "private void InstallSharedWebViewPreWarm()");
+        var deferred = ExtractMethodBody(codeBehind, "private void InstallDeferredSecondaryWebViewPreWarm(");
+
+        Assert.Contains("GetService<IApplicateSharedWebViewHostProvider>()", preWarm, StringComparison.Ordinal);
+        Assert.Contains("_ = provider.ViewerHost.PreWarmShellAsync();", preWarm, StringComparison.Ordinal);
+        Assert.Contains("InstallDeferredSecondaryWebViewPreWarm(provider.ViewerHost, provider.EditPreviewHost);", preWarm, StringComparison.Ordinal);
+        Assert.DoesNotContain("foreach (var sharedHost in EnumerateSharedWebViewHosts())", preWarm, StringComparison.Ordinal);
+
+        Assert.Contains("visibleHost.View.DocumentRevealReady += onPrimaryDocumentRevealReady;", deferred, StringComparison.Ordinal);
+        Assert.Contains("visibleHost.View.ProgressiveAppendCompleted += onPrimaryProgressiveAppendCompleted;", deferred, StringComparison.Ordinal);
+        Assert.Contains("visibleHost.View.HasPendingProgressiveAppend", deferred, StringComparison.Ordinal);
+        Assert.Contains("visibleHost.RendererFailed += onPrimaryRendererFailed;", deferred, StringComparison.Ordinal);
+        Assert.Contains("SecondaryWebViewPreWarmFallbackDelay", deferred, StringComparison.Ordinal);
+        Assert.Contains("SecondaryWebViewPreWarmDelay", deferred, StringComparison.Ordinal);
+        Assert.Contains("\"secondary-shell-prewarm-deferred\"", deferred, StringComparison.Ordinal);
+        Assert.Contains("\"secondary-shell-prewarm-wait-progressive\"", deferred, StringComparison.Ordinal);
+        Assert.Contains("\"visible-progressive-append-ready\"", deferred, StringComparison.Ordinal);
+        Assert.Contains("\"secondary-shell-prewarm-start\"", deferred, StringComparison.Ordinal);
+        Assert.Contains("InstallWarmupPanelForHost(secondaryHost, index: 1);", deferred, StringComparison.Ordinal);
+        Assert.Contains("secondaryHost.PreWarmShellAsync()", deferred, StringComparison.Ordinal);
+
+        var warmup = ExtractMethodBody(codeBehind, "private void InstallSharedWebViewWarmupPanel()");
+        Assert.Contains("InstallWarmupPanelForHost(provider.ViewerHost, index: 0);", warmup, StringComparison.Ordinal);
+        Assert.DoesNotContain("provider.EditPreviewHost", warmup, StringComparison.Ordinal);
+        Assert.DoesNotContain("EnumerateSharedWebViewHosts()", warmup, StringComparison.Ordinal);
     }
 
     [Fact]

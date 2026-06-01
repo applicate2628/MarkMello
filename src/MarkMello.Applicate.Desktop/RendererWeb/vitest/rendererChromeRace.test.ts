@@ -207,7 +207,7 @@ describe("renderer chrome race handling", () => {
     expect(document.documentElement.dataset.mmChrome).toBe("off");
   });
 
-  it("keeps minimap visible for heavy scrollable documents when mode is on", async () => {
+  it("keeps detailed minimap content visible for heavy scrollable documents when mode is on", async () => {
     const messages: unknown[] = [];
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
       webview: { postMessage: (message: unknown) => messages.push(message) }
@@ -283,7 +283,7 @@ describe("renderer chrome race handling", () => {
     expect(document.body.classList.contains("mm-has-minimap")).toBe(false);
   });
 
-  it("does not build the detailed minimap clone for auto-hidden heavy documents", async () => {
+  it("keeps auto-hidden heavy minimap empty until explicit on mode requests detail", async () => {
     vi.useFakeTimers();
     const messages: unknown[] = [];
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
@@ -315,8 +315,68 @@ describe("renderer chrome race handling", () => {
     await vi.advanceTimersByTimeAsync(100);
     flushQueuedRafs();
 
+    expect(document.body.classList.contains("mm-has-minimap")).toBe(true);
     expect(document.querySelector(".mm-minimap-content .mm-document")).not.toBeNull();
     expect(document.querySelector(".mm-minimap-content svg")).toBeNull();
+  });
+
+  it("keeps progressive heavy minimap finalization off the full-DOM clone path", async () => {
+    vi.useFakeTimers();
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+    setDocumentMetrics(2400, 600);
+
+    load({ type: "reading-preferences", ...makePreferences(true, "on") });
+    flushQueuedRafs();
+    loadMinimapPolicy(1000);
+    load({
+      type: "load-document",
+      html: "<h1>Intro</h1><p>Visible first chunk</p>",
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 1,
+      cacheKey: null,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    flushQueuedRafs();
+
+    const documentElement = document.querySelector<HTMLElement>("main.mm-document");
+    expect(documentElement).not.toBeNull();
+    const cloneSpy = vi.spyOn(documentElement!, "cloneNode").mockImplementation(() => {
+      throw new Error("progressive final append cloned the full heavy document");
+    });
+    messages.length = 0;
+
+    expect(() => load({
+      type: "append-document",
+      html: "<h2>Later</h2><p>Rest of heavy document</p>",
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 1,
+      isFinal: true,
+      cacheKey: "heavy-full",
+    })).not.toThrow();
+
+    expect(cloneSpy).not.toHaveBeenCalled();
+    expect(document.body.classList.contains("mm-has-minimap")).toBe(true);
+    expect(document.querySelector(".mm-minimap-content .mm-document")).not.toBeNull();
+    expect(document.querySelector(".mm-minimap-content svg")).toBeNull();
+
+    const perfMarks = messages
+      .filter((message): message is { type: "perf-mark"; name: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: unknown }).type === "perf-mark")
+      .map(message => message.name);
+    expect(perfMarks).toContain("mm-progressive-append-end");
+    expect(perfMarks).not.toContain("mm-minimap-refresh-start");
+
+    cloneSpy.mockRestore();
+    await vi.advanceTimersByTimeAsync(160);
+    expect(document.querySelector(".mm-minimap-content .mm-document")?.textContent).toContain("Rest of heavy document");
   });
 
   it("does not remeasure the detailed minimap clone on every width-handle drag frame", async () => {

@@ -40,7 +40,7 @@ export function walkDocumentBlocks(input: SchematicMinimapInput): DocumentBlock[
   for (let i = 0; i < children.length; i++) {
     const child = children[i];
     if (!(child instanceof HTMLElement)) continue;
-    const kind = classify(child);
+    const kind = classifyDocumentBlockElement(child);
     if (!kind) continue;
     const top = child.offsetTop;
     const height = child.offsetHeight;
@@ -54,7 +54,7 @@ export function walkDocumentBlocks(input: SchematicMinimapInput): DocumentBlock[
   return blocks;
 }
 
-function classify(el: HTMLElement): DocumentBlockKind | null {
+export function classifyDocumentBlockElement(el: HTMLElement): DocumentBlockKind | null {
   const tag = el.tagName.toLowerCase();
   if (tag === "h1") return "heading-1";
   if (tag === "h2") return "heading-2";

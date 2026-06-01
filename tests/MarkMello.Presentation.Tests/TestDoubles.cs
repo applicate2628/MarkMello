@@ -74,10 +74,27 @@ internal sealed class StubCommandLineActivation : ICommandLineActivation
 
 internal sealed class ManualRendererReadinessService : IRendererReadinessService
 {
+    private readonly TaskCompletionSource _startupDocumentPublishReady = new();
     private readonly TaskCompletionSource _ready = new();
 
+    public int StartupDocumentPublishWaitCallCount { get; private set; }
+
+    public int WaitCallCount { get; private set; }
+
+    public Task WaitStartupDocumentPublishReadyAsync(CancellationToken cancellationToken = default)
+    {
+        StartupDocumentPublishWaitCallCount++;
+        return _startupDocumentPublishReady.Task.WaitAsync(cancellationToken);
+    }
+
     public Task WaitReadyAsync(CancellationToken cancellationToken = default)
-        => _ready.Task.WaitAsync(cancellationToken);
+    {
+        WaitCallCount++;
+        return _ready.Task.WaitAsync(cancellationToken);
+    }
+
+    public void SetStartupDocumentPublishReady()
+        => _startupDocumentPublishReady.TrySetResult();
 
     public void SetReady()
         => _ready.TrySetResult();
@@ -173,6 +190,40 @@ internal sealed class TestMarkdownRenderer : IMarkdownDocumentRenderer
 
     public RenderedMarkdownDocument Render(string markdown, string? baseDirectory)
     {
+        var document = RenderedMarkdownDocument.PlainText(markdown);
+        return baseDirectory is null ? document : document with { BaseDirectory = baseDirectory };
+    }
+}
+
+internal sealed class BlockingMarkdownRenderer : IMarkdownDocumentRenderer, IDisposable
+{
+    private readonly ManualResetEventSlim _release = new();
+    private readonly TaskCompletionSource _renderStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _renderCallCount;
+
+    public int RenderCallCount => Volatile.Read(ref _renderCallCount);
+
+    public Task RenderStarted => _renderStarted.Task;
+
+    public void Release()
+        => _release.Set();
+
+    public void Dispose()
+        => _release.Dispose();
+
+    public RenderedMarkdownDocument Render(string markdown)
+        => Render(markdown, baseDirectory: null);
+
+    public RenderedMarkdownDocument Render(string markdown, string? baseDirectory)
+    {
+        Interlocked.Increment(ref _renderCallCount);
+        _renderStarted.TrySetResult();
+
+        if (!_release.Wait(TimeSpan.FromSeconds(5)))
+        {
+            throw new TimeoutException("Blocking markdown renderer was not released by the test.");
+        }
+
         var document = RenderedMarkdownDocument.PlainText(markdown);
         return baseDirectory is null ? document : document with { BaseDirectory = baseDirectory };
     }

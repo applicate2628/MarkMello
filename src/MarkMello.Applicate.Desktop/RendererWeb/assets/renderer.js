@@ -511,6 +511,8 @@
 
   // RendererWeb/src/mathRenderInit.ts
   var INITIAL_LOOKAHEAD_PX = 500;
+  var MATH_RENDER_FRAME_FALLBACK_MS = 32;
+  var INITIAL_PAST_VIEWPORT_SCAN_LIMIT = 8;
   function complexityScore(tex) {
     let score = 1;
     score += (tex.match(/\\frac/g)?.length ?? 0) * 2;
@@ -533,7 +535,24 @@
     return node;
   }
   function rafYield() {
-    return new Promise((r) => window.requestAnimationFrame(() => r()));
+    return new Promise((resolve) => {
+      let resolved = false;
+      let timeout;
+      const finish = () => {
+        if (resolved) return;
+        resolved = true;
+        if (timeout !== void 0) {
+          window.clearTimeout(timeout);
+        }
+        resolve();
+      };
+      if (typeof window.requestAnimationFrame === "function") {
+        timeout = window.setTimeout(finish, MATH_RENDER_FRAME_FALLBACK_MS);
+        window.requestAnimationFrame(finish);
+        return;
+      }
+      timeout = window.setTimeout(finish, 0);
+    });
   }
   function renderMath(deps) {
     const mathNodes = Array.from(deps.documentRoot.querySelectorAll("[data-tex]"));
@@ -558,23 +577,50 @@
     });
     const viewportHeight = window.innerHeight;
     const initialVisibleNodes = /* @__PURE__ */ new Set();
+    const rectCache = /* @__PURE__ */ new Map();
+    let stopMeasuringInitialVisibility = false;
+    let consecutivePastViewportElements = 0;
+    let lastMeasuredVisibilityElement = null;
+    const readRect = (element) => {
+      const cached = rectCache.get(element);
+      if (cached) return cached;
+      const rect = element.getBoundingClientRect();
+      rectCache.set(element, rect);
+      return rect;
+    };
     for (const node of mathNodes) {
       if (isTerminalMathState(node.dataset["mmMathRendered"])) {
         continue;
       }
       const visEl = getVisibilityElement(node);
-      const rect = visEl.getBoundingClientRect();
       const tex = node.dataset["tex"] ?? "";
       const task = {
         node,
         tex,
         displayMode: node.classList.contains("math-display")
       };
+      if (stopMeasuringInitialVisibility) {
+        queue.enqueue(task, "low");
+        continue;
+      }
+      const rect = readRect(visEl);
       if (rect.bottom >= -INITIAL_LOOKAHEAD_PX && rect.top <= viewportHeight + INITIAL_LOOKAHEAD_PX) {
         initialVisibleNodes.add(node);
         queue.enqueue(task, "high");
+        consecutivePastViewportElements = 0;
       } else {
         queue.enqueue(task, "low");
+        if (visEl !== lastMeasuredVisibilityElement) {
+          lastMeasuredVisibilityElement = visEl;
+          if (rect.top > viewportHeight + INITIAL_LOOKAHEAD_PX) {
+            consecutivePastViewportElements++;
+            if (consecutivePastViewportElements >= INITIAL_PAST_VIEWPORT_SCAN_LIMIT) {
+              stopMeasuringInitialVisibility = true;
+            }
+          } else {
+            consecutivePastViewportElements = 0;
+          }
+        }
       }
     }
     let initialPending = initialVisibleNodes.size;
@@ -1134,7 +1180,7 @@
     }
     const nodes = Array.from(input.minimapContent.childNodes);
     const content = input.ownerDocument.createDocumentFragment();
-    content.append(...nodes);
+    content.append(...nodes.map((node) => node.cloneNode(true)));
     return {
       content,
       documentHeight: input.documentHeight,
@@ -1154,7 +1200,7 @@
       return null;
     }
     const contentNodeCount = snapshot.content.childNodes.length;
-    input.minimapContent.replaceChildren(snapshot.content);
+    input.minimapContent.replaceChildren(snapshot.content.cloneNode(true));
     input.minimapContent.style.width = snapshot.contentStyle.width;
     input.minimapContent.style.transform = snapshot.contentStyle.transform;
     if (input.minimapViewport) {
@@ -1186,6 +1232,8 @@
   var minimapViewportFrameRequested = false;
   var minimapRefreshTimer;
   var minimapContentRefreshTimer;
+  var minimapDeferredContentRefreshHandle = null;
+  var progressiveMinimapRefreshGeneration = 0;
   var cachedGeometryRefreshTimer;
   var mermaidCacheResumeTimer;
   var resizeReactFrameRequested = false;
@@ -1257,9 +1305,12 @@
   var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
   var processedDocumentCache = /* @__PURE__ */ new Map();
   var currentDocumentCacheKey = null;
+  var currentDocumentRenderId = null;
   var restoredCachedLayoutState = null;
   var restoredCachedHeadings = null;
   var restoredCachedMinimapSnapshot = null;
+  var processedDocumentCacheCloneGeneration = 0;
+  var processedDocumentCacheCloneHandle = null;
   var lastExtractedHeadings = [];
   var lastKnownLayoutState = {
     scrollTop: 0,
@@ -1284,25 +1335,39 @@
       return void 0;
     }
     processedDocumentCache.delete(cacheKey);
+    processedDocumentCache.set(cacheKey, cached);
     restoredCachedLayoutState = { ...cached.layoutState };
     restoredCachedHeadings = cached.headings.map((heading) => ({ ...heading }));
     restoredCachedMinimapSnapshot = cached.minimapSnapshot;
-    return cached.fragment;
+    return cached.fragment.cloneNode(true);
   }
   function setCurrentProcessedDocumentCacheKey(cacheKey) {
     currentDocumentCacheKey = cacheKey;
   }
-  function preserveCurrentProcessedDocument() {
-    if (!currentDocumentCacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
+  function cancelProcessedDocumentCacheClone() {
+    if (!processedDocumentCacheCloneHandle) {
       return;
     }
+    const handle = processedDocumentCacheCloneHandle;
+    processedDocumentCacheCloneHandle = null;
+    if (handle.kind === "idle") {
+      window.cancelIdleCallback?.(handle.id);
+    } else {
+      window.clearTimeout(handle.id);
+    }
+  }
+  function captureCurrentProcessedDocumentCacheEntry(mode) {
     const main = document.querySelector("main.mm-document");
     if (!main || main.childNodes.length === 0) {
-      return;
+      return null;
     }
+    const sourceNodes = Array.from(main.childNodes);
     const fragment = document.createDocumentFragment();
-    const nodes = Array.from(main.childNodes);
-    fragment.append(...nodes);
+    if (mode === "clone") {
+      fragment.append(...sourceNodes.map((node) => node.cloneNode(true)));
+    } else {
+      fragment.append(...sourceNodes);
+    }
     const minimapSnapshot = captureMinimapSnapshot({
       ownerDocument: document,
       minimapContent,
@@ -1310,14 +1375,17 @@
       documentHeight: minimapDocumentHeight,
       lastPostedState: lastPostedMinimapState
     });
-    processedDocumentCache.delete(currentDocumentCacheKey);
-    processedDocumentCache.set(currentDocumentCacheKey, {
+    return {
       fragment,
-      nodeCount: nodes.length,
+      nodeCount: sourceNodes.length,
       layoutState: { ...lastKnownLayoutState },
       headings: lastExtractedHeadings.map((heading) => ({ ...heading })),
       minimapSnapshot
-    });
+    };
+  }
+  function storeProcessedDocumentCacheEntry(cacheKey, entry) {
+    processedDocumentCache.delete(cacheKey);
+    processedDocumentCache.set(cacheKey, entry);
     while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
       const oldest = processedDocumentCache.keys().next().value;
       if (oldest === void 0) {
@@ -1325,10 +1393,103 @@
       }
       processedDocumentCache.delete(oldest);
     }
+  }
+  function cachedFragmentIsBehindLiveDocument(cached) {
+    const main = document.querySelector("main.mm-document");
+    if (!main) {
+      return false;
+    }
+    if (main.childNodes.length > cached.nodeCount) {
+      return true;
+    }
+    const liveHeadingCount = main.querySelectorAll("h1,h2,h3,h4,h5,h6").length;
+    if (liveHeadingCount > cached.headings.length) {
+      return true;
+    }
+    return cached.minimapSnapshot === null && minimapContent !== null && minimapContent.childNodes.length > 0;
+  }
+  function refreshProcessedDocumentCacheState(cacheKey, markName) {
+    const cached = processedDocumentCache.get(cacheKey);
+    if (cached === void 0) {
+      return false;
+    }
+    if (cachedFragmentIsBehindLiveDocument(cached)) {
+      return false;
+    }
+    const minimapSnapshot = captureMinimapSnapshot({
+      ownerDocument: document,
+      minimapContent,
+      minimapViewport,
+      documentHeight: minimapDocumentHeight,
+      lastPostedState: lastPostedMinimapState
+    });
+    processedDocumentCache.delete(cacheKey);
+    processedDocumentCache.set(cacheKey, {
+      ...cached,
+      layoutState: { ...lastKnownLayoutState },
+      headings: lastExtractedHeadings.map((heading) => ({ ...heading })),
+      minimapSnapshot
+    });
+    postPerfMark(markName, {
+      entries: processedDocumentCache.size,
+      nodeCount: cached.nodeCount
+    });
+    return true;
+  }
+  function scheduleCurrentProcessedDocumentCacheClone(delayMs = 240) {
+    const cacheKey = currentDocumentCacheKey;
+    if (!cacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
+      return;
+    }
+    const generation = ++processedDocumentCacheCloneGeneration;
+    cancelProcessedDocumentCacheClone();
+    const run = () => {
+      if (generation !== processedDocumentCacheCloneGeneration || currentDocumentCacheKey !== cacheKey) {
+        return;
+      }
+      processedDocumentCacheCloneHandle = null;
+      const entry = captureCurrentProcessedDocumentCacheEntry("clone");
+      if (!entry) {
+        return;
+      }
+      storeProcessedDocumentCacheEntry(cacheKey, entry);
+      postPerfMark("mm-document-cache-prestore", {
+        entries: processedDocumentCache.size,
+        nodeCount: entry.nodeCount
+      });
+    };
+    const requestIdle = window.requestIdleCallback;
+    if (requestIdle) {
+      processedDocumentCacheCloneHandle = {
+        kind: "idle",
+        id: requestIdle(run, { timeout: Math.max(delayMs, 1200) })
+      };
+    } else {
+      processedDocumentCacheCloneHandle = {
+        kind: "timeout",
+        id: window.setTimeout(run, delayMs)
+      };
+    }
+  }
+  function preserveCurrentProcessedDocument() {
+    if (!currentDocumentCacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
+      return;
+    }
+    const cacheKey = currentDocumentCacheKey;
+    cancelProcessedDocumentCacheClone();
+    if (refreshProcessedDocumentCacheState(cacheKey, "mm-document-cache-refresh")) {
+      currentDocumentCacheKey = null;
+      return;
+    }
+    const entry = captureCurrentProcessedDocumentCacheEntry("move");
+    if (!entry) {
+      return;
+    }
+    storeProcessedDocumentCacheEntry(cacheKey, entry);
     currentDocumentCacheKey = null;
     postPerfMark("mm-document-cache-store", {
       entries: processedDocumentCache.size,
-      nodeCount: nodes.length
+      nodeCount: entry.nodeCount
     });
   }
   function applyViewerChromeState() {
@@ -1656,6 +1817,33 @@
       void renderMermaidNodes(missingNodes, mermaid, "mm-mermaid-cache-resume");
     }, 0);
   }
+  function scheduleProgressiveDeferredEnhancements(message) {
+    const renderId = message.renderId;
+    const run = () => {
+      if (renderId !== void 0 && currentDocumentRenderId !== null && renderId !== currentDocumentRenderId) {
+        postPerfMark("mm-progressive-enhancements-stale", {
+          renderId,
+          currentRenderId: currentDocumentRenderId
+        });
+        return;
+      }
+      postPerfMark("mm-progressive-enhancements-start", {
+        renderId: renderId ?? null
+      });
+      renderMath2();
+      scheduleCachedMermaidResume(message.hasMermaid);
+      scheduleCurrentProcessedDocumentCacheClone(1200);
+      postPerfMark("mm-progressive-enhancements-end", {
+        renderId: renderId ?? null
+      });
+    };
+    const requestIdle = window.requestIdleCallback;
+    if (requestIdle) {
+      requestIdle(run, { timeout: 4e3 });
+      return;
+    }
+    window.setTimeout(run, 800);
+  }
   function getViewportHeightForMermaid() {
     const root = document.scrollingElement ?? document.documentElement;
     return root.clientHeight || window.innerHeight || 0;
@@ -1703,18 +1891,25 @@
       await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
       if (generation === mermaidRenderGeneration) {
         postPerfMark("mm-mermaid-lazy-render-end");
+        scheduleCurrentProcessedDocumentCacheClone();
       }
     });
   }
-  function renderCodeBlocks() {
+  function renderCodeBlocks(root = document) {
     const hljs = hostWindow.hljs;
     if (!hljs) return;
-    const nodes = Array.from(document.querySelectorAll("code[data-mm-code], code[data-mm-mermaid]"));
+    const nodes = Array.from(root.querySelectorAll("code[data-mm-code], code[data-mm-mermaid]"));
     for (const node of nodes) {
+      if (node.dataset["mmHighlighted"] === "true") {
+        continue;
+      }
       const langClass = Array.from(node.classList).find((c) => c.startsWith("language-"));
       const rawLang = langClass?.slice("language-".length);
       const normalized = normalizeHljsLanguage(rawLang);
-      if (!hljs.getLanguage(normalized)) continue;
+      if (!hljs.getLanguage(normalized)) {
+        node.dataset["mmHighlighted"] = "true";
+        continue;
+      }
       if (langClass && langClass !== `language-${normalized}`) {
         node.classList.remove(langClass);
         node.classList.add(`language-${normalized}`);
@@ -1723,6 +1918,7 @@
         hljs.highlightElement(node);
       } catch {
       }
+      node.dataset["mmHighlighted"] = "true";
     }
   }
   function deferPostReadyEnhancements(work) {
@@ -1739,6 +1935,7 @@
       message.renderId = renderId;
     }
     postHostMessage(message);
+    scheduleCurrentProcessedDocumentCacheClone();
   }
   function hasMermaidNodes() {
     return document.querySelector("pre.mm-mermaid") !== null;
@@ -1773,6 +1970,50 @@
         }
       });
     }, THEME_MERMAID_REFRESH_DELAY_MS);
+  }
+  function appendProgressiveDocumentHtml(message) {
+    if (message.renderId !== void 0 && currentDocumentRenderId !== null && message.renderId !== currentDocumentRenderId) {
+      postPerfMark("mm-progressive-append-stale", {
+        renderId: message.renderId,
+        currentRenderId: currentDocumentRenderId
+      });
+      return;
+    }
+    const main = document.querySelector("main.mm-document");
+    if (!main || message.html.length === 0) {
+      return;
+    }
+    postPerfMark("mm-progressive-append-start", {
+      htmlLength: message.html.length,
+      renderId: message.renderId ?? null,
+      isFinal: message.isFinal !== false
+    });
+    const template = document.createElement("template");
+    template.innerHTML = message.html;
+    if (message.hasHljs !== false) {
+      renderCodeBlocks(template.content);
+    }
+    main.append(template.content);
+    const isFinal = message.isFinal !== false;
+    if (!isFinal) {
+      postPerfMark("mm-progressive-append-end", {
+        htmlLength: message.html.length,
+        renderId: message.renderId ?? null,
+        isFinal: false
+      });
+      return;
+    }
+    if (typeof message.cacheKey === "string" && message.cacheKey.length > 0) {
+      setCurrentProcessedDocumentCacheKey(message.cacheKey);
+    }
+    ensureChromeNodes(false, { refreshMinimap: false });
+    postPerfMark("mm-progressive-append-end", {
+      htmlLength: message.html.length,
+      renderId: message.renderId ?? null,
+      isFinal: true
+    });
+    queueProgressiveMinimapAppendRefresh(message);
+    scheduleProgressiveDeferredEnhancements(message);
   }
   function postThemeAppliedAfterPaint(theme, requestId) {
     if (requestId === void 0 || !Number.isFinite(requestId) || requestId <= 0) {
@@ -2395,6 +2636,17 @@
   function isPolicyHeavyMinimapHeight(documentHeight) {
     return minimapPolicy !== null && documentHeight > minimapPolicy.maxDetailedDocumentHeight;
   }
+  function sanitizeMinimapCloneTree(root) {
+    root.querySelectorAll("*").forEach((node) => {
+      const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
+      if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
+      const tag = node.tagName;
+      if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+        node.setAttribute("tabindex", "-1");
+        node.removeAttribute("href");
+      }
+    });
+  }
   function cloneDocumentForMinimap() {
     const source = document.querySelector(".mm-document");
     if (!source) {
@@ -2411,18 +2663,11 @@
     clone.style.paddingRight = "0";
     clone.style.paddingBottom = sourceStyle.paddingBottom;
     clone.style.paddingLeft = "0";
-    clone.querySelectorAll("*").forEach((node) => {
-      const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
-      if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
-      const tag = node.tagName;
-      if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
-        node.setAttribute("tabindex", "-1");
-        node.removeAttribute("href");
-      }
-    });
+    sanitizeMinimapCloneTree(clone);
     return clone;
   }
   function refreshMinimapContent(phase = "A") {
+    cancelDeferredMinimapContentRefresh();
     emitMark("mm-minimap-refresh-start", { phase });
     postPerfMark("mm-minimap-refresh-start", { phase });
     ensureMinimap();
@@ -2465,6 +2710,7 @@
     updateMinimapViewport({ skipVisibilityUpdate: true });
     emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
     postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
+    scheduleCurrentProcessedDocumentCacheClone();
   }
   function ensureDetailedMinimapContentForVisiblePath(phase = "A") {
     if (minimapSourceReady || !shouldBuildDetailedMinimapContent().allowed) {
@@ -2897,12 +3143,119 @@
       queueMinimapViewportUpdate();
     }, MINIMAP_REFRESH_DEBOUNCE_MS);
   }
+  function cancelDeferredMinimapContentRefresh(invalidate = true) {
+    if (invalidate) {
+      ++progressiveMinimapRefreshGeneration;
+    }
+    const handle = minimapDeferredContentRefreshHandle;
+    minimapDeferredContentRefreshHandle = null;
+    if (!handle) {
+      return;
+    }
+    if (handle.kind === "idle") {
+      window.cancelIdleCallback?.(handle.id);
+    } else {
+      window.clearTimeout(handle.id);
+    }
+  }
   function queueMinimapContentRefreshAfterLayoutSettles(phase = "A") {
+    cancelDeferredMinimapContentRefresh();
     window.clearTimeout(minimapContentRefreshTimer);
     minimapContentRefreshTimer = window.setTimeout(() => {
       minimapContentRefreshTimer = void 0;
       refreshMinimapContent(phase);
     }, MINIMAP_REFRESH_DEBOUNCE_MS);
+  }
+  function getExistingMinimapDocumentClone() {
+    if (!minimapContent) {
+      return null;
+    }
+    for (const child of Array.from(minimapContent.children)) {
+      if (child instanceof HTMLElement && child.classList.contains("mm-document")) {
+        return child;
+      }
+    }
+    return null;
+  }
+  function appendHtmlToExistingMinimapClone(html, hasHljs) {
+    const clone = getExistingMinimapDocumentClone();
+    if (!clone || !minimapContent) {
+      return false;
+    }
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    if (hasHljs !== false) {
+      renderCodeBlocks(template.content);
+    }
+    sanitizeMinimapCloneTree(template.content);
+    clone.append(template.content);
+    minimapSourceReady = true;
+    const root = document.scrollingElement ?? document.documentElement;
+    minimapDocumentHeight = root.scrollHeight;
+    if (isPolicyHeavyMinimapDocument()) {
+      minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
+    }
+    updateMinimapVisibility(true);
+    updateMinimapViewport({ skipVisibilityUpdate: true });
+    scheduleCurrentProcessedDocumentCacheClone();
+    return true;
+  }
+  function queueProgressiveMinimapAppendRefresh(message) {
+    if (message.html.length === 0) {
+      return;
+    }
+    const generation = ++progressiveMinimapRefreshGeneration;
+    const renderId = message.renderId;
+    cancelDeferredMinimapContentRefresh(false);
+    const run = () => {
+      minimapDeferredContentRefreshHandle = null;
+      if (generation !== progressiveMinimapRefreshGeneration) {
+        return;
+      }
+      if (renderId !== void 0 && currentDocumentRenderId !== null && renderId !== currentDocumentRenderId) {
+        postPerfMark("mm-minimap-progressive-append-stale", {
+          renderId,
+          currentRenderId: currentDocumentRenderId
+        });
+        return;
+      }
+      emitMark("mm-minimap-progressive-append-start", { renderId: renderId ?? null });
+      postPerfMark("mm-minimap-progressive-append-start", { renderId: renderId ?? null });
+      if (!appendHtmlToExistingMinimapClone(message.html, message.hasHljs)) {
+        refreshMinimapContent("A");
+        emitMark("mm-minimap-progressive-append-end", {
+          renderId: renderId ?? null,
+          fallback: "full-refresh",
+          documentHeight: minimapDocumentHeight
+        });
+        postPerfMark("mm-minimap-progressive-append-end", {
+          renderId: renderId ?? null,
+          fallback: "full-refresh",
+          documentHeight: minimapDocumentHeight
+        });
+        return;
+      }
+      emitMark("mm-minimap-progressive-append-end", {
+        renderId: renderId ?? null,
+        documentHeight: minimapDocumentHeight
+      });
+      postPerfMark("mm-minimap-progressive-append-end", {
+        renderId: renderId ?? null,
+        documentHeight: minimapDocumentHeight
+      });
+    };
+    const requestIdle = window.requestIdleCallback;
+    if (requestIdle) {
+      minimapDeferredContentRefreshHandle = {
+        kind: "idle",
+        id: requestIdle(run, { timeout: 1200 })
+      };
+      return;
+    }
+    minimapDeferredContentRefreshHandle = {
+      kind: "timeout",
+      id: window.setTimeout(run, 160)
+    };
   }
   function scheduleResizeReactions() {
     if (resizeReactFrameRequested) {
@@ -3118,6 +3471,7 @@
       return;
     }
     if (message.type === "load-document") {
+      currentDocumentRenderId = message.renderId ?? null;
       const loadMessage = { html: message.html };
       if (message.documentName !== void 0) {
         loadMessage.documentName = message.documentName;
@@ -3137,7 +3491,8 @@
       if (message.hasHljs !== void 0) {
         loadMessage.hasHljs = message.hasHljs;
       }
-      if (typeof message.cacheKey === "string" && message.cacheKey.length > 0) {
+      if (message.cacheKey === null) {
+      } else if (typeof message.cacheKey === "string" && message.cacheKey.length > 0) {
         loadMessage.cacheKey = message.cacheKey;
       } else {
         loadMessage.cacheKey = createProcessedDocumentCacheKey(
@@ -3148,7 +3503,12 @@
       applyLoadDocument(loadMessage, buildLoadDocumentDeps());
       return;
     }
+    if (message.type === "append-document") {
+      appendProgressiveDocumentHtml(message);
+      return;
+    }
     if (message.type === "load-cached-document") {
+      currentDocumentRenderId = message.renderId ?? null;
       const loadMessage = {
         cacheKey: message.cacheKey
       };
@@ -3174,6 +3534,7 @@
       return;
     }
     if (message.type === "clear-document") {
+      currentDocumentRenderId = null;
       clearModeRevealShield();
       clearDocumentState(buildLoadDocumentDeps());
       return;
@@ -3341,13 +3702,14 @@
   }
   function resetModuleGlobalsForLoadDocument() {
     ++initialRenderPipelineGeneration;
+    ++processedDocumentCacheCloneGeneration;
+    ++progressiveMinimapRefreshGeneration;
+    cancelProcessedDocumentCacheClone();
+    cancelDeferredMinimapContentRefresh(false);
     initialRenderPipelineCompleted = false;
     postReadyEnhancementsCompleted = false;
     currentController?.cancel();
     currentController = null;
-    restoredCachedLayoutState = null;
-    restoredCachedHeadings = null;
-    restoredCachedMinimapSnapshot = null;
     ++layoutReadyGeneration;
     if (layoutReadyTimer !== void 0) {
       window.clearTimeout(layoutReadyTimer);
@@ -3389,12 +3751,15 @@
     suppressPreviewSourceLineEmit = false;
     lastPostedPreviewSourceLine = null;
   }
-  function ensureChromeNodes(useCachedDocumentState = false) {
+  function ensureChromeNodes(useCachedDocumentState = false, options = {}) {
     ensureMinimap();
     ensureWidthHandle();
     ensureDropOverlay();
     updateWidthHandlePositionForCurrentLayout();
-    if (!useCachedDocumentState || !restoreCachedMinimapContent()) {
+    if (options.refreshMinimap === false) {
+      updateMinimapVisibility(true);
+      updateMinimapViewport({ skipVisibilityUpdate: true });
+    } else if (!useCachedDocumentState || !restoreCachedMinimapContent()) {
       refreshMinimapContent("A");
     }
     if (useCachedDocumentState) {

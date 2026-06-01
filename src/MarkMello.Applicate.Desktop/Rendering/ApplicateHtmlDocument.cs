@@ -22,6 +22,7 @@ public sealed record ApplicateRenderedBody(
     string PlainText,
     IReadOnlyList<ApplicateHtmlHeading> Headings,
     IReadOnlyList<ApplicateHtmlBlockMarker> Blocks,
+    IReadOnlyList<int> TopLevelBlockEndOffsets,
     bool HasMermaidBlock,
     bool HasCodeBlockWithSyntax,
     string? RendererCacheKeySuffix = null);

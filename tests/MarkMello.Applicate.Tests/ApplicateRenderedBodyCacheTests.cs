@@ -278,6 +278,7 @@ public sealed class ApplicateRenderedBodyCacheTests
             PlainText: string.Empty,
             Array.Empty<ApplicateHtmlHeading>(),
             Array.Empty<ApplicateHtmlBlockMarker>(),
+            new[] { html.Length },
             HasMermaidBlock: false,
             HasCodeBlockWithSyntax: false);
 
