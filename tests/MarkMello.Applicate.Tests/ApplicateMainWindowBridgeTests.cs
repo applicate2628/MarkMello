@@ -97,16 +97,27 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("startupCover.ShowStartupSplash(this, viewModel.Document?.FileName)", gate, StringComparison.Ordinal);
         Assert.Contains("startupViewerHost.View.DocumentRevealReady += OnDocumentRevealReady;", gate, StringComparison.Ordinal);
         Assert.Contains("startupViewerHost.View.HeadingsChanged += OnHeadingsChanged;", gate, StringComparison.Ordinal);
+        Assert.Contains("startupViewerHost.View.ModeToggleSettled += OnRendererSettled;", gate, StringComparison.Ordinal);
+        Assert.Contains("startupViewerHost.View.RequestModeToggleSettleProbe();", gate, StringComparison.Ordinal);
         Assert.Contains("startupViewerHost.RendererFailed += OnRendererFailed;", gate, StringComparison.Ordinal);
         Assert.Contains("viewModel.PropertyChanged += OnViewModelPropertyChanged;", gate, StringComparison.Ordinal);
+        Assert.Contains("ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait(", gate, StringComparison.Ordinal);
+        Assert.Contains("ApplicateSharedWebViewHost.RendererSettleFallbackTimeout", gate, StringComparison.Ordinal);
         Assert.Contains("headingsReady = !waitForHeadings || headings.Count > 0;", gate, StringComparison.Ordinal);
         Assert.Contains("TryRelease(\"headings-reported\");", gate, StringComparison.Ordinal);
+        Assert.Contains("ArmRendererSettle(reason);", gate, StringComparison.Ordinal);
+        Assert.Contains("\"startup-window-renderer-settle-armed\"", gate, StringComparison.Ordinal);
+        Assert.Contains("\"startup-window-renderer-settle-complete\"", gate, StringComparison.Ordinal);
+        Assert.Contains("ReleaseRendererSettleWait();", gate, StringComparison.Ordinal);
         Assert.Contains("ReleaseAfterPaint(reason);", gate, StringComparison.Ordinal);
         Assert.Contains("topLevel.RequestAnimationFrame", gate, StringComparison.Ordinal);
         Assert.Contains("new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) }", gate, StringComparison.Ordinal);
         Assert.Contains("new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) }", gate, StringComparison.Ordinal);
         Assert.Contains("Opacity = 1;", gate, StringComparison.Ordinal);
-        Assert.Contains("startupCover.Hide(ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences));", gate, StringComparison.Ordinal);
+        Assert.Contains("? TimeSpan.Zero", gate, StringComparison.Ordinal);
+        Assert.Contains(": ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences);", gate, StringComparison.Ordinal);
+        Assert.Contains("startupCover.Hide(duration);", gate, StringComparison.Ordinal);
+        Assert.Contains("durationMs={duration.TotalMilliseconds:F0}", gate, StringComparison.Ordinal);
         Assert.Contains("startup-window-reveal-released", gate, StringComparison.Ordinal);
     }
 

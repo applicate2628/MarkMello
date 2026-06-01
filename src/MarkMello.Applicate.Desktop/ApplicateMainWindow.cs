@@ -188,10 +188,18 @@ public sealed class ApplicateMainWindow : MainWindow
         var waitForHeadings = viewModel.IsTocPreferredVisible;
         var headingsReady = !waitForHeadings || viewModel.HasDocumentHeadings;
         var fallbackTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+        var rendererSettleFallbackTimer = new DispatcherTimer
+        {
+            Interval = ApplicateSharedWebViewHost.RendererSettleFallbackTimeout
+        };
+        var rendererSettleArmed = false;
+        var rendererSettleReady = false;
+        var rendererSettleReleaseReason = string.Empty;
         Opened += OnStartupWindowOpened;
         SizeChanged += OnStartupWindowSizeChanged;
         startupViewerHost.View.DocumentRevealReady += OnDocumentRevealReady;
         startupViewerHost.View.HeadingsChanged += OnHeadingsChanged;
+        rendererSettleFallbackTimer.Tick += OnRendererSettleFallbackTick;
         startupViewerHost.RendererFailed += OnRendererFailed;
         viewModel.PropertyChanged += OnViewModelPropertyChanged;
         Closed += OnClosed;
@@ -289,7 +297,75 @@ public sealed class ApplicateMainWindow : MainWindow
                 return;
             }
 
+            if (ShouldWaitForRendererSettle())
+            {
+                ArmRendererSettle(reason);
+                return;
+            }
+
             ReleaseAfterPaint(reason);
+        }
+
+        bool ShouldWaitForRendererSettle()
+            => !rendererSettleReady
+               && ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait(
+                   viewModel.Document,
+                   transactionGeneration: 0);
+
+        void ArmRendererSettle(string reason)
+        {
+            if (rendererSettleArmed)
+            {
+                return;
+            }
+
+            rendererSettleArmed = true;
+            rendererSettleReleaseReason = reason;
+            startupViewerHost.View.ModeToggleSettled += OnRendererSettled;
+            rendererSettleFallbackTimer.Start();
+            ApplicateTrace.DiagMs(
+                "startup-applicate-window",
+                "startup-window-renderer-settle-armed",
+                $"reason={reason}");
+            startupViewerHost.View.RequestModeToggleSettleProbe();
+        }
+
+        void OnRendererSettled(object? sender, EventArgs e)
+            => Dispatcher.UIThread.Post(
+                () => CompleteRendererSettle("ipc-ack"),
+                DispatcherPriority.Render);
+
+        void OnRendererSettleFallbackTick(object? sender, EventArgs e)
+            => CompleteRendererSettle("fallback-timer");
+
+        void CompleteRendererSettle(string path)
+        {
+            if (released || !rendererSettleArmed)
+            {
+                return;
+            }
+
+            rendererSettleReady = true;
+            ReleaseRendererSettleWait();
+            ApplicateTrace.DiagMs(
+                "startup-applicate-window",
+                "startup-window-renderer-settle-complete",
+                $"path={path}");
+            var reason = string.IsNullOrWhiteSpace(rendererSettleReleaseReason)
+                ? path
+                : rendererSettleReleaseReason + "-" + path;
+            ReleaseAfterPaint(reason);
+        }
+
+        void ReleaseRendererSettleWait()
+        {
+            if (rendererSettleArmed)
+            {
+                startupViewerHost.View.ModeToggleSettled -= OnRendererSettled;
+            }
+
+            rendererSettleArmed = false;
+            rendererSettleFallbackTimer.Stop();
         }
 
         void Release(string reason)
@@ -365,14 +441,24 @@ public sealed class ApplicateMainWindow : MainWindow
 
         void HideStartupCover(string reason)
         {
-            startupCover.Hide(ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences));
-            ApplicateTrace.DiagMs("startup-applicate-window", "startup-window-reveal-released", $"reason={reason}");
+            var duration = ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait(
+                viewModel.Document,
+                transactionGeneration: 0)
+                ? TimeSpan.Zero
+                : ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences);
+            startupCover.Hide(duration);
+            ApplicateTrace.DiagMs(
+                "startup-applicate-window",
+                "startup-window-reveal-released",
+                $"reason={reason} durationMs={duration.TotalMilliseconds:F0}");
         }
 
         void Cleanup()
         {
             fallbackTimer.Stop();
             fallbackTimer.Tick -= OnFallbackTick;
+            ReleaseRendererSettleWait();
+            rendererSettleFallbackTimer.Tick -= OnRendererSettleFallbackTick;
             Opened -= OnStartupWindowOpened;
             SizeChanged -= OnStartupWindowSizeChanged;
             startupViewerHost.View.DocumentRevealReady -= OnDocumentRevealReady;

@@ -77,7 +77,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
     // 8 ms before that ack on a large document, revealing the renderer at the
     // pre-minimap width. Keep the fallback comfortably behind the normal ack
     // path so it only covers a dropped/stalled renderer response.
-    private static readonly TimeSpan SettleFallbackTimeout = TimeSpan.FromMilliseconds(500);
+    internal static readonly TimeSpan RendererSettleFallbackTimeout = TimeSpan.FromMilliseconds(500);
 
     public ApplicateSharedWebViewHost(
         IApplicateHtmlMarkdownRenderer renderer,
@@ -816,7 +816,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
 
         _settleFallbackTimer = new DispatcherTimer
         {
-            Interval = SettleFallbackTimeout
+            Interval = RendererSettleFallbackTimeout
         };
         _settleFallbackTimer.Tick += OnSettleFallbackTick;
         _settleFallbackTimer.Start();
