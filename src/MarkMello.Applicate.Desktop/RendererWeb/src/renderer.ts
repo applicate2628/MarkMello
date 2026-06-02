@@ -584,7 +584,13 @@ function getModeRevealShieldBackground(): string {
 }
 
 function getThemeRevealShieldBackground(theme: RendererTheme): string {
-  return theme === "dark" ? "#11100d" : "#ffffff";
+  if (theme === "dark") {
+    return "#11100d";
+  }
+  if (theme === "classic-white") {
+    return "#ffffff";
+  }
+  return "#fcfaf6";
 }
 
 function ensureModeRevealShield(): HTMLElement {
