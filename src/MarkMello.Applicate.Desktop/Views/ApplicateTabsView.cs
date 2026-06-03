@@ -54,6 +54,18 @@ internal sealed class ApplicateTabsView : UserControl
 
     private readonly IOpenDocumentsService _openDocsService;
     private readonly StackPanel _tabsPanel;
+    private readonly ScrollViewer _tabsScroll;
+    // Overflow nav: paired edge scroll arrows + a tab-list (⌄) dropdown. All
+    // shown only when the tab strip overflows. Visually distinct from the
+    // single ‹/› TOC toggle chevron that also lives in this row.
+    private readonly Button _scrollLeftButton;
+    private readonly Button _scrollRightButton;
+    private readonly Avalonia.Controls.Shapes.Path _scrollLeftIcon;
+    private readonly Avalonia.Controls.Shapes.Path _scrollRightIcon;
+    private readonly Button _tabListButton;
+    private readonly Avalonia.Controls.Shapes.Path _tabListIcon;
+    private readonly Avalonia.Controls.Primitives.Popup _tabListPopup;
+    private readonly StackPanel _tabListItems;
     private readonly Button _addButton;
     private readonly Avalonia.Controls.Shapes.Path _addButtonIcon;
     // v0.3.2 — magnifier toolbar button beside the "+" open-file button.
@@ -80,13 +92,12 @@ internal sealed class ApplicateTabsView : UserControl
             Margin = new Thickness(6, 4, 6, 0)
         };
 
-        var scroll = new ScrollViewer
+        _tabsScroll = new ScrollViewer
         {
-            // Hidden, not Auto: the tab strip scrolls via wheel/keyboard
-            // when tabs overflow, but a visible horizontal scrollbar would
-            // sit under the strip in the same row as the tabs and overlap
-            // them visually. Tab overflow is rare and the wheel-scroll
-            // affordance is enough.
+            // Hidden, not Auto: a visible horizontal scrollbar would sit under
+            // the strip in the same row as the tabs and overlap them. The
+            // strip scrolls via shift+wheel; the edge arrows + tab-list
+            // dropdown below give a discoverable affordance for that scroll.
             HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
             VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
             Content = _tabsPanel
@@ -109,22 +120,80 @@ internal sealed class ApplicateTabsView : UserControl
         ToolTip.SetTip(_findButton, "Find in document (Ctrl+F)");
         _findButton.Click += OnFindButtonClick;
 
+        // Edge scroll arrows (← / →) — distinct from the TOC ‹/› toggle by
+        // glyph (arrows with a shaft), pairing, and edge position. Hidden
+        // until the strip overflows; click pages the scroll.
+        _scrollLeftIcon = BuildScrollArrowIcon(left: true, ResolveBrush("MmTextSoftBrush"));
+        _scrollLeftButton = BuildToolbarButton(_scrollLeftIcon);
+        _scrollLeftButton.Width = 16;
+        _scrollLeftButton.IsVisible = false;
+        ToolTip.SetTip(_scrollLeftButton, "Scroll tabs left");
+        _scrollLeftButton.Click += (_, _) => ScrollTabs(-1);
+
+        _scrollRightIcon = BuildScrollArrowIcon(left: false, ResolveBrush("MmTextSoftBrush"));
+        _scrollRightButton = BuildToolbarButton(_scrollRightIcon);
+        _scrollRightButton.Width = 16;
+        _scrollRightButton.IsVisible = false;
+        ToolTip.SetTip(_scrollRightButton, "Scroll tabs right");
+        _scrollRightButton.Click += (_, _) => ScrollTabs(1);
+
+        // Tab-list dropdown (⌄) — opens a menu of all open tabs to jump to
+        // any one directly. Down-glyph + right placement keep it clear of the
+        // TOC chevron. Also overflow-only.
+        _tabListIcon = BuildTabListIcon(ResolveBrush("MmTextSoftBrush"));
+        _tabListButton = BuildToolbarButton(_tabListIcon);
+        _tabListButton.IsVisible = false;
+        ToolTip.SetTip(_tabListButton, "All open tabs");
+        // A plain MenuFlyout renders in the in-window overlay layer, which the
+        // WebView2 NativeControlHost HWND occludes (the dropdown was invisible
+        // over the document). Use a WINDOWED Popup (ShouldUseOverlayLayer=False)
+        // exactly like the app's menu/settings popovers so it floats above the
+        // WebView2 HWND as a separate top-level OS window.
+        _tabListItems = new StackPanel { Spacing = 1 };
+        _tabListPopup = new Avalonia.Controls.Primitives.Popup
+        {
+            PlacementTarget = _tabListButton,
+            Placement = PlacementMode.BottomEdgeAlignedRight,
+            IsLightDismissEnabled = true,
+            OverlayDismissEventPassThrough = true,
+            ShouldUseOverlayLayer = false,
+            Child = new Border
+            {
+                Background = ResolveBrush("MmElevatedBackgroundBrush"),
+                BorderBrush = ResolveBrush("MmBorderSoftBrush"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(4),
+                MinWidth = 168,
+                Child = _tabListItems
+            }
+        };
+        _tabListButton.Click += (_, _) => OpenTabList();
+
         var rightCluster = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             Spacing = 2,
             VerticalAlignment = VerticalAlignment.Center,
         };
+        rightCluster.Children.Add(_tabListButton);
         rightCluster.Children.Add(_findButton);
         rightCluster.Children.Add(_addButton);
+        rightCluster.Children.Add(_tabListPopup);
+
+        _tabsScroll.ScrollChanged += (_, _) => UpdateTabOverflowChrome();
 
         var root = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto")
+            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto")
         };
-        Grid.SetColumn(scroll, 0);
-        Grid.SetColumn(rightCluster, 1);
-        root.Children.Add(scroll);
+        Grid.SetColumn(_scrollLeftButton, 0);
+        Grid.SetColumn(_tabsScroll, 1);
+        Grid.SetColumn(_scrollRightButton, 2);
+        Grid.SetColumn(rightCluster, 3);
+        root.Children.Add(_scrollLeftButton);
+        root.Children.Add(_tabsScroll);
+        root.Children.Add(_scrollRightButton);
         root.Children.Add(rightCluster);
 
         // Bottom border separates the tabs strip from the document body
@@ -266,6 +335,169 @@ internal sealed class ApplicateTabsView : UserControl
         CancelDrag();
     }
 
+    private static Avalonia.Controls.Shapes.Path BuildScrollArrowIcon(bool left, IBrush stroke)
+    {
+        // Arrow WITH a shaft (← / →) so it does not read as the TOC ‹/› toggle.
+        var data = left
+            ? "M 7,3 L 2.5,7.5 L 7,12 M 2.5,7.5 L 12,7.5"
+            : "M 6,3 L 10.5,7.5 L 6,12 M 1,7.5 L 10.5,7.5";
+        return new Avalonia.Controls.Shapes.Path
+        {
+            Data = Avalonia.Media.Geometry.Parse(data),
+            Stroke = stroke,
+            StrokeThickness = 1.5,
+            StrokeLineCap = Avalonia.Media.PenLineCap.Round,
+            StrokeJoin = Avalonia.Media.PenLineJoin.Round,
+            Width = 13,
+            Height = 15,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+    }
+
+    private static Avalonia.Controls.Shapes.Path BuildTabListIcon(IBrush stroke)
+    {
+        // Down chevron (⌄) — reads as "open a dropdown", distinct from the
+        // left/right TOC toggle chevron.
+        return new Avalonia.Controls.Shapes.Path
+        {
+            Data = Avalonia.Media.Geometry.Parse("M 2,5 L 7,10 L 12,5"),
+            Stroke = stroke,
+            StrokeThickness = 1.5,
+            StrokeLineCap = Avalonia.Media.PenLineCap.Round,
+            StrokeJoin = Avalonia.Media.PenLineJoin.Round,
+            Width = 14,
+            Height = 15,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+    }
+
+    private void ScrollTabs(int direction)
+    {
+        if (_tabsScroll.Viewport.Width <= 0)
+        {
+            return;
+        }
+
+        var maxX = System.Math.Max(0, _tabsScroll.Extent.Width - _tabsScroll.Viewport.Width);
+        var step = _tabsScroll.Viewport.Width * 0.6;
+        var newX = System.Math.Clamp(_tabsScroll.Offset.X + direction * step, 0, maxX);
+        _tabsScroll.Offset = new Avalonia.Vector(newX, _tabsScroll.Offset.Y);
+    }
+
+    private void UpdateTabOverflowChrome()
+    {
+        var overflow = _tabsScroll.Extent.Width > _tabsScroll.Viewport.Width + 1;
+        _scrollLeftButton.IsVisible = overflow;
+        _scrollRightButton.IsVisible = overflow;
+        _tabListButton.IsVisible = overflow;
+        if (!overflow)
+        {
+            return;
+        }
+
+        var maxX = _tabsScroll.Extent.Width - _tabsScroll.Viewport.Width;
+        SetScrollArrowState(_scrollLeftButton, _tabsScroll.Offset.X > 1);
+        SetScrollArrowState(_scrollRightButton, _tabsScroll.Offset.X < maxX - 1);
+    }
+
+    private static void SetScrollArrowState(Button arrow, bool enabled)
+    {
+        // At a scroll extreme the arrow goes fully inert: not clickable, not
+        // hit-testable (so it can't show a hover highlight), and dimmed — so it
+        // reads as "nothing more this way" instead of an active-looking button.
+        arrow.IsEnabled = enabled;
+        arrow.IsHitTestVisible = enabled;
+        arrow.Opacity = enabled ? 1.0 : 0.3;
+    }
+
+    private void EnsureActiveTabVisible()
+    {
+        _tabsScroll.UpdateLayout();
+        if (_tabsScroll.Viewport.Width <= 0)
+        {
+            return;
+        }
+
+        Border? activeTab = null;
+        foreach (var tab in _tabsPanel.Children.OfType<Border>())
+        {
+            if (_tabToDocument.TryGetValue(tab, out var doc)
+                && ReferenceEquals(doc, _openDocsService.ActiveDocument))
+            {
+                activeTab = tab;
+                break;
+            }
+        }
+
+        if (activeTab is null || activeTab.Bounds.Width <= 0)
+        {
+            return;
+        }
+
+        var tabLeft = activeTab.Bounds.X;
+        var tabRight = tabLeft + activeTab.Bounds.Width;
+        var viewLeft = _tabsScroll.Offset.X;
+        var viewRight = viewLeft + _tabsScroll.Viewport.Width;
+
+        double newX;
+        if (tabLeft < viewLeft)
+        {
+            newX = tabLeft;
+        }
+        else if (tabRight > viewRight)
+        {
+            newX = tabRight - _tabsScroll.Viewport.Width;
+        }
+        else
+        {
+            return;
+        }
+
+        var maxX = System.Math.Max(0, _tabsScroll.Extent.Width - _tabsScroll.Viewport.Width);
+        _tabsScroll.Offset = new Avalonia.Vector(System.Math.Clamp(newX, 0, maxX), _tabsScroll.Offset.Y);
+    }
+
+    private void OpenTabList()
+    {
+        if (_tabListPopup.Child is Border border)
+        {
+            border.Background = ResolveBrush("MmElevatedBackgroundBrush");
+            border.BorderBrush = ResolveBrush("MmBorderSoftBrush");
+        }
+
+        _tabListItems.Children.Clear();
+        foreach (var doc in _openDocsService.OpenDocuments)
+        {
+            var target = doc;
+            var label = new TextBlock
+            {
+                Text = target.DisplayName,
+                Foreground = ResolveBrush("MmTextBrush"),
+                FontWeight = ReferenceEquals(target, _openDocsService.ActiveDocument)
+                    ? FontWeight.SemiBold
+                    : FontWeight.Normal,
+                TextTrimming = Avalonia.Media.TextTrimming.CharacterEllipsis
+            };
+            var item = new Button
+            {
+                Classes = { "mm-menu-item" },
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                Content = label
+            };
+            item.Click += (_, _) =>
+            {
+                _tabListPopup.IsOpen = false;
+                _openDocsService.Activate(target);
+            };
+            _tabListItems.Children.Add(item);
+        }
+
+        _tabListPopup.IsOpen = true;
+    }
+
     private void OnThemeVariantChanged(object? sender, EventArgs e)
         => Dispatcher.UIThread.Post(ApplyThemeColours);
 
@@ -286,6 +518,9 @@ internal sealed class ApplicateTabsView : UserControl
         // follows the same pattern (sibling to "+", same stroke brush).
         _addButtonIcon.Stroke = ResolveBrush("MmTextSoftBrush");
         _findButtonIcon.Stroke = ResolveBrush("MmTextSoftBrush");
+        _scrollLeftIcon.Stroke = ResolveBrush("MmTextSoftBrush");
+        _scrollRightIcon.Stroke = ResolveBrush("MmTextSoftBrush");
+        _tabListIcon.Stroke = ResolveBrush("MmTextSoftBrush");
 
         var borderBrush = ResolveBrush("MmBorderBrush");
         var activeBg = ResolveBrush("MmBackgroundBrush");
@@ -333,6 +568,18 @@ internal sealed class ApplicateTabsView : UserControl
             _tabToDocument[tab] = doc;
             _tabsPanel.Children.Add(tab);
         }
+
+        // After the strip relayouts with the new tab set: scroll the (possibly
+        // off-screen) active tab into view, then refresh the overflow chrome. A
+        // Rebuild resets the scroll offset, so activating a hidden tab (e.g.
+        // from the tab-list dropdown) must re-reveal its tab button.
+        Dispatcher.UIThread.Post(
+            () =>
+            {
+                EnsureActiveTabVisible();
+                UpdateTabOverflowChrome();
+            },
+            DispatcherPriority.Background);
     }
 
     private Control BuildTab(OpenDocument doc)
