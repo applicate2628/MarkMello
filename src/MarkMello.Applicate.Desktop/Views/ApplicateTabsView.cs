@@ -373,8 +373,23 @@ internal sealed class ApplicateTabsView : UserControl
             ColumnDefinitions = new ColumnDefinitions("*,Auto"),
             VerticalAlignment = VerticalAlignment.Stretch
         };
+        // Reserve the active (SemiBold) label width on every tab via an
+        // invisible always-SemiBold sizer behind the live label, so selecting a
+        // tab no longer widens it and shifts the whole strip. The live label
+        // keeps its Normal/SemiBold weight for the visual accent.
+        var labelSizer = new TextBlock
+        {
+            Text = doc.DisplayName,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(10, 0, 4, 0),
+            FontWeight = FontWeight.SemiBold,
+            Opacity = 0,
+            IsHitTestVisible = false
+        };
+        Grid.SetColumn(labelSizer, 0);
         Grid.SetColumn(label, 0);
         Grid.SetColumn(closeButton, 1);
+        tabContent.Children.Add(labelSizer);
         tabContent.Children.Add(label);
         tabContent.Children.Add(closeButton);
 
