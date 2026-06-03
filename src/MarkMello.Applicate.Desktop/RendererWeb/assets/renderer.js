@@ -2996,6 +2996,66 @@
       reservedWidth
     });
   }
+  function cloneSpaceTop(el, container) {
+    let y = 0;
+    let n = el;
+    while (n && n !== container) {
+      y += n.offsetTop;
+      n = n.offsetParent;
+    }
+    return n === container ? y : null;
+  }
+  function cloneYForDocBlock(docBlock, clone, rect, clientY) {
+    const idx = docBlock.dataset["mmBlockIndex"];
+    if (idx === void 0) return null;
+    const cln = clone.querySelector(`[data-mm-block-index="${idx}"]`);
+    if (!cln) return null;
+    const top = cloneSpaceTop(cln, clone);
+    if (top === null) return null;
+    const offset = clientY - rect.top;
+    const contribution = offset <= 0 ? offset : rect.height > 0 ? offset / rect.height * cln.offsetHeight : 0;
+    return top + contribution;
+  }
+  function getDocumentViewportTopCloneY(clone) {
+    const docRoot = document.querySelector("body > main.mm-document");
+    if (!docRoot) return null;
+    for (const b of Array.from(docRoot.querySelectorAll("[data-mm-block-index]"))) {
+      const r = b.getBoundingClientRect();
+      if (r.height > 0 && r.bottom >= 0) {
+        const y = cloneYForDocBlock(b, clone, r, 0);
+        if (y !== null) return y;
+      }
+    }
+    return null;
+  }
+  function cloneBlockAtCloneY(clone, y) {
+    let prev = null;
+    let prevTop = 0;
+    for (const b of Array.from(clone.querySelectorAll("[data-mm-block-index]"))) {
+      const top = cloneSpaceTop(b, clone);
+      if (top === null) continue;
+      const h = b.offsetHeight;
+      if (y < top) return { block: b, mode: "gap", value: y - top };
+      if (y < top + h) return { block: b, mode: "frac", value: h > 0 ? (y - top) / h : 0 };
+      prev = b;
+      prevTop = top;
+    }
+    if (prev) return { block: prev, mode: "tail", value: y - (prevTop + prev.offsetHeight) };
+    return null;
+  }
+  function docScrollTopForCloneY(root, y) {
+    if (!minimapContent) return null;
+    const hit = cloneBlockAtCloneY(minimapContent, y);
+    if (!hit) return null;
+    const idx = hit.block.dataset["mmBlockIndex"];
+    if (idx === void 0) return null;
+    const docBlock = document.querySelector(`body > main.mm-document [data-mm-block-index="${idx}"]`);
+    if (!docBlock) return null;
+    const r = docBlock.getBoundingClientRect();
+    const contribution = hit.mode === "gap" ? hit.value : hit.mode === "tail" ? r.height + hit.value : hit.value * r.height;
+    const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+    return Math.max(0, Math.min(maxScrollTop, root.scrollTop + r.top + contribution));
+  }
   function updateMinimapViewport(options = {}) {
     ensureMinimap();
     if (!minimapRoot || !minimapContent || !minimapViewport) {
@@ -3037,17 +3097,30 @@
     }
     const measuredContentHeight = minimapContent.scrollHeight;
     const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
-    const realMaxScrollTop = Math.max(0, documentScrollHeight - viewportHeight);
-    const scrollProgress = realMaxScrollTop > 0 ? Math.min(1, Math.max(0, root.scrollTop / realMaxScrollTop)) : 0;
-    const contentScrollTop = scrollProgress * Math.max(0, contentHeight - viewportHeight);
-    const layout = calculateMinimapViewportLayout({
-      minimapWidth,
-      minimapHeight,
-      documentWidth,
-      documentHeight: contentHeight,
-      viewportHeight,
-      scrollTop: contentScrollTop
-    });
+    let layout;
+    const anchorTopY = getDocumentViewportTopCloneY(minimapContent);
+    if (anchorTopY !== null) {
+      layout = calculateMinimapViewportLayout({
+        minimapWidth,
+        minimapHeight,
+        documentWidth,
+        documentHeight: contentHeight,
+        viewportHeight,
+        scrollTop: anchorTopY
+      });
+    } else {
+      const realMaxScrollTop = Math.max(0, documentScrollHeight - viewportHeight);
+      const scrollProgress = realMaxScrollTop > 0 ? Math.min(1, Math.max(0, root.scrollTop / realMaxScrollTop)) : 0;
+      const contentScrollTop = scrollProgress * Math.max(0, contentHeight - viewportHeight);
+      layout = calculateMinimapViewportLayout({
+        minimapWidth,
+        minimapHeight,
+        documentWidth,
+        documentHeight: contentHeight,
+        viewportHeight,
+        scrollTop: contentScrollTop
+      });
+    }
     if (!layout) {
       currentMinimapLayout = null;
       return;
@@ -3071,6 +3144,24 @@
     const root = document.scrollingElement ?? document.documentElement;
     const rect = minimapRoot.getBoundingClientRect();
     const minimapY = Math.max(0, Math.min(rect.height, clientY - rect.top));
+    if (currentMinimapLayout && minimapContent) {
+      const cloneYTarget = (minimapY - currentMinimapLayout.contentTranslateY) / currentMinimapLayout.scale;
+      const firstTarget = docScrollTopForCloneY(root, cloneYTarget);
+      if (firstTarget !== null) {
+        window.scrollTo({ top: firstTarget, behavior: "instant" });
+        let attempts = 0;
+        const refine = () => {
+          if (++attempts > 3) return;
+          const next = docScrollTopForCloneY(root, cloneYTarget);
+          if (next !== null && Math.abs(next - root.scrollTop) > 2) {
+            window.scrollTo({ top: next, behavior: "instant" });
+            window.requestAnimationFrame(refine);
+          }
+        };
+        window.requestAnimationFrame(refine);
+        return;
+      }
+    }
     const thumbTravel = getCurrentMinimapThumbTravel();
     const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
     const targetScrollTop = Math.min(minimapY, thumbTravel) / thumbTravel * maxScrollTop;

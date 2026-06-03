@@ -2455,6 +2455,107 @@ type MinimapViewportUpdateOptions = {
   skipVisibilityUpdate?: boolean;
 };
 
+// [block-anchor] Sum offsetTop up the offsetParent chain to the container.
+// Transform-independent (offsetTop ignores the clone's scale()/translateY()).
+// Returns null when the walk does not terminate at the container.
+function cloneSpaceTop(el: HTMLElement, container: HTMLElement): number | null {
+  let y = 0;
+  let n: HTMLElement | null = el;
+  while (n && n !== container) {
+    y += n.offsetTop;
+    n = n.offsetParent as HTMLElement | null;
+  }
+  return n === container ? y : null;
+}
+
+// [block-anchor] Map a document client-Y at/above a document block to the
+// clone-space Y of the same-index clone block. Within the block: fraction ×
+// clone height (block heights differ doc↔clone under content-visibility). In
+// the padding/gap above the block (offset <= 0): raw px, 1:1 — the clone
+// restores vertical padding (renderer.ts cloneDocumentForMinimap) and inter-
+// block gaps are structural copies. Returns null → caller falls back.
+function cloneYForDocBlock(docBlock: HTMLElement, clone: HTMLElement, rect: DOMRect, clientY: number): number | null {
+  const idx = docBlock.dataset["mmBlockIndex"];
+  if (idx === undefined) return null;
+  const cln = clone.querySelector<HTMLElement>(`[data-mm-block-index="${idx}"]`);
+  if (!cln) return null;
+  const top = cloneSpaceTop(cln, clone);
+  if (top === null) return null;
+  const offset = clientY - rect.top;
+  const contribution = offset <= 0
+    ? offset
+    : (rect.height > 0 ? (offset / rect.height) * cln.offsetHeight : 0);
+  return top + contribution;
+}
+
+// [block-anchor forward] Clone-space Y of the document viewport's TOP edge via
+// the block index shared between document and clone — drift-free under content-
+// visibility (unlike root.scrollHeight). Drives the minimap POSITION only; the
+// thumb HEIGHT stays on the stable document viewport height (see caller), NOT a
+// clone-space viewport span: during fast ("accelerated") scroll/drag content-
+// visibility lags, so on-screen blocks are collapsed in the document (~120px)
+// but full in the clone (~hundreds px); a clone-space span would then inflate
+// and stretch the thumb — up to the whole minimap. Null → caller falls back.
+function getDocumentViewportTopCloneY(clone: HTMLElement): number | null {
+  const docRoot = document.querySelector<HTMLElement>("body > main.mm-document");
+  if (!docRoot) return null;
+  for (const b of Array.from(docRoot.querySelectorAll<HTMLElement>("[data-mm-block-index]"))) {
+    const r = b.getBoundingClientRect();
+    // Skip zero-box blocks. A display:none element (e.g. a mermaid `<pre>` that is
+    // hidden once its SVG has rendered) reports rect (0,0,0,0) — so rect.bottom===0
+    // would FALSELY match as the top block at any scroll, and its clone twin has no
+    // offsetParent, so cloneYForDocBlock returns null and the forward map drops to
+    // the legacy fallback (observed: minimap leads the document at the very bottom).
+    // Anchor on the first VISIBLE block whose clone twin also resolves.
+    if (r.height > 0 && r.bottom >= 0) {
+      const y = cloneYForDocBlock(b, clone, r, 0);
+      if (y !== null) return y;
+    }
+  }
+  return null;
+}
+
+// [block-anchor inverse] Clone block whose range contains clone-space Y (or the
+// gap/tail around it). Mirror of the forward map. Returns null when the clone
+// has no annotated blocks.
+function cloneBlockAtCloneY(clone: HTMLElement, y: number):
+    { block: HTMLElement; mode: "gap" | "frac" | "tail"; value: number } | null {
+  let prev: HTMLElement | null = null;
+  let prevTop = 0;
+  for (const b of Array.from(clone.querySelectorAll<HTMLElement>("[data-mm-block-index]"))) {
+    const top = cloneSpaceTop(b, clone);
+    if (top === null) continue;
+    const h = b.offsetHeight;
+    if (y < top) return { block: b, mode: "gap", value: y - top };
+    if (y < top + h) return { block: b, mode: "frac", value: h > 0 ? (y - top) / h : 0 };
+    prev = b;
+    prevTop = top;
+  }
+  if (prev) return { block: prev, mode: "tail", value: y - (prevTop + prev.offsetHeight) };
+  return null;
+}
+
+// [block-anchor inverse] Document scrollTop that places clone-space Y at the
+// viewport top. In frac mode the document block height may be the c-v estimate;
+// the click caller refines after the target block renders. Returns null → fall back.
+function docScrollTopForCloneY(root: Element, y: number): number | null {
+  if (!minimapContent) return null;
+  const hit = cloneBlockAtCloneY(minimapContent, y);
+  if (!hit) return null;
+  const idx = hit.block.dataset["mmBlockIndex"];
+  if (idx === undefined) return null;
+  const docBlock = document.querySelector<HTMLElement>(`body > main.mm-document [data-mm-block-index="${idx}"]`);
+  if (!docBlock) return null;
+  const r = docBlock.getBoundingClientRect();
+  const contribution = hit.mode === "gap"
+    ? hit.value
+    : hit.mode === "tail"
+      ? r.height + hit.value
+      : hit.value * r.height;
+  const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+  return Math.max(0, Math.min(maxScrollTop, root.scrollTop + r.top + contribution));
+}
+
 function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void {
   ensureMinimap();
   if (!minimapRoot || !minimapContent || !minimapViewport) {
@@ -2521,24 +2622,41 @@ function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void
   const measuredContentHeight = minimapContent.scrollHeight;
   const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
 
-  // Bridge the two coordinate systems (real content-visibility scroll range vs.
-  // the clone's full height) through dimensionless progress, then express the
-  // position in clone space. The existing (unit-tested) layout math then drives
-  // both content and thumb to the true bottom at progress 1.
-  const realMaxScrollTop = Math.max(0, documentScrollHeight - viewportHeight);
-  const scrollProgress = realMaxScrollTop > 0
-    ? Math.min(1, Math.max(0, root.scrollTop / realMaxScrollTop))
-    : 0;
-  const contentScrollTop = scrollProgress * Math.max(0, contentHeight - viewportHeight);
-
-  const layout = calculateMinimapViewportLayout({
-    minimapWidth,
-    minimapHeight,
-    documentWidth,
-    documentHeight: contentHeight,
-    viewportHeight,
-    scrollTop: contentScrollTop
-  });
+  // Map document→clone position through the BLOCK INDEX (identical in document
+  // and clone), which is drift-free under content-visibility — unlike the
+  // floating root.scrollHeight, whose live reshaping made a single dimensionless
+  // scrollProgress mis-place both content and thumb (runtime-measured: up to
+  // ~11k px drift, sign-flipping by scroll direction). The legacy floating-
+  // progress path is kept as the fallback when no block anchor is available
+  // (no annotated blocks, missing/mismatched clone block during a rebuild).
+  let layout: MinimapViewportLayout | null;
+  // Block-anchor drives the POSITION (anchor.topY); the thumb HEIGHT stays on the
+  // stable document viewport height so it cannot jump/stretch during fast drag.
+  const anchorTopY = getDocumentViewportTopCloneY(minimapContent);
+  if (anchorTopY !== null) {
+    layout = calculateMinimapViewportLayout({
+      minimapWidth,
+      minimapHeight,
+      documentWidth,
+      documentHeight: contentHeight,
+      viewportHeight,
+      scrollTop: anchorTopY
+    });
+  } else {
+    const realMaxScrollTop = Math.max(0, documentScrollHeight - viewportHeight);
+    const scrollProgress = realMaxScrollTop > 0
+      ? Math.min(1, Math.max(0, root.scrollTop / realMaxScrollTop))
+      : 0;
+    const contentScrollTop = scrollProgress * Math.max(0, contentHeight - viewportHeight);
+    layout = calculateMinimapViewportLayout({
+      minimapWidth,
+      minimapHeight,
+      documentWidth,
+      documentHeight: contentHeight,
+      viewportHeight,
+      scrollTop: contentScrollTop
+    });
+  }
   if (!layout) {
     currentMinimapLayout = null;
     return;
@@ -2568,12 +2686,38 @@ function scrollFromMinimapClientY(clientY: number): void {
   const root = document.scrollingElement ?? document.documentElement;
   const rect = minimapRoot.getBoundingClientRect();
   const minimapY = Math.max(0, Math.min(rect.height, clientY - rect.top));
-  // Range-based click-jump: cursor at minimap_y maps to scrollTop such that
-  // the viewport indicator's TOP ends up at minimap_y. Consistent with the
-  // pan/grab drag math: pointer position on the thumb-travel range maps
-  // linearly to scrollTop on its scrollable range. Clicking at top of
-  // minimap = top of document; clicking at the max-thumb-top position =
-  // bottom of document.
+
+  // [block-anchor inverse] Click-jump: invert the forward minimap-space mapping
+  // (rawThumbTop = scrollTop*scale + contentTranslateY) to the clone-space Y
+  // under the cursor, then resolve that to the document block at that Y, so the
+  // click lands on the block the user actually pointed at (the linear inverse
+  // below would land on the wrong block now that the forward map is non-linear).
+  // A bounded rAF settle re-aims once an off-screen content-visibility-collapsed
+  // target block renders its true height (the first pass used the c-v estimate).
+  // NOTE: the pan/grab DRAG (handleMinimapPointerMove) intentionally stays on the
+  // legacy linear math — a continuous gesture with live feedback, no regression.
+  if (currentMinimapLayout && minimapContent) {
+    const cloneYTarget = (minimapY - currentMinimapLayout.contentTranslateY) / currentMinimapLayout.scale;
+    const firstTarget = docScrollTopForCloneY(root, cloneYTarget);
+    if (firstTarget !== null) {
+      window.scrollTo({ top: firstTarget, behavior: "instant" as ScrollBehavior });
+      let attempts = 0;
+      const refine = () => {
+        if (++attempts > 3) return;
+        const next = docScrollTopForCloneY(root, cloneYTarget);
+        if (next !== null && Math.abs(next - root.scrollTop) > 2) {
+          window.scrollTo({ top: next, behavior: "instant" as ScrollBehavior });
+          window.requestAnimationFrame(refine);
+        }
+      };
+      window.requestAnimationFrame(refine);
+      return;
+    }
+  }
+
+  // Fallback (legacy linear, bit-identical to pre-block-anchor): cursor at
+  // minimap_y maps linearly to scrollTop so the viewport indicator's top ends
+  // up at minimap_y. Used when no block-anchor layout/clone is available.
   const thumbTravel = getCurrentMinimapThumbTravel();
   const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
   const targetScrollTop = (Math.min(minimapY, thumbTravel) / thumbTravel) * maxScrollTop;
