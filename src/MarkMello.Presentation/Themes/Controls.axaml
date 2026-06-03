@@ -548,7 +548,9 @@
   </Style>
 
   <Style Selector="Slider.mm-settings-slider">
-    <Setter Property="Width" Value="130" />
+    <!-- Keep slider+value inside the row column: 130 + spacing + value box
+         overflowed the popover, clipping the "px" unit off the size value. -->
+    <Setter Property="Width" Value="100" />
     <Setter Property="Height" Value="18" />
     <Setter Property="MinHeight" Value="18" />
     <Setter Property="Padding" Value="0" />
