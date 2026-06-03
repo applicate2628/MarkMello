@@ -3935,6 +3935,9 @@
       if (!wheelProxyEnabled) {
         return;
       }
+      if (event.ctrlKey || event.metaKey) {
+        return;
+      }
       if (Math.abs(event.deltaY) <= Number.EPSILON || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
         return;
       }

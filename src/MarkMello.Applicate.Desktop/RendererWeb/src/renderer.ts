@@ -3762,6 +3762,14 @@ function wireWheelProxy(): void {
       return;
     }
 
+    // Ctrl/Cmd + wheel is the browser zoom gesture — leave it to Chromium's
+    // built-in zoom (WebView2 IsZoomControlEnabled is on by default) instead of
+    // consuming it as a document scroll. Without this the proxy preventDefault'd
+    // every wheel event, swallowing ctrl+wheel zoom (the "zoom disappeared" bug).
+    if (event.ctrlKey || event.metaKey) {
+      return;
+    }
+
     if (Math.abs(event.deltaY) <= Number.EPSILON || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
       return;
     }
