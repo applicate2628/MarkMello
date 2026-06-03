@@ -326,12 +326,21 @@
 
   <Style Selector="TextBlock.mm-setting-label">
     <Setter Property="Foreground" Value="{DynamicResource MmTextBrush}" />
+    <!-- Pin the bundled UI font (the rest of the UI does) so menu/settings item
+         text renders identically on every OS. Without this these labels fell to
+         the platform default (Win11 "Segoe UI Variable" vs Win10 "Segoe UI"),
+         and the wider Win10 metrics overflowed the fixed-width popovers. The
+         ellipsis is a hard guard so no font/locale can push text past the edge. -->
+    <Setter Property="FontFamily" Value="{DynamicResource MmDocumentSansFontFamily}" />
     <Setter Property="FontSize" Value="13" />
+    <Setter Property="TextTrimming" Value="CharacterEllipsis" />
   </Style>
 
   <Style Selector="TextBlock.mm-setting-hint">
     <Setter Property="Foreground" Value="{DynamicResource MmTextFaintBrush}" />
+    <Setter Property="FontFamily" Value="{DynamicResource MmDocumentSansFontFamily}" />
     <Setter Property="FontSize" Value="11" />
+    <Setter Property="TextTrimming" Value="CharacterEllipsis" />
   </Style>
 
   <Style Selector="TextBlock.mm-setting-body">
