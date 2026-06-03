@@ -72,6 +72,8 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - Heavy Markdown bodies are loaded visible-first: the initial viewport is published first, the rest of the document is appended in background chunks, and secondary WebView prewarm waits until the visible document finishes its progressive append.
 - Renderer body caching and deferred post-ready work reduce repeated Markdown rendering, Mermaid/code highlighting, theme switching, tab switching, and width-resizer latency on large documents without enabling the future virtualization feature.
 - The WebView minimap remains detailed when explicitly enabled; automatic heavy-document mode can still hide the minimap, but explicit `on` no longer falls back to schematic stripes.
+- The detailed WebView minimap now maps through document block anchors and clone height, keeping heavy-document scrolling synchronized through downward scroll, upward scroll, and bottom-of-document positions.
+- Startup reveal keeps a themed splash/shield visible until the target heavy document is ready, preventing exposed raw or partially sized document frames during the first load.
 - Dark/light switches keep Avalonia and WebView theme changes covered until the renderer confirms the matching theme paint.
 - The host-side Table of Contents keeps its panel and active selection stable during tab switches and tolerates virtualized Avalonia row recycling without crashing.
 
