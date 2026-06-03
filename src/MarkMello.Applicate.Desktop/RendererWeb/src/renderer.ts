@@ -2451,10 +2451,6 @@ function postTransactionMinimapSettled(transactionGeneration: number): void {
   });
 }
 
-function shouldMeasureMinimapCloneHeight(documentScrollHeight: number): boolean {
-  return !minimapPolicy || documentScrollHeight <= minimapPolicy.maxDetailedDocumentHeight;
-}
-
 type MinimapViewportUpdateOptions = {
   skipVisibilityUpdate?: boolean;
 };
@@ -2478,9 +2474,10 @@ function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void
   // scrolls over; keep them as the basis for scroll PROGRESS so the thumb
   // tracks actual user scroll (thumb correctness is not negotiable).
   const knownPolicyHeavyDocument = isPolicyHeavyMinimapDocument();
-  const documentScrollHeight = knownPolicyHeavyDocument && minimapDocumentHeight > 0
-    ? minimapDocumentHeight
-    : root.scrollHeight;
+  // RESTORE (455c485): progress must track the LIVE scroll range. The cached
+  // minimapDocumentHeight (c-v estimate, fixed at build) goes stale as content-visibility
+  // grows the document during through-scroll, freezing the minimap in the lower portion.
+  const documentScrollHeight = root.scrollHeight;
   const policyHeavyDocument = knownPolicyHeavyDocument
     || (minimapPolicy !== null && documentScrollHeight > minimapPolicy.maxDetailedDocumentHeight);
   const source = policyHeavyDocument ? null : document.querySelector<HTMLElement>(".mm-document");
@@ -2511,19 +2508,17 @@ function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void
     return;
   }
 
-  // Content height must be the CLONE's true rendered height, not
-  // root.scrollHeight for ordinary documents: the minimap clone is intentionally
-  // NOT content-visibility-covered, so exact clone height keeps bottom mapping
-  // precise. On policy-heavy documents in explicit `on` mode, that first clone
-  // scrollHeight read is itself a full-clone synchronous layout; use the source
-  // scroll range instead and keep interaction under the 100ms heavy-doc budget.
+  // Content height must be the CLONE's true rendered height (455c485). The minimap clone is
+  // intentionally NOT content-visibility-covered, so it renders every block at full height;
+  // root.scrollHeight is the c-v ESTIMATE and underestimates a heavy document until every
+  // block has scrolled into view, which stops the content short of the bottom. Lay the clone
+  // out at the source width first (a no-op on plain scroll, so the read stays cheap), then
+  // measure it.
   const nextContentWidth = `${documentWidth}px`;
   if (minimapContent.style.width !== nextContentWidth) {
     minimapContent.style.width = nextContentWidth;
   }
-  const measuredContentHeight = shouldMeasureMinimapCloneHeight(documentScrollHeight)
-    ? minimapContent.scrollHeight
-    : 0;
+  const measuredContentHeight = minimapContent.scrollHeight;
   const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
 
   // Bridge the two coordinate systems (real content-visibility scroll range vs.
@@ -2708,46 +2703,6 @@ function queueMinimapContentRefreshAfterLayoutSettles(phase: "A" | "B" = "A"): v
   }, MINIMAP_REFRESH_DEBOUNCE_MS);
 }
 
-function getExistingMinimapDocumentClone(): HTMLElement | null {
-  if (!minimapContent) {
-    return null;
-  }
-
-  for (const child of Array.from(minimapContent.children)) {
-    if (child instanceof HTMLElement && child.classList.contains("mm-document")) {
-      return child;
-    }
-  }
-
-  return null;
-}
-
-function appendHtmlToExistingMinimapClone(html: string, hasHljs?: boolean): boolean {
-  const clone = getExistingMinimapDocumentClone();
-  if (!clone || !minimapContent) {
-    return false;
-  }
-
-  const template = document.createElement("template");
-  template.innerHTML = html;
-  if (hasHljs !== false) {
-    renderCodeBlocks(template.content);
-  }
-  sanitizeMinimapCloneTree(template.content);
-  clone.append(template.content);
-
-  minimapSourceReady = true;
-  const root = document.scrollingElement ?? document.documentElement;
-  minimapDocumentHeight = root.scrollHeight;
-  if (isPolicyHeavyMinimapDocument()) {
-    minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
-  }
-  updateMinimapVisibility(true);
-  updateMinimapViewport({ skipVisibilityUpdate: true });
-  scheduleCurrentProcessedDocumentCacheClone();
-  return true;
-}
-
 function queueProgressiveMinimapAppendRefresh(message: Extract<HostMessage, { type: "append-document" }>): void {
   if (message.html.length === 0) {
     return;
@@ -2777,21 +2732,10 @@ function queueProgressiveMinimapAppendRefresh(message: Extract<HostMessage, { ty
 
     emitMark("mm-minimap-progressive-append-start", { renderId: renderId ?? null });
     postPerfMark("mm-minimap-progressive-append-start", { renderId: renderId ?? null });
-    if (!appendHtmlToExistingMinimapClone(message.html, message.hasHljs)) {
-      refreshMinimapContent("A");
-      emitMark("mm-minimap-progressive-append-end", {
-        renderId: renderId ?? null,
-        fallback: "full-refresh",
-        documentHeight: minimapDocumentHeight,
-      });
-      postPerfMark("mm-minimap-progressive-append-end", {
-        renderId: renderId ?? null,
-        fallback: "full-refresh",
-        documentHeight: minimapDocumentHeight,
-      });
-      return;
-    }
-
+    // RESTORE (455c485): rebuild the FULL clone from the completed document so it holds every
+    // block. The incremental append only added the final chunk, leaving the clone stuck at its
+    // early partial block count, so its measured height and content stopped far short.
+    refreshMinimapContent("A");
     emitMark("mm-minimap-progressive-append-end", {
       renderId: renderId ?? null,
       documentHeight: minimapDocumentHeight,

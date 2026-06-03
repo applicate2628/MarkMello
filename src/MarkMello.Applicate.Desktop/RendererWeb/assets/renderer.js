@@ -2996,9 +2996,6 @@
       reservedWidth
     });
   }
-  function shouldMeasureMinimapCloneHeight(documentScrollHeight) {
-    return !minimapPolicy || documentScrollHeight <= minimapPolicy.maxDetailedDocumentHeight;
-  }
   function updateMinimapViewport(options = {}) {
     ensureMinimap();
     if (!minimapRoot || !minimapContent || !minimapViewport) {
@@ -3013,7 +3010,7 @@
     }
     const root = document.scrollingElement ?? document.documentElement;
     const knownPolicyHeavyDocument = isPolicyHeavyMinimapDocument();
-    const documentScrollHeight = knownPolicyHeavyDocument && minimapDocumentHeight > 0 ? minimapDocumentHeight : root.scrollHeight;
+    const documentScrollHeight = root.scrollHeight;
     const policyHeavyDocument = knownPolicyHeavyDocument || minimapPolicy !== null && documentScrollHeight > minimapPolicy.maxDetailedDocumentHeight;
     const source = policyHeavyDocument ? null : document.querySelector(".mm-document");
     if (!policyHeavyDocument && !source) {
@@ -3038,7 +3035,7 @@
     if (minimapContent.style.width !== nextContentWidth) {
       minimapContent.style.width = nextContentWidth;
     }
-    const measuredContentHeight = shouldMeasureMinimapCloneHeight(documentScrollHeight) ? minimapContent.scrollHeight : 0;
+    const measuredContentHeight = minimapContent.scrollHeight;
     const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
     const realMaxScrollTop = Math.max(0, documentScrollHeight - viewportHeight);
     const scrollProgress = realMaxScrollTop > 0 ? Math.min(1, Math.max(0, root.scrollTop / realMaxScrollTop)) : 0;
@@ -3172,40 +3169,6 @@
       refreshMinimapContent(phase);
     }, MINIMAP_REFRESH_DEBOUNCE_MS);
   }
-  function getExistingMinimapDocumentClone() {
-    if (!minimapContent) {
-      return null;
-    }
-    for (const child of Array.from(minimapContent.children)) {
-      if (child instanceof HTMLElement && child.classList.contains("mm-document")) {
-        return child;
-      }
-    }
-    return null;
-  }
-  function appendHtmlToExistingMinimapClone(html, hasHljs) {
-    const clone = getExistingMinimapDocumentClone();
-    if (!clone || !minimapContent) {
-      return false;
-    }
-    const template = document.createElement("template");
-    template.innerHTML = html;
-    if (hasHljs !== false) {
-      renderCodeBlocks(template.content);
-    }
-    sanitizeMinimapCloneTree(template.content);
-    clone.append(template.content);
-    minimapSourceReady = true;
-    const root = document.scrollingElement ?? document.documentElement;
-    minimapDocumentHeight = root.scrollHeight;
-    if (isPolicyHeavyMinimapDocument()) {
-      minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
-    }
-    updateMinimapVisibility(true);
-    updateMinimapViewport({ skipVisibilityUpdate: true });
-    scheduleCurrentProcessedDocumentCacheClone();
-    return true;
-  }
   function queueProgressiveMinimapAppendRefresh(message) {
     if (message.html.length === 0) {
       return;
@@ -3227,20 +3190,7 @@
       }
       emitMark("mm-minimap-progressive-append-start", { renderId: renderId ?? null });
       postPerfMark("mm-minimap-progressive-append-start", { renderId: renderId ?? null });
-      if (!appendHtmlToExistingMinimapClone(message.html, message.hasHljs)) {
-        refreshMinimapContent("A");
-        emitMark("mm-minimap-progressive-append-end", {
-          renderId: renderId ?? null,
-          fallback: "full-refresh",
-          documentHeight: minimapDocumentHeight
-        });
-        postPerfMark("mm-minimap-progressive-append-end", {
-          renderId: renderId ?? null,
-          fallback: "full-refresh",
-          documentHeight: minimapDocumentHeight
-        });
-        return;
-      }
+      refreshMinimapContent("A");
       emitMark("mm-minimap-progressive-append-end", {
         renderId: renderId ?? null,
         documentHeight: minimapDocumentHeight
