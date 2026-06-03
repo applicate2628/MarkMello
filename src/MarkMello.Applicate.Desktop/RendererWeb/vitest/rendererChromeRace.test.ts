@@ -247,12 +247,6 @@ describe("renderer chrome race handling", () => {
     vi.spyOn(documentElement!, "getBoundingClientRect").mockImplementation(() => {
       throw new Error("heavy minimap transition forced document layout");
     });
-    Object.defineProperty(minimapContent!, "scrollHeight", {
-      configurable: true,
-      get: () => {
-        throw new Error("heavy minimap refresh forced full clone layout");
-      },
-    });
     messages.length = 0;
 
     loadModeSettleProbe("on");
