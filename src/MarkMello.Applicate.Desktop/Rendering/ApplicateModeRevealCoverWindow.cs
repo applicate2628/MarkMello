@@ -26,6 +26,11 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
     private static readonly IBrush FallbackLightAccentBrush = new SolidColorBrush(Color.FromRgb(0xBD, 0x59, 0x2F));
     private static readonly IBrush FallbackDarkAccentBrush = new SolidColorBrush(Color.FromRgb(0xE3, 0x8A, 0x67));
     private static readonly Uri StartupLogoUri = new("avares://MarkMello.Presentation/Assets/Images/logo.png");
+    // Startup-splash CONTENT fade-in only. The cover background stays opaque from the
+    // first frame (Show sets Opacity=1.0), so the splash appears smoothly without any
+    // white bleed; the document reveal (Hide) is unchanged — still an instant cut on
+    // heavy docs, keeping the stale WebView backing hidden (ce455d2).
+    private static readonly TimeSpan StartupSplashContentFadeIn = TimeSpan.FromMilliseconds(280);
 
     private Window? _window;
     private Border? _shield;
@@ -420,15 +425,32 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
             TextWrapping = TextWrapping.NoWrap,
         });
 
-        return new Grid
+        var root = new Grid
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Stretch,
+            Opacity = 0.0,
             Children =
             {
                 content,
             },
         };
+        // Fade the splash content in over the already-opaque cover background. The
+        // change fires once the cover window is on screen (AttachedToVisualTree), so
+        // it animates 0 -> 1; the opaque background means no white bleed during the
+        // fade. Reveal (Hide) is untouched: instant cut on heavy docs as before.
+        root.Transitions =
+        [
+            new DoubleTransition
+            {
+                Property = Visual.OpacityProperty,
+                Duration = StartupSplashContentFadeIn,
+                Easing = ApplicateMotion.Easing,
+            },
+        ];
+        root.AttachedToVisualTree += (_, _) =>
+            Dispatcher.UIThread.Post(() => root.Opacity = 1.0, DispatcherPriority.Render);
+        return root;
     }
 
     private static Image? TryCreateStartupLogo()
