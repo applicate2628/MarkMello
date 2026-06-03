@@ -111,6 +111,10 @@ git diff --check
 
 Если менялись тесты и повторный `.NET` прогон с `--no-build` показывает старые assertions, перезапусти затронутый test project без `--no-build`.
 
+## Релиз
+
+Перед обновлением GitHub Release, переносом Applicate tag или публикацией installer assets прочитай [agent-release.md](agent-release.md). Там зафиксирован текущий release workflow, включая PowerShell-safe команды для tag peel (разрешение annotated tag в commit), `gh release view` JSON fields, `gh run watch`, обновление release body через `.scratch` file и обязательный `--target` при редактировании существующего релиза.
+
 ## Визуальная диагностика
 
 Для UI и renderer багов build/test не доказывают визуальную корректность. Нужен manual visual pass.
@@ -176,6 +180,8 @@ Claude verdict не заменяет локальную проверку. Есл
 - Bundle: generated renderer output file, usually `RendererWeb/assets/renderer.js`.
 - Claude: external model/provider used only through file-based prompts in this repository.
 - Dirty tree: Git working tree with uncommitted changes.
+- GitHub Release: public version page with release notes and downloadable assets.
+- Installer asset: release artifact such as `MarkMello.Applicate-setup-win-x64.exe`.
 - Renderer: WebView/Chromium Markdown rendering path.
 - TOC: Table of Contents; document outline pane.
 - UI: User Interface.
