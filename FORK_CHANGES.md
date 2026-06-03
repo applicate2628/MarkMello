@@ -66,6 +66,15 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - The WebView renderer hides the document body, minimap, and width-resizer handle until the bootstrap pipeline finishes math + mermaid + code-block rendering and posts `layout-ready`. Without this gate the user briefly sees a fallback state on tab switch and fresh launch (web fonts not yet swapped, `\[ ... \]` math placeholders, raw mermaid source, width handle at a stale X coordinate). The reveal uses a 120ms CSS opacity transition shared by all three surfaces.
 - The hide-rule is scoped to `body > main.mm-document` (and the minimap aside, and the width-handle div) so that the minimap's cloned `.mm-document` subtree is not affected; the clone always renders at full opacity inside the minimap container.
 
+## Release Scope (v0.3.4-applicate)
+
+- The Applicate tab strip now exposes overflow navigation when many documents are open: edge scroll arrows page the hidden tabs, the active tab is kept in view, and an all-tabs dropdown jumps directly to any open document.
+- Tab labels reserve their semibold selected width, preventing tab widths from shifting when selection changes.
+- Viewer-mode `Ctrl`/`Cmd` + wheel zoom is restored by letting Chromium handle browser zoom gestures instead of consuming them in the document wheel proxy.
+- The startup reveal gate now receives the authoritative renderer id from the initial post-ready pipeline, avoiding the long fallback wait on documents that require post-ready renderer work.
+- Russian settings labels and segmented controls were tightened so font options, line-height labels, slider values, and menu/settings text fit reliably, including Win10 font metrics.
+- Repo-local release instructions now document the Applicate release workflow, GitHub CLI checks, PowerShell-safe tag-peel commands, release-body editing, and asset hash verification.
+
 ## Bugfix Release Scope (v0.3.3-applicate)
 
 - Heavy WebView documents keep the previous rendered surface visible until the replacement document, mode, or tab state is ready, avoiding blank or raw intermediate frames on startup, tab switch, and reading/edit transitions.
