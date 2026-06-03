@@ -3120,7 +3120,15 @@ function flushPendingReadingPreferences(): void {
       },
       postPerfMark,
       notifyPostReadyEnhancementsComplete: () => {
-        postPostReadyEnhancementsComplete(undefined, undefined, undefined);
+        // Echo the C#-authoritative renderId (stored on load-document /
+        // load-cached-document) so the host's reveal gate
+        // (HandlePostReadyEnhancementsComplete, which rejects renderId-less
+        // messages) accepts it. Without this the initial-render-pipeline path
+        // posted no renderId → _postReadyEnhancementsComplete never set →
+        // document-reveal-ready never fired → startup cover released only by
+        // the 15s fallback (~16-18s startup on docs requiring post-ready).
+        // `?? undefined` preserves the prior behavior if no load set the id.
+        postPostReadyEnhancementsComplete(currentDocumentRenderId ?? undefined, undefined, undefined);
       },
       isCurrent: () => pipelineGeneration === initialRenderPipelineGeneration,
     });

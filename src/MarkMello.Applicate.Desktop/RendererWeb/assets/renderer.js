@@ -3434,7 +3434,7 @@
         },
         postPerfMark,
         notifyPostReadyEnhancementsComplete: () => {
-          postPostReadyEnhancementsComplete(void 0, void 0, void 0);
+          postPostReadyEnhancementsComplete(currentDocumentRenderId ?? void 0, void 0, void 0);
         },
         isCurrent: () => pipelineGeneration === initialRenderPipelineGeneration
       });
