@@ -273,7 +273,7 @@ public sealed class LocalizationService : ObservableObject, ILocalizationService
         ["ReadingFontMono"] = "Моно",
         ["ReadingSizeLabel"] = "Размер",
         ["ReadingSizeHint"] = "Базовый размер шрифта",
-        ["ReadingLineHeightLabel"] = "Интерлиньяж",
+        ["ReadingLineHeightLabel"] = "Высота строки",
         ["ReadingLineHeightHint"] = "Комфорт чтения",
         ["ReadingWidthLabel"] = "Ширина",
         ["ReadingWidthHint"] = "Длина строки",
