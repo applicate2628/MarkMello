@@ -343,6 +343,26 @@ public sealed class MainWindowOverlayTests
     }
 
     [Fact]
+    public void MainWindowShellRootDrawsVisibleFrameBorder()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "MainWindow.axaml"));
+
+        Assert.Contains("<Border Name=\"ShellRoot\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("BorderBrush=\"{DynamicResource MmBorderBrush}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("BorderThickness=\"1\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void MainWindowUsesStartupShellFade()
     {
         var xaml = File.ReadAllText(Path.Combine(
