@@ -3,7 +3,7 @@ export type LoadDocumentMessage = {
   documentName?: string;
   theme?: "light" | "dark" | "classic-white";
   renderId?: number;
-  cacheKey?: string;
+  cacheKey?: string | null;
   skipFrameWait?: boolean;
   // PE r2 item G — host-provided per-document mermaid presence flag,
   // populated from C#'s `body.HasMermaidBlock` at the IPC boundary
@@ -21,7 +21,7 @@ export type LoadDocumentDeps = {
   // mermaid guard set correctly for this specific load. Omitting the arg
   // (e.g. test harness, first-reading-preferences bootstrap) leaves the
   // pipeline at the "run mermaid" default.
-  runInitialRenderPipeline: (hasMermaid?: boolean, skipFrameWait?: boolean, renderId?: number, hasHljs?: boolean) => Promise<void>;
+  runInitialRenderPipeline: (hasMermaid?: boolean, skipFrameWait?: boolean, renderId?: number, hasHljs?: boolean, ownsCompleteFreshBody?: boolean) => Promise<void>;
   cancelCurrentMathController: () => void;
   resetModuleGlobals: () => void;
   scrollWindowToTop: () => void;
@@ -33,7 +33,7 @@ export type LoadDocumentDeps = {
   getCachedDocumentFragment?: (cacheKey: string) => DocumentFragment | undefined;
   setCurrentDocumentCacheKey?: (cacheKey: string | null) => void;
   restoreCachedScrollPosition?: () => void;
-  completeCachedDocumentLoad?: (renderId?: number, hasMermaid?: boolean, hasHljs?: boolean) => void;
+  completeCachedDocumentLoad?: (renderId?: number, hasMermaid?: boolean, hasHljs?: boolean, skipFrameWait?: boolean) => void;
   notifyDocumentCacheMiss?: (renderId?: number, cacheKey?: string) => void;
 };
 
@@ -55,6 +55,7 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
   // Failing to cancel keeps frozen initialVisibleNodes pointing into the
   // detached subtree, producing phantom math marks against the previous doc.
   const restoreOnly = message.html === undefined;
+  const isProgressiveInitial = message.cacheKey === null;
   let cachedFragment = restoreOnly && message.cacheKey
     ? deps.getCachedDocumentFragment?.(message.cacheKey)
     : undefined;
@@ -63,7 +64,7 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
       documentName: message.documentName ?? "",
       renderId: message.renderId ?? null,
     });
-    deps.notifyDocumentCacheMiss?.(message.renderId, message.cacheKey);
+    deps.notifyDocumentCacheMiss?.(message.renderId, message.cacheKey ?? undefined);
     return;
   }
 
@@ -120,11 +121,16 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
   // pipeline can skip mermaid init+render entirely for docs without mermaid
   // blocks. Undefined defaults to running (backward-compat).
   if (cachedFragment !== undefined && deps.completeCachedDocumentLoad) {
-    deps.completeCachedDocumentLoad(message.renderId, message.hasMermaid, message.hasHljs);
+    deps.completeCachedDocumentLoad(message.renderId, message.hasMermaid, message.hasHljs, message.skipFrameWait);
     return;
   }
 
-  void deps.runInitialRenderPipeline(message.hasMermaid, message.skipFrameWait, message.renderId, message.hasHljs);
+  void deps.runInitialRenderPipeline(
+    message.hasMermaid,
+    message.skipFrameWait,
+    message.renderId,
+    message.hasHljs,
+    !isProgressiveInitial);
 }
 
 export function clearDocumentState(deps: LoadDocumentDeps): void {

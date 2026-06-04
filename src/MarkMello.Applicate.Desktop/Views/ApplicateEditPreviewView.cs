@@ -65,6 +65,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     private readonly DispatcherTimer _webRenderTimer;
     private readonly DispatcherTimer _resizeContentWidthTimer;
     private readonly ApplicateDeferredHeadingUpdater _headingUpdater = new();
+    private bool _documentRenderedForCurrentRequest;
     private EditorSessionViewModel? _session;
     private ScrollViewer? _hostScrollViewer;
     private ScrollBarVisibility? _hostScrollViewerVerticalMode;
@@ -819,6 +820,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
             // back to viewer). Clear the local flag so the next visibility
             // flip will re-AttachTo cleanly.
             _isAttachedToHost = false;
+            _documentRenderedForCurrentRequest = false;
             _headingUpdater.Invalidate();
             // F-05 fix: hand consumer ownership of the scrollbar overlay
             // back to the inactive state.
@@ -948,6 +950,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         _sharedHost.View.HeadingsChanged -= OnSharedHeadingsChanged;
         _sharedHost.View.ActiveHeadingChanged -= OnSharedActiveHeadingChanged;
         _sharedHost.RendererFailed -= OnSharedRendererFailed;
+        _documentRenderedForCurrentRequest = false;
         _headingUpdater.Invalidate();
         _hostEventsWired = false;
     }
@@ -1023,7 +1026,8 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         _headingUpdater.Apply(
             headings,
             viewModel,
-            () => _isAttachedToHost && ReferenceEquals(_viewModel, viewModel));
+            () => _isAttachedToHost && ReferenceEquals(_viewModel, viewModel),
+            deferLargeUntilExplicitFlush: !_documentRenderedForCurrentRequest);
     }
 
     private void OnSharedActiveHeadingChanged(object? sender, string id)
@@ -1052,6 +1056,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         }
         // Render committed: hide any visible failure overlay.
         _failureView.IsVisible = false;
+        _documentRenderedForCurrentRequest = true;
         _headingUpdater.FlushPending();
         if (restoreProgress.HasValue
             && _isAttachedToHost

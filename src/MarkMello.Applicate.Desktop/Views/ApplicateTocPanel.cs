@@ -46,6 +46,8 @@ public sealed class ApplicateTocPanel : UserControl
     private MainWindowViewModel? _viewModel;
     private readonly Dictionary<string, Border> _rowsById = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _rowIndexById = new(StringComparer.Ordinal);
+    private string? _pendingActiveHeadingScrollReplayId;
+    private bool _activeHeadingScrollReplayArmed;
 
     // Cached theme brushes — refreshed in ApplyThemeBrushes() on attach and
     // on every theme-variant change. A single resolve cycle covers every
@@ -147,6 +149,7 @@ public sealed class ApplicateTocPanel : UserControl
 
     private void OnDetached(object? sender, VisualTreeAttachmentEventArgs e)
     {
+        ClearActiveHeadingScrollReplay();
         if (global::Avalonia.Application.Current is { } app)
         {
             app.ActualThemeVariantChanged -= OnThemeVariantChanged;
@@ -209,6 +212,7 @@ public sealed class ApplicateTocPanel : UserControl
             return;
         }
 
+        ClearActiveHeadingScrollReplay();
         if (_viewModel is not null)
         {
             _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
@@ -242,6 +246,19 @@ public sealed class ApplicateTocPanel : UserControl
             if (_viewModel is not null)
             {
                 HighlightActiveHeading(_viewModel.ActiveHeadingId);
+            }
+            return;
+        }
+
+        if (e.PropertyName == nameof(MainWindowViewModel.IsTocVisible))
+        {
+            if (_viewModel?.IsTocVisible == true)
+            {
+                RequestActiveHeadingScroll(_viewModel.ActiveHeadingId, allowVirtualizedScroll: true);
+            }
+            else
+            {
+                ClearActiveHeadingScrollReplay();
             }
             return;
         }
@@ -435,25 +452,44 @@ public sealed class ApplicateTocPanel : UserControl
 
     private void HighlightActiveHeading(string? activeId, bool allowVirtualizedScroll)
     {
-        Border? activeRow = null;
         foreach (var pair in _rowsById)
         {
             var row = pair.Value;
             var isActive = !string.IsNullOrEmpty(activeId)
                            && string.Equals(pair.Key, activeId, StringComparison.Ordinal);
             ApplyRowVisuals(row, isActive);
-            if (isActive)
-            {
-                activeRow = row;
-            }
         }
 
-        if (activeRow is not null)
+        RequestActiveHeadingScroll(activeId, allowVirtualizedScroll);
+    }
+
+    private void RequestActiveHeadingScroll(string? activeId, bool allowVirtualizedScroll)
+    {
+        if (string.IsNullOrEmpty(activeId) || _viewModel?.IsTocVisible != true)
+        {
+            ClearActiveHeadingScrollReplay();
+            return;
+        }
+
+        if (!_rowIndexById.TryGetValue(activeId, out var index))
+        {
+            ClearActiveHeadingScrollReplay();
+            return;
+        }
+
+        if (!IsVisible || !_scroll.IsAttachedToVisualTree() || _scroll.Bounds.Height <= 0)
+        {
+            ArmActiveHeadingScrollReplay(activeId);
+            return;
+        }
+
+        ClearActiveHeadingScrollReplay();
+        if (_rowsById.TryGetValue(activeId, out var activeRow))
         {
             var rowToScroll = activeRow;
             Dispatcher.UIThread.Post(() => ScrollRowIntoView(rowToScroll), DispatcherPriority.Background);
         }
-        else if (allowVirtualizedScroll && !string.IsNullOrEmpty(activeId) && _rowIndexById.TryGetValue(activeId, out var index))
+        else if (allowVirtualizedScroll)
         {
             Dispatcher.UIThread.Post(
                 () =>
@@ -463,6 +499,36 @@ public sealed class ApplicateTocPanel : UserControl
                 },
                 DispatcherPriority.Background);
         }
+    }
+
+    private void ArmActiveHeadingScrollReplay(string activeId)
+    {
+        _pendingActiveHeadingScrollReplayId = activeId;
+        if (_activeHeadingScrollReplayArmed)
+        {
+            return;
+        }
+
+        _scroll.LayoutUpdated += OnScrollLayoutUpdatedForActiveHeadingReplay;
+        _activeHeadingScrollReplayArmed = true;
+    }
+
+    private void ClearActiveHeadingScrollReplay()
+    {
+        if (_activeHeadingScrollReplayArmed)
+        {
+            _scroll.LayoutUpdated -= OnScrollLayoutUpdatedForActiveHeadingReplay;
+            _activeHeadingScrollReplayArmed = false;
+        }
+
+        _pendingActiveHeadingScrollReplayId = null;
+    }
+
+    private void OnScrollLayoutUpdatedForActiveHeadingReplay(object? sender, EventArgs e)
+    {
+        var activeId = _pendingActiveHeadingScrollReplayId;
+        ClearActiveHeadingScrollReplay();
+        RequestActiveHeadingScroll(activeId, allowVirtualizedScroll: true);
     }
 
     private void RefreshRowVisuals(Border row)

@@ -72,6 +72,11 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - Tab labels reserve their semibold selected width, preventing tab widths from shifting when selection changes.
 - Viewer-mode `Ctrl`/`Cmd` + wheel zoom is restored by letting Chromium handle browser zoom gestures instead of consuming them in the document wheel proxy.
 - The startup reveal gate now receives the authoritative renderer id from the initial post-ready pipeline, avoiding the long fallback wait on documents that require post-ready renderer work.
+- Startup now drops the already paint-gated splash cover immediately after renderer readiness, while in-session mode and tab-switch cover timing remains unchanged.
+- The main-window chrome popups are hydrated lazily after first composite, preserving their bindings and overlay shells while reducing startup `InitializeComponent` work.
+- The Table of Contents (TOC) panel replays active-heading scrolling after the panel becomes visible and laid out, so the highlighted heading is brought into view even when Avalonia rows were virtualized.
+- Cached WebView documents that still contain unrendered TeX math now re-enter the initial render pipeline before reporting layout-ready instead of using the cached fast path too early.
+- Applicate release publishes enable .NET ReadyToRun precompilation for managed assemblies to reduce cold first-launch Just-In-Time compilation cost without changing Debug builds.
 - Russian settings labels and segmented controls were tightened so font options, line-height labels, slider values, and menu/settings text fit reliably, including Win10 font metrics.
 - Repo-local release instructions now document the Applicate release workflow, GitHub CLI checks, PowerShell-safe tag-peel commands, release-body editing, and asset hash verification.
 
@@ -148,6 +153,8 @@ Outcomes: thumb drag tracks the mouse without the Win32 → IPC → Chromium rou
 - `NCH`: `Avalonia.Controls.NativeControlHost`; the Avalonia control wrapping a native Win32 HWND.
 - `overlay`: fork-specific code added beside upstream code instead of editing upstream files.
 - `ProgId`: Windows file-association program identifier.
+- `ReadyToRun`: .NET publish option that precompiles managed assemblies to reduce startup Just-In-Time compilation work.
 - `TeX`: math notation syntax commonly used in Markdown formula renderers.
+- `TOC`: Table of Contents; the heading navigation panel shown beside the document.
 - `upstream`: the original MarkMello repository used as the update source.
 - `WebView2`: Microsoft Edge Chromium-based WebView control hosted via Avalonia.Controls.WebView.

@@ -441,11 +441,13 @@ public sealed class ApplicateMainWindow : MainWindow
 
         void HideStartupCover(string reason)
         {
-            var duration = ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait(
-                viewModel.Document,
-                transactionGeneration: 0)
-                ? TimeSpan.Zero
-                : ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences);
+            // Perf B1 (audit 2026-06-04): the startup cover is already paint-gated
+            // (DocumentRevealReady + double-RAF before HideStartupCover fires), so
+            // the fade-out is dead cosmetic time on every startup, not a mask over
+            // unpainted first paint. Zero it for the startup reveal. Scoped to THIS
+            // call site only — ApplicateMotion.ModeSwitchDuration still drives the
+            // in-session mode-toggle and tab/document-switch covers.
+            var duration = TimeSpan.Zero;
             startupCover.Hide(duration);
             ApplicateTrace.DiagMs(
                 "startup-applicate-window",

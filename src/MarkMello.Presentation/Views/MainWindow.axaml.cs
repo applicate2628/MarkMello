@@ -130,6 +130,16 @@ public partial class MainWindow : Window
         // Smoke-exit timer is independent of VM init readiness; it just measures
         // "window opened + delay" which is the smoke-test contract.
         _ = CompleteStartupSmokeTestAsync();
+
+        // Perf F1 (audit 2026-06-04): the five chrome popups (app menu / app
+        // settings / about / updates + reading settings) are no longer inflated
+        // inside InitializeComponent — their XAML children were removed. Hydrate
+        // them here, after the first composite, one per Background tick so
+        // InitializeComponent stays ~100 ms leaner (~167 ms earlier reveal,
+        // runtime-measured) and no single tick stalls the reveal fade. A popup
+        // whose trigger is hit before the pump reaches it hydrates on demand via
+        // the Opened guard.
+        ScheduleChromePopupHydration();
     }
 
     private void PrepareShellForStartup()
@@ -147,6 +157,73 @@ public partial class MainWindow : Window
         ShellRoot.Opacity = 1;
         StartupDiag.DiagMs("startup-first-frame", "shell-reveal-end");
     }
+
+    // Perf F1: the chrome popups are kept in XAML as empty <Popup> shells (Name +
+    // IsOpen binding + PlacementTarget) so existing overlay hit-testing
+    // (FindControl by name) and placement are unaffected; only their inner views
+    // are constructed lazily here instead of eagerly in InitializeComponent.
+    private static readonly string[] ChromePopupNames =
+    {
+        "AppMenuPanel",
+        "AppSettingsPanel",
+        "AppAboutPanel",
+        "AppUpdatesPanel",
+        "SettingsPanel",
+    };
+
+    private void ScheduleChromePopupHydration()
+    {
+        // Race guard: a popup opened before the Background pump reaches it hydrates
+        // synchronously in its Opened handler. Normally the pump wins first and the
+        // handler is a no-op (Child already set).
+        foreach (var name in ChromePopupNames)
+        {
+            if (this.FindControl<Popup>(name) is { } popup)
+            {
+                popup.Opened += OnChromePopupOpened;
+            }
+        }
+
+        HydrateChromePopupAt(0);
+    }
+
+    private void OnChromePopupOpened(object? sender, EventArgs e)
+    {
+        if (sender is Popup popup && popup.Child is null)
+        {
+            popup.Child = CreateChromePopupContent(popup.Name);
+        }
+    }
+
+    private void HydrateChromePopupAt(int index)
+    {
+        if (index >= ChromePopupNames.Length)
+        {
+            return;
+        }
+
+        if (this.FindControl<Popup>(ChromePopupNames[index]) is { Child: null } popup)
+        {
+            popup.Child = CreateChromePopupContent(ChromePopupNames[index]);
+        }
+
+        // One popup per Background tick keeps each tick small so the reveal fade is
+        // never stalled; Background priority yields to Render so paints win. The
+        // heaviest panel (reading settings) is last, well after the fade settles.
+        Dispatcher.UIThread.Post(
+            () => HydrateChromePopupAt(index + 1),
+            DispatcherPriority.Background);
+    }
+
+    private static Control? CreateChromePopupContent(string? popupName) => popupName switch
+    {
+        "AppMenuPanel" => new AppMenuPanelView(),
+        "AppSettingsPanel" => new AppSettingsPanelView(),
+        "AppAboutPanel" => new AppAboutPanelView(),
+        "AppUpdatesPanel" => new AppUpdatesPanelView(),
+        "SettingsPanel" => new ReadingSettingsPanelView(),
+        _ => null,
+    };
 
     private async Task InitializeStartupAsync()
     {

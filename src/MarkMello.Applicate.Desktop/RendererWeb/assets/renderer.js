@@ -229,13 +229,14 @@
     });
     deps.debugLog(`load-document:start id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${message.theme ?? "(none)"} currentTheme=${document.documentElement.dataset.theme ?? "(none)"} htmlLength=${message.html?.length ?? 0}`);
     const restoreOnly = message.html === void 0;
+    const isProgressiveInitial = message.cacheKey === null;
     let cachedFragment = restoreOnly && message.cacheKey ? deps.getCachedDocumentFragment?.(message.cacheKey) : void 0;
     if (cachedFragment === void 0 && restoreOnly) {
       deps.emitMark("mm-load-document-cache-miss", {
         documentName: message.documentName ?? "",
         renderId: message.renderId ?? null
       });
-      deps.notifyDocumentCacheMiss?.(message.renderId, message.cacheKey);
+      deps.notifyDocumentCacheMiss?.(message.renderId, message.cacheKey ?? void 0);
       return;
     }
     deps.preserveCurrentDocumentCache?.();
@@ -269,10 +270,16 @@
       deps.scrollWindowToTop();
     }
     if (cachedFragment !== void 0 && deps.completeCachedDocumentLoad) {
-      deps.completeCachedDocumentLoad(message.renderId, message.hasMermaid, message.hasHljs);
+      deps.completeCachedDocumentLoad(message.renderId, message.hasMermaid, message.hasHljs, message.skipFrameWait);
       return;
     }
-    void deps.runInitialRenderPipeline(message.hasMermaid, message.skipFrameWait, message.renderId, message.hasHljs);
+    void deps.runInitialRenderPipeline(
+      message.hasMermaid,
+      message.skipFrameWait,
+      message.renderId,
+      message.hasHljs,
+      !isProgressiveInitial
+    );
   }
   function clearDocumentState(deps) {
     const main = document.querySelector("main.mm-document");
@@ -1261,6 +1268,7 @@
   var themeAppliedAckGeneration = 0;
   var initialRenderPipelineGeneration = 0;
   var initialRenderPipelineCompleted = false;
+  var firstPrefsBootstrapSuppressedByLoadGeneration = null;
   var postReadyEnhancementsCompleted = false;
   var currentController = null;
   var MERMAID_PER_DIAGRAM_TIMEOUT_MS = 3e3;
@@ -1702,6 +1710,9 @@
       if (node.dataset["mmMathRendered"] === "failed") count++;
     }
     return count;
+  }
+  function hasUnrenderedDocumentMath() {
+    return document.querySelector(".mm-document [data-tex]:not([data-mm-math-rendered])") !== null;
   }
   function renderMath2() {
     emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
@@ -3418,7 +3429,11 @@
         scheduleHeavyLiveUpdate();
       }
     }
-    if (!hadHostPreferences && !initialRenderPipelineCompleted) {
+    const suppressFirstPrefsBootstrap = !hadHostPreferences && firstPrefsBootstrapSuppressedByLoadGeneration === initialRenderPipelineGeneration;
+    if (!hadHostPreferences) {
+      firstPrefsBootstrapSuppressedByLoadGeneration = null;
+    }
+    if (!hadHostPreferences && !suppressFirstPrefsBootstrap) {
       const pipelineGeneration = ++initialRenderPipelineGeneration;
       void runInitialRenderPipeline({
         getCurrentTheme,
@@ -3539,6 +3554,7 @@
         loadMessage.hasHljs = message.hasHljs;
       }
       if (message.cacheKey === null) {
+        loadMessage.cacheKey = null;
       } else if (typeof message.cacheKey === "string" && message.cacheKey.length > 0) {
         loadMessage.cacheKey = message.cacheKey;
       } else {
@@ -3754,6 +3770,7 @@
     cancelProcessedDocumentCacheClone();
     cancelDeferredMinimapContentRefresh(false);
     initialRenderPipelineCompleted = false;
+    firstPrefsBootstrapSuppressedByLoadGeneration = null;
     postReadyEnhancementsCompleted = false;
     currentController?.cancel();
     currentController = null;
@@ -3815,38 +3832,46 @@
       extractAndPostHeadings();
     }
   }
+  async function runLoadDocumentInitialRenderPipeline(hasMermaid, skipFrameWait, renderId, hasHljs, suppressFirstPrefsBootstrap = false) {
+    const pipelineGeneration = ++initialRenderPipelineGeneration;
+    firstPrefsBootstrapSuppressedByLoadGeneration = suppressFirstPrefsBootstrap ? pipelineGeneration : null;
+    await runInitialRenderPipeline({
+      getCurrentTheme,
+      applyTheme,
+      initMermaidWithTheme,
+      renderMath: renderMath2,
+      renderMermaid,
+      renderCodeBlocks,
+      deferPostReadyWork: deferPostReadyEnhancements,
+      scheduleLayoutReady: () => {
+        initialRenderPipelineCompleted = true;
+        scheduleLayoutReady(skipFrameWait === true);
+        postHostMessage({
+          type: "document-ready",
+          mathCount: document.querySelectorAll("[data-tex]").length
+        });
+      },
+      hasMermaid,
+      postPerfMark,
+      notifyPostReadyEnhancementsComplete: () => {
+        postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
+      },
+      isCurrent: () => pipelineGeneration === initialRenderPipelineGeneration
+    });
+  }
   function buildLoadDocumentDeps() {
     return {
       // PE r2 item G — accept the per-document `hasMermaid` so the pipeline
       // skips mermaid init+render for docs without mermaid blocks. Undefined
       // passes through to the pipeline's `!== false` default, preserving the
       // pre-G behavior for any caller that doesn't carry the flag.
-      runInitialRenderPipeline: async (hasMermaid, skipFrameWait, renderId, hasHljs) => {
-        const pipelineGeneration = ++initialRenderPipelineGeneration;
-        await runInitialRenderPipeline({
-          getCurrentTheme,
-          applyTheme,
-          initMermaidWithTheme,
-          renderMath: renderMath2,
-          renderMermaid,
-          renderCodeBlocks,
-          deferPostReadyWork: deferPostReadyEnhancements,
-          scheduleLayoutReady: () => {
-            initialRenderPipelineCompleted = true;
-            scheduleLayoutReady(skipFrameWait === true);
-            postHostMessage({
-              type: "document-ready",
-              mathCount: document.querySelectorAll("[data-tex]").length
-            });
-          },
-          hasMermaid,
-          postPerfMark,
-          notifyPostReadyEnhancementsComplete: () => {
-            postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
-          },
-          isCurrent: () => pipelineGeneration === initialRenderPipelineGeneration
-        });
-      },
+      runInitialRenderPipeline: (hasMermaid, skipFrameWait, renderId, hasHljs, ownsCompleteFreshBody) => runLoadDocumentInitialRenderPipeline(
+        hasMermaid,
+        skipFrameWait,
+        renderId,
+        hasHljs,
+        ownsCompleteFreshBody === true
+      ),
       cancelCurrentMathController: () => {
         currentController?.cancel();
       },
@@ -3872,7 +3897,11 @@
       getCachedDocumentFragment: getCachedProcessedDocumentFragment,
       setCurrentDocumentCacheKey: setCurrentProcessedDocumentCacheKey,
       restoreCachedScrollPosition,
-      completeCachedDocumentLoad: (renderId, hasMermaid, hasHljs) => {
+      completeCachedDocumentLoad: (renderId, hasMermaid, hasHljs, skipFrameWait) => {
+        if (hasUnrenderedDocumentMath()) {
+          void runLoadDocumentInitialRenderPipeline(hasMermaid, skipFrameWait, renderId, hasHljs, false);
+          return;
+        }
         initialRenderPipelineCompleted = true;
         hasInitialLayoutSettled = true;
         postReadyEnhancementsCompleted = true;

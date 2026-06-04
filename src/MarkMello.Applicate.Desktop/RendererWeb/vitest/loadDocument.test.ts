@@ -59,7 +59,7 @@ describe("applyLoadDocument", () => {
       "mm-load-document-cache-hit",
       expect.objectContaining({ documentName: "doc.md" }));
     expect(deps.runInitialRenderPipeline).not.toHaveBeenCalled();
-    expect(deps.completeCachedDocumentLoad).toHaveBeenCalledWith(42, true, true);
+    expect(deps.completeCachedDocumentLoad).toHaveBeenCalledWith(42, true, true, undefined);
   });
 
   it("restores cached scroll before completing a cached document load", () => {
@@ -116,7 +116,7 @@ describe("applyLoadDocument", () => {
       skipFrameWait: true,
     }, deps);
 
-    expect(deps.runInitialRenderPipeline).toHaveBeenCalledWith(true, true, 7, true);
+    expect(deps.runInitialRenderPipeline).toHaveBeenCalledWith(true, true, 7, true, true);
   });
 
   it("scrolls to top after swap", () => {

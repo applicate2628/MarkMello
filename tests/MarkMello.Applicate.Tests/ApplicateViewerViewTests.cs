@@ -200,6 +200,10 @@ public sealed class ApplicateViewerViewTests
         Assert.Contains("DispatcherPriority.Background", updater, StringComparison.Ordinal);
         Assert.Contains("public void FlushPending()", updater, StringComparison.Ordinal);
         Assert.Contains("viewModel.UpdateDocumentHeadings(snapshot);", updater, StringComparison.Ordinal);
+        Assert.Contains("bool deferLargeUntilExplicitFlush", updater, StringComparison.Ordinal);
+        Assert.Contains("ScheduleApply(", updater, StringComparison.Ordinal);
+        Assert.Contains("deferLargeUntilExplicitFlush: !_documentRenderedForCurrentRequest", handler, StringComparison.Ordinal);
+        Assert.Contains("_documentRenderedForCurrentRequest = true;", rendered, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -264,10 +268,33 @@ public sealed class ApplicateViewerViewTests
     {
         var tocPanel = ReadTocPanelCodeBehind();
         var refresh = ExtractMethodBody(tocPanel, "private void HighlightActiveHeading(string? activeId, bool allowVirtualizedScroll)");
-        var virtualizedScrollStart = refresh.IndexOf("if (allowVirtualizedScroll", StringComparison.Ordinal);
+        var requestScroll = ExtractMethodBody(tocPanel, "private void RequestActiveHeadingScroll(string? activeId, bool allowVirtualizedScroll)");
+        var scrollRequestStart = refresh.IndexOf("RequestActiveHeadingScroll(activeId, allowVirtualizedScroll);", StringComparison.Ordinal);
 
-        Assert.True(virtualizedScrollStart >= 0, "HighlightActiveHeading should keep virtualized-row scroll fallback.");
-        Assert.DoesNotContain("return;", refresh[..virtualizedScrollStart], StringComparison.Ordinal);
+        Assert.True(scrollRequestStart >= 0, "HighlightActiveHeading should request active-row scrolling after refreshing rows.");
+        Assert.DoesNotContain("return;", refresh[..scrollRequestStart], StringComparison.Ordinal);
+        Assert.Contains("if (allowVirtualizedScroll", requestScroll, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TocPanelQueuesActiveHeadingScrollReplayUntilVisibleLayoutIsReady()
+    {
+        var tocPanel = ReadTocPanelCodeBehind();
+        var propertyChanged = ExtractMethodBody(tocPanel, "private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)");
+        var requestScroll = ExtractMethodBody(tocPanel, "private void RequestActiveHeadingScroll(string? activeId, bool allowVirtualizedScroll)");
+        var armReplay = ExtractMethodBody(tocPanel, "private void ArmActiveHeadingScrollReplay(string activeId)");
+        var clearReplay = ExtractMethodBody(tocPanel, "private void ClearActiveHeadingScrollReplay()");
+        var detach = ExtractMethodBody(tocPanel, "private void OnDetached(object? sender, VisualTreeAttachmentEventArgs e)");
+
+        Assert.Contains("nameof(MainWindowViewModel.IsTocVisible)", propertyChanged, StringComparison.Ordinal);
+        Assert.Contains("RequestActiveHeadingScroll(_viewModel.ActiveHeadingId, allowVirtualizedScroll: true);", propertyChanged, StringComparison.Ordinal);
+        Assert.Contains("!IsVisible", requestScroll, StringComparison.Ordinal);
+        Assert.Contains("!_scroll.IsAttachedToVisualTree()", requestScroll, StringComparison.Ordinal);
+        Assert.Contains("_scroll.Bounds.Height <= 0", requestScroll, StringComparison.Ordinal);
+        Assert.Contains("!_rowIndexById.TryGetValue(activeId, out var index)", requestScroll, StringComparison.Ordinal);
+        Assert.Contains("_scroll.LayoutUpdated += OnScrollLayoutUpdatedForActiveHeadingReplay;", armReplay, StringComparison.Ordinal);
+        Assert.Contains("_scroll.LayoutUpdated -= OnScrollLayoutUpdatedForActiveHeadingReplay;", clearReplay, StringComparison.Ordinal);
+        Assert.Contains("ClearActiveHeadingScrollReplay();", detach, StringComparison.Ordinal);
     }
 
     [Fact]

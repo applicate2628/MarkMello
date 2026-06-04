@@ -66,6 +66,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     private readonly ApplicateRendererFailureView _failureView;
     private readonly DispatcherTimer _resizeContentWidthTimer;
     private readonly ApplicateDeferredHeadingUpdater _headingUpdater = new();
+    private bool _documentRenderedForCurrentRequest;
     private WebViewHostScrollBarOverlay? _scrollBarOverlay;
     private MainWindowViewModel? _viewModel;
     private bool _isDraggingWidth;
@@ -263,6 +264,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         else
         {
             _isAttachedToHost = false;
+            _documentRenderedForCurrentRequest = false;
             _headingUpdater.Invalidate();
             // F-05 fix: hand consumer ownership of the scrollbar overlay
             // back to the inactive state when this view stops being the
@@ -561,6 +563,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         _sharedHost.View.HeadingsChanged -= OnHostHeadingsChanged;
         _sharedHost.View.ActiveHeadingChanged -= OnHostActiveHeadingChanged;
         _sharedHost.RendererFailed -= OnHostRendererFailed;
+        _documentRenderedForCurrentRequest = false;
         _headingUpdater.Invalidate();
         _hostEventsWired = false;
     }
@@ -578,7 +581,8 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         _headingUpdater.Apply(
             headings,
             viewModel,
-            () => _isAttachedToHost && ReferenceEquals(_viewModel, viewModel));
+            () => _isAttachedToHost && ReferenceEquals(_viewModel, viewModel),
+            deferLargeUntilExplicitFlush: !_documentRenderedForCurrentRequest);
     }
 
     private void OnHostActiveHeadingChanged(object? sender, string id)
@@ -617,6 +621,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         // committed the slot to IsVisible=true, and a stale failure overlay
         // beneath the now-visible WebView would block input.
         _failureView.IsVisible = false;
+        _documentRenderedForCurrentRequest = true;
         _headingUpdater.FlushPending();
 
         if (restoreProgress.HasValue

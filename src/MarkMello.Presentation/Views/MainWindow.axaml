@@ -497,7 +497,7 @@
              VerticalOffset="8"
              Topmost="False"
              ShouldUseOverlayLayer="False">
-        <views:AppMenuPanelView />
+        <!-- AppMenuPanelView hydrated lazily in code-behind (perf F1): MainWindow.ScheduleChromePopupHydration -->
       </Popup>
 
       <Popup Name="AppSettingsPanel"
@@ -508,7 +508,7 @@
              VerticalOffset="8"
              Topmost="False"
              ShouldUseOverlayLayer="False">
-        <views:AppSettingsPanelView />
+        <!-- AppSettingsPanelView hydrated lazily in code-behind (perf F1) -->
       </Popup>
 
       <Popup Name="AppAboutPanel"
@@ -519,7 +519,7 @@
              VerticalOffset="8"
              Topmost="False"
              ShouldUseOverlayLayer="False">
-        <views:AppAboutPanelView />
+        <!-- AppAboutPanelView hydrated lazily in code-behind (perf F1) -->
       </Popup>
 
       <Popup Name="AppUpdatesPanel"
@@ -530,7 +530,7 @@
              VerticalOffset="8"
              Topmost="False"
              ShouldUseOverlayLayer="False">
-        <views:AppUpdatesPanelView />
+        <!-- AppUpdatesPanelView hydrated lazily in code-behind (perf F1) -->
       </Popup>
 
       <Popup Name="SettingsPanel"
@@ -541,7 +541,7 @@
              VerticalOffset="8"
              Topmost="False"
              ShouldUseOverlayLayer="False">
-        <views:ReadingSettingsPanelView />
+        <!-- ReadingSettingsPanelView hydrated lazily in code-behind (perf F1) -->
       </Popup>
 
       <Border Classes="mm-status"

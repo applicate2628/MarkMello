@@ -26,7 +26,8 @@ internal sealed class ApplicateDeferredHeadingUpdater
     public void Apply(
         IReadOnlyList<DocumentHeading> headings,
         MainWindowViewModel viewModel,
-        Func<bool> canApply)
+        Func<bool> canApply,
+        bool deferLargeUntilExplicitFlush = true)
     {
         ArgumentNullException.ThrowIfNull(headings);
         ArgumentNullException.ThrowIfNull(viewModel);
@@ -42,8 +43,16 @@ internal sealed class ApplicateDeferredHeadingUpdater
             return;
         }
 
+        var snapshot = headings.ToArray();
+        if (!deferLargeUntilExplicitFlush && headings.Count >= LargeHeadingUpdateThreshold)
+        {
+            ClearPending();
+            ScheduleApply(version, snapshot, viewModel, canApply);
+            return;
+        }
+
         _pendingVersion = version;
-        _pendingHeadings = headings.ToArray();
+        _pendingHeadings = snapshot;
         _pendingViewModel = viewModel;
         _pendingCanApply = canApply;
     }
@@ -63,6 +72,15 @@ internal sealed class ApplicateDeferredHeadingUpdater
             return;
         }
 
+        ScheduleApply(version, snapshot, viewModel, canApply);
+    }
+
+    private void ScheduleApply(
+        int version,
+        IReadOnlyList<DocumentHeading> snapshot,
+        MainWindowViewModel viewModel,
+        Func<bool> canApply)
+    {
         _ = Task.Delay(LargeHeadingFlushDelay).ContinueWith(
             _ => Dispatcher.UIThread.Post(() =>
             {

@@ -248,6 +248,7 @@ let themeMermaidRefreshTimer: number | undefined;
 let themeAppliedAckGeneration = 0;
 let initialRenderPipelineGeneration = 0;
 let initialRenderPipelineCompleted = false;
+let firstPrefsBootstrapSuppressedByLoadGeneration: number | null = null;
 let postReadyEnhancementsCompleted = false;
 let currentController: MathReadinessController | null = null;
 const MERMAID_PER_DIAGRAM_TIMEOUT_MS = 3000;
@@ -798,6 +799,10 @@ function countFailedInSet(nodes: Iterable<HTMLElement>): number {
     if (node.dataset["mmMathRendered"] === "failed") count++;
   }
   return count;
+}
+
+function hasUnrenderedDocumentMath(): boolean {
+  return document.querySelector(".mm-document [data-tex]:not([data-mm-math-rendered])") !== null;
 }
 
 function renderMath(): MathReadinessController {
@@ -3101,7 +3106,13 @@ function flushPendingReadingPreferences(): void {
     }
   }
 
-  if (!hadHostPreferences && !initialRenderPipelineCompleted) {
+  const suppressFirstPrefsBootstrap =
+    !hadHostPreferences
+    && firstPrefsBootstrapSuppressedByLoadGeneration === initialRenderPipelineGeneration;
+  if (!hadHostPreferences) {
+    firstPrefsBootstrapSuppressedByLoadGeneration = null;
+  }
+  if (!hadHostPreferences && !suppressFirstPrefsBootstrap) {
     // First reading-preferences — the pipeline owns layout-ready; heavy
     // Mermaid/code-block enhancement is deferred behind the first readable
     // paint so large full-DOM documents do not block on off-screen work.
@@ -3270,6 +3281,7 @@ function handleHostMessage(raw: unknown): void {
     if (message.cacheKey === null) {
       // Host intentionally disabled renderer-document caching for a partial
       // progressive first load. The full key arrives with append-document.
+      loadMessage.cacheKey = null;
     } else if (typeof message.cacheKey === "string" && message.cacheKey.length > 0) {
       loadMessage.cacheKey = message.cacheKey;
     } else {
@@ -3533,6 +3545,7 @@ function resetModuleGlobalsForLoadDocument(): void {
   cancelProcessedDocumentCacheClone();
   cancelDeferredMinimapContentRefresh(false);
   initialRenderPipelineCompleted = false;
+  firstPrefsBootstrapSuppressedByLoadGeneration = null;
   postReadyEnhancementsCompleted = false;
   currentController?.cancel();
   currentController = null;
@@ -3630,40 +3643,57 @@ function ensureChromeNodes(useCachedDocumentState = false, options: EnsureChrome
   }
 }
 
+async function runLoadDocumentInitialRenderPipeline(
+  hasMermaid?: boolean,
+  skipFrameWait?: boolean,
+  renderId?: number,
+  hasHljs?: boolean,
+  suppressFirstPrefsBootstrap = false
+): Promise<void> {
+  const pipelineGeneration = ++initialRenderPipelineGeneration;
+  firstPrefsBootstrapSuppressedByLoadGeneration = suppressFirstPrefsBootstrap
+    ? pipelineGeneration
+    : null;
+  await runInitialRenderPipeline({
+    getCurrentTheme,
+    applyTheme,
+    initMermaidWithTheme,
+    renderMath,
+    renderMermaid,
+    renderCodeBlocks,
+    deferPostReadyWork: deferPostReadyEnhancements,
+    scheduleLayoutReady: () => {
+      initialRenderPipelineCompleted = true;
+      scheduleLayoutReady(skipFrameWait === true);
+      // Re-emit document-ready so the host's _hasLoadedDocument state
+      // machine restarts for the new document.
+      postHostMessage({
+        type: "document-ready",
+        mathCount: document.querySelectorAll("[data-tex]").length
+      });
+    },
+    hasMermaid,
+    postPerfMark,
+    notifyPostReadyEnhancementsComplete: () => {
+      postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
+    },
+    isCurrent: () => pipelineGeneration === initialRenderPipelineGeneration,
+  });
+}
+
 function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
   return {
     // PE r2 item G — accept the per-document `hasMermaid` so the pipeline
     // skips mermaid init+render for docs without mermaid blocks. Undefined
     // passes through to the pipeline's `!== false` default, preserving the
     // pre-G behavior for any caller that doesn't carry the flag.
-    runInitialRenderPipeline: async (hasMermaid, skipFrameWait, renderId, hasHljs) => {
-      const pipelineGeneration = ++initialRenderPipelineGeneration;
-      await runInitialRenderPipeline({
-        getCurrentTheme,
-        applyTheme,
-        initMermaidWithTheme,
-        renderMath,
-        renderMermaid,
-        renderCodeBlocks,
-        deferPostReadyWork: deferPostReadyEnhancements,
-        scheduleLayoutReady: () => {
-          initialRenderPipelineCompleted = true;
-          scheduleLayoutReady(skipFrameWait === true);
-          // Re-emit document-ready so the host's _hasLoadedDocument state
-          // machine restarts for the new document.
-          postHostMessage({
-            type: "document-ready",
-            mathCount: document.querySelectorAll("[data-tex]").length
-          });
-        },
+    runInitialRenderPipeline: (hasMermaid, skipFrameWait, renderId, hasHljs, ownsCompleteFreshBody) =>
+      runLoadDocumentInitialRenderPipeline(
         hasMermaid,
-        postPerfMark,
-        notifyPostReadyEnhancementsComplete: () => {
-          postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
-        },
-        isCurrent: () => pipelineGeneration === initialRenderPipelineGeneration,
-      });
-    },
+        skipFrameWait,
+        renderId,
+        hasHljs,
+        ownsCompleteFreshBody === true),
     cancelCurrentMathController: () => { currentController?.cancel(); },
     resetModuleGlobals: resetModuleGlobalsForLoadDocument,
     scrollWindowToTop: () => { window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior }); },
@@ -3687,7 +3717,12 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
     getCachedDocumentFragment: getCachedProcessedDocumentFragment,
     setCurrentDocumentCacheKey: setCurrentProcessedDocumentCacheKey,
     restoreCachedScrollPosition,
-    completeCachedDocumentLoad: (renderId, hasMermaid, hasHljs) => {
+    completeCachedDocumentLoad: (renderId, hasMermaid, hasHljs, skipFrameWait) => {
+      if (hasUnrenderedDocumentMath()) {
+        void runLoadDocumentInitialRenderPipeline(hasMermaid, skipFrameWait, renderId, hasHljs, false);
+        return;
+      }
+
       initialRenderPipelineCompleted = true;
       hasInitialLayoutSettled = true;
       postReadyEnhancementsCompleted = true;

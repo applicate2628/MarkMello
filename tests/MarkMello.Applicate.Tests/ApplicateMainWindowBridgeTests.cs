@@ -114,8 +114,7 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) }", gate, StringComparison.Ordinal);
         Assert.Contains("new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) }", gate, StringComparison.Ordinal);
         Assert.Contains("Opacity = 1;", gate, StringComparison.Ordinal);
-        Assert.Contains("? TimeSpan.Zero", gate, StringComparison.Ordinal);
-        Assert.Contains(": ApplicateMotion.ModeSwitchDuration(viewModel.ReadingPreferences);", gate, StringComparison.Ordinal);
+        Assert.Contains("var duration = TimeSpan.Zero;", gate, StringComparison.Ordinal);
         Assert.Contains("startupCover.Hide(duration);", gate, StringComparison.Ordinal);
         Assert.Contains("durationMs={duration.TotalMilliseconds:F0}", gate, StringComparison.Ordinal);
         Assert.Contains("startup-window-reveal-released", gate, StringComparison.Ordinal);

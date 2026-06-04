@@ -258,7 +258,29 @@ public sealed class MainWindowOverlayTests
 
         Assert.Contains("<Popup Name=\"AppUpdatesPanel\"", xaml, StringComparison.Ordinal);
         Assert.Contains("IsOpen=\"{Binding IsAppUpdatesOpen}\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("<views:AppUpdatesPanelView />", xaml, StringComparison.Ordinal);
+
+        // Perf F1 (2026-06-04): the dedicated AppUpdatesPanelView is hydrated
+        // lazily from code-behind (kept out of InitializeComponent so cold start
+        // is ~100 ms leaner) instead of being inflated inline in the markup. The
+        // "dedicated updates panel" contract is preserved — the Popup shell above
+        // plus the code-behind hydration map below wire AppUpdatesPanelView to the
+        // AppUpdatesPanel popup, so assert the wiring there rather than inline.
+        var codeBehind = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "MainWindow.axaml.cs"));
+
+        Assert.Contains(
+            "\"AppUpdatesPanel\" => new AppUpdatesPanelView()",
+            codeBehind,
+            StringComparison.Ordinal);
     }
 
     [Fact]

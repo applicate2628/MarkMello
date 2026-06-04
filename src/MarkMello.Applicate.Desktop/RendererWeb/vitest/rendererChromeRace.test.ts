@@ -147,6 +147,11 @@ describe("renderer chrome race handling", () => {
     return messages.findIndex((message: { type?: string } | null) => message?.type === type);
   }
 
+  function countRendererMarks(name: string): number {
+    const report = (window as unknown as { __mmPerfReport: () => { marks: Array<{ name: string }> } }).__mmPerfReport();
+    return report.marks.filter(mark => mark.name === name).length;
+  }
+
   async function advanceLayoutReadyTimer(): Promise<void> {
     await Promise.resolve();
     await Promise.resolve();
@@ -205,6 +210,39 @@ describe("renderer chrome race handling", () => {
 
     expect(handle!.hidden).toBe(true);
     expect(document.documentElement.dataset.mmChrome).toBe("off");
+  });
+
+  it("suppresses first-preferences bootstrap when the load pipeline owns a complete fresh body", () => {
+    load({
+      type: "load-document",
+      html: "<p><span class='math-inline' data-tex='x'>x</span></p>",
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 21,
+      cacheKey: "fresh-full",
+    });
+    load({ type: "reading-preferences", ...makePreferences(true) });
+    flushQueuedRafs();
+
+    expect(countRendererMarks("mm-render-math-start")).toBe(1);
+  });
+
+  it("does not suppress first-preferences bootstrap after a progressive initial load completes", async () => {
+    load({
+      type: "load-document",
+      html: "<p><span class='math-inline' data-tex='x'>x</span></p>",
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 22,
+      cacheKey: null,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    load({ type: "reading-preferences", ...makePreferences(true) });
+    flushQueuedRafs();
+
+    expect(countRendererMarks("mm-render-math-start")).toBe(2);
   });
 
   it("keeps detailed minimap content visible for heavy scrollable documents when mode is on", async () => {

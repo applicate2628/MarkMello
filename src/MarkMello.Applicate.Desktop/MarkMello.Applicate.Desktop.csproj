@@ -14,6 +14,12 @@
     <MarkMelloReleaseOwner Condition="'$(MarkMelloReleaseOwner)' == ''">applicate2628</MarkMelloReleaseOwner>
     <MarkMelloReleaseRepo Condition="'$(MarkMelloReleaseRepo)' == ''">MarkMello</MarkMelloReleaseRepo>
     <NoWarn>$(NoWarn);CA1822;CA1859</NoWarn>
+    <!-- Perf (audit 2026-06-04, finding F2): pre-JIT managed assemblies on the
+         RID-specific self-contained release publish to cut cold first-launch JIT
+         cost (front-loaded ~9x at DI/assembly in the cold capture). Publish-only:
+         a RID-less `dotnet build`/run ignores it, so the dev inner loop and
+         runtime behavior are unchanged. -->
+    <PublishReadyToRun>true</PublishReadyToRun>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Debug' and '$(MarkMelloDebugConsole)' == 'true'">
