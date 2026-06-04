@@ -8,6 +8,10 @@
              x:DataType="vm:MainWindowViewModel">
       <Border
               Classes="mm-settings-panel mm-popover-left mm-app-updates-panel"
+              Transitions="{x:Null}"
+              Opacity="1"
+              IsHitTestVisible="True"
+              RenderTransform="translate(0px,0px) scale(1)"
               Width="320"
               MinHeight="216">
         <Grid RowDefinitions="Auto,*">
@@ -110,85 +114,22 @@
                           Grid.Column="0"
                           HorizontalAlignment="Left"
                           MinWidth="112"
-                          Command="{Binding CheckForUpdatesCommand}">
-                    <Grid MinWidth="74">
-                      <TextBlock HorizontalAlignment="Center"
-                                 Text="{Binding CheckForUpdatesIdleLabel}"
-                                 Opacity="{Binding CheckForUpdatesIdleLabelOpacity}">
-                        <TextBlock.Transitions>
-                          <Transitions>
-                            <DoubleTransition Property="Opacity"
-                                              Duration="{DynamicResource MmDurationStandard}"
-                                              Easing="{DynamicResource MmEasingStandard}" />
-                          </Transitions>
-                        </TextBlock.Transitions>
-                      </TextBlock>
-                      <TextBlock HorizontalAlignment="Center"
-                                 Text="{Binding CheckForUpdatesBusyLabel}"
-                                 Opacity="{Binding CheckForUpdatesBusyLabelOpacity}">
-                        <TextBlock.Transitions>
-                          <Transitions>
-                            <DoubleTransition Property="Opacity"
-                                              Duration="{DynamicResource MmDurationStandard}"
-                                              Easing="{DynamicResource MmEasingStandard}" />
-                          </Transitions>
-                        </TextBlock.Transitions>
-                      </TextBlock>
-                    </Grid>
-                  </Button>
+                          Content="{Binding CheckForUpdatesLabel}"
+                          Command="{Binding CheckForUpdatesCommand}" />
                   <Button Classes="mm-dialog-primary"
                           Grid.Column="1"
                           HorizontalAlignment="Stretch"
                           Command="{Binding DownloadUpdateCommand}"
                           IsEnabled="{Binding CanDownloadAvailableUpdate}"
-                          Opacity="{Binding DownloadUpdateActionOpacity}">
-                    <Grid>
-                      <TextBlock HorizontalAlignment="Center"
-                                 Text="{Binding DownloadUpdateIdleLabel}"
-                                 Opacity="{Binding DownloadUpdateIdleLabelOpacity}">
-                        <TextBlock.Transitions>
-                          <Transitions>
-                            <DoubleTransition Property="Opacity"
-                                              Duration="{DynamicResource MmDurationStandard}"
-                                              Easing="{DynamicResource MmEasingStandard}" />
-                          </Transitions>
-                        </TextBlock.Transitions>
-                      </TextBlock>
-                      <TextBlock HorizontalAlignment="Center"
-                                 Text="{Binding DownloadUpdateBusyLabel}"
-                                 Opacity="{Binding DownloadUpdateBusyLabelOpacity}">
-                        <TextBlock.Transitions>
-                          <Transitions>
-                            <DoubleTransition Property="Opacity"
-                                              Duration="{DynamicResource MmDurationStandard}"
-                                              Easing="{DynamicResource MmEasingStandard}" />
-                          </Transitions>
-                        </TextBlock.Transitions>
-                      </TextBlock>
-                    </Grid>
-                    <Button.Transitions>
-                      <Transitions>
-                        <DoubleTransition Property="Opacity"
-                                          Duration="{DynamicResource MmDurationStandard}"
-                                          Easing="{DynamicResource MmEasingStandard}" />
-                      </Transitions>
-                    </Button.Transitions>
-                  </Button>
+                          Opacity="{Binding DownloadUpdateActionOpacity}"
+                          Content="{Binding DownloadUpdateLabel}" />
                   <Button Classes="mm-dialog-secondary"
                           Grid.Column="1"
                           HorizontalAlignment="Stretch"
                           Content="{Binding DownloadedUpdateActionLabel}"
                           Command="{Binding OpenDownloadedUpdateCommand}"
                           IsEnabled="{Binding CanOpenDownloadedUpdate}"
-                          Opacity="{Binding OpenDownloadedUpdateActionOpacity}">
-                    <Button.Transitions>
-                      <Transitions>
-                        <DoubleTransition Property="Opacity"
-                                          Duration="{DynamicResource MmDurationStandard}"
-                                          Easing="{DynamicResource MmEasingStandard}" />
-                      </Transitions>
-                    </Button.Transitions>
-                  </Button>
+                          Opacity="{Binding OpenDownloadedUpdateActionOpacity}" />
                 </Grid>
               </Border>
             </Grid>

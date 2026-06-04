@@ -27,6 +27,11 @@ public partial class MainWindow : Window
     private readonly ISettingsStore? _settings;
     private readonly Task _startupInitializationTask = Task.CompletedTask;
     private WindowPlacement? _lastNormalWindowPlacement;
+    private AppMenuPanelView? _appMenuPanelView;
+    private AppSettingsPanelView? _appSettingsPanelView;
+    private AppAboutPanelView? _appAboutPanelView;
+    private AppUpdatesPanelView? _appUpdatesPanelView;
+    private ContentControl? _appOverlayContentHost;
     private bool _allowConfirmedClose;
     private bool _isTopChromeHovering;
     private IDisposable? _windowStateSubscription;
@@ -165,9 +170,6 @@ public partial class MainWindow : Window
     private static readonly string[] ChromePopupNames =
     {
         "AppMenuPanel",
-        "AppSettingsPanel",
-        "AppAboutPanel",
-        "AppUpdatesPanel",
         "SettingsPanel",
     };
 
@@ -189,7 +191,18 @@ public partial class MainWindow : Window
 
     private void OnChromePopupOpened(object? sender, EventArgs e)
     {
-        if (sender is Popup popup && popup.Child is null)
+        if (sender is not Popup popup)
+        {
+            return;
+        }
+
+        if (popup.Name == "AppMenuPanel")
+        {
+            SyncAppOverlayPopupContent();
+            return;
+        }
+
+        if (popup.Child is null)
         {
             popup.Child = CreateChromePopupContent(popup.Name);
         }
@@ -202,9 +215,16 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (this.FindControl<Popup>(ChromePopupNames[index]) is { Child: null } popup)
+        if (this.FindControl<Popup>(ChromePopupNames[index]) is { } popup)
         {
-            popup.Child = CreateChromePopupContent(ChromePopupNames[index]);
+            if (popup.Name == "AppMenuPanel")
+            {
+                SyncAppOverlayPopupContent();
+            }
+            else if (popup.Child is null)
+            {
+                popup.Child = CreateChromePopupContent(ChromePopupNames[index]);
+            }
         }
 
         // One popup per Background tick keeps each tick small so the reveal fade is
@@ -215,14 +235,38 @@ public partial class MainWindow : Window
             DispatcherPriority.Background);
     }
 
-    private static Control? CreateChromePopupContent(string? popupName) => popupName switch
+    private static ReadingSettingsPanelView? CreateChromePopupContent(string? popupName) => popupName switch
     {
-        "AppMenuPanel" => new AppMenuPanelView(),
-        "AppSettingsPanel" => new AppSettingsPanelView(),
-        "AppAboutPanel" => new AppAboutPanelView(),
-        "AppUpdatesPanel" => new AppUpdatesPanelView(),
         "SettingsPanel" => new ReadingSettingsPanelView(),
         _ => null,
+    };
+
+    private void SyncAppOverlayPopupContent()
+    {
+        if (this.FindControl<Popup>("AppMenuPanel") is not { } popup)
+        {
+            return;
+        }
+
+        _appOverlayContentHost ??= new ContentControl();
+        if (!ReferenceEquals(popup.Child, _appOverlayContentHost))
+        {
+            popup.Child = _appOverlayContentHost;
+        }
+
+        var content = GetAppOverlayPopupContent();
+        if (!ReferenceEquals(_appOverlayContentHost.Content, content))
+        {
+            _appOverlayContentHost.Content = content;
+        }
+    }
+
+    private Control GetAppOverlayPopupContent() => _viewModel.ShellOverlay switch
+    {
+        ShellOverlayKind.AppSettings => _appSettingsPanelView ??= new AppSettingsPanelView(),
+        ShellOverlayKind.AppAbout => _appAboutPanelView ??= new AppAboutPanelView(),
+        ShellOverlayKind.AppUpdates => _appUpdatesPanelView ??= new AppUpdatesPanelView(),
+        _ => _appMenuPanelView ??= new AppMenuPanelView(),
     };
 
     private async Task InitializeStartupAsync()
@@ -518,6 +562,7 @@ public partial class MainWindow : Window
             or nameof(MainWindowViewModel.IsAppUpdatesOpen)
             or nameof(MainWindowViewModel.HasOpenOverlay))
         {
+            SyncAppOverlayPopupContent();
             SyncOverlayWindowClasses();
             return;
         }
@@ -827,37 +872,10 @@ public partial class MainWindow : Window
             return settingsTrigger is not null && IsWithinVisual(source, settingsTrigger);
         }
 
-        if (_viewModel.IsAppMenuOpen)
+        if (_viewModel.IsAppOverlayOpen)
         {
-            var appMenuPanel = this.FindControl<Control>("AppMenuPanel");
-            if (appMenuPanel is not null && IsWithinVisual(source, appMenuPanel))
-            {
-                return true;
-            }
-        }
-
-        if (_viewModel.IsAppSettingsOpen)
-        {
-            var appSettingsPanel = this.FindControl<Control>("AppSettingsPanel");
-            if (appSettingsPanel is not null && IsWithinVisual(source, appSettingsPanel))
-            {
-                return true;
-            }
-        }
-
-        if (_viewModel.IsAppAboutOpen)
-        {
-            var appAboutPanel = this.FindControl<Control>("AppAboutPanel");
-            if (appAboutPanel is not null && IsWithinVisual(source, appAboutPanel))
-            {
-                return true;
-            }
-        }
-
-        if (_viewModel.IsAppUpdatesOpen)
-        {
-            var appUpdatesPanel = this.FindControl<Control>("AppUpdatesPanel");
-            if (appUpdatesPanel is not null && IsWithinVisual(source, appUpdatesPanel))
+            var appOverlayPanel = this.FindControl<Control>("AppMenuPanel");
+            if (appOverlayPanel is not null && IsWithinVisual(source, appOverlayPanel))
             {
                 return true;
             }

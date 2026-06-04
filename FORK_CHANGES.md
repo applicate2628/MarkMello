@@ -77,6 +77,7 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - The Table of Contents (TOC) panel replays active-heading scrolling after the panel becomes visible and laid out, so the highlighted heading is brought into view even when Avalonia rows were virtualized.
 - Cached WebView documents that still contain unrendered TeX math now re-enter the initial render pipeline before reporting layout-ready instead of using the cached fast path too early.
 - Applicate release publishes enable .NET ReadyToRun precompilation for managed assemblies to reduce cold first-launch Just-In-Time compilation cost without changing Debug builds.
+- The Updates menu path now swaps between the menu and updates panel inside one stable popup, keeps update action buttons steady during busy states, and hides the top-level update notification while edit preview is active.
 - Russian settings labels and segmented controls were tightened so font options, line-height labels, slider values, and menu/settings text fit reliably, including Win10 font metrics.
 - Repo-local release instructions now document the Applicate release workflow, GitHub CLI checks, PowerShell-safe tag-peel commands, release-body editing, and asset hash verification.
 

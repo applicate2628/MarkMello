@@ -491,46 +491,13 @@
 
       <Popup Name="AppMenuPanel"
              ZIndex="1000"
-             IsOpen="{Binding IsAppMenuOpen}"
+             IsOpen="{Binding IsAppOverlayOpen}"
              PlacementTarget="{Binding #AppMenuTriggerButton}"
              Placement="BottomEdgeAlignedLeft"
              VerticalOffset="8"
              Topmost="False"
              ShouldUseOverlayLayer="False">
-        <!-- AppMenuPanelView hydrated lazily in code-behind (perf F1): MainWindow.ScheduleChromePopupHydration -->
-      </Popup>
-
-      <Popup Name="AppSettingsPanel"
-             ZIndex="1000"
-             IsOpen="{Binding IsAppSettingsOpen}"
-             PlacementTarget="{Binding #AppMenuTriggerButton}"
-             Placement="BottomEdgeAlignedLeft"
-             VerticalOffset="8"
-             Topmost="False"
-             ShouldUseOverlayLayer="False">
-        <!-- AppSettingsPanelView hydrated lazily in code-behind (perf F1) -->
-      </Popup>
-
-      <Popup Name="AppAboutPanel"
-             ZIndex="1000"
-             IsOpen="{Binding IsAppAboutOpen}"
-             PlacementTarget="{Binding #AppMenuTriggerButton}"
-             Placement="BottomEdgeAlignedLeft"
-             VerticalOffset="8"
-             Topmost="False"
-             ShouldUseOverlayLayer="False">
-        <!-- AppAboutPanelView hydrated lazily in code-behind (perf F1) -->
-      </Popup>
-
-      <Popup Name="AppUpdatesPanel"
-             ZIndex="1000"
-             IsOpen="{Binding IsAppUpdatesOpen}"
-             PlacementTarget="{Binding #AppMenuTriggerButton}"
-             Placement="BottomEdgeAlignedLeft"
-             VerticalOffset="8"
-             Topmost="False"
-             ShouldUseOverlayLayer="False">
-        <!-- AppUpdatesPanelView hydrated lazily in code-behind (perf F1) -->
+        <!-- App overlay child views hydrated lazily in code-behind (perf F1). -->
       </Popup>
 
       <Popup Name="SettingsPanel"

@@ -607,8 +607,6 @@ public sealed class MainWindowViewModelTests
         Assert.True(harness.ViewModel.IsCheckingForUpdates);
         Assert.True(harness.ViewModel.IsUpdateBusy);
         Assert.Equal(1.0, harness.ViewModel.UpdateBusyIndicatorOpacity);
-        Assert.Equal(0.0, harness.ViewModel.CheckForUpdatesIdleLabelOpacity);
-        Assert.Equal(1.0, harness.ViewModel.CheckForUpdatesBusyLabelOpacity);
         Assert.Equal("Checking...", harness.ViewModel.CheckForUpdatesBusyLabel);
         Assert.Equal("Checking...", harness.ViewModel.CheckForUpdatesLabel);
 
@@ -617,8 +615,32 @@ public sealed class MainWindowViewModelTests
 
         Assert.False(harness.ViewModel.IsUpdateBusy);
         Assert.Equal(0.0, harness.ViewModel.UpdateBusyIndicatorOpacity);
-        Assert.Equal(1.0, harness.ViewModel.CheckForUpdatesIdleLabelOpacity);
-        Assert.Equal(0.0, harness.ViewModel.CheckForUpdatesBusyLabelOpacity);
+        Assert.Equal("Check now", harness.ViewModel.CheckForUpdatesLabel);
+    }
+
+    [Fact]
+    public async Task RecheckingAfterAvailableUpdateKeepsDownloadActionVisibleWhileBusy()
+    {
+        var harness = CreateHarness();
+        var package = CreateUpdatePackage();
+        var pendingCheck = new TaskCompletionSource<UpdateCheckResult>();
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
+
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+        harness.UpdateService.NextCheckTask = pendingCheck.Task;
+        var checkTask = harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+
+        Assert.True(harness.ViewModel.IsCheckingForUpdates);
+        Assert.False(harness.ViewModel.CanDownloadAvailableUpdate);
+        Assert.Equal(1.0, harness.ViewModel.DownloadUpdateActionOpacity);
+        Assert.Equal(0.0, harness.ViewModel.OpenDownloadedUpdateActionOpacity);
+
+        pendingCheck.SetResult(new UpdateCheckResult.UpdateAvailable(package));
+        await checkTask;
+
+        Assert.False(harness.ViewModel.IsUpdateBusy);
+        Assert.True(harness.ViewModel.CanDownloadAvailableUpdate);
+        Assert.Equal(1.0, harness.ViewModel.DownloadUpdateActionOpacity);
     }
 
     [Fact]
@@ -638,6 +660,39 @@ public sealed class MainWindowViewModelTests
         harness.ViewModel.DismissUpdateNotificationCommand.Execute(null);
 
         Assert.False(harness.ViewModel.IsUpdateNotificationVisible);
+    }
+
+    [Fact]
+    public async Task UpdateNotificationHidesInEditModeAndReturnsInReadingMode()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "one.md");
+        var package = CreateUpdatePackage();
+        var changedProperties = new List<string?>();
+        harness.Loader.Sources[path] = CreateSource(path, "alpha beta");
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
+        harness.ViewModel.PropertyChanged += (_, args) => changedProperties.Add(args.PropertyName);
+
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+
+        Assert.True(harness.ViewModel.IsUpdateNotificationVisible);
+
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+
+        Assert.True(harness.ViewModel.IsEditMode);
+        Assert.False(harness.ViewModel.ShowsAppMenuControl);
+        Assert.False(harness.ViewModel.IsUpdateNotificationVisible);
+        Assert.Contains(nameof(MainWindowViewModel.IsUpdateNotificationVisible), changedProperties);
+
+        changedProperties.Clear();
+
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+
+        Assert.False(harness.ViewModel.IsEditMode);
+        Assert.True(harness.ViewModel.ShowsAppMenuControl);
+        Assert.True(harness.ViewModel.IsUpdateNotificationVisible);
+        Assert.Contains(nameof(MainWindowViewModel.IsUpdateNotificationVisible), changedProperties);
     }
 
     [Fact]
@@ -768,9 +823,6 @@ public sealed class MainWindowViewModelTests
         Assert.Equal(1.0, harness.ViewModel.UpdateBusyIndicatorOpacity);
         Assert.Equal(1.0, harness.ViewModel.DownloadUpdateActionOpacity);
         Assert.Equal(0.0, harness.ViewModel.OpenDownloadedUpdateActionOpacity);
-        Assert.Equal(0.0, harness.ViewModel.DownloadUpdateIdleLabelOpacity);
-        Assert.Equal(1.0, harness.ViewModel.DownloadUpdateBusyLabelOpacity);
-        Assert.Equal("Downloading...", harness.ViewModel.DownloadUpdateBusyLabel);
         Assert.Equal("Downloading...", harness.ViewModel.DownloadUpdateLabel);
 
         pendingDownload.SetResult(new UpdateDownloadResult.Success(package, downloadedPath));

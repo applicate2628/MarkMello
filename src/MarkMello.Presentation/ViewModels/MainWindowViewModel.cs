@@ -170,6 +170,7 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsAppOverlayOpen))]
     [NotifyPropertyChangedFor(nameof(HasOpenOverlay))]
     [NotifyPropertyChangedFor(nameof(ShowsDirtySaveButton))]
+    [NotifyPropertyChangedFor(nameof(IsUpdateNotificationVisible))]
     private bool _isEditMode;
 
     [ObservableProperty]
@@ -335,20 +336,19 @@ public partial class MainWindowViewModel : ObservableObject
 
     public double UpdateBusyIndicatorOpacity => IsUpdateBusy ? 1.0 : 0.0;
 
-    public double CheckForUpdatesIdleLabelOpacity => IsCheckingForUpdates ? 0.0 : 1.0;
+    public double DownloadUpdateActionOpacity
+        => _availableUpdatePackage is not null && string.IsNullOrWhiteSpace(DownloadedUpdatePath)
+            ? 1.0
+            : 0.0;
 
-    public double CheckForUpdatesBusyLabelOpacity => IsCheckingForUpdates ? 1.0 : 0.0;
-
-    public double DownloadUpdateIdleLabelOpacity => IsDownloadingUpdate ? 0.0 : 1.0;
-
-    public double DownloadUpdateBusyLabelOpacity => IsDownloadingUpdate ? 1.0 : 0.0;
-
-    public double DownloadUpdateActionOpacity => CanDownloadAvailableUpdate || IsDownloadingUpdate ? 1.0 : 0.0;
-
-    public double OpenDownloadedUpdateActionOpacity => CanOpenDownloadedUpdate ? 1.0 : 0.0;
+    public double OpenDownloadedUpdateActionOpacity
+        => _availableUpdatePackage is not null && !string.IsNullOrWhiteSpace(DownloadedUpdatePath)
+            ? 1.0
+            : 0.0;
 
     public bool IsUpdateNotificationVisible
-        => !_isUpdateNotificationDismissed
+        => ShowsAppMenuControl
+           && !_isUpdateNotificationDismissed
            && _updateStatus is UpdateStatusSnapshot.UpdateAvailableState or UpdateStatusSnapshot.DownloadReadyState;
 
     public bool IsAlwaysOnTopDisabled
@@ -1061,8 +1061,6 @@ public partial class MainWindowViewModel : ObservableObject
     {
         IsCheckingForUpdates = true;
         IsDownloadingUpdate = false;
-        _availableUpdatePackage = null;
-        DownloadedUpdatePath = null;
         SetUpdateStatus(new UpdateStatusSnapshot.CheckingState());
         UpdateCommandStates();
 
@@ -1072,16 +1070,22 @@ public partial class MainWindowViewModel : ObservableObject
             switch (result)
             {
                 case UpdateCheckResult.SourceNotConfigured:
+                    _availableUpdatePackage = null;
+                    DownloadedUpdatePath = null;
                     SetUpdateStatus(new UpdateStatusSnapshot.SourceNotConfiguredState());
                     break;
 
                 case UpdateCheckResult.UnsupportedPlatform unsupportedPlatform:
+                    _availableUpdatePackage = null;
+                    DownloadedUpdatePath = null;
                     SetUpdateStatus(new UpdateStatusSnapshot.UnsupportedPlatformState(
                         unsupportedPlatform.PlatformName,
                         unsupportedPlatform.ArchitectureName));
                     break;
 
                 case UpdateCheckResult.UpToDate upToDate:
+                    _availableUpdatePackage = null;
+                    DownloadedUpdatePath = null;
                     SetUpdateStatus(new UpdateStatusSnapshot.UpToDateState(
                         upToDate.CurrentVersion,
                         upToDate.LatestVersion));
@@ -1089,10 +1093,13 @@ public partial class MainWindowViewModel : ObservableObject
 
                 case UpdateCheckResult.UpdateAvailable updateAvailable:
                     _availableUpdatePackage = updateAvailable.Package;
+                    DownloadedUpdatePath = null;
                     SetUpdateStatus(new UpdateStatusSnapshot.UpdateAvailableState(updateAvailable.Package));
                     break;
 
                 case UpdateCheckResult.Failed failed:
+                    _availableUpdatePackage = null;
+                    DownloadedUpdatePath = null;
                     SetUpdateStatus(new UpdateStatusSnapshot.CheckFailedState(failed.Message));
                     break;
             }
@@ -2187,10 +2194,6 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(CanOpenDownloadedUpdate));
         OnPropertyChanged(nameof(IsUpdateBusy));
         OnPropertyChanged(nameof(UpdateBusyIndicatorOpacity));
-        OnPropertyChanged(nameof(CheckForUpdatesIdleLabelOpacity));
-        OnPropertyChanged(nameof(CheckForUpdatesBusyLabelOpacity));
-        OnPropertyChanged(nameof(DownloadUpdateIdleLabelOpacity));
-        OnPropertyChanged(nameof(DownloadUpdateBusyLabelOpacity));
         OnPropertyChanged(nameof(DownloadUpdateActionOpacity));
         OnPropertyChanged(nameof(OpenDownloadedUpdateActionOpacity));
         OnPropertyChanged(nameof(CheckForUpdatesLabel));

@@ -19,9 +19,6 @@ public sealed class MainWindowOverlayTests
 
     [Theory]
     [InlineData("AppMenuPanel")]
-    [InlineData("AppSettingsPanel")]
-    [InlineData("AppAboutPanel")]
-    [InlineData("AppUpdatesPanel")]
     [InlineData("SettingsPanel")]
     public void MainOverlaysUseNonTopmostPlatformPopupWindows(string panelName)
     {
@@ -225,12 +222,17 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("x:Name=\"UpdateStatusContent\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("IsIndeterminate=\"{Binding IsUpdateBusy}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Opacity=\"{Binding UpdateBusyIndicatorOpacity}\"", appUpdates, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding CheckForUpdatesIdleLabel}\"", appUpdates, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding CheckForUpdatesBusyLabel}\"", appUpdates, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding DownloadUpdateIdleLabel}\"", appUpdates, StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding DownloadUpdateBusyLabel}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Content=\"{Binding CheckForUpdatesLabel}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Content=\"{Binding DownloadUpdateLabel}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Opacity=\"1\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("IsHitTestVisible=\"True\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("RenderTransform=\"translate(0px,0px) scale(1)\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Transitions=\"{x:Null}\"", appUpdates, StringComparison.Ordinal);
+        Assert.DoesNotContain("CheckForUpdatesIdleLabelOpacity", appUpdates, StringComparison.Ordinal);
+        Assert.DoesNotContain("CheckForUpdatesBusyLabelOpacity", appUpdates, StringComparison.Ordinal);
+        Assert.DoesNotContain("DownloadUpdateIdleLabelOpacity", appUpdates, StringComparison.Ordinal);
+        Assert.DoesNotContain("DownloadUpdateBusyLabelOpacity", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("TransformOperationsTransition Property=\"RenderTransform\"", appUpdates, StringComparison.Ordinal);
-        Assert.DoesNotContain("RenderTransform=\"translate", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("Height=\"300\"", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("RowDefinitions=\"*,Auto,104\"", appUpdates, StringComparison.Ordinal);
         Assert.DoesNotContain("ItemsSource=\"{Binding ThemeOptions}\"", appSettings, StringComparison.Ordinal);
@@ -242,7 +244,7 @@ public sealed class MainWindowOverlayTests
     }
 
     [Fact]
-    public void MainWindowContainsDedicatedUpdatesPanel()
+    public void MainWindowUsesSharedAppOverlayPopupForUpdatesPanel()
     {
         var xaml = File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,
@@ -256,15 +258,17 @@ public sealed class MainWindowOverlayTests
             "Views",
             "MainWindow.axaml"));
 
-        Assert.Contains("<Popup Name=\"AppUpdatesPanel\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("IsOpen=\"{Binding IsAppUpdatesOpen}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("<Popup Name=\"AppMenuPanel\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("IsOpen=\"{Binding IsAppOverlayOpen}\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("<Popup Name=\"AppUpdatesPanel\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("<Popup Name=\"AppSettingsPanel\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("<Popup Name=\"AppAboutPanel\"", xaml, StringComparison.Ordinal);
 
-        // Perf F1 (2026-06-04): the dedicated AppUpdatesPanelView is hydrated
-        // lazily from code-behind (kept out of InitializeComponent so cold start
-        // is ~100 ms leaner) instead of being inflated inline in the markup. The
-        // "dedicated updates panel" contract is preserved — the Popup shell above
-        // plus the code-behind hydration map below wire AppUpdatesPanelView to the
-        // AppUpdatesPanel popup, so assert the wiring there rather than inline.
+        // Perf F1 (2026-06-04): app overlay child views are hydrated lazily from
+        // code-behind (kept out of InitializeComponent so cold start stays lean).
+        // Updates still has a dedicated view, but it is swapped inside the shared
+        // AppMenuPanel popup host so menu -> updates does not close one Popup and
+        // open another.
         var codeBehind = File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,
             "..",
@@ -277,8 +281,9 @@ public sealed class MainWindowOverlayTests
             "Views",
             "MainWindow.axaml.cs"));
 
+        Assert.Contains("SyncAppOverlayPopupContent", codeBehind, StringComparison.Ordinal);
         Assert.Contains(
-            "\"AppUpdatesPanel\" => new AppUpdatesPanelView()",
+            "ShellOverlayKind.AppUpdates => _appUpdatesPanelView ??= new AppUpdatesPanelView()",
             codeBehind,
             StringComparison.Ordinal);
     }
