@@ -346,8 +346,11 @@ public partial class MainWindowViewModel : ObservableObject
             ? 1.0
             : 0.0;
 
+    public bool CanShowTopLevelUpdateNotification
+        => State == ViewState.NoDocument && ShowsAppMenuControl;
+
     public bool IsUpdateNotificationVisible
-        => ShowsAppMenuControl
+        => CanShowTopLevelUpdateNotification
            && !_isUpdateNotificationDismissed
            && _updateStatus is UpdateStatusSnapshot.UpdateAvailableState or UpdateStatusSnapshot.DownloadReadyState;
 
@@ -1305,6 +1308,8 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(HasDocumentTitle));
         OnPropertyChanged(nameof(ShowsReadingStatus));
         OnPropertyChanged(nameof(ShowsEditToggle));
+        OnPropertyChanged(nameof(CanShowTopLevelUpdateNotification));
+        OnPropertyChanged(nameof(IsUpdateNotificationVisible));
         // IsTocVisible depends on IsViewer (= State == Viewing); refresh
         // the composite predicate when State transitions.
         OnPropertyChanged(nameof(IsTocVisible));
@@ -1325,6 +1330,7 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(ShowsReadEyeIcon));
         OnPropertyChanged(nameof(ShowsReadingStatus));
         OnPropertyChanged(nameof(ShowsAppMenuControl));
+        OnPropertyChanged(nameof(CanShowTopLevelUpdateNotification));
         OnPropertyChanged(nameof(IsAppMenuOpen));
         OnPropertyChanged(nameof(IsAppSettingsOpen));
         OnPropertyChanged(nameof(IsAppAboutOpen));

@@ -663,7 +663,7 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public async Task UpdateNotificationHidesInEditModeAndReturnsInReadingMode()
+    public async Task UpdateNotificationStaysOffDocumentSurfacesAndReturnsOnlyOnWelcome()
     {
         var harness = CreateHarness();
         var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "one.md");
@@ -673,15 +673,16 @@ public sealed class MainWindowViewModelTests
         harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
         harness.ViewModel.PropertyChanged += (_, args) => changedProperties.Add(args.PropertyName);
 
-        await harness.ViewModel.OpenPathAsync(path);
         await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
 
         Assert.True(harness.ViewModel.IsUpdateNotificationVisible);
+        Assert.True(harness.ViewModel.CanShowTopLevelUpdateNotification);
 
-        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        await harness.ViewModel.OpenPathAsync(path);
 
-        Assert.True(harness.ViewModel.IsEditMode);
-        Assert.False(harness.ViewModel.ShowsAppMenuControl);
+        Assert.True(harness.ViewModel.IsViewer);
+        Assert.False(harness.ViewModel.IsEditMode);
+        Assert.False(harness.ViewModel.CanShowTopLevelUpdateNotification);
         Assert.False(harness.ViewModel.IsUpdateNotificationVisible);
         Assert.Contains(nameof(MainWindowViewModel.IsUpdateNotificationVisible), changedProperties);
 
@@ -689,8 +690,25 @@ public sealed class MainWindowViewModelTests
 
         await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
 
+        Assert.True(harness.ViewModel.IsEditMode);
+        Assert.False(harness.ViewModel.ShowsAppMenuControl);
+        Assert.False(harness.ViewModel.CanShowTopLevelUpdateNotification);
+        Assert.False(harness.ViewModel.IsUpdateNotificationVisible);
+
+        changedProperties.Clear();
+
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+
         Assert.False(harness.ViewModel.IsEditMode);
         Assert.True(harness.ViewModel.ShowsAppMenuControl);
+        Assert.True(harness.ViewModel.IsViewer);
+        Assert.False(harness.ViewModel.CanShowTopLevelUpdateNotification);
+        Assert.False(harness.ViewModel.IsUpdateNotificationVisible);
+
+        await harness.ViewModel.CloseFileCommand.ExecuteAsync(null);
+
+        Assert.True(harness.ViewModel.IsWelcome);
+        Assert.True(harness.ViewModel.CanShowTopLevelUpdateNotification);
         Assert.True(harness.ViewModel.IsUpdateNotificationVisible);
         Assert.Contains(nameof(MainWindowViewModel.IsUpdateNotificationVisible), changedProperties);
     }
