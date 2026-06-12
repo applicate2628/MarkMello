@@ -190,8 +190,9 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
     {
         var level = System.Math.Clamp(heading.Level, 1, 6);
         var text = GetPlainText(heading.Inlines);
+        var inlines = GetHeadingInlines(heading.Inlines);
         var anchor = MarkdownHeadingAnchorSlugger.CreateAnchor(heading.Inlines);
-        context.Headings.Add(new ApplicateHtmlHeading(level, text, anchor, blockIndex));
+        context.Headings.Add(new ApplicateHtmlHeading(level, text, anchor, blockIndex, inlines));
         context.PlainText.AppendLine(text);
 
         context.Html.Append("<h").Append(level)
@@ -574,6 +575,71 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         }
 
         return builder.ToString();
+    }
+
+    private static IReadOnlyList<ApplicateHtmlHeadingInline> GetHeadingInlines(IReadOnlyList<MarkdownInline> inlines)
+    {
+        var segments = new List<ApplicateHtmlHeadingInline>();
+        AppendHeadingInlines(segments, inlines);
+        return segments;
+    }
+
+    private static void AppendHeadingInlines(List<ApplicateHtmlHeadingInline> segments, IReadOnlyList<MarkdownInline> inlines)
+    {
+        foreach (var inline in inlines)
+        {
+            AppendHeadingInline(segments, inline);
+        }
+    }
+
+    private static void AppendHeadingInline(List<ApplicateHtmlHeadingInline> segments, MarkdownInline inline)
+    {
+        switch (inline)
+        {
+            case MarkdownTextInline text:
+                AddHeadingSegment(segments, ApplicateHtmlHeadingInlineKind.Text, text.Text);
+                break;
+            case MarkdownStrongInline strong:
+                AppendHeadingInlines(segments, strong.Inlines);
+                break;
+            case MarkdownEmphasisInline emphasis:
+                AppendHeadingInlines(segments, emphasis.Inlines);
+                break;
+            case MarkdownCodeInline code:
+                AddHeadingSegment(segments, ApplicateHtmlHeadingInlineKind.Text, code.Code);
+                break;
+            case MarkdownImageInline image:
+                AddHeadingSegment(segments, ApplicateHtmlHeadingInlineKind.Text, image.AltText ?? image.Title ?? "image");
+                break;
+            case MarkdownLinkInline link:
+                AppendHeadingInlines(segments, link.Inlines);
+                break;
+            case MarkdownLineBreakInline:
+                AddHeadingSegment(segments, ApplicateHtmlHeadingInlineKind.Text, " ");
+                break;
+            case ApplicateMathInline math:
+                AddHeadingSegment(segments, ApplicateHtmlHeadingInlineKind.Math, math.Tex);
+                break;
+        }
+    }
+
+    private static void AddHeadingSegment(
+        List<ApplicateHtmlHeadingInline> segments,
+        ApplicateHtmlHeadingInlineKind kind,
+        string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        if (segments.Count > 0 && segments[^1].Kind == kind)
+        {
+            segments[^1] = segments[^1] with { Text = segments[^1].Text + text };
+            return;
+        }
+
+        segments.Add(new ApplicateHtmlHeadingInline(kind, text));
     }
 
     private static void AppendPlainText(StringBuilder builder, MarkdownInline inline)

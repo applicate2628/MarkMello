@@ -10,7 +10,27 @@ public sealed record ApplicateHtmlHeading(
     int Level,
     string Text,
     string Anchor,
-    int BlockIndex);
+    int BlockIndex,
+    IReadOnlyList<ApplicateHtmlHeadingInline> Inlines)
+{
+    public ApplicateHtmlHeading(int Level, string Text, string Anchor, int BlockIndex)
+        : this(Level, Text, Anchor, BlockIndex, CreatePlainFallbackInlines(Text))
+    {
+    }
+
+    private static IReadOnlyList<ApplicateHtmlHeadingInline> CreatePlainFallbackInlines(string text)
+        => string.IsNullOrEmpty(text)
+            ? []
+            : [new ApplicateHtmlHeadingInline(ApplicateHtmlHeadingInlineKind.Text, text)];
+}
+
+public enum ApplicateHtmlHeadingInlineKind
+{
+    Text,
+    Math,
+}
+
+public sealed record ApplicateHtmlHeadingInline(ApplicateHtmlHeadingInlineKind Kind, string Text);
 
 public sealed record ApplicateHtmlBlockMarker(
     int BlockIndex,

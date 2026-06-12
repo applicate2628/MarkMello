@@ -1,8 +1,10 @@
 using System.Reflection;
 using System.Threading;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Media;
+using CSharpMath.Avalonia;
 using MarkMello.Applicate.Desktop;
 using MarkMello.Applicate.Desktop.Views;
 using MarkMello.Presentation.ViewModels;
@@ -332,6 +334,43 @@ public sealed class ApplicateViewerViewTests
             Assert.Same(Brushes.LightYellow, first.Background);
             Assert.Same(Brushes.Transparent, second.Background);
             Assert.Same(Brushes.Transparent, third.Background);
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public void TocPanelRendersMathHeadingSegmentsWithMathView()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var panel = new ApplicateTocPanel();
+            var buildHeadingRow = typeof(ApplicateTocPanel).GetMethod(
+                "BuildHeadingRow",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+
+            var row = Assert.IsType<Border>(buildHeadingRow?.Invoke(panel, [
+                new DocumentHeading(
+                    "wave",
+                    1,
+                    "Wave Z_{0} ports",
+                    0,
+                    [
+                        new DocumentHeadingInline(DocumentHeadingInlineKind.Text, "Wave "),
+                        new DocumentHeadingInline(DocumentHeadingInlineKind.Math, "Z_{0}"),
+                        new DocumentHeadingInline(DocumentHeadingInlineKind.Text, " ports"),
+                    ]),
+            ]));
+
+            var grid = Assert.IsType<Grid>(row.Child);
+            var headingContent = Assert.IsType<Panel>(grid.Children[1]);
+            Assert.Contains(headingContent.Children, child => child is TextBlock { Text: "Wave " });
+            var mathView = Assert.Single(headingContent.Children.OfType<MathView>());
+            Assert.Equal("Z_{0}", mathView.LaTeX);
+            row.Measure(new Size(300, 40));
+            row.Arrange(new Rect(0, 0, 300, 40));
+            Assert.True(mathView.Bounds.Width > 0);
+            Assert.True(mathView.Bounds.Height > 0);
+            Assert.Contains(headingContent.Children, child => child is TextBlock { Text: " ports" });
         }, CancellationToken.None);
     }
 

@@ -457,6 +457,27 @@ describe("renderer document cache", () => {
     }));
   });
 
+  it("posts heading inline segments for math spans", async () => {
+    const { load, messages } = await loadRendererWithMessages();
+    const html = "<h1 id='wave'>Wave <span class='math-inline' data-tex='Z_{0}'></span> ports</h1>";
+
+    load({ type: "load-document", html, documentName: "math-heading.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "headings-updated",
+      headings: [expect.objectContaining({
+        id: "wave",
+        text: "Wave Z_{0} ports",
+        segments: [
+          { kind: "text", text: "Wave " },
+          { kind: "math", text: "Z_{0}" },
+          { kind: "text", text: " ports" },
+        ],
+      })],
+    }));
+  });
+
   it("leaves the current document in place and asks the host for fallback html when a key restore misses", async () => {
     const { load, messages } = await loadRendererWithMessages();
     const currentHtml = "<h1 id='current'>Current</h1>";

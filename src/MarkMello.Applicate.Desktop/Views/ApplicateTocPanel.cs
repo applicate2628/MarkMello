@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Linq;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -13,6 +14,8 @@ using Avalonia.Media;
 using Avalonia.Styling;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using CSharpMath.Avalonia;
+using MarkMello.Applicate.Desktop.Math;
 using MarkMello.Presentation.ViewModels;
 
 namespace MarkMello.Applicate.Desktop.Views;
@@ -332,16 +335,7 @@ public sealed class ApplicateTocPanel : UserControl
             Fill = _textFaintBrush,
         };
 
-        var text = new TextBlock
-        {
-            Text = string.IsNullOrWhiteSpace(heading.Text) ? heading.Id : heading.Text,
-            FontSize = heading.Level <= 1 ? 13 : 12,
-            FontWeight = heading.Level <= 1 ? FontWeight.SemiBold : FontWeight.Normal,
-            VerticalAlignment = VerticalAlignment.Center,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            TextWrapping = TextWrapping.NoWrap,
-            Foreground = _textBrush,
-        };
+        var content = BuildHeadingContent(heading);
 
         var contentGrid = new Grid
         {
@@ -349,9 +343,9 @@ public sealed class ApplicateTocPanel : UserControl
             Margin = new Thickness(8 + heading.Indent, 0, 8, 0),
         };
         Grid.SetColumn(levelDot, 0);
-        Grid.SetColumn(text, 1);
+        Grid.SetColumn(content, 1);
         contentGrid.Children.Add(levelDot);
-        contentGrid.Children.Add(text);
+        contentGrid.Children.Add(content);
 
         var row = new Border
         {
@@ -373,6 +367,73 @@ public sealed class ApplicateTocPanel : UserControl
 
         return row;
     }
+
+    private Control BuildHeadingContent(DocumentHeading heading)
+    {
+        if (!HasMathContent(heading))
+        {
+            return CreateHeadingTextBlock(heading, null, trim: true);
+        }
+
+        var panel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        foreach (var inline in heading.Inlines)
+        {
+            switch (inline.Kind)
+            {
+                case DocumentHeadingInlineKind.Text:
+                    if (!string.IsNullOrEmpty(inline.Text))
+                    {
+                        panel.Children.Add(CreateHeadingTextBlock(heading, inline.Text, trim: false));
+                    }
+                    break;
+                case DocumentHeadingInlineKind.Math:
+                    if (!string.IsNullOrWhiteSpace(inline.Text))
+                    {
+                        panel.Children.Add(CreateHeadingMathView(heading, inline.Text));
+                    }
+                    break;
+            }
+        }
+
+        if (panel.Children.Count == 0)
+        {
+            panel.Children.Add(CreateHeadingTextBlock(heading, null, trim: false));
+        }
+
+        return panel;
+    }
+
+    private static bool HasMathContent(DocumentHeading heading)
+        => heading.Inlines.Any(inline => inline.Kind == DocumentHeadingInlineKind.Math);
+
+    private TextBlock CreateHeadingTextBlock(DocumentHeading heading, string? text, bool trim)
+        => new()
+        {
+            Text = text ?? (string.IsNullOrWhiteSpace(heading.Text) ? heading.Id : heading.Text),
+            FontSize = heading.Level <= 1 ? 13 : 12,
+            FontWeight = heading.Level <= 1 ? FontWeight.SemiBold : FontWeight.Normal,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = trim ? TextTrimming.CharacterEllipsis : TextTrimming.None,
+            TextWrapping = TextWrapping.NoWrap,
+            Foreground = _textBrush,
+        };
+
+    private MathView CreateHeadingMathView(DocumentHeading heading, string tex)
+        => new()
+        {
+            LaTeX = ApplicateMarkdownDocumentRenderer.NormalizeTexForRenderer(tex),
+            FontSize = heading.Level <= 1 ? 13 : 12,
+            TextColor = BrushColor(_textBrush, Colors.Black),
+            ErrorColor = Colors.OrangeRed,
+            DisplayErrorInline = true,
+            Margin = new Thickness(1, 0, 1, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
 
     private void OnRowDetached(object? sender, VisualTreeAttachmentEventArgs e)
     {
@@ -552,21 +613,48 @@ public sealed class ApplicateTocPanel : UserControl
             row.Background = Brushes.Transparent;
         }
 
+        var contentBrush = isActive ? _accentBrush : _textBrush;
+        var fontWeight = isActive || heading.Level <= 1
+            ? FontWeight.SemiBold
+            : FontWeight.Normal;
+
         foreach (var child in grid.Children)
         {
-            switch (child)
+            if (child is Ellipse ellipse)
             {
-                case TextBlock textBlock:
-                    textBlock.Foreground = isActive ? _accentBrush : _textBrush;
-                    textBlock.FontWeight = isActive || heading.Level <= 1
-                        ? FontWeight.SemiBold
-                        : FontWeight.Normal;
-                    break;
-                case Ellipse ellipse:
-                    ellipse.Fill = isActive ? _accentBrush : _textFaintBrush;
-                    break;
+                ellipse.Fill = isActive ? _accentBrush : _textFaintBrush;
+                continue;
             }
+
+            ApplyHeadingContentVisuals(child, contentBrush, fontWeight);
         }
+    }
+
+    private static void ApplyHeadingContentVisuals(Control control, IBrush brush, FontWeight fontWeight)
+    {
+        switch (control)
+        {
+            case TextBlock textBlock:
+                textBlock.Foreground = brush;
+                textBlock.FontWeight = fontWeight;
+                break;
+            case MathView mathView:
+                mathView.TextColor = BrushColor(brush, Colors.Black);
+                break;
+            case Panel panel:
+                foreach (var child in panel.Children)
+                {
+                    ApplyHeadingContentVisuals(child, brush, fontWeight);
+                }
+                break;
+        }
+    }
+
+    private static Color BrushColor(IBrush brush, Color fallback)
+    {
+        return brush is ISolidColorBrush solid
+            ? solid.Color
+            : fallback;
     }
 
     private void ScrollRowIntoView(Border row)

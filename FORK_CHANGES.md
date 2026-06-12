@@ -79,6 +79,8 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - Applicate release publishes enable .NET ReadyToRun precompilation for managed assemblies to reduce cold first-launch Just-In-Time compilation cost without changing Debug builds.
 - The Updates menu path now swaps between the menu and updates panel inside one stable popup, keeps update action buttons steady during busy states, and keeps the top-level update notification on the welcome shell instead of document renderer surfaces.
 - The main window shell now draws a subtle one-pixel frame border, keeping the custom chrome visually bounded on light backgrounds.
+- Table of Contents headings now preserve inline TeX formulas through the renderer payload/cache and host TOC row, so formulas in Markdown headings render in the outline instead of disappearing into blank gaps.
+- Applicate scrollbar theme styles now load through Avalonia `StyleInclude`, preventing startup crashes when the style-only resource is loaded from a Debug or published build.
 - Russian settings labels and segmented controls were tightened so font options, line-height labels, slider values, and menu/settings text fit reliably, including Win10 font metrics.
 - Repo-local release instructions now document the Applicate release workflow, GitHub CLI checks, PowerShell-safe tag-peel commands, release-body editing, and asset hash verification.
 

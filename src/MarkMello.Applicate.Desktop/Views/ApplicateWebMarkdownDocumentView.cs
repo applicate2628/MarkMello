@@ -19,6 +19,7 @@ using MarkMello.Applicate.Desktop.Views.Minimap;
 using MarkMello.Domain;
 using MarkMello.Presentation;
 using MarkMello.Presentation.Services;
+using MarkMello.Presentation.ViewModels;
 using MarkMello.Presentation.Views.Markdown;
 using Microsoft.Extensions.DependencyInjection;
 using SysMath = System.Math;
@@ -2125,7 +2126,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
-        var headings = new List<MarkMello.Presentation.ViewModels.DocumentHeading>(headingsArray.GetArrayLength());
+        var headings = new List<DocumentHeading>(headingsArray.GetArrayLength());
         foreach (var entry in headingsArray.EnumerateArray())
         {
             if (entry.ValueKind != JsonValueKind.Object)
@@ -2157,10 +2158,60 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             // to a primitive double without a value converter — keeps the
             // XAML/code-built TOC layout simple.
             var indent = (level - 1) * 12.0;
-            headings.Add(new MarkMello.Presentation.ViewModels.DocumentHeading(id, level, text, indent));
+            headings.Add(TryReadHeadingInlines(entry, out var inlines)
+                ? new DocumentHeading(id, level, text, indent, inlines)
+                : new DocumentHeading(id, level, text, indent));
         }
 
         HeadingsChanged?.Invoke(this, headings);
+    }
+
+    private static bool TryReadHeadingInlines(JsonElement entry, out IReadOnlyList<DocumentHeadingInline> inlines)
+    {
+        inlines = [];
+        if (!entry.TryGetProperty("segments", out var segmentsArray)
+            || segmentsArray.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        var parsed = new List<DocumentHeadingInline>(segmentsArray.GetArrayLength());
+        foreach (var segment in segmentsArray.EnumerateArray())
+        {
+            if (segment.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+            if (!segment.TryGetProperty("kind", out var kindProp)
+                || kindProp.ValueKind != JsonValueKind.String
+                || !segment.TryGetProperty("text", out var textProp)
+                || textProp.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var text = textProp.GetString();
+            if (string.IsNullOrEmpty(text))
+            {
+                continue;
+            }
+
+            var kind = kindProp.GetString() switch
+            {
+                "math" => DocumentHeadingInlineKind.Math,
+                "text" => DocumentHeadingInlineKind.Text,
+                _ => (DocumentHeadingInlineKind?)null,
+            };
+            if (kind is null)
+            {
+                continue;
+            }
+
+            parsed.Add(new DocumentHeadingInline(kind.Value, text));
+        }
+
+        inlines = parsed;
+        return parsed.Count > 0;
     }
 
     private void HandlePreviewSourceLineMessage(JsonElement root)

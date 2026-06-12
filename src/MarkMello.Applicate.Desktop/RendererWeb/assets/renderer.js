@@ -1245,7 +1245,7 @@
   var mermaidCacheResumeTimer;
   var resizeReactFrameRequested = false;
   var modeToggleProbeFrameRequested = false;
-  var modeToggleProbeToken = 0;
+  var modeToggleSettleSequence = 0;
   var modeToggleProbeTransactionGeneration;
   var modeRevealPrepared = false;
   var modeRevealShield = null;
@@ -1311,6 +1311,12 @@
   var suppressPreviewSourceLineSequence = 0;
   var lastPostedPreviewSourceLine = null;
   var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
+  function cloneHeadingPayload(heading) {
+    return {
+      ...heading,
+      segments: heading.segments.map((segment) => ({ ...segment }))
+    };
+  }
   var processedDocumentCache = /* @__PURE__ */ new Map();
   var currentDocumentCacheKey = null;
   var currentDocumentRenderId = null;
@@ -1345,7 +1351,7 @@
     processedDocumentCache.delete(cacheKey);
     processedDocumentCache.set(cacheKey, cached);
     restoredCachedLayoutState = { ...cached.layoutState };
-    restoredCachedHeadings = cached.headings.map((heading) => ({ ...heading }));
+    restoredCachedHeadings = cached.headings.map(cloneHeadingPayload);
     restoredCachedMinimapSnapshot = cached.minimapSnapshot;
     return cached.fragment.cloneNode(true);
   }
@@ -1387,7 +1393,7 @@
       fragment,
       nodeCount: sourceNodes.length,
       layoutState: { ...lastKnownLayoutState },
-      headings: lastExtractedHeadings.map((heading) => ({ ...heading })),
+      headings: lastExtractedHeadings.map(cloneHeadingPayload),
       minimapSnapshot
     };
   }
@@ -1435,7 +1441,7 @@
     processedDocumentCache.set(cacheKey, {
       ...cached,
       layoutState: { ...lastKnownLayoutState },
-      headings: lastExtractedHeadings.map((heading) => ({ ...heading })),
+      headings: lastExtractedHeadings.map(cloneHeadingPayload),
       minimapSnapshot
     });
     postPerfMark(markName, {
@@ -2806,6 +2812,36 @@
   }
   var activeHeadingObserver = null;
   var lastPostedActiveHeadingId = null;
+  function addHeadingSegment(segments, kind, text) {
+    if (!text) {
+      return;
+    }
+    const previous = segments.length > 0 ? segments[segments.length - 1] : void 0;
+    if (previous?.kind === kind) {
+      previous.text += text;
+      return;
+    }
+    segments.push({ kind, text });
+  }
+  function extractHeadingSegments(root) {
+    const segments = [];
+    const visit = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        addHeadingSegment(segments, "text", node.textContent);
+        return;
+      }
+      if (!(node instanceof Element)) {
+        return;
+      }
+      if (node instanceof HTMLElement && node.classList.contains("math-inline")) {
+        addHeadingSegment(segments, "math", node.dataset.tex ?? node.getAttribute("data-tex") ?? node.textContent);
+        return;
+      }
+      node.childNodes.forEach(visit);
+    };
+    root.childNodes.forEach(visit);
+    return segments;
+  }
   function extractAndPostHeadings() {
     const main = document.querySelector("main.mm-document");
     if (!main) {
@@ -2827,10 +2863,11 @@
       if (!Number.isFinite(level) || level < 1 || level > 6) {
         return null;
       }
-      const text = (node.textContent ?? "").trim();
-      return { id, level, text };
+      const segments = extractHeadingSegments(node);
+      const text = segments.length > 0 ? segments.map((segment) => segment.text).join("").trim() : (node.textContent ?? "").trim();
+      return { id, level, text, segments };
     }).filter((h) => h !== null);
-    lastExtractedHeadings = headings.map((heading) => ({ ...heading }));
+    lastExtractedHeadings = headings.map(cloneHeadingPayload);
     postHostMessage({ type: "headings-updated", headings });
     rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
   }
@@ -2841,8 +2878,8 @@
       extractAndPostHeadings();
       return;
     }
-    const headings = cachedHeadings;
-    lastExtractedHeadings = headings.map((heading) => ({ ...heading }));
+    const headings = cachedHeadings.map(cloneHeadingPayload);
+    lastExtractedHeadings = headings.map(cloneHeadingPayload);
     postHostMessage({ type: "headings-updated", headings });
     if (activeHeadingObserver) {
       activeHeadingObserver.disconnect();
@@ -3618,8 +3655,8 @@
       }
       modeToggleProbeFrameRequested = true;
       modeToggleProbeTransactionGeneration = transactionGeneration;
-      const probeToken = ++modeToggleProbeToken;
-      const isCurrentProbe = () => probeToken === modeToggleProbeToken;
+      const settleSequence = ++modeToggleSettleSequence;
+      const isCurrentProbe = () => settleSequence === modeToggleSettleSequence;
       const postModeToggleSettleAck = () => {
         if (!isCurrentProbe()) {
           return;

@@ -89,7 +89,7 @@ type RendererMessage =
   // (avoids clock-skew between renderer performance.now() and host wall clock)
   // and re-emits as `[renderer-perf] <name> ms=<elapsed>` via ApplicateTrace.
   | { type: "perf-mark"; name: string; detail?: string }
-  | { type: "headings-updated"; headings: ReadonlyArray<{ id: string; level: number; text: string }> }
+  | { type: "headings-updated"; headings: ReadonlyArray<HeadingPayload> }
   | { type: "active-heading-changed"; id: string }
   | { type: "preview-source-line"; sourceLine: number }
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number }
@@ -225,7 +225,7 @@ let resizeReactFrameRequested = false;
 // response so CSS reflow on any new slot bounds has propagated and one paint
 // has happened after minimap visibility settles.
 let modeToggleProbeFrameRequested = false;
-let modeToggleProbeToken = 0;
+let modeToggleSettleSequence = 0;
 let modeToggleProbeTransactionGeneration: number | undefined;
 let modeRevealPrepared = false;
 let modeRevealShield: HTMLElement | null = null;
@@ -314,7 +314,20 @@ type HeadingPayload = {
   id: string;
   level: number;
   text: string;
+  segments: HeadingSegmentPayload[];
 };
+
+type HeadingSegmentPayload = {
+  kind: "text" | "math";
+  text: string;
+};
+
+function cloneHeadingPayload(heading: HeadingPayload): HeadingPayload {
+  return {
+    ...heading,
+    segments: heading.segments.map(segment => ({ ...segment })),
+  };
+}
 
 type CachedLayoutState = {
   scrollTop: number;
@@ -361,7 +374,7 @@ function getCachedProcessedDocumentFragment(cacheKey: string): DocumentFragment 
   processedDocumentCache.delete(cacheKey);
   processedDocumentCache.set(cacheKey, cached);
   restoredCachedLayoutState = { ...cached.layoutState };
-  restoredCachedHeadings = cached.headings.map(heading => ({ ...heading }));
+  restoredCachedHeadings = cached.headings.map(cloneHeadingPayload);
   restoredCachedMinimapSnapshot = cached.minimapSnapshot;
   return cached.fragment.cloneNode(true) as DocumentFragment;
 }
@@ -410,7 +423,7 @@ function captureCurrentProcessedDocumentCacheEntry(mode: "clone" | "move"): Proc
     fragment,
     nodeCount: sourceNodes.length,
     layoutState: { ...lastKnownLayoutState },
-    headings: lastExtractedHeadings.map(heading => ({ ...heading })),
+    headings: lastExtractedHeadings.map(cloneHeadingPayload),
     minimapSnapshot,
   };
 }
@@ -468,7 +481,7 @@ function refreshProcessedDocumentCacheState(cacheKey: string, markName: string):
   processedDocumentCache.set(cacheKey, {
     ...cached,
     layoutState: { ...lastKnownLayoutState },
-    headings: lastExtractedHeadings.map(heading => ({ ...heading })),
+    headings: lastExtractedHeadings.map(cloneHeadingPayload),
     minimapSnapshot,
   });
   postPerfMark(markName, {
@@ -2185,6 +2198,49 @@ function restoreCachedMinimapContent(): boolean {
 let activeHeadingObserver: IntersectionObserver | null = null;
 let lastPostedActiveHeadingId: string | null = null;
 
+function addHeadingSegment(
+  segments: HeadingSegmentPayload[],
+  kind: HeadingSegmentPayload["kind"],
+  text: string | null | undefined
+): void {
+  if (!text) {
+    return;
+  }
+
+  const previous = segments.length > 0 ? segments[segments.length - 1] : undefined;
+  if (previous?.kind === kind) {
+    previous.text += text;
+    return;
+  }
+
+  segments.push({ kind, text });
+}
+
+function extractHeadingSegments(root: HTMLElement): HeadingSegmentPayload[] {
+  const segments: HeadingSegmentPayload[] = [];
+
+  const visit = (node: Node): void => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      addHeadingSegment(segments, "text", node.textContent);
+      return;
+    }
+
+    if (!(node instanceof Element)) {
+      return;
+    }
+
+    if (node instanceof HTMLElement && node.classList.contains("math-inline")) {
+      addHeadingSegment(segments, "math", node.dataset.tex ?? node.getAttribute("data-tex") ?? node.textContent);
+      return;
+    }
+
+    node.childNodes.forEach(visit);
+  };
+
+  root.childNodes.forEach(visit);
+  return segments;
+}
+
 function extractAndPostHeadings(): void {
   const main = document.querySelector<HTMLElement>("main.mm-document");
   if (!main) {
@@ -2208,12 +2264,15 @@ function extractAndPostHeadings(): void {
       if (!Number.isFinite(level) || level < 1 || level > 6) {
         return null;
       }
-      const text = (node.textContent ?? "").trim();
-      return { id, level, text };
+      const segments = extractHeadingSegments(node);
+      const text = segments.length > 0
+        ? segments.map(segment => segment.text).join("").trim()
+        : (node.textContent ?? "").trim();
+      return { id, level, text, segments };
     })
     .filter((h): h is HeadingPayload => h !== null);
 
-  lastExtractedHeadings = headings.map(heading => ({ ...heading }));
+  lastExtractedHeadings = headings.map(cloneHeadingPayload);
   postHostMessage({ type: "headings-updated", headings });
   rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
 }
@@ -2227,8 +2286,8 @@ function postCachedHeadings(): void {
     return;
   }
 
-  const headings = cachedHeadings;
-  lastExtractedHeadings = headings.map(heading => ({ ...heading }));
+  const headings = cachedHeadings.map(cloneHeadingPayload);
+  lastExtractedHeadings = headings.map(cloneHeadingPayload);
   postHostMessage({ type: "headings-updated", headings });
   if (activeHeadingObserver) {
     activeHeadingObserver.disconnect();
@@ -3356,8 +3415,8 @@ function handleHostMessage(raw: unknown): void {
 
     modeToggleProbeFrameRequested = true;
     modeToggleProbeTransactionGeneration = transactionGeneration;
-    const probeToken = ++modeToggleProbeToken;
-    const isCurrentProbe = () => probeToken === modeToggleProbeToken;
+    const settleSequence = ++modeToggleSettleSequence;
+    const isCurrentProbe = () => settleSequence === modeToggleSettleSequence;
     const postModeToggleSettleAck = () => {
       if (!isCurrentProbe()) {
         return;

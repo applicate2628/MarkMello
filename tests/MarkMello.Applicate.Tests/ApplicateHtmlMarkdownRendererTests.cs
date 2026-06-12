@@ -188,6 +188,39 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
+    public async Task RenderCreatesHeadingInlineSegmentsForMath()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        var source = new MarkdownSource("headings.md", "headings.md", "# Wave $Z_{0}$ ports");
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        var heading = Assert.Single(document.Headings);
+        Assert.Equal("Wave Z_{0} ports", heading.Text);
+        Assert.Collection(
+            heading.Inlines,
+            segment =>
+            {
+                Assert.Equal(ApplicateHtmlHeadingInlineKind.Text, segment.Kind);
+                Assert.Equal("Wave ", segment.Text);
+            },
+            segment =>
+            {
+                Assert.Equal(ApplicateHtmlHeadingInlineKind.Math, segment.Kind);
+                Assert.Equal("Z_{0}", segment.Text);
+            },
+            segment =>
+            {
+                Assert.Equal(ApplicateHtmlHeadingInlineKind.Text, segment.Kind);
+                Assert.Equal(" ports", segment.Text);
+            });
+    }
+
+    [Fact]
     public async Task RenderEmitsBlockIndexAndKindForSyncMetadata()
     {
         var renderer = new ApplicateHtmlMarkdownRenderer();

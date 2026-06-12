@@ -8,6 +8,7 @@ using Avalonia.Controls.Templates;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.Markup.Xaml.Styling;
 using Avalonia.Styling;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -780,11 +781,10 @@ public sealed class ApplicateMainWindow : MainWindow
         // Fork-overlay-safe: the .axaml lives under MarkMello.Applicate
         // .Desktop's avares root; no upstream Themes/Controls.axaml edit.
         var uri = new Uri("avares://MarkMello.Applicate/Themes/ApplicateScrollBars.axaml");
-        var loaded = Avalonia.Markup.Xaml.AvaloniaXamlLoader.Load(uri);
-        if (loaded is Styles styles)
+        Avalonia.Application.Current?.Styles.Add(new StyleInclude(uri)
         {
-            Avalonia.Application.Current?.Styles.Add(styles);
-        }
+            Source = uri
+        });
     }
 
     private void InstallPopupFadeIn()
