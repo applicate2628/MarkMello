@@ -238,6 +238,9 @@ let minimapDragging = false;
 let minimapDragStartClientY: number | null = null;
 let minimapDragStartScrollTop = 0;
 let minimapDragMode: "tentative" | "panning" = "tentative";
+// Minimap-local offset between the grab point and the viewport-indicator top at
+// pointer-down, so the block-anchor drag keeps the grabbed point under the cursor.
+let minimapDragGrabOffset = 0;
 const MINIMAP_DRAG_THRESHOLD_PX = 4;
 let minimapSourceReady = false;
 let mermaidRenderGeneration = 0;
@@ -2810,6 +2813,14 @@ function handleMinimapPointerDown(event: PointerEvent): void {
   const root = document.scrollingElement ?? document.documentElement;
   minimapDragStartScrollTop = root.scrollTop;
   minimapDragMode = "tentative";
+  // Record where inside the viewport indicator the user grabbed (minimap-local Y)
+  // so panning can keep that point under the cursor instead of drifting.
+  minimapDragGrabOffset = 0;
+  if (minimapRoot && minimapViewport) {
+    const rootTop = minimapRoot.getBoundingClientRect().top;
+    const thumbTop = minimapViewport.getBoundingClientRect().top - rootTop;
+    minimapDragGrabOffset = (event.clientY - rootTop) - thumbTop;
+  }
   minimapRoot?.setPointerCapture(event.pointerId);
   event.preventDefault();
 }
@@ -2825,17 +2836,40 @@ function handleMinimapPointerMove(event: PointerEvent): void {
   }
   minimapDragMode = "panning";
 
-  // Range-based mapping: cursor traversing the rendered thumb-travel range
-  // scrolls the document across its full
-  // scrollable range (scrollHeight - clientHeight). The indicator's top
-  // follows the cursor 1:1 in minimap pixels — feels like "grabbing the
-  // viewport indicator and dragging it from start to end".
   const root = document.scrollingElement ?? document.documentElement;
-  const thumbTravel = getCurrentMinimapThumbTravel();
   const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+
+  // Block-anchor drag: keep the grabbed point of the viewport indicator under the
+  // cursor. The indicator's top is thumbTop = anchorTopY * thumbSlope (the UNCLAMPED
+  // forward map in minimapLayout.ts; thumbSlope = scale - overflowHeight/maxScroll,
+  // NOT scale, because contentTranslateY itself moves with the scroll). So to put the
+  // thumb top at desiredThumbTop we need anchorTopY = desiredThumbTop / thumbSlope,
+  // then resolve that clone-Y to a document scrollTop through the block-index map.
+  // (The earlier attempt used the click "content-under-cursor" inverse — divide by
+  // scale, subtract a constant contentTranslateY — which has the WRONG slope and made
+  // the drift worse the farther you dragged.)
+  if (minimapRoot && minimapViewport && currentMinimapLayout && minimapContent && currentMinimapLayout.thumbSlope > 0) {
+    const rootTop = minimapRoot.getBoundingClientRect().top;
+    const desiredThumbTop = event.clientY - rootTop - minimapDragGrabOffset;
+    const cloneY = desiredThumbTop / currentMinimapLayout.thumbSlope;
+    const target = docScrollTopForCloneY(root, cloneY);
+    if (target !== null) {
+      window.scrollTo({ top: Math.max(0, Math.min(maxScrollTop, target)), behavior: "instant" as ScrollBehavior });
+      // Optimistic pin: paint the indicator at the cursor's clamped position THIS frame
+      // so a fast flick has no one-frame lag. The scroll-driven updateMinimapViewport
+      // reconciles it to the canonical thumbTop next frame (≈ identical — the slope is
+      // exact), so this is a transient gesture overlay, not a second source of truth.
+      const pinnedTop = Math.max(0, Math.min(currentMinimapLayout.thumbTravel, desiredThumbTop));
+      minimapViewport.style.transform = `translateY(${pinnedTop}px)`;
+      event.preventDefault();
+      return;
+    }
+  }
+
+  // Fallback (legacy linear): no block-anchor layout/clone available.
+  const thumbTravel = getCurrentMinimapThumbTravel();
   const scrollDelta = delta * (maxScrollTop / thumbTravel);
-  const newScrollTop = minimapDragStartScrollTop + scrollDelta;
-  const clampedScrollTop = Math.max(0, Math.min(maxScrollTop, newScrollTop));
+  const clampedScrollTop = Math.max(0, Math.min(maxScrollTop, minimapDragStartScrollTop + scrollDelta));
   window.scrollTo({ top: clampedScrollTop, behavior: "instant" as ScrollBehavior });
   event.preventDefault();
 }

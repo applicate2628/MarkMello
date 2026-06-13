@@ -16,6 +16,12 @@ export type MinimapViewportLayout = {
   thumbTop: number;
   thumbHeight: number;
   thumbTravel: number;
+  // True slope d(thumbTop)/d(scrollTop) of the UNCLAMPED forward map. thumbTop is
+  // linear in scrollTop through the origin: rawThumbTop = scrollTop*scale +
+  // contentTranslateY, and contentTranslateY = -(scrollTop/maxScroll)*overflowHeight,
+  // so the effective slope is (scale - overflowHeight/maxScroll), NOT scale. Drag-to-pan
+  // must invert with THIS slope to keep the grabbed point under the cursor.
+  thumbSlope: number;
 };
 
 const DEFAULT_MINIMUM_THUMB_HEIGHT = 22;
@@ -61,6 +67,7 @@ export function calculateMinimapViewportLayout(input: MinimapViewportLayoutInput
   const maximumClampedThumbTop = Math.max(0, input.minimapHeight - thumbHeight);
   const thumbTravel = Math.min(maximumClampedThumbTop, maximumRawThumbTop);
   const thumbTop = Math.max(0, Math.min(thumbTravel, rawThumbTop));
+  const thumbSlope = maximumScrollTop > 0 ? scale - (overflowHeight / maximumScrollTop) : scale;
 
   return {
     contentWidth: input.documentWidth,
@@ -69,6 +76,7 @@ export function calculateMinimapViewportLayout(input: MinimapViewportLayoutInput
     transform: `translateY(${contentTranslateY}px) scale(${scale})`,
     thumbTop,
     thumbHeight,
-    thumbTravel
+    thumbTravel,
+    thumbSlope
   };
 }

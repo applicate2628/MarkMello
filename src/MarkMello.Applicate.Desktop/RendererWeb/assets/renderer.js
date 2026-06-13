@@ -35,6 +35,7 @@
     const maximumClampedThumbTop = Math.max(0, input.minimapHeight - thumbHeight);
     const thumbTravel = Math.min(maximumClampedThumbTop, maximumRawThumbTop);
     const thumbTop = Math.max(0, Math.min(thumbTravel, rawThumbTop));
+    const thumbSlope = maximumScrollTop > 0 ? scale - overflowHeight / maximumScrollTop : scale;
     return {
       contentWidth: input.documentWidth,
       scale,
@@ -42,7 +43,8 @@
       transform: `translateY(${contentTranslateY}px) scale(${scale})`,
       thumbTop,
       thumbHeight,
-      thumbTravel
+      thumbTravel,
+      thumbSlope
     };
   }
 
@@ -1292,6 +1294,7 @@
   var minimapDragStartClientY = null;
   var minimapDragStartScrollTop = 0;
   var minimapDragMode = "tentative";
+  var minimapDragGrabOffset = 0;
   var MINIMAP_DRAG_THRESHOLD_PX = 4;
   var minimapSourceReady = false;
   var mermaidRenderGeneration = 0;
@@ -3262,6 +3265,12 @@
     const root = document.scrollingElement ?? document.documentElement;
     minimapDragStartScrollTop = root.scrollTop;
     minimapDragMode = "tentative";
+    minimapDragGrabOffset = 0;
+    if (minimapRoot && minimapViewport) {
+      const rootTop = minimapRoot.getBoundingClientRect().top;
+      const thumbTop = minimapViewport.getBoundingClientRect().top - rootTop;
+      minimapDragGrabOffset = event.clientY - rootTop - thumbTop;
+    }
     minimapRoot?.setPointerCapture(event.pointerId);
     event.preventDefault();
   }
@@ -3275,11 +3284,23 @@
     }
     minimapDragMode = "panning";
     const root = document.scrollingElement ?? document.documentElement;
-    const thumbTravel = getCurrentMinimapThumbTravel();
     const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+    if (minimapRoot && minimapViewport && currentMinimapLayout && minimapContent && currentMinimapLayout.thumbSlope > 0) {
+      const rootTop = minimapRoot.getBoundingClientRect().top;
+      const desiredThumbTop = event.clientY - rootTop - minimapDragGrabOffset;
+      const cloneY = desiredThumbTop / currentMinimapLayout.thumbSlope;
+      const target = docScrollTopForCloneY(root, cloneY);
+      if (target !== null) {
+        window.scrollTo({ top: Math.max(0, Math.min(maxScrollTop, target)), behavior: "instant" });
+        const pinnedTop = Math.max(0, Math.min(currentMinimapLayout.thumbTravel, desiredThumbTop));
+        minimapViewport.style.transform = `translateY(${pinnedTop}px)`;
+        event.preventDefault();
+        return;
+      }
+    }
+    const thumbTravel = getCurrentMinimapThumbTravel();
     const scrollDelta = delta * (maxScrollTop / thumbTravel);
-    const newScrollTop = minimapDragStartScrollTop + scrollDelta;
-    const clampedScrollTop = Math.max(0, Math.min(maxScrollTop, newScrollTop));
+    const clampedScrollTop = Math.max(0, Math.min(maxScrollTop, minimapDragStartScrollTop + scrollDelta));
     window.scrollTo({ top: clampedScrollTop, behavior: "instant" });
     event.preventDefault();
   }
