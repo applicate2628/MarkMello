@@ -153,8 +153,8 @@
                                 Spacing="10"
                                                   VerticalAlignment="Center">
                       <Slider Classes="mm-settings-slider"
-                              Minimum="1.4"
-                              Maximum="2.0"
+                              Minimum="1"
+                              Maximum="3"
                               TickFrequency="0.05"
                               IsSnapToTickEnabled="True"
                               Value="{Binding LineHeightSetting, Mode=TwoWay}" />

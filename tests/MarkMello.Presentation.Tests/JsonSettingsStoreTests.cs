@@ -68,6 +68,40 @@ public sealed class JsonSettingsStoreTests
     }
 
     [Fact]
+    public async Task ResetRestoresAllSettingsDefaults()
+    {
+        var rootDirectory = CreateTempDirectory();
+        try
+        {
+            var store = new JsonSettingsStore(rootDirectory);
+            await store.SavePreferencesAsync(ReadingPreferences.Default with
+            {
+                FontFamily = FontFamilyMode.Mono,
+                FontSize = 22,
+                LineHeight = 2.4,
+                ContentWidth = ReadingPreferences.WideContentWidth,
+                DocumentMinimapMode = DocumentMinimapMode.On,
+                LightPalette = LightPaletteMode.Original
+            });
+            await store.SaveThemeAsync(ThemeMode.Dark);
+            await store.SaveLanguageAsync(AppLanguage.Russian);
+            await store.SaveWindowPlacementAsync(new WindowPlacement(120, 80, 900, 700, IsMaximized: true));
+
+            await store.ResetAsync();
+
+            var reloadedStore = new JsonSettingsStore(rootDirectory);
+            Assert.Equal(ReadingPreferences.Default, await reloadedStore.LoadPreferencesAsync());
+            Assert.Equal(ThemeMode.Light, await reloadedStore.LoadThemeAsync());
+            Assert.Equal(AppLanguage.System, await reloadedStore.LoadLanguageAsync());
+            Assert.Null(await reloadedStore.LoadWindowPlacementAsync());
+        }
+        finally
+        {
+            DeleteDirectory(rootDirectory);
+        }
+    }
+
+    [Fact]
     public async Task LoadFallsBackToDefaultsWhenSettingsFileIsCorrupted()
     {
         var rootDirectory = CreateTempDirectory();

@@ -106,6 +106,27 @@
                     EndPoint="1,0.5" />
 
               <Button Classes="mm-menu-item"
+                      Command="{Binding ResetSettingsCommand}">
+                <Grid ColumnDefinitions="*,Auto"
+                      ColumnSpacing="12">
+                  <StackPanel Grid.Column="0"
+                              Spacing="2">
+                    <TextBlock Classes="mm-setting-label"
+                               Text="{Binding ResetSettingsLabel}" />
+                    <TextBlock Classes="mm-setting-hint"
+                               Text="{Binding ResetSettingsHint}" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1"
+                             Classes="mm-setting-meta"
+                             Text="{Binding MetaReset}" />
+                </Grid>
+              </Button>
+
+              <Line Classes="mm-setting-divider"
+                    StartPoint="0,0.5"
+                    EndPoint="1,0.5" />
+
+              <Button Classes="mm-menu-item"
                       Command="{Binding OpenAboutCommand}">
                 <Grid ColumnDefinitions="*,Auto"
                       ColumnSpacing="12">

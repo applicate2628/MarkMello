@@ -56,6 +56,7 @@ public partial class MainWindowViewModel : ObservableObject
     private bool _isUpdateNotificationDismissed;
     private LightPaletteMode _selectedLightPalette = LightPaletteMode.White;
     private ReadingPreferences _lastNotifiedReadingPreferences = ReadingPreferences.Default;
+    private const ThemeMode DefaultResetTheme = ThemeMode.Light;
 
     public event EventHandler? CloseRequested;
 
@@ -1009,6 +1010,26 @@ public partial class MainWindowViewModel : ObservableObject
         MarkSecondaryFeaturesReady();
 
         ShellOverlay = ShellOverlayKind.AppAbout;
+    }
+
+    [RelayCommand]
+    private async Task ResetSettingsAsync()
+    {
+        var defaultPreferences = ReadingPreferences.Default;
+
+        ApplyThemeAndReadingPreferences(DefaultResetTheme, defaultPreferences, persistPreferences: false);
+        ApplyLanguageSelection(AppLanguage.System, persist: false);
+        IsAlwaysOnTop = false;
+
+        try
+        {
+            await _settings.ResetAsync().ConfigureAwait(true);
+        }
+        catch
+        {
+            // Settings persistence is best-effort; keep the live UI on the
+            // requested defaults even when the config file cannot be written.
+        }
     }
 
     [RelayCommand]
@@ -2083,6 +2104,21 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(IsWhitePaletteSelected));
     }
 
+    private void ApplyThemeAndReadingPreferences(
+        ThemeMode theme,
+        ReadingPreferences preferences,
+        bool persistPreferences = true)
+    {
+        var normalizedTheme = NormalizeTheme(theme);
+        var normalizedPreferences = ReadingPreferences.Normalize(preferences);
+
+        RaiseThemeTransitionStartingIfEffectiveThemeWillChange(
+            normalizedTheme,
+            normalizedPreferences.LightPalette);
+        ApplyReadingPreferences(normalizedPreferences, persistPreferences);
+        ApplyTheme(normalizedTheme);
+    }
+
     private void RaiseThemeTransitionStartingIfEffectiveThemeWillChange(
         ThemeMode theme,
         LightPaletteMode lightPalette)
@@ -2107,7 +2143,7 @@ public partial class MainWindowViewModel : ObservableObject
             _ => ThemeMode.System
         };
 
-    private void ApplyReadingPreferences(ReadingPreferences preferences)
+    private void ApplyReadingPreferences(ReadingPreferences preferences, bool persist = true)
     {
         var normalized = ReadingPreferences.Normalize(preferences);
         if (normalized == ReadingPreferences)
@@ -2116,7 +2152,10 @@ public partial class MainWindowViewModel : ObservableObject
         }
 
         ReadingPreferences = normalized;
-        PersistReadingPreferences(normalized);
+        if (persist)
+        {
+            PersistReadingPreferences(normalized);
+        }
     }
 
     private void PersistReadingPreferences(ReadingPreferences preferences)

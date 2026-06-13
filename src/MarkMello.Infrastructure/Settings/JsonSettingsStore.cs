@@ -129,6 +129,23 @@ public sealed class JsonSettingsStore : ISettingsStore
         return ValueTask.CompletedTask;
     }
 
+    public ValueTask ResetAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        lock (_gate)
+        {
+            EnsureLoadedCore();
+            _theme = ThemeMode.Light;
+            _preferences = ReadingPreferences.Default;
+            _language = AppLanguage.System;
+            _windowPlacement = null;
+            PersistCore();
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
     private void EnsureLoadedCore()
     {
         if (_isLoaded)

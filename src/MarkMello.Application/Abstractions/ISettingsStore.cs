@@ -19,4 +19,6 @@ public interface ISettingsStore
 
     ValueTask<WindowPlacement?> LoadWindowPlacementAsync(CancellationToken cancellationToken = default);
     ValueTask SaveWindowPlacementAsync(WindowPlacement? placement, CancellationToken cancellationToken = default);
+
+    ValueTask ResetAsync(CancellationToken cancellationToken = default);
 }

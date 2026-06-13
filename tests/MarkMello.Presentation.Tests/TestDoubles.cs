@@ -147,6 +147,15 @@ internal sealed class InMemorySettingsStore : ISettingsStore
         WindowPlacement = MarkMello.Domain.WindowPlacement.Normalize(placement);
         return ValueTask.CompletedTask;
     }
+
+    public ValueTask ResetAsync(CancellationToken cancellationToken = default)
+    {
+        Preferences = ReadingPreferences.Default;
+        Theme = ThemeMode.Light;
+        Language = AppLanguage.System;
+        WindowPlacement = null;
+        return ValueTask.CompletedTask;
+    }
 }
 
 internal sealed class RecordingThemeService : IThemeService

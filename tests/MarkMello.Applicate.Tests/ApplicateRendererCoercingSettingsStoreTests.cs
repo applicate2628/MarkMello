@@ -135,6 +135,10 @@ public sealed class ApplicateRendererCoercingSettingsStoreTests
         Assert.Equal(ThemeMode.Light, inner.LastSavedTheme);
         Assert.Equal(AppLanguage.English, inner.LastSavedLanguage);
         Assert.Equal(newPlacement, inner.LastSavedWindowPlacement);
+
+        await decorator.ResetAsync();
+
+        Assert.True(inner.ResetCalled);
     }
 
     /// <summary>
@@ -211,6 +215,7 @@ public sealed class ApplicateRendererCoercingSettingsStoreTests
         public ThemeMode? LastSavedTheme { get; private set; }
         public AppLanguage? LastSavedLanguage { get; private set; }
         public WindowPlacement? LastSavedWindowPlacement { get; private set; }
+        public bool ResetCalled { get; private set; }
 
         public RecordingSettingsStore(ReadingPreferences seedPreferences)
         {
@@ -250,6 +255,12 @@ public sealed class ApplicateRendererCoercingSettingsStoreTests
         public ValueTask SaveWindowPlacementAsync(WindowPlacement? placement, CancellationToken cancellationToken = default)
         {
             LastSavedWindowPlacement = placement;
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask ResetAsync(CancellationToken cancellationToken = default)
+        {
+            ResetCalled = true;
             return ValueTask.CompletedTask;
         }
     }

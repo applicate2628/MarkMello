@@ -77,6 +77,9 @@ public sealed class ApplicateRendererCoercingSettingsStore : ISettingsStore
     public ValueTask SaveWindowPlacementAsync(WindowPlacement? placement, CancellationToken cancellationToken = default)
         => _inner.SaveWindowPlacementAsync(placement, cancellationToken);
 
+    public ValueTask ResetAsync(CancellationToken cancellationToken = default)
+        => _inner.ResetAsync(cancellationToken);
+
     /// <summary>
     /// Returns <paramref name="preferences"/> unchanged when
     /// <see cref="ReadingPreferences.RendererBackend"/> is already

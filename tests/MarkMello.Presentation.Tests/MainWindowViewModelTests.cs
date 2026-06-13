@@ -962,6 +962,48 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task ResetSettingsCommandRestoresLiveAndPersistedDefaults()
+    {
+        var harness = CreateHarness();
+        var names = new List<string?>();
+        ThemeTransitionStartingEventArgs? transition = null;
+        harness.ViewModel.PropertyChanged += (_, e) => names.Add(e.PropertyName);
+        harness.ViewModel.ThemeTransitionStarting += (_, e) => transition = e;
+
+        harness.ViewModel.SelectedLanguageOption =
+            harness.ViewModel.LanguageOptions.Single(option => option.Language == AppLanguage.Russian);
+        harness.ViewModel.CycleThemeCommand.Execute(null);
+        harness.ViewModel.IsAlwaysOnTop = true;
+        harness.ViewModel.LineHeightSetting = 2.75;
+        harness.ViewModel.IsOriginalPaletteSelected = true;
+        harness.Settings.WindowPlacement = new WindowPlacement(120, 80, 900, 700, IsMaximized: true);
+
+        await harness.ViewModel.ResetSettingsCommand.ExecuteAsync(null);
+
+        Assert.Equal(ReadingPreferences.Default, harness.ViewModel.ReadingPreferences);
+        Assert.Equal(ReadingPreferences.Default, harness.Settings.Preferences);
+        Assert.Equal(AppLanguage.System, harness.ViewModel.SelectedLanguageOption?.Language);
+        Assert.Equal(AppLanguage.System, harness.Settings.Language);
+        Assert.Equal(ThemeMode.Light, harness.ViewModel.Theme);
+        Assert.Equal(ThemeMode.Light, harness.Settings.Theme);
+        Assert.Equal(ThemeMode.ClassicWhite, harness.ViewModel.EffectiveTheme);
+        Assert.Equal(ThemeMode.ClassicWhite, transition?.TargetEffectiveTheme);
+        Assert.False(harness.ViewModel.IsOriginalPaletteSelected);
+        Assert.True(harness.ViewModel.IsWhitePaletteSelected);
+        Assert.False(harness.ViewModel.IsAlwaysOnTop);
+        Assert.True(harness.ViewModel.IsAlwaysOnTopDisabled);
+        Assert.Null(harness.Settings.WindowPlacement);
+        Assert.Contains(nameof(MainWindowViewModel.LineHeightSetting), names);
+        Assert.Contains(nameof(MainWindowViewModel.SelectedLanguageOption), names);
+
+        harness.ViewModel.CycleThemeCommand.Execute(null);
+
+        Assert.Equal(ThemeMode.Dark, harness.ViewModel.Theme);
+        Assert.Equal(ThemeMode.Dark, harness.Settings.Theme);
+        Assert.Equal(ThemeMode.Dark, harness.ViewModel.EffectiveTheme);
+    }
+
+    [Fact]
     public void RendererPreferenceChangeDoesNotNotifyUnrelatedReadingSettingButtons()
     {
         var harness = CreateHarness();
@@ -1008,6 +1050,24 @@ public sealed class MainWindowViewModelTests
 
         Assert.Equal(180, harness.ViewModel.ReadingPreferences.ModeSwitchSmoothDurationMs);
         Assert.Equal("180 ms", harness.ViewModel.ModeSwitchSmoothDurationLabel);
+    }
+
+    [Fact]
+    public void LineHeightSettingUsesOneToThreeRange()
+    {
+        var harness = CreateHarness();
+
+        harness.ViewModel.LineHeightSetting = 0.25;
+
+        Assert.Equal(ReadingPreferences.MinLineHeight, harness.ViewModel.ReadingPreferences.LineHeight);
+        Assert.Equal(1.0, harness.ViewModel.LineHeightSetting);
+        Assert.Equal("1.00", harness.ViewModel.LineHeightLabel);
+
+        harness.ViewModel.LineHeightSetting = 3.4;
+
+        Assert.Equal(ReadingPreferences.MaxLineHeight, harness.ViewModel.ReadingPreferences.LineHeight);
+        Assert.Equal(3.0, harness.ViewModel.LineHeightSetting);
+        Assert.Equal("3.00", harness.ViewModel.LineHeightLabel);
     }
 
     [Fact]

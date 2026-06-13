@@ -94,6 +94,7 @@ public partial class MainWindowViewModel
         nameof(LoadErrorTryAgain),
         nameof(MetaCurrent),
         nameof(MetaOpen),
+        nameof(MetaReset),
         nameof(OverlayBackToMenu),
         nameof(OverlayBackToSettings),
         nameof(OverlayCloseAbout),
@@ -139,6 +140,8 @@ public partial class MainWindowViewModel
         nameof(ReadingWidthMedium),
         nameof(ReadingWidthNarrow),
         nameof(ReadingWidthWide),
+        nameof(ResetSettingsHint),
+        nameof(ResetSettingsLabel),
         nameof(StatusOpen),
         nameof(StatusPrefs),
         nameof(TitleBarClose),
@@ -203,6 +206,7 @@ public partial class MainWindowViewModel
     public string LoadErrorTryAgain => _localization["LoadErrorTryAgain"];
     public string MetaCurrent => _localization["MetaCurrent"];
     public string MetaOpen => _localization["MetaOpen"];
+    public string MetaReset => _localization["MetaReset"];
     public string OverlayBackToMenu => _localization["OverlayBackToMenu"];
     public string OverlayBackToSettings => _localization["OverlayBackToSettings"];
     public string OverlayCloseAbout => _localization["OverlayCloseAbout"];
@@ -248,6 +252,8 @@ public partial class MainWindowViewModel
     public string ReadingWidthMedium => _localization["ReadingWidthMedium"];
     public string ReadingWidthNarrow => _localization["ReadingWidthNarrow"];
     public string ReadingWidthWide => _localization["ReadingWidthWide"];
+    public string ResetSettingsHint => _localization["ResetSettingsHint"];
+    public string ResetSettingsLabel => _localization["ResetSettingsLabel"];
     public string StatusOpen => _localization["StatusOpen"];
     public string StatusPrefs => _localization["StatusPrefs"];
     public string TitleBarClose => _localization["TitleBarClose"];

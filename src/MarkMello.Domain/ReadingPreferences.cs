@@ -27,8 +27,8 @@ public sealed record ReadingPreferences(
 {
     public const int MinFontSize = 14;
     public const int MaxFontSize = 24;
-    public const double MinLineHeight = 1.4;
-    public const double MaxLineHeight = 2.0;
+    public const double MinLineHeight = 1.0;
+    public const double MaxLineHeight = 3.0;
     public const double LineHeightStep = 0.05;
     public const int NarrowContentWidth = 640;
     public const int MediumContentWidth = 820;

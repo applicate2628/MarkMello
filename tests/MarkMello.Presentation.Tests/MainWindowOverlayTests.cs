@@ -206,6 +206,8 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("IsChecked=\"{Binding IsModeSwitchSmoothEnabled}\"", readingSettings, StringComparison.Ordinal);
         Assert.Contains("IsChecked=\"{Binding IsModeSwitchSmoothDisabled}\"", readingSettings, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding ReadingModeSmoothOff}\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("Minimum=\"1\"", readingSettings, StringComparison.Ordinal);
+        Assert.Contains("Maximum=\"3\"", readingSettings, StringComparison.Ordinal);
         Assert.Contains("Value=\"{Binding ModeSwitchSmoothDurationSetting, Mode=TwoWay}\"", readingSettings, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding ModeSwitchSmoothDurationLabel}\"", readingSettings, StringComparison.Ordinal);
         Assert.Contains("Slider.mm-settings-slider:disabled", controlsTheme, StringComparison.Ordinal);
@@ -239,6 +241,8 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("Text=\"{Binding AlwaysOnTopLabel}\"", appSettings, StringComparison.Ordinal);
         Assert.Contains("IsChecked=\"{Binding IsAlwaysOnTop}\"", appSettings, StringComparison.Ordinal);
         Assert.Contains("IsChecked=\"{Binding IsAlwaysOnTopDisabled}\"", appSettings, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding ResetSettingsLabel}\"", appSettings, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding ResetSettingsCommand}\"", appSettings, StringComparison.Ordinal);
         Assert.DoesNotContain("Text=\"{Binding UpdatesLabel}\"", appSettings, StringComparison.Ordinal);
         Assert.DoesNotContain("Command=\"{Binding CheckForUpdatesCommand}\"", appSettings, StringComparison.Ordinal);
     }

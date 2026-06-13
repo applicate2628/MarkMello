@@ -66,6 +66,13 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - The WebView renderer hides the document body, minimap, and width-resizer handle until the bootstrap pipeline finishes math + mermaid + code-block rendering and posts `layout-ready`. Without this gate the user briefly sees a fallback state on tab switch and fresh launch (web fonts not yet swapped, `\[ ... \]` math placeholders, raw mermaid source, width handle at a stale X coordinate). The reveal uses a 120ms CSS opacity transition shared by all three surfaces.
 - The hide-rule is scoped to `body > main.mm-document` (and the minimap aside, and the width-handle div) so that the minimap's cloned `.mm-document` subtree is not affected; the clone always renders at full opacity inside the minimap container.
 
+## Release Scope (v0.3.5-applicate)
+
+- Table of Contents headings now preserve inline TeX formulas through the renderer payload/cache and host TOC row, so formulas in Markdown headings render in the outline instead of disappearing into blank gaps.
+- Applicate scrollbar theme styles now load through Avalonia `StyleInclude`, preventing startup crashes when the style-only resource is loaded from a Debug or published build.
+- The reading Line Height setting now supports the full `1.00` to `3.00` range while preserving the existing `0.05` step and normalization path.
+- Menu -> Settings now includes a Reset settings action that restores persisted defaults for reading preferences, theme, language, and window placement while also clearing the live always-on-top toggle; reset now applies the default light/white theme through the normal theme path so theme switching keeps working afterward.
+
 ## Release Scope (v0.3.4-applicate)
 
 - The Applicate tab strip now exposes overflow navigation when many documents are open: edge scroll arrows page the hidden tabs, the active tab is kept in view, and an all-tabs dropdown jumps directly to any open document.
@@ -79,8 +86,6 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - Applicate release publishes enable .NET ReadyToRun precompilation for managed assemblies to reduce cold first-launch Just-In-Time compilation cost without changing Debug builds.
 - The Updates menu path now swaps between the menu and updates panel inside one stable popup, keeps update action buttons steady during busy states, and keeps the top-level update notification on the welcome shell instead of document renderer surfaces.
 - The main window shell now draws a subtle one-pixel frame border, keeping the custom chrome visually bounded on light backgrounds.
-- Table of Contents headings now preserve inline TeX formulas through the renderer payload/cache and host TOC row, so formulas in Markdown headings render in the outline instead of disappearing into blank gaps.
-- Applicate scrollbar theme styles now load through Avalonia `StyleInclude`, preventing startup crashes when the style-only resource is loaded from a Debug or published build.
 - Russian settings labels and segmented controls were tightened so font options, line-height labels, slider values, and menu/settings text fit reliably, including Win10 font metrics.
 - Repo-local release instructions now document the Applicate release workflow, GitHub CLI checks, PowerShell-safe tag-peel commands, release-body editing, and asset hash verification.
 
