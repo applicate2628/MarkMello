@@ -755,76 +755,35 @@
   var FIND_COUNT_CLASS = "mm-find-count";
   var FIND_BTN_CLASS = "mm-find-btn";
   var FIND_DEBOUNCE_MS = 150;
-  var SKIP_TAGS = /* @__PURE__ */ new Set([
-    "SCRIPT",
-    "STYLE",
-    "NOSCRIPT",
-    "ASIDE"
-    // minimap aside
-  ]);
+  var HIGHLIGHT_ALL = "mm-find-all";
+  var HIGHLIGHT_CURRENT = "mm-find-current";
+  var SKIP_TAGS = /* @__PURE__ */ new Set(["SCRIPT", "STYLE", "NOSCRIPT", "ASIDE"]);
   var SKIP_CLASSES = /* @__PURE__ */ new Set([
     "mm-minimap",
     "mm-minimap-viewport",
     "mm-width-handle",
     "mm-drop-overlay",
+    "katex-mathml",
     FIND_BAR_CLASS
   ]);
-  function countMatchesInRoot(root, needle) {
-    if (needle.length === 0) {
-      return 0;
-    }
-    const lowered = needle.toLowerCase();
-    let total = 0;
-    const walker = document.createTreeWalker(
-      root,
-      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(node) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            const el = node;
-            if (SKIP_TAGS.has(el.tagName)) {
-              return NodeFilter.FILTER_REJECT;
-            }
-            for (const cls of SKIP_CLASSES) {
-              if (el.classList.contains(cls)) {
-                return NodeFilter.FILTER_REJECT;
-              }
-            }
-            return NodeFilter.FILTER_SKIP;
-          }
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      }
-    );
-    let current = walker.nextNode();
-    while (current !== null) {
-      const text = (current.nodeValue ?? "").toLowerCase();
-      if (text.length >= lowered.length) {
-        let idx = text.indexOf(lowered);
-        while (idx !== -1) {
-          total++;
-          idx = text.indexOf(lowered, idx + lowered.length);
-        }
-      }
-      current = walker.nextNode();
-    }
-    return total;
+  var SKIP_SELECTOR = "pre.mm-mermaid.is-rendered";
+  function getHighlightRegistry() {
+    const css = window.CSS;
+    return css?.highlights ?? null;
   }
-  function currentMatchIndex(root, needle) {
+  function makeHighlight(ranges) {
+    const ctor = window.Highlight;
+    if (ctor === void 0 || ranges.length === 0) {
+      return null;
+    }
+    return new ctor(...ranges);
+  }
+  function buildMatches(root, needle) {
+    const out = [];
     if (needle.length === 0) {
-      return 0;
-    }
-    const sel = window.getSelection();
-    if (sel === null || sel.rangeCount === 0) {
-      return 0;
-    }
-    const range = sel.getRangeAt(0);
-    if (range.collapsed) {
-      return 0;
+      return out;
     }
     const lowered = needle.toLowerCase();
-    let count = 0;
-    let found = false;
     const walker = document.createTreeWalker(
       root,
       NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
@@ -840,29 +799,152 @@
                 return NodeFilter.FILTER_REJECT;
               }
             }
+            if (el.matches?.(SKIP_SELECTOR)) {
+              return NodeFilter.FILTER_REJECT;
+            }
             return NodeFilter.FILTER_SKIP;
           }
           return NodeFilter.FILTER_ACCEPT;
         }
       }
     );
-    let current = walker.nextNode();
-    while (current !== null && !found) {
-      const text = (current.nodeValue ?? "").toLowerCase();
-      if (text.length >= lowered.length) {
-        let idx = text.indexOf(lowered);
-        while (idx !== -1) {
-          count++;
-          if (current === range.startContainer && idx === range.startOffset) {
-            found = true;
-            break;
-          }
-          idx = text.indexOf(lowered, idx + lowered.length);
-        }
+    for (let cur = walker.nextNode(); cur !== null; cur = walker.nextNode()) {
+      const text = (cur.nodeValue ?? "").toLowerCase();
+      if (text.length < lowered.length) {
+        continue;
       }
-      current = walker.nextNode();
+      let idx = text.indexOf(lowered);
+      while (idx !== -1) {
+        const range = document.createRange();
+        range.setStart(cur, idx);
+        range.setEnd(cur, idx + lowered.length);
+        out.push(range);
+        idx = text.indexOf(lowered, idx + lowered.length);
+      }
     }
-    return found ? count : 0;
+    return out;
+  }
+  function applyHighlights(s) {
+    const reg = getHighlightRegistry();
+    if (reg === null) {
+      return;
+    }
+    if (s.matches.length === 0) {
+      reg.delete(HIGHLIGHT_ALL);
+      reg.delete(HIGHLIGHT_CURRENT);
+      return;
+    }
+    const all = makeHighlight(s.matches);
+    if (all !== null) {
+      reg.set(HIGHLIGHT_ALL, all);
+    }
+    const currentRange = s.matches[s.currentIndex];
+    if (currentRange !== void 0) {
+      const current = makeHighlight([currentRange]);
+      if (current !== null) {
+        reg.set(HIGHLIGHT_CURRENT, current);
+      }
+    } else {
+      reg.delete(HIGHLIGHT_CURRENT);
+    }
+  }
+  function clearHighlights() {
+    const reg = getHighlightRegistry();
+    if (reg !== null) {
+      reg.delete(HIGHLIGHT_ALL);
+      reg.delete(HIGHLIGHT_CURRENT);
+    }
+  }
+  function rebuildMatches(s) {
+    s.matches = buildMatches(document.body, s.lastSearched);
+    s.matchesDirty = false;
+    if (s.matches.length === 0) {
+      s.currentIndex = -1;
+    } else {
+      s.currentIndex = Math.min(Math.max(s.currentIndex, 0), s.matches.length - 1);
+    }
+  }
+  function ensureFresh(s) {
+    if (s.matchesDirty) {
+      rebuildMatches(s);
+    }
+  }
+  function scrollToCurrent(s) {
+    const range = s.matches[s.currentIndex];
+    if (range === void 0) {
+      return;
+    }
+    const host = range.startContainer.parentElement;
+    const block = host?.closest("main.mm-document > *") ?? host;
+    block?.scrollIntoView({ block: "center" });
+    let attempts = 0;
+    const reaim = () => {
+      if (++attempts > 3) {
+        return;
+      }
+      const rect = range.getBoundingClientRect();
+      if (rect.height === 0 && rect.width === 0) {
+        window.requestAnimationFrame(reaim);
+        return;
+      }
+      const viewport = window.innerHeight || document.documentElement.clientHeight;
+      if (rect.top < 0 || rect.bottom > viewport) {
+        const target = window.scrollY + rect.top - viewport / 2 + rect.height / 2;
+        window.scrollTo({ top: Math.max(0, target), behavior: "instant" });
+        window.requestAnimationFrame(reaim);
+      }
+    };
+    window.requestAnimationFrame(reaim);
+  }
+  function updateCountDisplay(s) {
+    if (s.input.value.length === 0) {
+      s.count.textContent = "";
+      s.bar.classList.remove("mm-find-no-match");
+      return;
+    }
+    if (s.matches.length === 0) {
+      s.count.textContent = "0 of 0";
+      s.bar.classList.add("mm-find-no-match");
+      return;
+    }
+    s.bar.classList.remove("mm-find-no-match");
+    s.count.textContent = `${s.currentIndex + 1} of ${s.matches.length}`;
+  }
+  function runSearch(s, query) {
+    s.lastSearched = query;
+    if (query.length === 0) {
+      s.matches = [];
+      s.currentIndex = -1;
+      s.matchesDirty = false;
+      applyHighlights(s);
+      updateCountDisplay(s);
+      return;
+    }
+    s.matches = buildMatches(document.body, query);
+    s.matchesDirty = false;
+    s.currentIndex = s.matches.length > 0 ? 0 : -1;
+    applyHighlights(s);
+    if (s.currentIndex >= 0) {
+      scrollToCurrent(s);
+    }
+    updateCountDisplay(s);
+  }
+  function navigate(s, direction) {
+    ensureFresh(s);
+    const n = s.matches.length;
+    if (n === 0) {
+      applyHighlights(s);
+      updateCountDisplay(s);
+      return;
+    }
+    if (s.currentIndex < 0) {
+      s.currentIndex = direction === "next" ? 0 : n - 1;
+    } else {
+      s.currentIndex = (s.currentIndex + (direction === "next" ? 1 : -1) + n) % n;
+    }
+    applyHighlights(s);
+    scrollToCurrent(s);
+    updateCountDisplay(s);
   }
   function createFindBar() {
     let state2 = null;
@@ -914,78 +996,24 @@
         closeBtn,
         debounceTimer: null,
         lastSearched: "",
-        totalMatches: 0,
-        hasNavigated: false
+        matches: [],
+        currentIndex: -1,
+        matchesDirty: false,
+        observer: null
       };
     }
-    function updateCountDisplay(s) {
-      const query = s.input.value;
-      if (query.length === 0) {
-        s.count.textContent = "";
-        s.bar.classList.remove("mm-find-no-match");
+    function connectObserver(s) {
+      if (s.observer !== null) {
         return;
       }
-      if (s.totalMatches === 0) {
-        s.count.textContent = "0 of 0";
-        s.bar.classList.add("mm-find-no-match");
+      const main = document.querySelector("main.mm-document");
+      if (main === null) {
         return;
       }
-      s.bar.classList.remove("mm-find-no-match");
-      if (s.hasNavigated) {
-        const idx = currentMatchIndex(document.body, s.lastSearched);
-        if (idx > 0) {
-          s.count.textContent = `${idx} of ${s.totalMatches}`;
-          return;
-        }
-      }
-      s.count.textContent = `${s.totalMatches} match${s.totalMatches === 1 ? "" : "es"}`;
-    }
-    function runSearch(s, query) {
-      s.lastSearched = query;
-      if (query.length === 0) {
-        s.totalMatches = 0;
-        s.hasNavigated = false;
-        window.getSelection()?.removeAllRanges();
-        updateCountDisplay(s);
-        return;
-      }
-      s.totalMatches = countMatchesInRoot(document.body, query);
-      s.hasNavigated = false;
-      if (s.totalMatches > 0) {
-        const main = document.querySelector("main.mm-document") ?? document.body;
-        const range = document.createRange();
-        range.setStart(main, 0);
-        range.collapse(true);
-        const sel = window.getSelection();
-        if (sel !== null) {
-          sel.removeAllRanges();
-          sel.addRange(range);
-        }
-        navigate(
-          s,
-          "next",
-          /* initialPlacement */
-          true
-        );
-      } else {
-        window.getSelection()?.removeAllRanges();
-      }
-      updateCountDisplay(s);
-    }
-    function navigate(s, direction, initialPlacement = false) {
-      if (s.lastSearched.length === 0 || s.totalMatches === 0) {
-        return;
-      }
-      const find = window.find;
-      if (typeof find !== "function") {
-        return;
-      }
-      const backwards = direction === "prev";
-      find(s.lastSearched, false, backwards, true, false, false, false);
-      s.hasNavigated = true;
-      if (!initialPlacement) {
-        updateCountDisplay(s);
-      }
+      s.observer = new MutationObserver(() => {
+        s.matchesDirty = true;
+      });
+      s.observer.observe(main, { childList: true, subtree: true });
     }
     function attachListeners(s) {
       s.input.addEventListener("input", () => {
@@ -1035,6 +1063,7 @@
         document.body.appendChild(state2.bar);
       }
       state2.bar.classList.add("mm-find-bar-open");
+      connectObserver(state2);
       state2.input.focus();
       state2.input.select();
     }
@@ -1046,14 +1075,19 @@
         window.clearTimeout(state2.debounceTimer);
         state2.debounceTimer = null;
       }
+      if (state2.observer !== null) {
+        state2.observer.disconnect();
+        state2.observer = null;
+      }
       state2.bar.classList.remove("mm-find-bar-open");
       state2.input.value = "";
       state2.lastSearched = "";
-      state2.totalMatches = 0;
-      state2.hasNavigated = false;
+      state2.matches = [];
+      state2.currentIndex = -1;
+      state2.matchesDirty = false;
       state2.count.textContent = "";
       state2.bar.classList.remove("mm-find-no-match");
-      window.getSelection()?.removeAllRanges();
+      clearHighlights();
     }
     function toggle() {
       if (state2 !== null && state2.bar.classList.contains("mm-find-bar-open")) {

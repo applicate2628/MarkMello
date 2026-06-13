@@ -1,30 +1,43 @@
-// Find-in-document feature (Ctrl+F). Renderer-side MVP — no host changes.
+// Find-in-document feature (Ctrl+F). Renderer-side, CSS Custom Highlight API.
 //
-// Why window.find() (deprecated/non-standard but Chromium-supported)?
-// WebView2 is Chromium, so window.find() works. The "blessed" path
-// would be CoreWebView2.FindController, but Avalonia.Controls.WebView
-// 12.0.x does not expose the managed CoreWebView2 surface yet (same
-// limitation that gates PreferredColorScheme + host-level Ctrl+F
-// forwarding in v0.3 backlog). When that lands, this module is
-// replaced by a host-bridged FindController call.
+// Why CSS Custom Highlight API (not window.find / document Selection)?
+// The previous MVP drove the single document Selection for THREE jobs at once —
+// the find input's text caret, the match highlight, and window.find's navigation
+// cursor — which conflict. Runtime-proven 2026-06-13 (probe3/4/5.log):
+//   * window.find()/Selection moves the caret OUT of the <input>, so keydown +
+//     keypress fire but beforeinput/input do not → typing dies after one char.
+//   * the prev/next handlers' input.focus() collapses the Selection, so the next
+//     window.find restarts from the top → navigation sticks (idx 0->3 forever).
+//   * a TreeWalker count disagreed with window.find's reachable set → "3 of 10".
+// CSS.highlights paints matches via Range objects in a side registry WITHOUT
+// touching the document Selection, so the input keeps its caret and navigation
+// is a deterministic index over an ordered Range[]. WebView2 149 (Chromium 149;
+// CSS.highlights shipped Chromium 105). Future: when Avalonia.Controls.WebView
+// exposes managed CoreWebView2, swap the match source behind this module's
+// Range[]/index seam to CoreWebView2.FindController — the DOM/CSS surface here
+// does not change.
 //
-// Match counting:
-// window.find() returns boolean (found / not found), not index/total.
-// We DOM-walk on each query change (debounced 150ms) to compute total
-// matches; "current index" is derived by counting how many matches
-// occur before the current Selection's anchor node.
+// Match styling: ::highlight(mm-find-all) + ::highlight(mm-find-current) in
+// renderer.css. No <mark> DOM mutation (keeps math / mermaid SVG / hljs
+// decorations / the TOC IntersectionObserver intact).
 //
-// Match styling:
-// We rely on the browser's built-in selection highlight (the
-// platform-default cyan/yellow). We do NOT wrap matches in <mark> —
-// that would require DOM mutation that conflicts with the in-progress
-// TOC feature's IntersectionObserver tracking and could disturb math
-// rendering / mermaid SVG / hljs decorations.
+// Hidden-text exclusion: some text is in the DOM (so a TreeWalker reaches it)
+// but not visible, so window.find skipped it — if we matched it we would emit
+// phantom matches that inflate the count and strand navigation on invisible
+// nodes. We reject those subtrees: `.katex-mathml` (clip-hidden raw TeX source,
+// KaTeX htmlAndMathml default) and `pre.mm-mermaid.is-rendered` (display:none
+// mermaid source after the SVG renders). These two plus the minimap aside are
+// the only invisible-text surfaces in the renderer.
 //
-// Per-document reset:
-// renderer.ts's `resetModuleGlobalsForLoadDocument` invokes `close()`
-// on the active controller so the bar disappears + state clears when
-// the user switches docs.
+// Freshness: matches are live Range objects, and the DOM mutates after
+// layout-ready (KaTeX, Highlight.js, lazy Mermaid on scroll). A MutationObserver
+// — active ONLY while the bar is open — flags the match set stale; it is rebuilt
+// lazily on the next search/navigate. The observer callback ONLY sets the flag
+// (it never rebuilds, re-applies, or scrolls), so a find-navigate scroll that
+// reveals a lazy block cannot feed back into a rebuild storm.
+//
+// Per-document reset: renderer.ts's `resetModuleGlobalsForLoadDocument` invokes
+// `close()` on doc swap, which disconnects the observer and clears highlights.
 
 const FIND_BAR_CLASS = "mm-find-bar";
 const FIND_INPUT_CLASS = "mm-find-input";
@@ -32,28 +45,36 @@ const FIND_COUNT_CLASS = "mm-find-count";
 const FIND_BTN_CLASS = "mm-find-btn";
 const FIND_DEBOUNCE_MS = 150;
 
-// Tags whose text is decoration, not searchable content. We skip them
-// in the DOM walker so that hidden chrome (minimap clone, drop-overlay
-// label, code-block line numbers etc) is not counted.
-const SKIP_TAGS = new Set([
-  "SCRIPT",
-  "STYLE",
-  "NOSCRIPT",
-  "ASIDE", // minimap aside
-]);
+// Well-known CSS.highlights registry names. Safe because there is exactly ONE
+// find-bar controller (createFindBar() is called once at renderer.ts wireFindBar)
+// so these global names cannot collide. A future second find surface MUST
+// namespace these.
+const HIGHLIGHT_ALL = "mm-find-all";
+const HIGHLIGHT_CURRENT = "mm-find-current";
 
+// Tags whose text is decoration, not searchable content (skipped wholesale).
+const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "ASIDE"]);
+
+// Classes whose subtree is excluded: chrome (minimap/width-handle/drop-overlay/
+// the find bar itself) + `katex-mathml` (clip-hidden TeX source — invisible but
+// DOM-reachable; would phantom-match).
 const SKIP_CLASSES = new Set<string>([
   "mm-minimap",
   "mm-minimap-viewport",
   "mm-width-handle",
   "mm-drop-overlay",
+  "katex-mathml",
   FIND_BAR_CLASS,
 ]);
+
+// Compound hidden-source surface: a rendered Mermaid block is `display:none`
+// but its source text persists in the DOM (renderer.css `pre.mm-mermaid.is-rendered`).
+const SKIP_SELECTOR = "pre.mm-mermaid.is-rendered";
 
 export type FindBarController = {
   /** Open the find bar; focuses the input. If already open, refocuses. */
   open: () => void;
-  /** Close the find bar, clear selection, reset state. */
+  /** Close the find bar, clear highlights, reset state. */
   close: () => void;
   /** Toggle: open if closed, close if open. */
   toggle: () => void;
@@ -69,88 +90,55 @@ type State = {
   nextBtn: HTMLButtonElement;
   closeBtn: HTMLButtonElement;
   debounceTimer: number | null;
-  /** Last query for which we have a match-count. */
+  /** Last query the match set was built for. */
   lastSearched: string;
-  /** Total matches for `lastSearched`. */
-  totalMatches: number;
-  /** Whether the user has navigated at least once for the current query. */
-  hasNavigated: boolean;
+  /** Ordered (document order) match ranges for `lastSearched`. */
+  matches: Range[];
+  /** 0-based index of the current match; -1 when none. */
+  currentIndex: number;
+  /** Set by the MutationObserver; consumed lazily before search/navigate. */
+  matchesDirty: boolean;
+  /** Active only while the bar is open. */
+  observer: MutationObserver | null;
 };
 
-/**
- * Count how many case-insensitive matches of `needle` exist in the
- * given root's descendant text nodes. Skips decorative subtrees.
- * O(n) over text length; debounced by caller.
- */
-export function countMatchesInRoot(root: Node, needle: string): number {
-  if (needle.length === 0) {
-    return 0;
+// --- CSS Custom Highlight API access (typed defensively so tsc passes even when
+// the lib target predates the API; behaviour is feature-detected at runtime) ---
+
+interface HighlightRegistryLike {
+  set(name: string, highlight: unknown): void;
+  delete(name: string): void;
+}
+
+function getHighlightRegistry(): HighlightRegistryLike | null {
+  const css = (window as unknown as {
+    CSS?: { highlights?: HighlightRegistryLike };
+  }).CSS;
+  return css?.highlights ?? null;
+}
+
+function makeHighlight(ranges: Range[]): unknown | null {
+  const ctor = (window as unknown as {
+    Highlight?: new (...ranges: Range[]) => unknown;
+  }).Highlight;
+  if (ctor === undefined || ranges.length === 0) {
+    return null;
   }
-  const lowered = needle.toLowerCase();
-  let total = 0;
-
-  // TreeWalker filter rejects entire subtrees by returning FILTER_REJECT
-  // on the element node itself.
-  const walker = document.createTreeWalker(
-    root,
-    NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-    {
-      acceptNode(node: Node): number {
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          const el = node as Element;
-          if (SKIP_TAGS.has(el.tagName)) {
-            return NodeFilter.FILTER_REJECT;
-          }
-          // classList check — element may have multiple classes
-          for (const cls of SKIP_CLASSES) {
-            if (el.classList.contains(cls)) {
-              return NodeFilter.FILTER_REJECT;
-            }
-          }
-          return NodeFilter.FILTER_SKIP; // descend, don't count element itself
-        }
-        // Text node
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    }
-  );
-
-  let current = walker.nextNode();
-  while (current !== null) {
-    const text = (current.nodeValue ?? "").toLowerCase();
-    if (text.length >= lowered.length) {
-      let idx = text.indexOf(lowered);
-      while (idx !== -1) {
-        total++;
-        idx = text.indexOf(lowered, idx + lowered.length);
-      }
-    }
-    current = walker.nextNode();
-  }
-
-  return total;
+  return new ctor(...ranges);
 }
 
 /**
- * Compute the 1-based index of the current selection within all matches
- * of `needle` in `root`. Returns 0 if no selection / not found.
+ * Build an ordered list of match Ranges for `needle` under `root`. Document
+ * order, case-insensitive, per-text-node (a match spanning a text-node boundary
+ * — e.g. a word split by an inline element — is not found; pre-existing
+ * limitation). Skips decorative and hidden-source subtrees.
  */
-export function currentMatchIndex(root: Node, needle: string): number {
+export function buildMatches(root: Node, needle: string): Range[] {
+  const out: Range[] = [];
   if (needle.length === 0) {
-    return 0;
+    return out;
   }
-  const sel = window.getSelection();
-  if (sel === null || sel.rangeCount === 0) {
-    return 0;
-  }
-  const range = sel.getRangeAt(0);
-  if (range.collapsed) {
-    return 0;
-  }
-
   const lowered = needle.toLowerCase();
-  let count = 0;
-  let found = false;
 
   const walker = document.createTreeWalker(
     root,
@@ -167,43 +155,185 @@ export function currentMatchIndex(root: Node, needle: string): number {
               return NodeFilter.FILTER_REJECT;
             }
           }
-          return NodeFilter.FILTER_SKIP;
+          if (el.matches?.(SKIP_SELECTOR)) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_SKIP; // descend, don't count the element
         }
-        return NodeFilter.FILTER_ACCEPT;
+        return NodeFilter.FILTER_ACCEPT; // text node
       },
     }
   );
 
-  let current = walker.nextNode();
-  while (current !== null && !found) {
-    const text = (current.nodeValue ?? "").toLowerCase();
-    if (text.length >= lowered.length) {
-      let idx = text.indexOf(lowered);
-      while (idx !== -1) {
-        count++;
-        // Did the selection start at (this text node, this idx)?
-        if (
-          current === range.startContainer &&
-          idx === range.startOffset
-        ) {
-          found = true;
-          break;
-        }
-        idx = text.indexOf(lowered, idx + lowered.length);
-      }
+  for (let cur = walker.nextNode(); cur !== null; cur = walker.nextNode()) {
+    const text = (cur.nodeValue ?? "").toLowerCase();
+    if (text.length < lowered.length) {
+      continue;
     }
-    current = walker.nextNode();
+    let idx = text.indexOf(lowered);
+    while (idx !== -1) {
+      const range = document.createRange();
+      range.setStart(cur, idx);
+      range.setEnd(cur, idx + lowered.length);
+      out.push(range);
+      idx = text.indexOf(lowered, idx + lowered.length);
+    }
   }
 
-  return found ? count : 0;
+  return out;
+}
+
+function applyHighlights(s: State): void {
+  const reg = getHighlightRegistry();
+  if (reg === null) {
+    return;
+  }
+  if (s.matches.length === 0) {
+    reg.delete(HIGHLIGHT_ALL);
+    reg.delete(HIGHLIGHT_CURRENT);
+    return;
+  }
+  const all = makeHighlight(s.matches);
+  if (all !== null) {
+    reg.set(HIGHLIGHT_ALL, all);
+  }
+  const currentRange = s.matches[s.currentIndex];
+  if (currentRange !== undefined) {
+    const current = makeHighlight([currentRange]);
+    if (current !== null) {
+      reg.set(HIGHLIGHT_CURRENT, current);
+    }
+  } else {
+    reg.delete(HIGHLIGHT_CURRENT);
+  }
+}
+
+function clearHighlights(): void {
+  const reg = getHighlightRegistry();
+  if (reg !== null) {
+    reg.delete(HIGHLIGHT_ALL);
+    reg.delete(HIGHLIGHT_CURRENT);
+  }
+}
+
+function rebuildMatches(s: State): void {
+  s.matches = buildMatches(document.body, s.lastSearched);
+  s.matchesDirty = false;
+  if (s.matches.length === 0) {
+    s.currentIndex = -1;
+  } else {
+    // Preserve position across a mutation-driven rebuild by clamping.
+    s.currentIndex = Math.min(Math.max(s.currentIndex, 0), s.matches.length - 1);
+  }
+}
+
+function ensureFresh(s: State): void {
+  if (s.matchesDirty) {
+    rebuildMatches(s);
+  }
 }
 
 /**
- * Create a find-bar controller. The bar lives as a fixed-position
- * sibling of <main> under <body> (matches minimap / width-handle /
- * drop-overlay pattern; survives the load-document innerHTML swap on
- * <main> alone, though we still call `close()` on doc-swap to reset
- * state).
+ * Scroll the current match into view. Two-step because every top-level document
+ * block is `content-visibility:auto` (renderer.css): a collapsed block skips
+ * paint and its descendants have no geometry, so we first scroll the nearest
+ * c-v-owning block (a direct child of `main.mm-document`) to force it to render,
+ * then — once the match Range has real geometry — re-aim on the match itself.
+ * No DOM mutation (so the observer is not tripped, and other Ranges are not
+ * invalidated by node splitting).
+ */
+function scrollToCurrent(s: State): void {
+  const range = s.matches[s.currentIndex];
+  if (range === undefined) {
+    return;
+  }
+  const host = range.startContainer.parentElement;
+  const block = host?.closest("main.mm-document > *") ?? host;
+  // Step 1 — reveal the (possibly collapsed) c-v block.
+  block?.scrollIntoView({ block: "center" });
+
+  // Step 2 — bounded rAF settle: once the block paints, the Range gets real
+  // geometry; re-center on it if it is off-screen. Same proven shape as
+  // scrollFromMinimapClientY's c-v settle (renderer.ts), replicated locally.
+  let attempts = 0;
+  const reaim = (): void => {
+    if (++attempts > 3) {
+      return;
+    }
+    const rect = range.getBoundingClientRect();
+    if (rect.height === 0 && rect.width === 0) {
+      // Block not painted yet — wait another frame.
+      window.requestAnimationFrame(reaim);
+      return;
+    }
+    const viewport = window.innerHeight || document.documentElement.clientHeight;
+    if (rect.top < 0 || rect.bottom > viewport) {
+      const target = window.scrollY + rect.top - viewport / 2 + rect.height / 2;
+      window.scrollTo({ top: Math.max(0, target), behavior: "instant" as ScrollBehavior });
+      window.requestAnimationFrame(reaim);
+    }
+  };
+  window.requestAnimationFrame(reaim);
+}
+
+function updateCountDisplay(s: State): void {
+  if (s.input.value.length === 0) {
+    s.count.textContent = "";
+    s.bar.classList.remove("mm-find-no-match");
+    return;
+  }
+  if (s.matches.length === 0) {
+    s.count.textContent = "0 of 0";
+    s.bar.classList.add("mm-find-no-match");
+    return;
+  }
+  s.bar.classList.remove("mm-find-no-match");
+  s.count.textContent = `${s.currentIndex + 1} of ${s.matches.length}`;
+}
+
+function runSearch(s: State, query: string): void {
+  s.lastSearched = query;
+  if (query.length === 0) {
+    s.matches = [];
+    s.currentIndex = -1;
+    s.matchesDirty = false;
+    applyHighlights(s);
+    updateCountDisplay(s);
+    return;
+  }
+  s.matches = buildMatches(document.body, query);
+  s.matchesDirty = false;
+  s.currentIndex = s.matches.length > 0 ? 0 : -1;
+  applyHighlights(s);
+  if (s.currentIndex >= 0) {
+    scrollToCurrent(s);
+  }
+  updateCountDisplay(s);
+}
+
+function navigate(s: State, direction: "next" | "prev"): void {
+  ensureFresh(s);
+  const n = s.matches.length;
+  if (n === 0) {
+    applyHighlights(s);
+    updateCountDisplay(s);
+    return;
+  }
+  if (s.currentIndex < 0) {
+    s.currentIndex = direction === "next" ? 0 : n - 1;
+  } else {
+    s.currentIndex = (s.currentIndex + (direction === "next" ? 1 : -1) + n) % n;
+  }
+  applyHighlights(s);
+  scrollToCurrent(s);
+  updateCountDisplay(s);
+}
+
+/**
+ * Create a find-bar controller. The bar lives as a fixed-position sibling of
+ * <main> under <body> (matches minimap / width-handle / drop-overlay pattern;
+ * survives the load-document innerHTML swap on <main>, though we still call
+ * `close()` on doc-swap to reset state).
  */
 export function createFindBar(): FindBarController {
   let state: State | null = null;
@@ -232,7 +362,6 @@ export function createFindBar(): FindBarController {
     prevBtn.className = `${FIND_BTN_CLASS} ${FIND_BTN_CLASS}-prev`;
     prevBtn.setAttribute("aria-label", "Previous match");
     prevBtn.title = "Previous match (Shift+Enter)";
-    // Unicode up-arrow; matches the down-arrow on next.
     prevBtn.textContent = "↑";
 
     const nextBtn = document.createElement("button");
@@ -247,7 +376,7 @@ export function createFindBar(): FindBarController {
     closeBtn.className = `${FIND_BTN_CLASS} ${FIND_BTN_CLASS}-close`;
     closeBtn.setAttribute("aria-label", "Close find bar");
     closeBtn.title = "Close (Esc)";
-    closeBtn.textContent = "×"; // multiplication sign — fits monoline UI
+    closeBtn.textContent = "×";
 
     bar.appendChild(input);
     bar.appendChild(count);
@@ -264,109 +393,30 @@ export function createFindBar(): FindBarController {
       closeBtn,
       debounceTimer: null,
       lastSearched: "",
-      totalMatches: 0,
-      hasNavigated: false,
+      matches: [],
+      currentIndex: -1,
+      matchesDirty: false,
+      observer: null,
     };
   }
 
-  function updateCountDisplay(s: State): void {
-    const query = s.input.value;
-    if (query.length === 0) {
-      s.count.textContent = "";
-      s.bar.classList.remove("mm-find-no-match");
+  function connectObserver(s: State): void {
+    if (s.observer !== null) {
       return;
     }
-    if (s.totalMatches === 0) {
-      s.count.textContent = "0 of 0";
-      s.bar.classList.add("mm-find-no-match");
+    const main = document.querySelector("main.mm-document");
+    if (main === null) {
       return;
     }
-    s.bar.classList.remove("mm-find-no-match");
-    if (s.hasNavigated) {
-      const idx = currentMatchIndex(document.body, s.lastSearched);
-      if (idx > 0) {
-        s.count.textContent = `${idx} of ${s.totalMatches}`;
-        return;
-      }
-    }
-    // Query has matches but user hasn't navigated yet (or the live
-    // selection no longer aligns with a match — e.g. user clicked
-    // elsewhere). Show total only.
-    s.count.textContent = `${s.totalMatches} match${s.totalMatches === 1 ? "" : "es"}`;
-  }
-
-  function runSearch(s: State, query: string): void {
-    s.lastSearched = query;
-    if (query.length === 0) {
-      s.totalMatches = 0;
-      s.hasNavigated = false;
-      window.getSelection()?.removeAllRanges();
-      updateCountDisplay(s);
-      return;
-    }
-    s.totalMatches = countMatchesInRoot(document.body, query);
-    s.hasNavigated = false;
-    // Try to find first match if any exist. window.find moves the
-    // selection forward from the document's current caret; we reset
-    // by collapsing to body start before searching.
-    if (s.totalMatches > 0) {
-      // Collapse selection to start of <main> so window.find() begins
-      // from the top on each fresh query. Skipping this means
-      // consecutive queries inherit the previous match's position.
-      const main = document.querySelector("main.mm-document") ?? document.body;
-      const range = document.createRange();
-      range.setStart(main, 0);
-      range.collapse(true);
-      const sel = window.getSelection();
-      if (sel !== null) {
-        sel.removeAllRanges();
-        sel.addRange(range);
-      }
-      navigate(s, "next", /* initialPlacement */ true);
-    } else {
-      window.getSelection()?.removeAllRanges();
-    }
-    updateCountDisplay(s);
-  }
-
-  function navigate(
-    s: State,
-    direction: "next" | "prev",
-    initialPlacement: boolean = false
-  ): void {
-    if (s.lastSearched.length === 0 || s.totalMatches === 0) {
-      return;
-    }
-    // window.find(query, caseSensitive, backwards, wrapAround,
-    //             wholeWord, searchInFrames, showDialog)
-    // Non-standard Chromium API; WebView2 is Chromium so this is
-    // supported. Returns true if a match was found.
-    type FindFn = (
-      query: string,
-      caseSensitive: boolean,
-      backwards: boolean,
-      wrapAround: boolean,
-      wholeWord: boolean,
-      searchInFrames: boolean,
-      showDialog: boolean
-    ) => boolean;
-    const find = (window as Window & { find?: FindFn }).find;
-    if (typeof find !== "function") {
-      // Defensive: non-Chromium engine. Should never hit in
-      // WebView2, but keeps the code robust if dev tools test
-      // outside Chromium.
-      return;
-    }
-    const backwards = direction === "prev";
-    find(s.lastSearched, false, backwards, true, false, false, false);
-    s.hasNavigated = true;
-    // initialPlacement: this navigate call is part of runSearch
-    // bootstrapping; the count display will be updated by runSearch's
-    // own updateCountDisplay call. Skip the redundant update here to
-    // avoid a flash of "N matches" → "1 of N".
-    if (!initialPlacement) {
-      updateCountDisplay(s);
-    }
+    // Flag-only callback: never rebuild/re-apply/scroll here, so a navigate
+    // scroll that triggers a lazy Mermaid render cannot feed back into a
+    // rebuild storm. The flag is consumed lazily by the next search/navigate.
+    // characterData is intentionally omitted: this is a read-only viewer; the
+    // mutations that change the match set (KaTeX / hljs / Mermaid) are childList.
+    s.observer = new MutationObserver(() => {
+      s.matchesDirty = true;
+    });
+    s.observer.observe(main, { childList: true, subtree: true });
   }
 
   function attachListeners(s: State): void {
@@ -384,7 +434,7 @@ export function createFindBar(): FindBarController {
     s.input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
-        // If a debounced search is still pending, flush it first.
+        // Flush a pending debounced search first.
         if (s.debounceTimer !== null) {
           window.clearTimeout(s.debounceTimer);
           s.debounceTimer = null;
@@ -399,6 +449,9 @@ export function createFindBar(): FindBarController {
       }
     });
 
+    // Re-focusing the input after navigation is now safe: the highlight is a CSS
+    // registry entry, not the document Selection, so focusing the input does not
+    // disturb it. Keeping focus in the input lets the user keep typing.
     s.prevBtn.addEventListener("click", () => {
       navigate(s, "prev");
       s.input.focus();
@@ -421,7 +474,7 @@ export function createFindBar(): FindBarController {
       document.body.appendChild(state.bar);
     }
     state.bar.classList.add("mm-find-bar-open");
-    // Pre-select existing value so user can type-to-replace.
+    connectObserver(state);
     state.input.focus();
     state.input.select();
   }
@@ -434,15 +487,20 @@ export function createFindBar(): FindBarController {
       window.clearTimeout(state.debounceTimer);
       state.debounceTimer = null;
     }
+    if (state.observer !== null) {
+      state.observer.disconnect();
+      state.observer = null;
+    }
     state.bar.classList.remove("mm-find-bar-open");
     state.input.value = "";
     state.lastSearched = "";
-    state.totalMatches = 0;
-    state.hasNavigated = false;
+    state.matches = [];
+    state.currentIndex = -1;
+    state.matchesDirty = false;
     state.count.textContent = "";
     state.bar.classList.remove("mm-find-no-match");
-    window.getSelection()?.removeAllRanges();
-    // Keep node in DOM for fast reopen; only re-build on first open.
+    clearHighlights();
+    // Keep the node in the DOM for fast reopen; only re-build on first open.
   }
 
   function toggle(): void {

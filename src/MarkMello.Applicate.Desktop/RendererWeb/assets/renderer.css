@@ -572,6 +572,20 @@ body.mm-saving .mm-find-bar {
   background: color-mix(in srgb, var(--mm-document-text) 8%, transparent);
 }
 
+/*
+ * Find matches — CSS Custom Highlight API (findBar.ts). Painted over Range
+ * objects in a side registry, NOT the document Selection, so the find input
+ * keeps its caret. Translucent accent (no color override) so document text
+ * stays legible across all themes; follows the focus-ring color-mix idiom.
+ */
+::highlight(mm-find-all) {
+  background-color: color-mix(in srgb, var(--mm-accent) 22%, transparent);
+}
+
+::highlight(mm-find-current) {
+  background-color: color-mix(in srgb, var(--mm-accent) 55%, transparent);
+}
+
 .mm-find-btn:active {
   background: color-mix(in srgb, var(--mm-document-text) 14%, transparent);
 }
