@@ -66,18 +66,13 @@ internal sealed class ApplicateWrappingMathView : WrapPanel
         }
     }
 
-    private MathView CreateMathView(string tex)
-        => new()
-        {
-            LaTeX = tex,
-            FontSize = _fontSize,
-            TextColor = _textColor,
-            ErrorColor = Colors.OrangeRed,
-            DisplayErrorInline = true,
-            Margin = new Thickness(0, 0, 6, 8),
-            HorizontalAlignment = HorizontalAlignment.Left,
-            VerticalAlignment = VerticalAlignment.Center
-        };
+    private Control CreateMathView(string tex)
+        => ApplicateMathPresenter.CreateOrFallback(
+            tex,
+            _fontSize,
+            _textColor,
+            new Thickness(0, 0, 6, 8),
+            HorizontalAlignment.Left);
 
     private static bool IsUsableWidth(double value)
         => !double.IsNaN(value) && !double.IsInfinity(value) && value > 0;

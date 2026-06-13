@@ -298,6 +298,19 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         @"(_|\^)(\\[a-zA-Z]+)(?!\s*\{)",
         System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    // CSharpMath 0.5.1's tokenizer (Structures/Dictionary.cs SplitCommand) glues a
+    // trailing '=' or "'" onto a control word, so clean "\omega=0" is looked up as
+    // the command "\omega=" and rejected ("Invalid command \omega="). The defect
+    // hits ANY "\command=" / "\command'" (runtime-confirmed: \omega=, \alpha=,
+    // \varepsilon= all fail; "\omega =0" succeeds). Inserting a space after the
+    // control word makes it tokenize alone; spaces after a control word are
+    // TeX-insignificant. The "'" case also catches primes that the ^{\prime}
+    // normalization above turns into "\command'". (We deliberately leave '*'
+    // alone — separating it could break a legitimately-registered starred command.)
+    private static readonly System.Text.RegularExpressions.Regex ControlWordGluedOperatorPattern = new(
+        @"(\\[a-zA-Z]+)(?=['=])",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
     public static string NormalizeTexForRenderer(string tex)
     {
         ArgumentNullException.ThrowIfNull(tex);
@@ -316,7 +329,8 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         // `_{\sqrt}{x}` which would change the meaning.
         normalized = SubscriptSuperscriptCommandPattern.Replace(normalized, "$1{$2}");
 
-        return StripUnsupportedFormattingCommands(StripUnsupportedBraceAnnotations(normalized));
+        var stripped = StripUnsupportedFormattingCommands(StripUnsupportedBraceAnnotations(normalized));
+        return ControlWordGluedOperatorPattern.Replace(stripped, "$1 ");
     }
 
     private static string StripUnsupportedFormattingCommands(string tex)

@@ -423,17 +423,12 @@ public sealed class ApplicateTocPanel : UserControl
             Foreground = _textBrush,
         };
 
-    private MathView CreateHeadingMathView(DocumentHeading heading, string tex)
-        => new()
-        {
-            LaTeX = ApplicateMarkdownDocumentRenderer.NormalizeTexForRenderer(tex),
-            FontSize = heading.Level <= 1 ? 13 : 12,
-            TextColor = BrushColor(_textBrush, Colors.Black),
-            ErrorColor = Colors.OrangeRed,
-            DisplayErrorInline = true,
-            Margin = new Thickness(1, 0, 1, 0),
-            VerticalAlignment = VerticalAlignment.Center,
-        };
+    private Control CreateHeadingMathView(DocumentHeading heading, string tex)
+        => ApplicateMathPresenter.CreateOrFallback(
+            ApplicateMarkdownDocumentRenderer.NormalizeTexForRenderer(tex),
+            heading.Level <= 1 ? 13 : 12,
+            BrushColor(_textBrush, Colors.Black),
+            new Thickness(1, 0, 1, 0));
 
     private void OnRowDetached(object? sender, VisualTreeAttachmentEventArgs e)
     {

@@ -513,16 +513,11 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
         };
 
     private Control BuildInlineMath(string tex)
-        => new MathView
-        {
-            LaTeX = ApplicateMarkdownDocumentRenderer.NormalizeTexForRenderer(tex),
-            FontSize = MathFontSize(),
-            TextColor = TextColor(),
-            ErrorColor = Colors.OrangeRed,
-            DisplayErrorInline = true,
-            Margin = new Thickness(3, 0, 3, 0),
-            VerticalAlignment = VerticalAlignment.Center
-        };
+        => ApplicateMathPresenter.CreateOrFallback(
+            ApplicateMarkdownDocumentRenderer.NormalizeTexForRenderer(tex),
+            MathFontSize(),
+            TextColor(),
+            new Thickness(3, 0, 3, 0));
 
     private float MathFontSize()
         => (float)SysMath.Round(ReadingPreferences.FontSize * MathFontScale, 1, MidpointRounding.AwayFromZero);
