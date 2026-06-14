@@ -411,6 +411,17 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         if (View.HasLoadedDocumentForSource(source))
         {
             Commit();
+            // Same-source no-op: action=None produced no QueueRender, so no new
+            // DocumentRendered and no fresh DocumentRevealReady will fire. Commit()
+            // gave the reveal cover its commit signal; re-emit reveal-ready (valid
+            // ONLY because the source is already loaded AND fully painted, per
+            // HasLoadedDocumentForSource) so a same-content reload's cover resolves
+            // promptly instead of waiting out its 8s idle fallback. gen==0 leaves the
+            // mode-toggle (Ctrl+E) transactional reveal owned by the bridge.
+            if (transactionGeneration == 0)
+            {
+                View.RaiseDocumentRevealReadyForLoadedSource(source);
+            }
         }
     }
 

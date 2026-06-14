@@ -293,6 +293,30 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     internal bool HasLoadedDocumentForSource(MarkdownSource? source)
         => _hasLoadedDocument && !_awaitingLayoutReady && Equals(Source, source);
 
+    // Re-emit DocumentRevealReady for a same-source no-op reload where the
+    // document is already fully loaded AND painted (HasLoadedDocumentForSource is
+    // true). A value-equal reload yields UpdateInputs action=None -> no QueueRender
+    // -> no fresh reveal-ready, so the document-switch reveal cover would otherwise
+    // wait out its 8s idle fallback. Raises the event DIRECTLY (does NOT go through
+    // CompleteDocumentRevealReady, does NOT touch _documentRevealReadyRaised /
+    // _hasLayoutReady / _postReadyEnhancementsComplete), so the real-render reveal
+    // gate is untouched. Garbage-free by construction: the guard is false for the
+    // whole duration of any real render (QueueRender clears _hasLoadedDocument), so
+    // this can only fire when the content is already on screen.
+    internal void RaiseDocumentRevealReadyForLoadedSource(MarkdownSource? source)
+    {
+        if (!HasLoadedDocumentForSource(source))
+        {
+            return;
+        }
+
+        ApplicateTrace.DiagMs(
+            "diag-gate",
+            "document-reveal-ready-reemit-noop",
+            $"path={source?.Path ?? "(null)"}");
+        DocumentRevealReady?.Invoke(this, EventArgs.Empty);
+    }
+
     internal bool LastLayoutReadyWasCached => _lastLayoutReadyWasCached;
 
     internal ApplicateWebInputUpdateAction UpdateInputs(

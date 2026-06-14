@@ -120,8 +120,31 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsError))]
     private ViewState _state = ViewState.NoDocument;
 
-    [ObservableProperty]
     private MarkdownSource? _document;
+
+    // Hand-rolled (NOT [ObservableProperty]): a same-content reload (F5 / re-open
+    // of the current doc / startup tab-restore) assigns a NEW but value-EQUAL
+    // MarkdownSource (value record), so the generated value-equality setter
+    // short-circuits and raises no PropertyChanged -> the viewer never re-syncs,
+    // no render is requested, and the document-switch reveal cover waits out its
+    // 8s idle fallback. Publish on REFERENCE identity so every fresh load drives
+    // the render request that resolves the cover. OnDocumentChanged (the existing
+    // hook) is still invoked, so TOC/summary/title/command-state are identical.
+    public MarkdownSource? Document
+    {
+        get => _document;
+        set
+        {
+            if (ReferenceEquals(_document, value))
+            {
+                return;
+            }
+
+            _document = value;
+            OnDocumentChanged(value);
+            OnPropertyChanged(nameof(Document));
+        }
+    }
 
     [ObservableProperty]
     private string _windowTitle = "MarkMello";
@@ -1321,7 +1344,7 @@ public partial class MainWindowViewModel : ObservableObject
         return true;
     }
 
-    partial void OnDocumentChanged(MarkdownSource? value)
+    private void OnDocumentChanged(MarkdownSource? value)
     {
         // C3 (atomic transition): clear the TOC only when there is no document
         // (close, or a load failure that nulls Document). On a viewer->viewer
