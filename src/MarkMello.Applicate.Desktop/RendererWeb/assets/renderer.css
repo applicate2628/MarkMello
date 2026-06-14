@@ -278,10 +278,14 @@ img {
 }
 
 .mm-document table {
-  display: block;
-  width: max-content;
+  /* Wrap wide tables to fit the viewport instead of overflowing with a
+     horizontal scrollbar. display:table + width:auto shrinks to content for
+     narrow tables, max-width:100% caps wide ones, and table-layout:auto then
+     wraps the cells (see th/td white-space:normal) so the table fits. */
+  display: table;
+  width: auto;
   max-width: 100%;
-  overflow-x: auto;
+  table-layout: auto;
   border-collapse: collapse;
   margin: 20px 0 24px;
   font-family: var(--mm-document-font-family-sans);
@@ -295,7 +299,8 @@ img {
   border-bottom: 1px solid var(--mm-document-rule);
   text-align: left;
   vertical-align: top;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 
 .mm-document th {
