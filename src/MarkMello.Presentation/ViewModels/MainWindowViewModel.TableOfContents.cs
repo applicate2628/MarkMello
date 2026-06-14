@@ -2,6 +2,7 @@ using System;
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using MarkMello.Domain;
 
 namespace MarkMello.Presentation.ViewModels;
 
@@ -48,12 +49,24 @@ public partial class MainWindowViewModel
 
     /// <summary>
     /// Current width of the TOC column. Two-way-bound to the GridSplitter
-    /// the Applicate-side ApplicateMainWindow installs. Held as a VM
-    /// property so the value survives layout passes; settings persistence
-    /// is a v0.3.3 backlog item.
+    /// the Applicate-side ApplicateMainWindow installs. Updated continuously
+    /// (no disk I/O) while the user drags the splitter; seeded from
+    /// <see cref="ReadingPreferences.TocColumnWidth"/> on load and persisted
+    /// once at drag-end via <see cref="CommitTocColumnWidth"/>.
     /// </summary>
     [ObservableProperty]
-    private double _tocColumnWidth = 240.0;
+    private double _tocColumnWidth = ReadingPreferences.DefaultTocColumnWidth;
+
+    /// <summary>
+    /// Persist the current TOC column width to settings. Called once at the
+    /// end of a splitter drag (drag-end), mirroring the content-width resizer:
+    /// the live <see cref="TocColumnWidth"/> updates continuously during the
+    /// drag without touching disk, and only the final value is written.
+    /// <see cref="ApplyReadingPreferences"/> early-returns when nothing changed,
+    /// so a no-op drag persists nothing.
+    /// </summary>
+    public void CommitTocColumnWidth()
+        => ApplyReadingPreferences(ReadingPreferences with { TocColumnWidth = TocColumnWidth });
 
     /// <summary>
     /// True when the TOC column should be visible. Composite predicate:

@@ -976,6 +976,19 @@ public sealed class ApplicateMainWindow : MainWindow
         };
         AttachSplitterDraggingHighlight(tocSplitter);
 
+        // Persist the TOC column width once at drag-end (mirrors the
+        // content-width resizer): the live two-way binding writes
+        // VM.TocColumnWidth continuously during the drag without touching
+        // disk; only the final value is saved here. CommitTocColumnWidth
+        // early-returns when nothing changed, so a no-op drag persists nothing.
+        tocSplitter.DragCompleted += (_, _) =>
+        {
+            if (DataContext is MainWindowViewModel vm)
+            {
+                vm.CommitTocColumnWidth();
+            }
+        };
+
         var contentGrid = new Grid
         {
             UseLayoutRounding = true,

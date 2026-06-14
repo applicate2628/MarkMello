@@ -1482,6 +1482,17 @@ public partial class MainWindowViewModel : ObservableObject
             OnPropertyChanged(nameof(IsWideWidthSelected));
         }
 
+        // Seed the live TOC-column width from persisted prefs (load / reset /
+        // external change). The live TocColumnWidth drives the GridSplitter
+        // two-way binding; on the drag-end commit this sets the same value the
+        // commit was built from, so [ObservableProperty]'s equality check
+        // short-circuits and no feedback loop forms. During a drag prefs are
+        // not mutated, so this never fights the splitter.
+        if (Math.Abs(oldValue.TocColumnWidth - value.TocColumnWidth) > 0.0001)
+        {
+            TocColumnWidth = value.TocColumnWidth;
+        }
+
         if (oldValue.WidthResizerVisibility != value.WidthResizerVisibility)
         {
             OnPropertyChanged(nameof(SelectedWidthResizerVisibility));

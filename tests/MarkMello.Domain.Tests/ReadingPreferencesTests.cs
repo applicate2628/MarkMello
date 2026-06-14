@@ -43,6 +43,29 @@ public sealed class ReadingPreferencesTests
     }
 
     [Theory]
+    [InlineData(50, ReadingPreferences.MinTocColumnWidth)]
+    [InlineData(9999, ReadingPreferences.MaxTocColumnWidth)]
+    [InlineData(273, 273)] // in range -> preserved EXACTLY, no step snap
+    public void NormalizeClampsTocColumnWidthWithoutStepSnapping(double candidateWidth, double expectedWidth)
+    {
+        var candidate = ReadingPreferences.Default with { TocColumnWidth = candidateWidth };
+
+        var normalized = ReadingPreferences.Normalize(candidate);
+
+        Assert.Equal(expectedWidth, normalized.TocColumnWidth);
+    }
+
+    [Fact]
+    public void NormalizeUsesDefaultTocColumnWidthForNonFiniteValue()
+    {
+        var candidate = ReadingPreferences.Default with { TocColumnWidth = double.NaN };
+
+        var normalized = ReadingPreferences.Normalize(candidate);
+
+        Assert.Equal(ReadingPreferences.DefaultTocColumnWidth, normalized.TocColumnWidth);
+    }
+
+    [Theory]
     [InlineData(580, ReadingPreferences.NarrowContentWidth)]
     [InlineData(720, ReadingPreferences.MediumContentWidth)]
     [InlineData(860, ReadingPreferences.WideContentWidth)]

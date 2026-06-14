@@ -22,7 +22,8 @@ public sealed class JsonSettingsStoreTests
                 WidthResizerVisibility.Always,
                 LightPaletteMode.White,
                 ModeSwitchSmoothEnabled: false,
-                ModeSwitchSmoothDurationMs: 260);
+                ModeSwitchSmoothDurationMs: 260,
+                TocColumnWidth: 333);
 
             await store.SavePreferencesAsync(expectedPreferences);
             await store.SaveThemeAsync(ThemeMode.Dark);

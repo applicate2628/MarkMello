@@ -13,6 +13,7 @@ namespace MarkMello.Domain;
 /// <param name="LightPalette">Вариант светлой палитры документа.</param>
 /// <param name="ModeSwitchSmoothEnabled">Включена ли плавная смена режимов чтение/редактирование.</param>
 /// <param name="ModeSwitchSmoothDurationMs">Длительность плавной смены режимов в миллисекундах.</param>
+/// <param name="TocColumnWidth">Ширина колонки оглавления (TOC) в пикселях; сохраняется между запусками.</param>
 public sealed record ReadingPreferences(
     FontFamilyMode FontFamily,
     int FontSize,
@@ -23,7 +24,8 @@ public sealed record ReadingPreferences(
     WidthResizerVisibility WidthResizerVisibility = WidthResizerVisibility.OnHover,
     LightPaletteMode LightPalette = LightPaletteMode.White,
     bool ModeSwitchSmoothEnabled = true,
-    int ModeSwitchSmoothDurationMs = ReadingPreferences.DefaultModeSwitchSmoothDurationMs)
+    int ModeSwitchSmoothDurationMs = ReadingPreferences.DefaultModeSwitchSmoothDurationMs,
+    double TocColumnWidth = ReadingPreferences.DefaultTocColumnWidth)
 {
     public const int MinFontSize = 14;
     public const int MaxFontSize = 24;
@@ -45,6 +47,13 @@ public sealed record ReadingPreferences(
     public const int ModeSwitchSmoothDurationStepMs = 20;
     public const int DefaultModeSwitchSmoothDurationMs = 180;
 
+    // TOC (оглавление) column width. Persists exactly like the content-width
+    // resizer (clamp only, no step snap). Range must match the Applicate-side
+    // GridSplitter clamp (ApplicateMainWindow.TocColumn{Min,Max,Default}Width).
+    public const double MinTocColumnWidth = 160;
+    public const double MaxTocColumnWidth = 480;
+    public const double DefaultTocColumnWidth = 240;
+
     private const int LegacyNarrowContentWidth = 580;
     private const int LegacyMediumContentWidth = 720;
     private const int LegacyWideContentWidth = 860;
@@ -62,7 +71,8 @@ public sealed record ReadingPreferences(
         WidthResizerVisibility: WidthResizerVisibility.OnHover,
         LightPalette: LightPaletteMode.White,
         ModeSwitchSmoothEnabled: true,
-        ModeSwitchSmoothDurationMs: DefaultModeSwitchSmoothDurationMs);
+        ModeSwitchSmoothDurationMs: DefaultModeSwitchSmoothDurationMs,
+        TocColumnWidth: DefaultTocColumnWidth);
 
     /// <summary>
     /// Нормализует пользовательские настройки до безопасного и предсказуемого диапазона.
@@ -95,6 +105,7 @@ public sealed record ReadingPreferences(
             ? preferences.LightPalette
             : Default.LightPalette;
         var modeSwitchSmoothDurationMs = NormalizeModeSwitchSmoothDuration(preferences.ModeSwitchSmoothDurationMs);
+        var tocColumnWidth = NormalizeTocColumnWidth(preferences.TocColumnWidth);
 
         return new ReadingPreferences(
             fontFamily,
@@ -106,7 +117,8 @@ public sealed record ReadingPreferences(
             widthResizerVisibility,
             lightPalette,
             preferences.ModeSwitchSmoothEnabled,
-            modeSwitchSmoothDurationMs);
+            modeSwitchSmoothDurationMs,
+            tocColumnWidth);
     }
 
     public ReadingPreferences Normalize() => Normalize(this);
@@ -136,6 +148,18 @@ public sealed record ReadingPreferences(
         // Persist the manual resizer width EXACTLY — only clamp to a sane range, do
         // not snap to a step grid (the user expects the column where they left it).
         return Math.Clamp(migrated, MinContentWidth, MaxContentWidth);
+    }
+
+    private static double NormalizeTocColumnWidth(double value)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value))
+        {
+            return DefaultTocColumnWidth;
+        }
+
+        // Persist the manual splitter width EXACTLY — clamp only, no step snap
+        // (the user expects the TOC column where they left it).
+        return Math.Clamp(value, MinTocColumnWidth, MaxTocColumnWidth);
     }
 
     private static int NormalizeModeSwitchSmoothDuration(int value)
