@@ -59,7 +59,14 @@ public sealed class ApplicateMainWindow : MainWindow
     // can prime immediately; heavy docs wait until the viewer has committed
     // and had one short post-reveal quiet period, so startup/tab reveal is not
     // taxed but the first edit transition is warmed without a visible pause.
-    private const int InactiveEditPrimeImmediateMaxDocumentContentLength = 256 * 1024;
+    // Perf (tab-switch reveal stability): 0 = NO document primes the off-screen
+    // edit-preview SYNCHRONOUSLY inside the reveal window. Every doc now routes
+    // through the delayed ScheduleDelayedHeavyPrime path (~300ms after reveal-ready),
+    // so the prime's second full render no longer contends with the viewer reveal on
+    // the shared UI/GPU thread -- this trims the cross-switch latency variance. The
+    // first Ctrl+E after a switch warms ~300ms later, the already-accepted heavy-doc
+    // tradeoff, now applied to all sizes. Edit-mode correctness is unchanged.
+    private const int InactiveEditPrimeImmediateMaxDocumentContentLength = 0;
     private const int InactiveEditPrimeVeryHeavyDocumentContentLength = 1024 * 1024;
     private static readonly TimeSpan InactiveEditPrimeHeavyDelay = TimeSpan.FromMilliseconds(300);
     private static readonly TimeSpan InactiveEditPrimeVeryHeavyDelay = TimeSpan.FromMilliseconds(1200);
@@ -1562,18 +1569,22 @@ public sealed class ApplicateMainWindow : MainWindow
             }
 
             if (e.PropertyName is nameof(MainWindowViewModel.Document)
-                or nameof(MainWindowViewModel.ReadingPreferences)
-                or nameof(MainWindowViewModel.IsTocVisible)
+                or nameof(MainWindowViewModel.ReadingPreferences))
+            {
+                // Invalidate the cached reveal-ready marker for the new doc/prefs, but
+                // do NOT QueuePrime here: the viewer has not loaded the new document
+                // yet, so a prime would only dead-end at the viewer-loaded gate inside
+                // the reveal window. The viewer's DocumentRevealReady / commit re-queues
+                // the prime once the doc is actually loaded + revealed.
+                revealReadyDocument = null;
+                revealReadyPreferences = null;
+            }
+            else if (e.PropertyName is nameof(MainWindowViewModel.IsTocVisible)
                 or nameof(MainWindowViewModel.TocColumnWidth)
                 or nameof(MainWindowViewModel.IsEditMode))
             {
-                if (e.PropertyName is nameof(MainWindowViewModel.Document)
-                    or nameof(MainWindowViewModel.ReadingPreferences))
-                {
-                    revealReadyDocument = null;
-                    revealReadyPreferences = null;
-                }
-
+                // TOC width / edit-state changes do not reload the document (no fresh
+                // reveal-ready fires), so they still re-queue the prime directly.
                 QueuePrime();
             }
         }
