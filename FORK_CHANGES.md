@@ -66,6 +66,15 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - The WebView renderer hides the document body, minimap, and width-resizer handle until the bootstrap pipeline finishes math + mermaid + code-block rendering and posts `layout-ready`. Without this gate the user briefly sees a fallback state on tab switch and fresh launch (web fonts not yet swapped, `\[ ... \]` math placeholders, raw mermaid source, width handle at a stale X coordinate). The reveal uses a 120ms CSS opacity transition shared by all three surfaces.
 - The hide-rule is scoped to `body > main.mm-document` (and the minimap aside, and the width-handle div) so that the minimap's cloned `.mm-document` subtree is not affected; the clone always renders at full opacity inside the minimap container.
 
+## Release Scope (v0.3.6-applicate)
+
+- The renderer find bar now keeps keyboard focus while typing past the first character and navigates between matches correctly. Matches are drawn with the CSS Custom Highlight API so the input caret and the match highlight no longer fight over the single document selection.
+- Table of Contents and host-rendered inline math now render headings and formulas where CSharpMath previously failed. TeX that glues an operator onto a control word (for example `\omega=0`) is normalized before rendering, and a formula CSharpMath still cannot parse falls back to a readable text approximation instead of a red inline error.
+- Dragging the WebView minimap viewport indicator now keeps the grabbed point under the cursor across the whole document, inverting the indicator's true non-linear position map instead of a linear approximation, with the indicator pinned optimistically to the cursor during the drag.
+- The Updates panel no longer flickers its action buttons on hover (the download/open buttons toggle by visibility instead of overlapping by opacity), holds the checking status text and progress indicator together for a minimum span so a fast check does not flash, and keeps the status title on a single line on the narrow panel.
+- The tab strip now scrolls horizontally with the mouse wheel when it overflows, and the overflow scroll arrows are fenced off from the tabs by thin dividers so they read as distinct controls.
+- The bottom-right status hint (word count and Ctrl+O/E/, hotkeys) stays pinned to the bottom and no longer flips up onto the tab strip when the window bottom is off-screen.
+
 ## Release Scope (v0.3.5-applicate)
 
 - Table of Contents headings now preserve inline TeX formulas through the renderer payload/cache and host TOC row, so formulas in Markdown headings render in the outline instead of disappearing into blank gaps.
