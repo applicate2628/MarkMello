@@ -1085,7 +1085,9 @@ public partial class MainWindowViewModel : ObservableObject
     private const int MinUpdateBusyMilliseconds = 600;
 
     [RelayCommand(CanExecute = nameof(CanCheckForUpdates))]
-    private async Task CheckForUpdatesAsync()
+    private Task CheckForUpdatesAsync() => CheckForUpdatesCoreAsync(minBusyDelay: true);
+
+    private async Task CheckForUpdatesCoreAsync(bool minBusyDelay)
     {
         IsCheckingForUpdates = true;
         IsDownloadingUpdate = false;
@@ -1097,14 +1099,17 @@ public partial class MainWindowViewModel : ObservableObject
         {
             var result = await _updateService.CheckForUpdatesAsync().ConfigureAwait(true);
 
-            // Hold the "checking" status text AND the spinner together for a minimum
-            // span, THEN reveal the result. Doing the delay here (not in finally) keeps
-            // them in sync: a fast check used to flip the status text to the result while
-            // the spinner was still up, flashing the checking text away early.
-            var elapsedMs = Environment.TickCount64 - busyStartTick;
-            if (elapsedMs < MinUpdateBusyMilliseconds)
+            // Hold the "checking" status text and spinner together for a minimum span
+            // before revealing the result, but only for a user-initiated check (the
+            // visible panel spinner). The background startup check shows no spinner,
+            // so it reveals its result immediately — tests rely on that.
+            if (minBusyDelay)
             {
-                await Task.Delay((int)(MinUpdateBusyMilliseconds - elapsedMs)).ConfigureAwait(true);
+                var elapsedMs = Environment.TickCount64 - busyStartTick;
+                if (elapsedMs < MinUpdateBusyMilliseconds)
+                {
+                    await Task.Delay((int)(MinUpdateBusyMilliseconds - elapsedMs)).ConfigureAwait(true);
+                }
             }
 
             switch (result)
@@ -1165,7 +1170,7 @@ public partial class MainWindowViewModel : ObservableObject
     {
         try
         {
-            await CheckForUpdatesAsync().ConfigureAwait(true);
+            await CheckForUpdatesCoreAsync(minBusyDelay: false).ConfigureAwait(true);
         }
         catch (System.Exception ex)
         {
