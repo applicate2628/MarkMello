@@ -46,6 +46,10 @@ internal sealed class ApplicateTabsView : UserControl
     // (DraggedTabWidth + TabSpacingPixels) to fill the gap.
     private const double TabSpacingPixels = 4.0;
 
+    // Horizontal tab-strip scroll distance per mouse-wheel notch — a little under
+    // one tab width, so each notch advances the strip by roughly one tab.
+    private const double TabWheelStepPixels = 80.0;
+
     // Animation timing for non-dragged tabs sliding into a new slot is
     // sourced from the app's motion tokens (Themes/Motion.axaml) so it
     // matches popup fades, hover transitions, and the rest of the UI's
@@ -62,6 +66,10 @@ internal sealed class ApplicateTabsView : UserControl
     private readonly Button _scrollRightButton;
     private readonly Avalonia.Controls.Shapes.Path _scrollLeftIcon;
     private readonly Avalonia.Controls.Shapes.Path _scrollRightIcon;
+    // Thin separators that fence the overflow scroll arrows off from the tab strip
+    // when it overflows, so each arrow reads as a distinct control, not a tab edge.
+    private readonly Border _leftScrollSeparator;
+    private readonly Border _rightScrollSeparator;
     private readonly Button _tabListButton;
     private readonly Avalonia.Controls.Shapes.Path _tabListIcon;
     private readonly Avalonia.Controls.Primitives.Popup _tabListPopup;
@@ -137,6 +145,9 @@ internal sealed class ApplicateTabsView : UserControl
         ToolTip.SetTip(_scrollRightButton, "Scroll tabs right");
         _scrollRightButton.Click += (_, _) => ScrollTabs(1);
 
+        _leftScrollSeparator = BuildScrollSeparator();
+        _rightScrollSeparator = BuildScrollSeparator();
+
         // Tab-list dropdown (⌄) — opens a menu of all open tabs to jump to
         // any one directly. Down-glyph + right placement keep it clear of the
         // TOC chevron. Also overflow-only.
@@ -182,17 +193,23 @@ internal sealed class ApplicateTabsView : UserControl
         rightCluster.Children.Add(_tabListPopup);
 
         _tabsScroll.ScrollChanged += (_, _) => UpdateTabOverflowChrome();
+        // Plain mouse wheel over the tabs area pages the horizontal scroll.
+        _tabsScroll.PointerWheelChanged += OnTabsWheel;
 
         var root = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto")
+            ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto,Auto,Auto")
         };
         Grid.SetColumn(_scrollLeftButton, 0);
-        Grid.SetColumn(_tabsScroll, 1);
-        Grid.SetColumn(_scrollRightButton, 2);
-        Grid.SetColumn(rightCluster, 3);
+        Grid.SetColumn(_leftScrollSeparator, 1);
+        Grid.SetColumn(_tabsScroll, 2);
+        Grid.SetColumn(_rightScrollSeparator, 3);
+        Grid.SetColumn(_scrollRightButton, 4);
+        Grid.SetColumn(rightCluster, 5);
         root.Children.Add(_scrollLeftButton);
+        root.Children.Add(_leftScrollSeparator);
         root.Children.Add(_tabsScroll);
+        root.Children.Add(_rightScrollSeparator);
         root.Children.Add(_scrollRightButton);
         root.Children.Add(rightCluster);
 
@@ -293,6 +310,21 @@ internal sealed class ApplicateTabsView : UserControl
         };
     }
 
+    // Short vertical hairline shown between an overflow scroll arrow and the tab
+    // strip. Inset top/bottom so it reads as a deliberate divider, not a full-
+    // height border. Hidden until the strip overflows (UpdateTabOverflowChrome).
+    private static Border BuildScrollSeparator()
+    {
+        return new Border
+        {
+            Width = 1,
+            Margin = new Thickness(2, 7, 2, 7),
+            Background = ResolveBrush("MmBorderSoftBrush"),
+            IsVisible = false,
+            VerticalAlignment = VerticalAlignment.Stretch
+        };
+    }
+
     private void OnFindButtonClick(object? sender, RoutedEventArgs e)
     {
         // Route through the VM's command so the find-bar trigger surface
@@ -386,11 +418,36 @@ internal sealed class ApplicateTabsView : UserControl
         _tabsScroll.Offset = new Avalonia.Vector(newX, _tabsScroll.Offset.Y);
     }
 
+    private void OnTabsWheel(object? sender, PointerWheelEventArgs e)
+    {
+        // Plain mouse wheel over the tabs area pages the strip's horizontal scroll,
+        // so an overflowing strip is navigable with the wheel — not only the edge
+        // arrows or Shift+wheel. No-op (and left unhandled, so it falls through to
+        // default handling) when the strip fits or the wheel is purely horizontal.
+        if (e.Delta.Y == 0 || _tabsScroll.Extent.Width <= _tabsScroll.Viewport.Width + 1)
+        {
+            return;
+        }
+
+        var maxX = System.Math.Max(0, _tabsScroll.Extent.Width - _tabsScroll.Viewport.Width);
+        // Wheel up (Delta.Y > 0) scrolls toward the start, wheel down toward the end.
+        var newX = System.Math.Clamp(
+            _tabsScroll.Offset.X - (e.Delta.Y * TabWheelStepPixels), 0, maxX);
+        if (System.Math.Abs(newX - _tabsScroll.Offset.X) > 0.01)
+        {
+            _tabsScroll.Offset = new Avalonia.Vector(newX, _tabsScroll.Offset.Y);
+        }
+
+        e.Handled = true;
+    }
+
     private void UpdateTabOverflowChrome()
     {
         var overflow = _tabsScroll.Extent.Width > _tabsScroll.Viewport.Width + 1;
         _scrollLeftButton.IsVisible = overflow;
         _scrollRightButton.IsVisible = overflow;
+        _leftScrollSeparator.IsVisible = overflow;
+        _rightScrollSeparator.IsVisible = overflow;
         _tabListButton.IsVisible = overflow;
         if (!overflow)
         {
@@ -521,6 +578,8 @@ internal sealed class ApplicateTabsView : UserControl
         _scrollLeftIcon.Stroke = ResolveBrush("MmTextSoftBrush");
         _scrollRightIcon.Stroke = ResolveBrush("MmTextSoftBrush");
         _tabListIcon.Stroke = ResolveBrush("MmTextSoftBrush");
+        _leftScrollSeparator.Background = ResolveBrush("MmBorderSoftBrush");
+        _rightScrollSeparator.Background = ResolveBrush("MmBorderSoftBrush");
 
         var borderBrush = ResolveBrush("MmBorderBrush");
         var activeBg = ResolveBrush("MmBackgroundBrush");
