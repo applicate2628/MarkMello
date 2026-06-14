@@ -33,8 +33,12 @@ public sealed record ReadingPreferences(
     public const int NarrowContentWidth = 640;
     public const int MediumContentWidth = 820;
     public const int WideContentWidth = 1080;
-    public const int MinContentWidth = NarrowContentWidth;
-    public const int MaxContentWidth = 1280;
+    // Manual resizer widths persist exactly, so the persistable range spans the
+    // resizer's own drag range (down to 320 px) up to a generous sanity cap; the
+    // render path re-clamps to the live viewport. NarrowContentWidth (640) stays
+    // the Narrow PRESET, not the floor.
+    public const int MinContentWidth = 320;
+    public const int MaxContentWidth = 8192;
     public const int ContentWidthStep = 20;
     public const int MinModeSwitchSmoothDurationMs = 0;
     public const int MaxModeSwitchSmoothDurationMs = 600;
@@ -129,9 +133,9 @@ public sealed record ReadingPreferences(
             _ => value
         };
 
-        var clamped = Math.Clamp(migrated, MinContentWidth, MaxContentWidth);
-        var rounded = (int)Math.Round(clamped / (double)ContentWidthStep, MidpointRounding.AwayFromZero) * ContentWidthStep;
-        return Math.Clamp(rounded, MinContentWidth, MaxContentWidth);
+        // Persist the manual resizer width EXACTLY — only clamp to a sane range, do
+        // not snap to a step grid (the user expects the column where they left it).
+        return Math.Clamp(migrated, MinContentWidth, MaxContentWidth);
     }
 
     private static int NormalizeModeSwitchSmoothDuration(int value)

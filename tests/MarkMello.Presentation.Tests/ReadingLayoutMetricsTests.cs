@@ -33,15 +33,16 @@ public sealed class ReadingLayoutMetricsTests
         // F-02 fix: when the active ContentWidth differs from the
         // Normalize(...) result, the formula widens the padding so the
         // rendered column still reaches the canonical max width.
-        var preferences = ReadingPreferences.Default with { ContentWidth = 600 };
-        // Normalize maps 600 -> 640 (NarrowContentWidth via clamp+round).
+        var preferences = ReadingPreferences.Default with { ContentWidth = 580 };
+        // Normalize migrates the legacy 580 -> 640 (NarrowContentWidth); manual
+        // widths now persist exactly, so use a legacy value that still re-maps.
         var normalized = ReadingPreferences.Normalize(preferences);
         Assert.Equal(ReadingPreferences.NarrowContentWidth, normalized.ContentWidth);
 
         var horizontalPadding = ReadingLayoutMetrics.GetDocumentHorizontalPadding(preferences);
 
         Assert.Equal(
-            ReadingPreferences.NarrowContentWidth + ReadingLayoutMetrics.DocumentHorizontalPadding - 600d,
+            ReadingPreferences.NarrowContentWidth + ReadingLayoutMetrics.DocumentHorizontalPadding - 580d,
             horizontalPadding);
     }
 }

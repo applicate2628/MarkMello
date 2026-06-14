@@ -465,9 +465,9 @@ public partial class MainWindowViewModel : ObservableObject
         get => ReadingPreferences.ContentWidth;
         set
         {
-            var contentWidth = (int)Math.Round(
-                value / ReadingPreferences.ContentWidthStep,
-                MidpointRounding.AwayFromZero) * ReadingPreferences.ContentWidthStep;
+            // Round to 1 px (NOT the step grid) so the manual resizer width persists
+            // exactly where the user left it; presets pass exact values unchanged.
+            var contentWidth = (int)Math.Round(value, MidpointRounding.AwayFromZero);
 
             if (ReadingPreferences.ContentWidth == contentWidth)
             {

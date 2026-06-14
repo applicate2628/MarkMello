@@ -139,7 +139,7 @@ public sealed class JsonSettingsStoreTests
             "fontFamily": "Mono",
             "fontSize": 4,
             "lineHeight": 9.0,
-            "contentWidth": 1700,
+            "contentWidth": 99999,
             "documentMinimapMode": "Off"
           }
         }

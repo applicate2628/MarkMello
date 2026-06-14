@@ -720,6 +720,17 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
     {
         _isDraggingWidth = false;
         SetWebDocumentHitTestingForWidthDrag(true);
+
+        // Persist the dragged width so the resizer position survives a restart.
+        // Until now the final width lived only in the ephemeral _manualContentWidth
+        // and was never written back to the VM, so it was lost on close. Commit it
+        // to ContentWidthSetting (rounds to the step, clamps to the persistable
+        // range, persists to ReadingPreferences); SyncFromViewModel then re-seeds
+        // _manualContentWidth from the persisted value so the live column matches.
+        if (_viewModel is not null && _manualContentWidth is { } draggedWidth)
+        {
+            _viewModel.ContentWidthSetting = draggedWidth;
+        }
     }
 
     private void ApplyWidthDragDelta(double deltaX)

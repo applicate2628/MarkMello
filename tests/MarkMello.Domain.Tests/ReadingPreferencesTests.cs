@@ -25,7 +25,7 @@ public sealed class ReadingPreferencesTests
             FontFamily: (FontFamilyMode)42,
             FontSize: 200,
             LineHeight: 0.2,
-            ContentWidth: 517,
+            ContentWidth: 100,
             DocumentMinimapMode: (DocumentMinimapMode)42,
             LightPalette: (LightPaletteMode)42,
             ModeSwitchSmoothDurationMs: 9999);
