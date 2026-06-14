@@ -71,7 +71,7 @@
                       <TextBlock Classes="mm-setting-label"
                                  FontWeight="SemiBold"
                                  Text="{Binding UpdateStatusTitle}"
-                                 TextWrapping="Wrap" />
+                                 TextWrapping="NoWrap" />
                       <TextBlock Classes="mm-setting-body"
                                  Text="{Binding UpdateStatusMessage}"
                                  TextWrapping="Wrap" />
@@ -120,16 +120,14 @@
                           Grid.Column="1"
                           HorizontalAlignment="Stretch"
                           Command="{Binding DownloadUpdateCommand}"
-                          IsEnabled="{Binding CanDownloadAvailableUpdate}"
-                          Opacity="{Binding DownloadUpdateActionOpacity}"
+                          IsVisible="{Binding CanDownloadAvailableUpdate}"
                           Content="{Binding DownloadUpdateLabel}" />
                   <Button Classes="mm-dialog-secondary"
                           Grid.Column="1"
                           HorizontalAlignment="Stretch"
                           Content="{Binding DownloadedUpdateActionLabel}"
                           Command="{Binding OpenDownloadedUpdateCommand}"
-                          IsEnabled="{Binding CanOpenDownloadedUpdate}"
-                          Opacity="{Binding OpenDownloadedUpdateActionOpacity}" />
+                          IsVisible="{Binding CanOpenDownloadedUpdate}" />
                 </Grid>
               </Border>
             </Grid>

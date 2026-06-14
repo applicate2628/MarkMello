@@ -1080,6 +1080,10 @@ public partial class MainWindowViewModel : ObservableObject
         CloseOverlayCore();
     }
 
+    // Minimum time the update-check busy indicator stays visible, so a fast check
+    // (cached result / quick failure) fades smoothly instead of flashing the bar.
+    private const int MinUpdateBusyMilliseconds = 600;
+
     [RelayCommand(CanExecute = nameof(CanCheckForUpdates))]
     private async Task CheckForUpdatesAsync()
     {
@@ -1088,9 +1092,21 @@ public partial class MainWindowViewModel : ObservableObject
         SetUpdateStatus(new UpdateStatusSnapshot.CheckingState());
         UpdateCommandStates();
 
+        var busyStartTick = Environment.TickCount64;
         try
         {
             var result = await _updateService.CheckForUpdatesAsync().ConfigureAwait(true);
+
+            // Hold the "checking" status text AND the spinner together for a minimum
+            // span, THEN reveal the result. Doing the delay here (not in finally) keeps
+            // them in sync: a fast check used to flip the status text to the result while
+            // the spinner was still up, flashing the checking text away early.
+            var elapsedMs = Environment.TickCount64 - busyStartTick;
+            if (elapsedMs < MinUpdateBusyMilliseconds)
+            {
+                await Task.Delay((int)(MinUpdateBusyMilliseconds - elapsedMs)).ConfigureAwait(true);
+            }
+
             switch (result)
             {
                 case UpdateCheckResult.SourceNotConfigured:
