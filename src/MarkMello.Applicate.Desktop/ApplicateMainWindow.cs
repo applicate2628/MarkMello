@@ -667,6 +667,15 @@ public sealed class ApplicateMainWindow : MainWindow
             Placement = Avalonia.Controls.PlacementMode.AnchorAndGravity,
             PlacementAnchor = Avalonia.Controls.Primitives.PopupPositioning.PopupAnchor.BottomRight,
             PlacementGravity = Avalonia.Controls.Primitives.PopupPositioning.PopupGravity.TopLeft,
+            // Keep the bottom-right status hint pinned to the BOTTOM. The default
+            // positioner flips it to the TOP when the window's bottom is off-screen,
+            // and the flipped position lands on the tab strip. Allow horizontal flip
+            // + sliding to stay on-screen, but drop FlipY so it never jumps up onto
+            // the tabs — it slides to the visible bottom edge instead.
+            PlacementConstraintAdjustment =
+                Avalonia.Controls.Primitives.PopupPositioning.PopupPositionerConstraintAdjustment.FlipX
+                | Avalonia.Controls.Primitives.PopupPositioning.PopupPositionerConstraintAdjustment.SlideX
+                | Avalonia.Controls.Primitives.PopupPositioning.PopupPositionerConstraintAdjustment.SlideY,
             ShouldUseOverlayLayer = false,
             IsLightDismissEnabled = false,
             OverlayDismissEventPassThrough = true,
