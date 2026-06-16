@@ -169,6 +169,31 @@
           </Button>
         </StackPanel>
 
+        <!-- Update-available notice. Lives in the OUTER title-bar DockPanel,
+             docked Right just LEFT of the window controls, so its right edge is a
+             fixed offset (window-controls width) from the corner. It is its own
+             DockPanel slice, so it never overlaps the action buttons and never
+             shifts when save/save-as or the title reflow (the bug where it
+             "jumped"). NOT topbar-ghost (that fixed-width icon class clipped the
+             label to "Up"); flat + content-sized instead. Always visible when an
+             update exists (not inside the hover-fading actions panel). -->
+        <Button DockPanel.Dock="Right"
+                Background="Transparent"
+                BorderThickness="0"
+                CornerRadius="6"
+                Margin="4,0,8,0"
+                Padding="8,3"
+                VerticalAlignment="Center"
+                HorizontalContentAlignment="Center"
+                FontSize="11"
+                FontWeight="Medium"
+                Foreground="{DynamicResource MmAccentBrush}"
+                Cursor="Hand"
+                IsVisible="{Binding IsHeaderUpdateNoticeVisible}"
+                Command="{Binding OpenAppUpdatesCommand}"
+                Content="{Binding HeaderUpdateNoticeText}"
+                ToolTip.Tip="{Binding HeaderUpdateNoticeTooltip}" />
+
         <StackPanel DockPanel.Dock="Right"
                     Classes="mm-titlebar-actions"
                     Orientation="Horizontal"

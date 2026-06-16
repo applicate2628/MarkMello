@@ -391,6 +391,8 @@ public partial class MainWindowViewModel
         OnPropertyChanged(nameof(DownloadedUpdateActionLabel));
         OnPropertyChanged(nameof(UpdateStateBadge));
         OnPropertyChanged(nameof(AppMenuUpdateStateBadge));
+        OnPropertyChanged(nameof(HeaderUpdateNoticeText));
+        OnPropertyChanged(nameof(HeaderUpdateNoticeTooltip));
         OnPropertyChanged(nameof(IsSystemLanguageSelected));
         OnPropertyChanged(nameof(IsEnglishLanguageSelected));
         OnPropertyChanged(nameof(IsRussianLanguageSelected));
@@ -516,6 +518,11 @@ public partial class MainWindowViewModel
         {
             OnPropertyChanged(nameof(IsUpdateNotificationVisible));
         }
+
+        // The unobtrusive header notice tracks the same available/ready states
+        // (but is not welcome-screen-gated); re-raise it on every status change.
+        OnPropertyChanged(nameof(IsHeaderUpdateNoticeVisible));
+        OnPropertyChanged(nameof(HeaderUpdateNoticeText));
     }
 
     private void RefreshUpdateStatusTexts()

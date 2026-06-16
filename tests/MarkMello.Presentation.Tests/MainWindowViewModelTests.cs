@@ -714,6 +714,39 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void HeaderUpdateNoticeHiddenByDefault()
+    {
+        var harness = CreateHarness();
+
+        Assert.False(harness.ViewModel.IsHeaderUpdateNoticeVisible);
+        Assert.Equal(string.Empty, harness.ViewModel.HeaderUpdateNoticeText);
+    }
+
+    [Fact]
+    public async Task HeaderUpdateNoticeStaysVisibleWhileReadingUnlikeTopLevelBanner()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "header-notice.md");
+        var package = CreateUpdatePackage();
+        harness.Loader.Sources[path] = CreateSource(path, "alpha beta");
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
+
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+
+        Assert.True(harness.ViewModel.IsHeaderUpdateNoticeVisible);
+        Assert.Equal("Update available!", harness.ViewModel.HeaderUpdateNoticeText);
+
+        await harness.ViewModel.OpenPathAsync(path);
+
+        // The welcome-screen-only top-level banner hides while reading...
+        Assert.True(harness.ViewModel.IsViewer);
+        Assert.False(harness.ViewModel.IsUpdateNotificationVisible);
+        // ...but the unobtrusive header notice stays visible with a document open.
+        Assert.True(harness.ViewModel.IsHeaderUpdateNoticeVisible);
+        Assert.Equal("Update available!", harness.ViewModel.HeaderUpdateNoticeText);
+    }
+
+    [Fact]
     public async Task InitializeAsyncReaderStartupCacheHitWaitsForPublishGateButNotRendererShell()
     {
         var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", $"startup-{Guid.NewGuid():N}.md");

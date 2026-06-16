@@ -136,6 +136,11 @@ public sealed class ApplicateMainWindow : MainWindow
         Opened += (_, _) => Avalonia.Threading.Dispatcher.UIThread.Post(
             InstallStatusHintAboveWebView,
             Avalonia.Threading.DispatcherPriority.Loaded);
+        // Start the recurring background update check once the window is shown
+        // (the one-shot startup check already runs from InitializeAsync). The VM
+        // owns the timer; the matching StopPeriodicUpdateChecks() is in
+        // OnApplicateMainWindowClosed so the timer is torn down on close.
+        Opened += (_, _) => viewModel.StartPeriodicUpdateChecks();
         ApplicateTrace.DiagMs("startup-applicate-window", "applicate-ctor-end");
     }
 
@@ -2070,6 +2075,7 @@ public sealed class ApplicateMainWindow : MainWindow
         _modeTransactionHostRouter?.Dispose();
         _modeTransactionHostRouter = null;
         ApplicateWebMarkdownDocumentView.HostShortcutHandler = null;
+        (DataContext as MainWindowViewModel)?.StopPeriodicUpdateChecks();
         Closed -= OnApplicateMainWindowClosed;
     }
 
