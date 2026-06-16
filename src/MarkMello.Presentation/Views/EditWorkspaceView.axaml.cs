@@ -39,6 +39,15 @@ public partial class EditWorkspaceView : UserControl
     private bool _firstVisualLinesLogged;
     private DateTime _ignoreEditorScrollUntil;
     private DateTime _ignorePreviewSourceLineUntil;
+    // Bidirectional source sync. The AvaloniaEdit source-pane spike (f1d18a9)
+    // wired only session -> editor (ApplySourceTextToEditor); the reverse was
+    // never ported from the old TextBox TwoWay binding. Without it, typing never
+    // reached EditorSession.SourceText, so IsDirty stayed false: no dirty star,
+    // no Save button, and Save persisted stale text. _writeBackEditor is the
+    // TextEditor we subscribed to; _suppressEditorWriteBack guards the
+    // session -> editor Document rebuild so it does not echo back.
+    private TextEditor? _writeBackEditor;
+    private bool _suppressEditorWriteBack;
 
     public EditWorkspaceView()
     {
@@ -69,6 +78,11 @@ public partial class EditWorkspaceView : UserControl
         RemoveHandler(PointerReleasedEvent, OnScrollBarDragPointerReleased);
         RemoveHandler(PointerCaptureLostEvent, OnScrollBarDragPointerCaptureLost);
         DetachScrollSynchronization();
+        if (_writeBackEditor is not null)
+        {
+            _writeBackEditor.TextChanged -= OnEditorTextChanged;
+            _writeBackEditor = null;
+        }
         if (_boundSession is not null)
         {
             _boundSession.PropertyChanged -= OnBoundSessionPropertyChanged;
@@ -154,11 +168,63 @@ public partial class EditWorkspaceView : UserControl
             return;
         }
 
+        EnsureEditorWriteBack(editor);
+
+        var newText = text ?? string.Empty;
+        // No-op when already in sync. This is the common case when the change
+        // echoes a write-back that originated in the editor itself; rebuilding
+        // the Document would reset the caret to the start on every keystroke.
+        if (string.Equals(editor.Document?.Text, newText, StringComparison.Ordinal))
+        {
+            return;
+        }
+
         // Replace whole Document — preserves AvaloniaEdit virtualization
-        // semantics and avoids partial-text-change events.
-        editor.Document = new TextDocument(text ?? string.Empty);
+        // semantics and avoids partial-text-change events. Suppress the
+        // write-back so this session -> editor push does not bounce back.
+        _suppressEditorWriteBack = true;
+        try
+        {
+            editor.Document = new TextDocument(newText);
+        }
+        finally
+        {
+            _suppressEditorWriteBack = false;
+        }
 
         AttachFirstVisualLinesProbe(editor);
+    }
+
+    // Subscribe the editor -> session direction exactly once per TextEditor
+    // instance (idempotent via the ReferenceEquals check).
+    private void EnsureEditorWriteBack(TextEditor editor)
+    {
+        if (ReferenceEquals(_writeBackEditor, editor))
+        {
+            return;
+        }
+
+        if (_writeBackEditor is not null)
+        {
+            _writeBackEditor.TextChanged -= OnEditorTextChanged;
+        }
+
+        _writeBackEditor = editor;
+        editor.TextChanged += OnEditorTextChanged;
+    }
+
+    private void OnEditorTextChanged(object? sender, EventArgs e)
+    {
+        if (_suppressEditorWriteBack || _boundSession is null)
+        {
+            return;
+        }
+
+        // Push typed text into the session so IsDirty / Save button / dirty star
+        // track edits, and Save persists what the user actually typed.
+        _boundSession.SourceText = (sender as TextEditor)?.Document?.Text
+            ?? _writeBackEditor?.Document?.Text
+            ?? string.Empty;
     }
 
     private void AttachFirstVisualLinesProbe(TextEditor editor)
@@ -248,6 +314,10 @@ public partial class EditWorkspaceView : UserControl
             "pane-seq",
             "editview-texteditor-found",
             $"editorBounds={_editorTextEditor.Bounds.Width:F0}x{_editorTextEditor.Bounds.Height:F0} attempt={attempt}");
+
+        // Ensure the editor -> session write-back is wired even when the editor
+        // resolves here (after the initial bind) rather than in ApplySourceTextToEditor.
+        EnsureEditorWriteBack(_editorTextEditor);
 
         // SPIKE: TextPresenter-based scroll-sync removed because AvaloniaEdit
         // exposes TextView (with VisualLines) instead of TextPresenter.TextLayout.
