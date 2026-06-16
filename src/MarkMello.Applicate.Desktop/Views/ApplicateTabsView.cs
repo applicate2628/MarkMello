@@ -343,6 +343,7 @@ internal sealed class ApplicateTabsView : UserControl
     {
         ((INotifyCollectionChanged)_openDocsService.OpenDocuments).CollectionChanged += OnOpenDocumentsChanged;
         _openDocsService.ActiveDocumentChanged += OnActiveDocumentChanged;
+        _openDocsService.DocumentModifiedChanged += OnDocumentModifiedChanged;
 
         // Tab colours are resolved from the Mm* theme brushes at build time,
         // so a theme switch leaves them frozen at the old palette (light tabs
@@ -360,6 +361,7 @@ internal sealed class ApplicateTabsView : UserControl
     {
         ((INotifyCollectionChanged)_openDocsService.OpenDocuments).CollectionChanged -= OnOpenDocumentsChanged;
         _openDocsService.ActiveDocumentChanged -= OnActiveDocumentChanged;
+        _openDocsService.DocumentModifiedChanged -= OnDocumentModifiedChanged;
         if (Avalonia.Application.Current is { } app)
         {
             app.ActualThemeVariantChanged -= OnThemeVariantChanged;
@@ -615,6 +617,9 @@ internal sealed class ApplicateTabsView : UserControl
     private void OnActiveDocumentChanged(object? sender, ActiveDocumentChangedEventArgs e)
         => Dispatcher.UIThread.Post(Rebuild);
 
+    private void OnDocumentModifiedChanged(object? sender, EventArgs e)
+        => Dispatcher.UIThread.Post(Rebuild);
+
     private void Rebuild()
     {
         CancelDrag();
@@ -645,9 +650,12 @@ internal sealed class ApplicateTabsView : UserControl
     {
         var isActive = ReferenceEquals(doc, _openDocsService.ActiveDocument);
 
+        // Dirty marker: a leading "●" when the document has unsaved edits
+        // (OpenDocument.IsModified, mirrored from the active session's dirty
+        // state by the active-document bridge).
         var label = new TextBlock
         {
-            Text = doc.DisplayName,
+            Text = (doc.IsModified ? "●  " : string.Empty) + doc.DisplayName,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(10, 0, 4, 0),
             FontWeight = isActive ? FontWeight.SemiBold : FontWeight.Normal,

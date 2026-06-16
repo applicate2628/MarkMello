@@ -26,6 +26,8 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
 
     public event EventHandler<ActiveDocumentChangedEventArgs>? ActiveDocumentChanged;
 
+    public event EventHandler? DocumentModifiedChanged;
+
     public async Task<OpenDocument> OpenAsync(string filePath, bool activate = true)
     {
         if (string.IsNullOrWhiteSpace(filePath))
@@ -208,6 +210,7 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
             throw new InvalidOperationException("Document is not in the open list.");
         }
 
+        var wasModified = document.IsModified;
         document.SourceText = sourceText ?? throw new ArgumentNullException(nameof(sourceText));
         document.IsModified = false;
         // Receiving externally-sourced text counts as loaded — any stub
@@ -215,6 +218,22 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
         // content differs) becomes a regular loaded document so later
         // tab switches do not re-read from disk.
         document.IsLoaded = true;
+        if (wasModified)
+        {
+            DocumentModifiedChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    public void SetModified(OpenDocument document, bool modified)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        if (document.IsModified == modified)
+        {
+            return;
+        }
+
+        document.IsModified = modified;
+        DocumentModifiedChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private OpenDocument? FindByPath(string normalizedPath)

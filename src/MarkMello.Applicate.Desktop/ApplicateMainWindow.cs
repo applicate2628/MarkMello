@@ -2344,6 +2344,19 @@ public sealed class ApplicateMainWindow : MainWindow
                 return;
             }
 
+            if (args.PropertyName == nameof(MainWindowViewModel.IsDirty))
+            {
+                // Mirror the active document's dirty state onto its tab so the
+                // strip can paint a dirty marker (OpenDocument.IsModified was
+                // otherwise never set true).
+                var active = openDocs.ActiveDocument;
+                if (active is not null)
+                {
+                    openDocs.SetModified(active, viewModel.IsDirty);
+                }
+                return;
+            }
+
             if (args.PropertyName != nameof(MainWindowViewModel.Document))
             {
                 return;

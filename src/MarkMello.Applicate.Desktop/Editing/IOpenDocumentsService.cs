@@ -72,4 +72,16 @@ public interface IOpenDocumentsService
     void UpdateState(OpenDocument document, int caret, double scrollProgressPercent);
 
     void UpdateSourceText(OpenDocument document, string sourceText);
+
+    /// <summary>
+    /// Set the per-document modified (dirty) flag and notify observers (the tabs
+    /// strip, which paints a dirty marker). No-op and no event when unchanged.
+    /// </summary>
+    void SetModified(OpenDocument document, bool modified);
+
+    /// <summary>
+    /// Raised when an open document's <see cref="OpenDocument.IsModified"/>
+    /// flag changes, so the tabs strip can refresh its dirty markers live.
+    /// </summary>
+    event EventHandler? DocumentModifiedChanged;
 }
