@@ -334,7 +334,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         var shouldPrepareDocumentReveal = ShouldPrepareDocumentReveal(
             sourceChanged,
             _hasLoadedDocument,
-            source);
+            source,
+            Source);
         if (shouldPrepareDocumentReveal)
         {
             PrepareNativeDocumentReveal(TimeSpan.Zero);
@@ -1063,14 +1064,30 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     internal static bool ShouldPrepareDocumentRevealForTesting(
         bool sourceChanged,
         bool hasLoadedDocument,
-        MarkdownSource? nextSource)
-        => ShouldPrepareDocumentReveal(sourceChanged, hasLoadedDocument, nextSource);
+        MarkdownSource? nextSource,
+        MarkdownSource? currentSource = null)
+        => ShouldPrepareDocumentReveal(sourceChanged, hasLoadedDocument, nextSource, currentSource);
 
     private static bool ShouldPrepareDocumentReveal(
         bool sourceChanged,
         bool hasLoadedDocument,
-        MarkdownSource? nextSource)
-        => sourceChanged && hasLoadedDocument && nextSource is not null;
+        MarkdownSource? nextSource,
+        MarkdownSource? currentSource)
+        => sourceChanged
+           && hasLoadedDocument
+           && nextSource is not null
+           // Skip the reveal cover for a same-document content update: a live
+           // edit in the split editor changes only the body, not the document,
+           // so the cover otherwise flashed a "disappear/reappear" on every
+           // edit-render. A real document switch (different path) still covers;
+           // reload is covered separately by the document-switch coordinator.
+           && !IsSameDocumentContentUpdate(currentSource, nextSource);
+
+    private static bool IsSameDocumentContentUpdate(MarkdownSource? current, MarkdownSource? next)
+        => current is not null
+           && next is not null
+           && !string.IsNullOrEmpty(current.Path)
+           && string.Equals(current.Path, next.Path, StringComparison.OrdinalIgnoreCase);
 
     private static bool AreEqual(double left, double right)
         => double.IsNaN(left) && double.IsNaN(right) || SysMath.Abs(left - right) <= double.Epsilon;
