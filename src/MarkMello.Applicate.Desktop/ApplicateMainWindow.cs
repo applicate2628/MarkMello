@@ -136,6 +136,9 @@ public sealed class ApplicateMainWindow : MainWindow
         Opened += (_, _) => Avalonia.Threading.Dispatcher.UIThread.Post(
             InstallStatusHintAboveWebView,
             Avalonia.Threading.DispatcherPriority.Loaded);
+        Opened += (_, _) => Avalonia.Threading.Dispatcher.UIThread.Post(
+            () => InstallDocumentHealthBannerOverlay(viewModel),
+            Avalonia.Threading.DispatcherPriority.Loaded);
         // Start the recurring background update check once the window is shown
         // (the one-shot startup check already runs from InitializeAsync). The VM
         // owns the timer; the matching StopPeriodicUpdateChecks() is in
@@ -493,6 +496,7 @@ public sealed class ApplicateMainWindow : MainWindow
     // such a popup as a separate transient top-level window on Win32, and
     // top-level windows always stack above their owner's child HWNDs.
     private Avalonia.Controls.Primitives.Popup? _statusHintPopup;
+    private Avalonia.Controls.Primitives.Popup? _healthBannerPopup;
 
     // Ctrl+1..9 activates the open document at that 1-based ordinal index.
     // Browser convention: Ctrl+9 jumps to the LAST tab rather than the 9th
@@ -701,6 +705,53 @@ public sealed class ApplicateMainWindow : MainWindow
         // the inner Border still works through PlacementTarget anchor).
         bodyPanel.Children.Add(_statusHintPopup);
         _statusHintPopup.IsOpen = true;
+    }
+
+    private void InstallDocumentHealthBannerOverlay(MainWindowViewModel viewModel)
+    {
+        if (_healthBannerPopup is not null)
+        {
+            return;
+        }
+
+        var bodyPanel = this.FindControl<Panel>("BodyPanel");
+        if (bodyPanel is null)
+        {
+            return;
+        }
+
+        // Float the health banner as a Popup (Win32 transient top-level via
+        // ShouldUseOverlayLayer=false) so it stacks ABOVE the WebView2 child HWND
+        // AND never participates in layout — showing/hiding it does not resize or
+        // shift the document (an in-layout row jumped the text on toggle).
+        var banner = BuildDocumentHealthBanner();
+        _healthBannerPopup = new Avalonia.Controls.Primitives.Popup
+        {
+            PlacementTarget = bodyPanel,
+            Placement = Avalonia.Controls.PlacementMode.AnchorAndGravity,
+            PlacementAnchor = Avalonia.Controls.Primitives.PopupPositioning.PopupAnchor.Bottom,
+            PlacementGravity = Avalonia.Controls.Primitives.PopupPositioning.PopupGravity.Top,
+            PlacementConstraintAdjustment =
+                Avalonia.Controls.Primitives.PopupPositioning.PopupPositionerConstraintAdjustment.SlideX
+                | Avalonia.Controls.Primitives.PopupPositioning.PopupPositionerConstraintAdjustment.SlideY,
+            ShouldUseOverlayLayer = false,
+            IsLightDismissEnabled = false,
+            OverlayDismissEventPassThrough = true,
+            Topmost = false,
+            Focusable = false,
+            Child = banner,
+        };
+        bodyPanel.Children.Add(_healthBannerPopup);
+
+        void SyncOpen() => _healthBannerPopup!.IsOpen = viewModel.IsDocumentHealthBannerVisible;
+        viewModel.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(MainWindowViewModel.IsDocumentHealthBannerVisible))
+            {
+                SyncOpen();
+            }
+        };
+        SyncOpen();
     }
 
     // ===========================================================
@@ -1099,6 +1150,79 @@ public sealed class ApplicateMainWindow : MainWindow
         bodyPanel.Children.Add(grid);
 
         InstallChevronGlyphTracking(chevronPath, chevronButton);
+    }
+
+    // Document-health banner: lives in its own grid row between the tabs strip
+    // and the document content (z-order-safe — a real layout row above the
+    // WebView, not a managed overlay over it). Collapsed it shows the defect
+    // count + "preview" + dismiss; expanded it previews the wrapped formulas the
+    // fix will join, with confirm/cancel. Auto-height row collapses to nothing
+    // when IsDocumentHealthBannerVisible is false.
+    private static Control BuildDocumentHealthBanner()
+    {
+        static Avalonia.Data.Binding B(string path) => new(path);
+
+        var warnIcon = new TextBlock
+        {
+            Text = "⚠",
+            FontSize = 13,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 8, 0),
+        };
+        warnIcon.Bind(TextBlock.ForegroundProperty, warnIcon.GetResourceObservable("MmAccentBrush"));
+
+        var summaryText = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = Avalonia.Media.TextTrimming.CharacterEllipsis,
+            FontSize = 12,
+        };
+        summaryText.Bind(TextBlock.TextProperty, B(nameof(MainWindowViewModel.DocumentHealthBannerText)));
+        summaryText.Bind(TextBlock.ForegroundProperty, summaryText.GetResourceObservable("MmTextBrush"));
+
+        var fixButton = new Button
+        {
+            Classes = { "ghost" },
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(8, 0, 6, 0),
+        };
+        fixButton.Bind(ContentControl.ContentProperty, B(nameof(MainWindowViewModel.DocumentHealthApplyLabel)));
+        fixButton.Bind(Button.CommandProperty, B(nameof(MainWindowViewModel.ApplyDocumentHealthFixCommand)));
+
+        var dismissButton = new Button
+        {
+            Classes = { "topbar-ghost" },
+            Content = "×",
+            FontSize = 14,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        dismissButton.Bind(Button.CommandProperty, B(nameof(MainWindowViewModel.DismissDocumentHealthBannerCommand)));
+
+        var summaryRight = new StackPanel
+        {
+            Orientation = Avalonia.Layout.Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        summaryRight.Children.Add(fixButton);
+        summaryRight.Children.Add(dismissButton);
+        DockPanel.SetDock(warnIcon, Dock.Left);
+        DockPanel.SetDock(summaryRight, Dock.Right);
+        var summaryRow = new DockPanel { LastChildFill = true };
+        summaryRow.Children.Add(warnIcon);
+        summaryRow.Children.Add(summaryRight);
+        summaryRow.Children.Add(summaryText);
+
+        var border = new Border
+        {
+            Padding = new Thickness(12, 6),
+            Margin = new Thickness(8, 4, 8, 4),
+            CornerRadius = new CornerRadius(8),
+            BorderThickness = new Thickness(1),
+            Child = summaryRow,
+        };
+        border.Bind(Border.BackgroundProperty, border.GetResourceObservable("MmSurfaceElevatedBrush"));
+        border.Bind(Border.BorderBrushProperty, border.GetResourceObservable("MmAccentSoftBrush"));
+        return border;
     }
 
     private static void AttachSplitterDraggingHighlight(GridSplitter splitter)
@@ -2361,6 +2485,13 @@ public sealed class ApplicateMainWindow : MainWindow
             {
                 return;
             }
+
+            // Scan the freshly-loaded document for repairable math defects
+            // (wrapped inline $…$) so the health banner can offer a fix. Runs on
+            // every document change including service-driven tab loads, so it
+            // sits before the inServiceLoad early-return.
+            viewModel.AnalyzeCurrentDocumentHealth();
+
             if (inServiceLoad)
             {
                 return;

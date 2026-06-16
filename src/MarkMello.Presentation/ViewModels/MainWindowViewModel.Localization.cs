@@ -393,6 +393,9 @@ public partial class MainWindowViewModel
         OnPropertyChanged(nameof(AppMenuUpdateStateBadge));
         OnPropertyChanged(nameof(HeaderUpdateNoticeText));
         OnPropertyChanged(nameof(HeaderUpdateNoticeTooltip));
+        OnPropertyChanged(nameof(DocumentHealthBannerText));
+        OnPropertyChanged(nameof(DocumentHealthApplyLabel));
+        OnPropertyChanged(nameof(DocumentHealthDismissLabel));
         OnPropertyChanged(nameof(IsSystemLanguageSelected));
         OnPropertyChanged(nameof(IsEnglishLanguageSelected));
         OnPropertyChanged(nameof(IsRussianLanguageSelected));

@@ -85,6 +85,7 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         _lastSource = viewModel.Document;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
         _viewModel.DocumentTransitionStarting += OnDocumentTransitionStarting;
+        _viewModel.SuppressNextDocumentReveal += OnSuppressNextDocumentReveal;
         _host.CommitCompleted += OnCommitCompleted;
         _host.RendererFailed += OnRendererFailed;
         _host.View.DocumentRevealReady += OnDocumentRevealReady;
@@ -97,6 +98,14 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
     // skips a redundant generation bump / re-show. Replaces the old behaviour
     // where the cover was raised only from PropertyChanged(Document), ~73 ms
     // after teardown had already started on screen.
+    private void OnSuppressNextDocumentReveal(object? sender, EventArgs e)
+    {
+        // The next document change is a same-path content update (the health
+        // fix's reload); reuse the existing skip mechanism so neither the
+        // cover-first transition nor the Document-change branch raises a cover.
+        _skipNextCoverSession = true;
+    }
+
     private void OnDocumentTransitionStarting(object? sender, EventArgs e)
     {
         if (_disposed || !_isActiveSurface())
@@ -402,6 +411,7 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
 
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
         _viewModel.DocumentTransitionStarting -= OnDocumentTransitionStarting;
+        _viewModel.SuppressNextDocumentReveal -= OnSuppressNextDocumentReveal;
         _host.CommitCompleted -= OnCommitCompleted;
         _host.RendererFailed -= OnRendererFailed;
         _host.View.DocumentRevealReady -= OnDocumentRevealReady;

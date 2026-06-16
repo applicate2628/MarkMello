@@ -17,6 +17,18 @@ public sealed class SaveDocumentUseCase
         _saver = saver;
     }
 
+    /// <summary>
+    /// Write a sidecar/backup file verbatim to <paramref name="path"/> WITHOUT
+    /// the markdown-extension validation that <see cref="ExecuteAsync"/> applies,
+    /// so callers can save e.g. a <c>.bak</c> copy before an in-place repair.
+    /// Throws on I/O failure (the caller decides whether to abort the repair).
+    /// </summary>
+    public Task SaveBackupAsync(string path, string content, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        return _saver.SaveAsync(path, content, cancellationToken);
+    }
+
     public async Task<SaveDocumentResult> ExecuteAsync(
         string path,
         string content,
