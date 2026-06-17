@@ -50,6 +50,11 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
     private readonly ApplicateMode _mode;
     private readonly Func<bool> _isActiveSurface;
     private readonly bool _clearHeadingsOnRendererFailure;
+    // True for surfaces that update document content in place (the edit surface:
+    // editor + live preview) instead of through a covered atomic WebView reveal.
+    // On such a surface a same-path reload (F5 / Ctrl+S) produces no re-render to
+    // resolve the cover, so the coordinator must not raise one for it.
+    private readonly bool _suppressSamePathReloadCover;
     private readonly ApplicateModeRevealCoverWindow _cover = new();
 
     private MarkdownSource? _lastSource;
@@ -72,7 +77,8 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         ApplicateMode mode,
         Func<bool> isActiveSurface,
         bool clearHeadingsOnRendererFailure = true,
-        bool skipInitialCoverSession = false)
+        bool skipInitialCoverSession = false,
+        bool suppressSamePathReloadCover = false)
     {
         _coverHost = coverHost ?? throw new ArgumentNullException(nameof(coverHost));
         _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -80,6 +86,7 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         _mode = mode;
         _isActiveSurface = isActiveSurface ?? throw new ArgumentNullException(nameof(isActiveSurface));
         _clearHeadingsOnRendererFailure = clearHeadingsOnRendererFailure;
+        _suppressSamePathReloadCover = suppressSamePathReloadCover;
         _skipNextCoverSession = skipInitialCoverSession;
 
         _lastSource = viewModel.Document;
@@ -109,6 +116,18 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
     private void OnDocumentTransitionStarting(object? sender, EventArgs e)
     {
         if (_disposed || !_isActiveSurface())
+        {
+            return;
+        }
+
+        // In-place-update surface (edit): cover-first cannot tell a same-path
+        // reload from a real switch (the new path is unknown until Document is
+        // assigned). Defer the whole cover decision to the path-aware
+        // Document-change branch below, which skips the same-path case and still
+        // covers a real switch. (PropertyChanged(Document) fires synchronously on
+        // the Document assignment that immediately follows this event and still
+        // precedes the editor's text swap, so atomic teardown is preserved.)
+        if (_suppressSamePathReloadCover)
         {
             return;
         }
@@ -156,6 +175,7 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         {
             return;
         }
+        var previous = _lastSource;
         _lastSource = next;
 
         // No document (welcome / closed), or not on this coordinator's active
@@ -163,6 +183,20 @@ internal sealed class ApplicateDocumentSwitchRevealCoordinator : IDisposable
         if (next is null || !_isActiveSurface())
         {
             HideCover();
+            return;
+        }
+
+        // Same-path reload on an in-place-update surface (edit). F5 reload and
+        // Ctrl+S save re-assign a value-fresh, same-path MarkdownSource; the
+        // editor + live preview update in place with NO covered WebView
+        // re-render, so a cover would never get its commit + reveal-ready pair
+        // and would sit on the full 8s FallbackTimeout (the reported stall). A
+        // real document switch (different path) falls through and covers below.
+        if (_suppressSamePathReloadCover
+            && previous is not null
+            && string.Equals(next.Path, previous.Path, StringComparison.OrdinalIgnoreCase))
+        {
+            ApplicateTrace.DiagMs("pane-seq", "doc-switch-cover-skipped", "reason=same-path-edit-reload");
             return;
         }
 

@@ -1615,7 +1615,12 @@ public sealed class ApplicateMainWindow : MainWindow
                 viewModel,
                 ApplicateMode.Edit,
                 () => viewModel.IsViewer && viewModel.IsEditMode,
-                clearHeadingsOnRendererFailure: false);
+                clearHeadingsOnRendererFailure: false,
+                // The edit surface updates content in place (editor + live
+                // preview), so a same-path reload (F5 / Ctrl+S) has no covered
+                // WebView reveal to resolve a doc-switch cover — skip it instead
+                // of stalling on the 8s fallback. A real switch still covers.
+                suppressSamePathReloadCover: true);
             _editThemeSwitchRevealCoordinator = new ApplicateThemeSwitchRevealCoordinator(
                 siblingPanel,
                 editHost,
