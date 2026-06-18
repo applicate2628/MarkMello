@@ -174,25 +174,69 @@
              fixed offset (window-controls width) from the corner. It is its own
              DockPanel slice, so it never overlaps the action buttons and never
              shifts when save/save-as or the title reflow (the bug where it
-             "jumped"). NOT topbar-ghost (that fixed-width icon class clipped the
-             label to "Up"); flat + content-sized instead. Always visible when an
-             update exists (not inside the hover-fading actions panel). -->
+             "jumped"). Rendered as a soft accent "pill" with a leading status
+             dot and SemiBold label so it reads as an actionable badge that sits
+             in the palette; on hover it inverts (fills with the accent, label +
+             dot flip to the soft tint — the two are a light/dark pair in every
+             theme, so contrast holds without a hard-coded color). Always visible
+             when an update exists (not inside the hover-fading actions panel). -->
         <Button DockPanel.Dock="Right"
-                Background="Transparent"
-                BorderThickness="0"
-                CornerRadius="6"
+                Classes="mm-update-pill"
+                BorderThickness="1"
+                CornerRadius="11"
                 Margin="4,0,8,0"
-                Padding="8,3"
+                Padding="9,3"
                 VerticalAlignment="Center"
-                HorizontalContentAlignment="Center"
-                FontSize="11"
-                FontWeight="Medium"
-                Foreground="{DynamicResource MmAccentBrush}"
                 Cursor="Hand"
                 IsVisible="{Binding IsHeaderUpdateNoticeVisible}"
                 Command="{Binding OpenAppUpdatesCommand}"
-                Content="{Binding HeaderUpdateNoticeText}"
-                ToolTip.Tip="{Binding HeaderUpdateNoticeTooltip}" />
+                ToolTip.Tip="{Binding HeaderUpdateNoticeTooltip}">
+          <Button.Styles>
+            <Style Selector="Button.mm-update-pill /template/ ContentPresenter#PART_ContentPresenter">
+              <Setter Property="Background" Value="{DynamicResource MmAccentSoftBrush}" />
+              <Setter Property="BorderBrush" Value="{DynamicResource MmAccentBrush}" />
+              <Setter Property="Transitions">
+                <Transitions>
+                  <BrushTransition Property="Background" Duration="0:0:0.15" />
+                </Transitions>
+              </Setter>
+            </Style>
+            <Style Selector="Button.mm-update-pill:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+              <Setter Property="Background" Value="{DynamicResource MmAccentBrush}" />
+              <Setter Property="BorderBrush" Value="{DynamicResource MmAccentBrush}" />
+            </Style>
+            <Style Selector="Button.mm-update-pill:pressed /template/ ContentPresenter#PART_ContentPresenter">
+              <Setter Property="Background" Value="{DynamicResource MmAccentBrush}" />
+            </Style>
+            <Style Selector="Button.mm-update-pill:pointerover TextBlock">
+              <Setter Property="Foreground" Value="{DynamicResource MmAccentSoftBrush}" />
+            </Style>
+            <Style Selector="Button.mm-update-pill:pointerover Ellipse">
+              <Setter Property="Fill" Value="{DynamicResource MmAccentSoftBrush}" />
+            </Style>
+            <!-- Slow breathing status dot: signals "something new is waiting"
+                 without motion noise. Opacity-only so it composes with the
+                 hover Fill inversion above. -->
+            <Style Selector="Button.mm-update-pill Ellipse">
+              <Style.Animations>
+                <Animation Duration="0:0:2.2" IterationCount="INFINITE" Easing="SineEaseInOut">
+                  <KeyFrame Cue="0%"><Setter Property="Opacity" Value="1.0" /></KeyFrame>
+                  <KeyFrame Cue="50%"><Setter Property="Opacity" Value="0.4" /></KeyFrame>
+                  <KeyFrame Cue="100%"><Setter Property="Opacity" Value="1.0" /></KeyFrame>
+                </Animation>
+              </Style.Animations>
+            </Style>
+          </Button.Styles>
+          <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+            <Ellipse Width="7" Height="7" VerticalAlignment="Center"
+                     Fill="{DynamicResource MmAccentBrush}" />
+            <TextBlock Text="{Binding HeaderUpdateNoticeText}"
+                       FontSize="11"
+                       FontWeight="SemiBold"
+                       VerticalAlignment="Center"
+                       Foreground="{DynamicResource MmAccentBrush}" />
+          </StackPanel>
+        </Button>
 
         <StackPanel DockPanel.Dock="Right"
                     Classes="mm-titlebar-actions"
