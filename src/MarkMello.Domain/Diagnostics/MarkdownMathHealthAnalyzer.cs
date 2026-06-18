@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 
 namespace MarkMello.Domain.Diagnostics;
 
@@ -16,6 +17,17 @@ public enum MarkdownMathDefectKind
     /// mangled text. Repaired by joining the wrapped lines back into one.
     /// </summary>
     WrappedInlineMath,
+
+    /// <summary>
+    /// A display formula written with LaTeX <c>\[ … \]</c> delimiters (the format
+    /// ChatGPT emits) instead of the <c>$$ … $$</c> the renderer understands. The
+    /// renderer's display-math splitter only recognizes <c>$$</c>, so a
+    /// <c>\[ … \]</c> block falls through to plain text and renders as literal
+    /// <c>\nabla \times …</c> source. Repaired by converting the <c>\[</c> / <c>\]</c>
+    /// delimiter lines to <c>$$</c> (the formula body is unchanged). Inline
+    /// <c>\( … \)</c> is NOT a defect — the renderer already accepts it.
+    /// </summary>
+    LatexDisplayMath,
 }
 
 /// <summary>One detected (and, when repairable, repaired) math defect.</summary>
@@ -49,10 +61,23 @@ public sealed record MarkdownMathHealthResult(
 }
 
 /// <summary>
-/// Detects — and repairs — markdown whose inline math will not render because a
-/// <c>$…$</c> span was hard-wrapped across a source-line break.
+/// Detects — and repairs — markdown whose math will not render in MarkMello.
+/// Two defect classes are handled:
+/// <list type="bullet">
+/// <item><see cref="MarkdownMathDefectKind.LatexDisplayMath"/> — a display block
+/// written with LaTeX <c>\[ … \]</c> delimiters (the ChatGPT format) the renderer
+/// does not recognize; converted to <c>$$ … $$</c>.</item>
+/// <item><see cref="MarkdownMathDefectKind.WrappedInlineMath"/> — an inline
+/// <c>$…$</c> span hard-wrapped across a source-line break; the wrapped lines are
+/// joined back into one.</item>
+/// </list>
+/// The <c>\[ … \]</c> conversion runs first, then the wrapped-inline scan runs on
+/// the converted text; both passes keep line counts (and therefore 1-based line
+/// numbers) identical, so reported defect lines stay consistent. Inline
+/// <c>\( … \)</c> is intentionally left untouched — the renderer already accepts it.
 ///
-/// <para>This MIRRORS the host renderer's per-line inline-math protection
+/// <para>The wrapped-inline pass MIRRORS the host renderer's per-line inline-math
+/// protection
 /// (<c>ApplicateMarkdownDocumentRenderer.ProtectInlineMath</c>): fenced code
 /// blocks and inline code spans are skipped, <c>\$</c> is a literal dollar, a
 /// line that is exactly <c>$$</c> toggles a (multi-line) display-math region,
@@ -75,6 +100,208 @@ public static class MarkdownMathHealthAnalyzer
             return MarkdownMathHealthResult.Clean(text ?? string.Empty);
         }
 
+        // Pass 1: convert LaTeX \[ … \] display blocks to $$ … $$.
+        var display = ConvertLatexDisplayMath(text);
+        // Pass 2: join hard-wrapped inline $…$ spans on the converted text.
+        var inline = ScanWrappedInlineMath(display.RepairedText);
+
+        if (display.Defects.Count == 0)
+        {
+            return inline; // nothing converted — return the inline scan as-is.
+        }
+
+        // Both passes preserve line count, so their 1-based line numbers refer to
+        // the same lines; merge and order by line for a stable UI listing.
+        var merged = new List<MarkdownMathDefect>(display.Defects.Count + inline.Defects.Count);
+        merged.AddRange(display.Defects);
+        merged.AddRange(inline.Defects);
+        merged.Sort((a, b) => a.LineNumber.CompareTo(b.LineNumber));
+
+        return new MarkdownMathHealthResult(
+            merged,
+            inline.RepairedText,
+            display.RepairableDefectCount + inline.RepairableDefectCount,
+            display.UnrepairableDefectCount + inline.UnrepairableDefectCount);
+    }
+
+    /// <summary>
+    /// Pass 1 — convert LaTeX <c>\[ … \]</c> display blocks (ChatGPT format) to the
+    /// <c>$$ … $$</c> the renderer understands. Only the delimiter lines change; the
+    /// formula body is copied verbatim. Fenced code and existing <c>$$ … $$</c>
+    /// display regions are skipped. Inline <c>\( … \)</c> is left untouched (the
+    /// renderer accepts it). Line count is preserved.
+    /// </summary>
+    private static MarkdownMathHealthResult ConvertLatexDisplayMath(string text)
+    {
+        var lines = new List<string>(text.Split('\n'));
+        var output = new List<string>(lines.Count);
+        var defects = new List<MarkdownMathDefect>();
+        var repairable = 0;
+        var unrepairable = 0;
+
+        var inFence = false;
+        var fenceMarker = string.Empty;
+        var inDisplay = false;
+
+        var i = 0;
+        while (i < lines.Count)
+        {
+            var line = lines[i];
+            var trimmed = line.Trim();
+
+            // Fenced code block: copy verbatim, never convert.
+            if (!inDisplay && TryToggleFence(trimmed, ref inFence, ref fenceMarker))
+            {
+                output.Add(line);
+                i++;
+                continue;
+            }
+            if (inFence)
+            {
+                output.Add(line);
+                i++;
+                continue;
+            }
+
+            // Existing $$ … $$ display region: copy verbatim.
+            if (trimmed == "$$")
+            {
+                inDisplay = !inDisplay;
+                output.Add(line);
+                i++;
+                continue;
+            }
+            if (inDisplay)
+            {
+                output.Add(line);
+                i++;
+                continue;
+            }
+
+            // Single-line \[ … \] → $$ … $$.
+            if (IsSingleLineLatexDisplay(trimmed))
+            {
+                output.Add(ConvertLatexDelimiters(line));
+                defects.Add(new MarkdownMathDefect(
+                    MarkdownMathDefectKind.LatexDisplayMath,
+                    i + 1,
+                    1,
+                    Repaired: true,
+                    Preview: Preview(trimmed[2..^2])));
+                repairable++;
+                i++;
+                continue;
+            }
+
+            // Multi-line \[ open: find its matching \] close, convert both
+            // delimiter lines, copy the body verbatim.
+            if (trimmed == @"\[")
+            {
+                var close = FindLatexDisplayClose(lines, i + 1);
+                if (close is { } j)
+                {
+                    output.Add(line.Replace(@"\[", "$$", StringComparison.Ordinal));
+                    for (var k = i + 1; k < j; k++)
+                    {
+                        output.Add(lines[k]);
+                    }
+                    output.Add(lines[j].Replace(@"\]", "$$", StringComparison.Ordinal));
+
+                    var body = new StringBuilder();
+                    for (var k = i + 1; k < j; k++)
+                    {
+                        if (body.Length > 0)
+                        {
+                            body.Append(' ');
+                        }
+                        body.Append(lines[k].Trim());
+                    }
+
+                    defects.Add(new MarkdownMathDefect(
+                        MarkdownMathDefectKind.LatexDisplayMath,
+                        i + 1,
+                        j - i + 1,
+                        Repaired: true,
+                        Preview: Preview(body.ToString())));
+                    repairable++;
+                    i = j + 1;
+                    continue;
+                }
+
+                // \[ with no matching \] before a boundary — report, do not guess.
+                defects.Add(new MarkdownMathDefect(
+                    MarkdownMathDefectKind.LatexDisplayMath,
+                    i + 1,
+                    1,
+                    Repaired: false,
+                    Preview: Preview(trimmed)));
+                unrepairable++;
+                output.Add(line);
+                i++;
+                continue;
+            }
+
+            output.Add(line);
+            i++;
+        }
+
+        return new MarkdownMathHealthResult(
+            defects,
+            string.Join("\n", output),
+            repairable,
+            unrepairable);
+    }
+
+    /// <summary>
+    /// A whole line that is exactly <c>\[ … \]</c> (delimiters on the same line with
+    /// a non-empty body), distinct from the bare <c>\[</c> that opens a multi-line
+    /// block.
+    /// </summary>
+    private static bool IsSingleLineLatexDisplay(string trimmed)
+        => trimmed.Length > 4
+            && trimmed.StartsWith(@"\[", StringComparison.Ordinal)
+            && trimmed.EndsWith(@"\]", StringComparison.Ordinal);
+
+    /// <summary>Replace the <c>\[</c> and <c>\]</c> on a single line with <c>$$</c>.</summary>
+    private static string ConvertLatexDelimiters(string line)
+        => line
+            .Replace(@"\[", "$$", StringComparison.Ordinal)
+            .Replace(@"\]", "$$", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Index of the line that closes a <c>\[</c> display block (a line that is
+    /// exactly <c>\]</c>), starting at <paramref name="start"/>. Returns
+    /// <c>null</c> if a boundary (a new <c>\[</c>, a <c>$$</c>, a fence marker, a
+    /// blank line, or end of input) is reached first — a <c>\[ … \]</c> block never
+    /// spans those, so an unterminated open is reported rather than guessed.
+    /// </summary>
+    private static int? FindLatexDisplayClose(List<string> lines, int start)
+    {
+        for (var j = start; j < lines.Count; j++)
+        {
+            var trimmed = lines[j].Trim();
+            if (trimmed == @"\]")
+            {
+                return j;
+            }
+            if (trimmed.Length == 0
+                || trimmed == @"\["
+                || trimmed == "$$"
+                || IsFenceMarkerLine(trimmed))
+            {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Pass 2 — join hard-wrapped inline <c>$…$</c> spans. Mirrors the host
+    /// renderer's per-line inline-math protection (see the type remarks).
+    /// </summary>
+    private static MarkdownMathHealthResult ScanWrappedInlineMath(string text)
+    {
         // Split on '\n' but KEEP each line's trailing '\r' (CRLF lines), so a
         // join with '\n' reconstructs the original byte-for-byte and only the
         // removed wrap-newline changes. New joined lines carry the trailing line's

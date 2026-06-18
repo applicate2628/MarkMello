@@ -176,4 +176,128 @@ public sealed class MarkdownMathHealthAnalyzerTests
         Assert.False(MarkdownMathHealthAnalyzer.Analyze("").HasDefects);
         Assert.False(MarkdownMathHealthAnalyzer.Analyze(null!).HasDefects);
     }
+
+    [Fact]
+    public void MultiLineLatexDisplayIsConvertedToDollarDisplay()
+    {
+        const string text = "Maxwell:\n\n\\[\n\\nabla \\times \\mathbf E = -j\\omega \\mathbf B,\n\\]\n\ntail\n";
+
+        var result = MarkdownMathHealthAnalyzer.Analyze(text);
+
+        Assert.True(result.HasRepairableDefects);
+        Assert.Equal(1, result.RepairableDefectCount);
+        Assert.Equal(0, result.UnrepairableDefectCount);
+        var defect = Assert.Single(result.Defects);
+        Assert.Equal(MarkdownMathDefectKind.LatexDisplayMath, defect.Kind);
+        Assert.Equal(3, defect.LineNumber); // 1-based line of the "\[" open
+        Assert.Equal(3, defect.JoinedLineCount); // \[ + body + \]
+        Assert.True(defect.Repaired);
+        Assert.Equal(
+            "Maxwell:\n\n$$\n\\nabla \\times \\mathbf E = -j\\omega \\mathbf B,\n$$\n\ntail\n",
+            result.RepairedText);
+    }
+
+    [Fact]
+    public void SingleLineLatexDisplayIsConvertedToDollarDisplay()
+    {
+        const string text = "before\n\\[ E = mc^2 \\]\nafter\n";
+
+        var result = MarkdownMathHealthAnalyzer.Analyze(text);
+
+        Assert.Equal(1, result.RepairableDefectCount);
+        var defect = Assert.Single(result.Defects);
+        Assert.Equal(MarkdownMathDefectKind.LatexDisplayMath, defect.Kind);
+        Assert.Equal(1, defect.JoinedLineCount);
+        Assert.Equal("before\n$$ E = mc^2 $$\nafter\n", result.RepairedText);
+    }
+
+    [Fact]
+    public void InlineLatexDelimitersAreLeftUntouched()
+    {
+        // The renderer already accepts \( … \); it is not a defect.
+        const string text = "With \\(e^{j\\omega t}\\) and \\(j^2=-1\\) inline.\n";
+
+        var result = MarkdownMathHealthAnalyzer.Analyze(text);
+
+        Assert.False(result.HasDefects);
+        Assert.Equal(text, result.RepairedText);
+    }
+
+    [Fact]
+    public void LatexDisplayConversionPreservesCrlf()
+    {
+        const string text = "a\r\n\\[\r\nx = y\r\n\\]\r\nb\r\n";
+
+        var result = MarkdownMathHealthAnalyzer.Analyze(text);
+
+        Assert.Equal(1, result.RepairableDefectCount);
+        Assert.Equal("a\r\n$$\r\nx = y\r\n$$\r\nb\r\n", result.RepairedText);
+    }
+
+    [Fact]
+    public void LatexDisplayInsideFencedCodeBlockIsIgnored()
+    {
+        const string text = "```text\n\\[\nnot math\n\\]\n```\nplain\n";
+
+        var result = MarkdownMathHealthAnalyzer.Analyze(text);
+
+        Assert.False(result.HasDefects);
+        Assert.Equal(text, result.RepairedText);
+    }
+
+    [Fact]
+    public void MultipleLatexDisplayBlocksAreAllConverted()
+    {
+        const string text = "\\[\na = b\n\\]\n\n\\[\nc = d\n\\]\n";
+
+        var result = MarkdownMathHealthAnalyzer.Analyze(text);
+
+        Assert.Equal(2, result.RepairableDefectCount);
+        Assert.Equal("$$\na = b\n$$\n\n$$\nc = d\n$$\n", result.RepairedText);
+    }
+
+    [Fact]
+    public void UnterminatedLatexDisplayOpenIsReportedUnrepairable()
+    {
+        // "\[" with no matching "\]" before the blank-line boundary.
+        const string text = "\\[\na = b\n\nplain paragraph\n";
+
+        var result = MarkdownMathHealthAnalyzer.Analyze(text);
+
+        Assert.False(result.HasRepairableDefects);
+        Assert.Equal(1, result.UnrepairableDefectCount);
+        var defect = Assert.Single(result.Defects);
+        Assert.Equal(MarkdownMathDefectKind.LatexDisplayMath, defect.Kind);
+        Assert.False(defect.Repaired);
+        Assert.Equal(text, result.RepairedText); // unchanged — no guess
+    }
+
+    [Fact]
+    public void LatexDisplayAndWrappedInlineAreBothDetectedAndOrdered()
+    {
+        // A \[ … \] display block followed by a hard-wrapped $…$ inline span.
+        const string text = "\\[\na = b\n\\]\nNote $x +\ny$ tail\n";
+
+        var result = MarkdownMathHealthAnalyzer.Analyze(text);
+
+        Assert.Equal(2, result.RepairableDefectCount);
+        Assert.Equal(0, result.UnrepairableDefectCount);
+        Assert.Equal(MarkdownMathDefectKind.LatexDisplayMath, result.Defects[0].Kind);
+        Assert.Equal(MarkdownMathDefectKind.WrappedInlineMath, result.Defects[1].Kind);
+        Assert.True(result.Defects[0].LineNumber < result.Defects[1].LineNumber);
+        Assert.Equal("$$\na = b\n$$\nNote $x + y$ tail\n", result.RepairedText);
+    }
+
+    [Fact]
+    public void LatexDisplayRepairIsIdempotent()
+    {
+        const string text = "\\[\n\\nabla \\cdot \\mathbf D = \\rho\n\\]\n";
+
+        var first = MarkdownMathHealthAnalyzer.Analyze(text);
+        Assert.True(first.HasRepairableDefects);
+
+        var second = MarkdownMathHealthAnalyzer.Analyze(first.RepairedText);
+        Assert.False(second.HasDefects);
+        Assert.Equal(first.RepairedText, second.RepairedText);
+    }
 }
