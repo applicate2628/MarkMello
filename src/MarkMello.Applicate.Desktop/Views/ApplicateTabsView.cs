@@ -176,7 +176,16 @@ internal sealed class ApplicateTabsView : UserControl
                 CornerRadius = new CornerRadius(8),
                 Padding = new Thickness(4),
                 MinWidth = 168,
-                Child = _tabListItems
+                // Bound the dropdown height so a long tab list scrolls instead of
+                // growing past the screen. Vertical scrollbar appears only when
+                // the items exceed MaxHeight; horizontal stays off (names ellipsize).
+                Child = new ScrollViewer
+                {
+                    MaxHeight = 440,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                    Content = _tabListItems
+                }
             }
         };
         _tabListButton.Click += (_, _) => OpenTabList();
