@@ -296,11 +296,17 @@ img {
 .mm-document th,
 .mm-document td {
   padding: 8px 12px;
-  border-bottom: 1px solid var(--mm-document-rule);
+  /* Full grid: row AND column rules (was border-bottom only, so columns had no
+     separators). Collapsed borders merge adjacent cell edges into single lines. */
+  border: 1px solid var(--mm-document-rule);
   text-align: left;
   vertical-align: top;
   white-space: normal;
-  overflow-wrap: break-word;
+  /* `anywhere` (not `break-word`) so soft-wrap opportunities count toward the
+     cell's min-content width — that lets an auto-layout table actually shrink to
+     max-width:100% (the readable column / resizer width) and reflow, instead of
+     overflowing past it when the per-column min-content sum is too wide. */
+  overflow-wrap: anywhere;
 }
 
 .mm-document th {
