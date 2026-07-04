@@ -60,7 +60,10 @@ public sealed class ApplicateMainWindowBridgeTests
         var applyIndex = editBranch.IndexOf("ApplyOpenedDocumentInPlaceWithScroll(target);", StringComparison.Ordinal);
         var postIndex = editBranch.IndexOf("Dispatcher.UIThread.Post", StringComparison.Ordinal);
         var clearIndex = editBranch.IndexOf("pendingDirtySwitchTarget = null;", StringComparison.Ordinal);
-        Assert.True(applyIndex >= 0 && postIndex > applyIndex, "The reconciler must be posted after the in-place apply.");
+        // Posts drain only after the synchronous action, so posting BEFORE the
+        // apply keeps FIFO (mirror -> reconciler) AND releases the flag even if
+        // the apply throws (fable re-acceptance hardening).
+        Assert.True(postIndex >= 0 && applyIndex > postIndex, "The reconciler must be posted before the in-place apply (throw-safe, same FIFO).");
         Assert.True(clearIndex > postIndex, "The suppression flag may only be cleared inside the posted reconciler.");
     }
 
@@ -80,6 +83,23 @@ public sealed class ApplicateMainWindowBridgeTests
         var bailIndex = guard.IndexOf("NotifyActiveTabLoadFailed", StringComparison.Ordinal);
         var gateIndex = guard.IndexOf("RequestDocumentSwitchWithDirtyCheckAsync", StringComparison.Ordinal);
         Assert.True(bailIndex >= 0 && gateIndex > bailIndex, "The H2 bail must run before the dirty-gated apply.");
+    }
+
+    [Fact]
+    public void TaskToggleCommitPatchesEditHostDomBeforeSilentSwap()
+    {
+        // fable re-acceptance must-fix: the edit-preview host is a DISTINCT
+        // WebView whose primed DOM never saw the click; a bare silent swap
+        // would declare "already rendered" content it never rendered, and the
+        // next Ctrl+E would serve a lying pre-toggle checkbox. The wiring must
+        // patch its checkbox surgically BEFORE the swap.
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+
+        var editPatchIndex = bridge.IndexOf("channelEditHost.View.SetTaskCheckboxState(commit.Line, commit.Checked);", StringComparison.Ordinal);
+        var editSwapIndex = bridge.IndexOf("channelEditHost.CommitInPlaceSourceSwap(commit.Source);", StringComparison.Ordinal);
+        Assert.True(editPatchIndex >= 0, "Edit host must receive the surgical checkbox patch.");
+        Assert.True(editSwapIndex > editPatchIndex, "The silent swap may run only AFTER the edit host's DOM was patched.");
     }
 
     [Fact]

@@ -83,8 +83,8 @@ public sealed class MainWindowViewModelTests
                 documentChanges++;
             }
         };
-        MarkdownSource? committed = null;
-        harness.ViewModel.TaskToggleCommitted += (_, source) => committed = source;
+        TaskToggleCommit? committed = null;
+        harness.ViewModel.TaskToggleCommitted += (_, commit) => committed = commit;
         var reverts = new List<TaskToggleRevertRequest>();
         harness.ViewModel.TaskToggleDomRevertRequested += (_, r) => reverts.Add(r);
 
@@ -106,8 +106,8 @@ public sealed class MainWindowViewModelTests
         harness.Loader.Sources[path] = CreateSource(path, "- [ ] alpha\n");
         await harness.ViewModel.OpenPathAsync(path);
 
-        MarkdownSource? committed = null;
-        harness.ViewModel.TaskToggleCommitted += (_, source) => committed = source;
+        TaskToggleCommit? committed = null;
+        harness.ViewModel.TaskToggleCommitted += (_, commit) => committed = commit;
         var reverts = new List<TaskToggleRevertRequest>();
         harness.ViewModel.TaskToggleDomRevertRequested += (_, r) => reverts.Add(r);
         harness.DocumentSaver.NextException = new IOException("disk full");

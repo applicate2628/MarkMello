@@ -14,6 +14,16 @@ namespace MarkMello.Presentation.ViewModels;
 public sealed record TaskToggleRevertRequest(int Line, bool Checked);
 
 /// <summary>
+/// Payload of <see cref="MainWindowViewModel.TaskToggleCommitted"/>: the
+/// patched in-memory source plus the flipped line/state. The line/state pair
+/// lets a surface whose DOM did NOT receive the user's click (the off-screen
+/// edit-preview host — a distinct WebView) patch its one checkbox surgically
+/// BEFORE the silent source swap, so the swap's premise ("the DOM already
+/// shows this content") holds on every surface.
+/// </summary>
+public sealed record TaskToggleCommit(MarkdownSource Source, int Line, bool Checked);
+
+/// <summary>
 /// GFM task-list checkbox write-back — the in-place update channel.
 ///
 /// <para>ONE logic (design: .scratch/plans/design-checkbox-scrolljump.md,
@@ -39,7 +49,7 @@ public partial class MainWindowViewModel
     /// into the shared WebView surfaces and the open-documents service WITHOUT
     /// any render request.
     /// </summary>
-    public event EventHandler<MarkdownSource>? TaskToggleCommitted;
+    public event EventHandler<TaskToggleCommit>? TaskToggleCommitted;
 
     /// <summary>
     /// Raised when a toggle was refused while the disk still matches the
@@ -102,7 +112,7 @@ public partial class MainWindowViewModel
                 if (await _saveDocument.ExecuteAsync(path, newContent).ConfigureAwait(true)
                     is SaveDocumentResult.Success)
                 {
-                    CommitTaskToggleSnapshot(path, newContent);
+                    CommitTaskToggleSnapshot(path, newContent, line, isChecked);
                     return;
                 }
 
@@ -154,7 +164,7 @@ public partial class MainWindowViewModel
     /// flipped content. The native-fallback RenderedDocument refreshes
     /// off-thread via the existing deferred queue.
     /// </summary>
-    private void CommitTaskToggleSnapshot(string path, string newContent)
+    private void CommitTaskToggleSnapshot(string path, string newContent, int line, bool isChecked)
     {
         var current = _document;
         if (current is null || !string.Equals(current.Path, path, StringComparison.OrdinalIgnoreCase))
@@ -166,7 +176,7 @@ public partial class MainWindowViewModel
         OnPropertyChanged(nameof(WordCount));
         OnPropertyChanged(nameof(WordCountStatusLabel));
         QueueDeferredRenderedDocument(_document);
-        TaskToggleCommitted?.Invoke(this, _document);
+        TaskToggleCommitted?.Invoke(this, new TaskToggleCommit(_document, line, isChecked));
     }
 
     /// <summary>

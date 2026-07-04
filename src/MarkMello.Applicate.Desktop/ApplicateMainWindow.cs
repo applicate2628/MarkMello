@@ -2362,19 +2362,27 @@ public sealed class ApplicateMainWindow : MainWindow
         var channelViewerHost = channelHostProvider?.ViewerHost
             ?? App.Services?.GetService<IApplicateSharedWebViewHost>();
         var channelEditHost = channelHostProvider?.EditPreviewHost;
-        viewModel.TaskToggleCommitted += (_, source) =>
+        viewModel.TaskToggleCommitted += (_, commit) =>
         {
-            channelViewerHost?.CommitInPlaceSourceSwap(source);
+            // Viewer surface: its DOM received the user's click, so the silent
+            // swap's premise already holds.
+            channelViewerHost?.CommitInPlaceSourceSwap(commit.Source);
             if (channelEditHost is not null && !ReferenceEquals(channelEditHost, channelViewerHost))
             {
-                channelEditHost.CommitInPlaceSourceSwap(source);
+                // Edit-preview surface: a DISTINCT WebView whose primed DOM
+                // never saw the click — patch its one checkbox surgically
+                // FIRST so the swap's premise ("DOM already shows this
+                // content") becomes true, THEN swap. Keeps the prime warm
+                // (zero re-render on the next Ctrl+E) and truthful.
+                channelEditHost.View.SetTaskCheckboxState(commit.Line, commit.Checked);
+                channelEditHost.CommitInPlaceSourceSwap(commit.Source);
             }
 
-            var mirrored = FindOpenDocumentByPath(openDocs, source.Path);
+            var mirrored = FindOpenDocumentByPath(openDocs, commit.Source.Path);
             if (mirrored is not null
-                && !string.Equals(mirrored.SourceText, source.Content, System.StringComparison.Ordinal))
+                && !string.Equals(mirrored.SourceText, commit.Source.Content, System.StringComparison.Ordinal))
             {
-                openDocs.UpdateSourceText(mirrored, source.Content);
+                openDocs.UpdateSourceText(mirrored, commit.Source.Content);
             }
         };
         viewModel.TaskToggleDomRevertRequested += (_, revert) =>
@@ -2560,16 +2568,6 @@ public sealed class ApplicateMainWindow : MainWindow
                     await viewModel.RequestDocumentSwitchWithDirtyCheckAsync(
                         () =>
                         {
-                            inServiceLoad = true;
-                            try
-                            {
-                                ApplyOpenedDocumentInPlaceWithScroll(target);
-                            }
-                            finally
-                            {
-                                inServiceLoad = false;
-                            }
-
                             // ONE posted reconciler resolves the switch. A Save
                             // resolution publishes the OLD document (via
                             // ApplySavedDocument) and its Document-mirror lambda
@@ -2579,8 +2577,11 @@ public sealed class ApplicateMainWindow : MainWindow
                             // re-asserted. Clearing the flag synchronously here
                             // would let the drained mirror re-activate the old
                             // tab (tabs/editor split-brain, fable acceptance
-                            // must-fix). Posting AFTER the mirror's post keeps
-                            // FIFO order: mirror (suppressed) -> reconciler.
+                            // must-fix). Posts drain only after this synchronous
+                            // action completes, so posting BEFORE the apply
+                            // keeps the same FIFO (mirror → reconciler) AND
+                            // guarantees the flag is released even if the apply
+                            // throws.
                             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
                             {
                                 pendingDirtySwitchTarget = null;
@@ -2599,6 +2600,16 @@ public sealed class ApplicateMainWindow : MainWindow
                                     inVmMirror = false;
                                 }
                             });
+
+                            inServiceLoad = true;
+                            try
+                            {
+                                ApplyOpenedDocumentInPlaceWithScroll(target);
+                            }
+                            finally
+                            {
+                                inServiceLoad = false;
+                            }
 
                             return System.Threading.Tasks.Task.CompletedTask;
                         },
