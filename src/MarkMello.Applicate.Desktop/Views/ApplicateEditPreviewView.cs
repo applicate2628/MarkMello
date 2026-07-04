@@ -46,7 +46,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     // scroll events are ignored, suppressing the editor↔preview ping-pong
     // loop. 200ms covers a typical Avalonia scroll animation tick + the
     // round-trip into WebView2's renderer thread.
-    private static readonly TimeSpan SyncOriginGuard = TimeSpan.FromMilliseconds(200);
 
     private readonly IApplicateSharedWebViewHost? _sharedHost;
     private readonly Grid _root = new() { UseLayoutRounding = true };

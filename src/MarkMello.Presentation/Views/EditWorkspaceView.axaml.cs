@@ -495,7 +495,22 @@ public partial class EditWorkspaceView : UserControl
     }
 
     private void OnPreviewDocumentRendered(object? sender, EventArgs e)
-        => SynchronizePreviewToEditor();
+    {
+        // Reading -> edit handoff: on first entry the editor sits untouched at
+        // offset 0 while the preview has just RESTORED the reading position.
+        // Forcing the editor->preview leg here would drag the preview to the
+        // document top, discarding that restore. Skip while the editor is
+        // untouched — the preview's own restore scroll posts its source line
+        // and the existing preview->editor leg aligns the editor to the
+        // reading position instead. Once the user scrolls the editor, renders
+        // re-anchor to the editor as designed.
+        if (_editorScrollViewer is { Offset.Y: 0 })
+        {
+            return;
+        }
+
+        SynchronizePreviewToEditor();
+    }
 
     private void OnPreviewDocumentRenderInvalidated(object? sender, EventArgs e)
     {
