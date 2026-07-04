@@ -2532,7 +2532,6 @@ public sealed class ApplicateMainWindow : MainWindow
                     await viewModel.RequestDocumentSwitchWithDirtyCheckAsync(
                         () =>
                         {
-                            pendingDirtySwitchTarget = null;
                             inServiceLoad = true;
                             try
                             {
@@ -2543,13 +2542,25 @@ public sealed class ApplicateMainWindow : MainWindow
                                 inServiceLoad = false;
                             }
 
-                            // A Save resolution published the OLD document via
-                            // ApplySavedDocument before this queued switch ran;
-                            // if its (suppressed) mirror left the service off
-                            // the target, re-assert the target so tabs and
-                            // editor land together.
-                            if (!ReferenceEquals(openDocs.ActiveDocument, target))
+                            // ONE posted reconciler resolves the switch. A Save
+                            // resolution publishes the OLD document (via
+                            // ApplySavedDocument) and its Document-mirror lambda
+                            // is POSTED before this queued switch runs — so the
+                            // suppression flag must stay up until that post has
+                            // drained, and only then may the target be
+                            // re-asserted. Clearing the flag synchronously here
+                            // would let the drained mirror re-activate the old
+                            // tab (tabs/editor split-brain, fable acceptance
+                            // must-fix). Posting AFTER the mirror's post keeps
+                            // FIFO order: mirror (suppressed) -> reconciler.
+                            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
                             {
+                                pendingDirtySwitchTarget = null;
+                                if (ReferenceEquals(openDocs.ActiveDocument, target))
+                                {
+                                    return;
+                                }
+
                                 inVmMirror = true;
                                 try
                                 {
@@ -2559,7 +2570,7 @@ public sealed class ApplicateMainWindow : MainWindow
                                 {
                                     inVmMirror = false;
                                 }
-                            }
+                            });
 
                             return System.Threading.Tasks.Task.CompletedTask;
                         },

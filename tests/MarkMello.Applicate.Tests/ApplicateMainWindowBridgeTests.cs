@@ -50,6 +50,18 @@ public sealed class ApplicateMainWindowBridgeTests
         // Save resolution re-assert: the queued action must land the service on
         // the switch target even if the suppressed mirror ran in between.
         Assert.Contains("openDocs.Activate(target);", editBranch, StringComparison.Ordinal);
+
+        // Ordering invariant (fable acceptance must-fix): the suppression flag
+        // must NOT be cleared synchronously inside the switch action — the Save
+        // resolution's Document-mirror lambda is POSTED before the queued switch
+        // runs, so a synchronous clear would let the drained mirror re-activate
+        // the OLD tab (tabs/editor split-brain). The clear + target re-assert
+        // must live inside ONE posted reconciler that drains AFTER the mirror.
+        var applyIndex = editBranch.IndexOf("ApplyOpenedDocumentInPlaceWithScroll(target);", StringComparison.Ordinal);
+        var postIndex = editBranch.IndexOf("Dispatcher.UIThread.Post", StringComparison.Ordinal);
+        var clearIndex = editBranch.IndexOf("pendingDirtySwitchTarget = null;", StringComparison.Ordinal);
+        Assert.True(applyIndex >= 0 && postIndex > applyIndex, "The reconciler must be posted after the in-place apply.");
+        Assert.True(clearIndex > postIndex, "The suppression flag may only be cleared inside the posted reconciler.");
     }
 
     [Fact]
