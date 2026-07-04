@@ -65,6 +65,95 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task RequestDocumentSwitchWithDirtyEditorQueuesPromptAndCancelPreservesDraft()
+    {
+        // Audit Critical #1 gate: a dirty editor must NOT be overwritten by a
+        // tab switch; Cancel keeps the draft and fires the revert callback.
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "one.md");
+        harness.Loader.Sources[path] = CreateSource(path, "alpha");
+
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        harness.ViewModel.EditorSession!.SourceText = "draft text";
+
+        var switchRan = 0;
+        var cancelRan = 0;
+        await harness.ViewModel.RequestDocumentSwitchWithDirtyCheckAsync(
+            () =>
+            {
+                switchRan++;
+                return Task.CompletedTask;
+            },
+            onCancel: () => cancelRan++);
+
+        Assert.True(harness.ViewModel.IsDirtyPromptOpen);
+        Assert.Equal(0, switchRan);
+        Assert.Equal("draft text", harness.ViewModel.EditorSession!.SourceText);
+
+        harness.ViewModel.CancelDirtyPromptCommand.Execute(null);
+
+        Assert.False(harness.ViewModel.IsDirtyPromptOpen);
+        Assert.Equal(0, switchRan);
+        Assert.Equal(1, cancelRan);
+        Assert.Equal("draft text", harness.ViewModel.EditorSession!.SourceText);
+    }
+
+    [Fact]
+    public async Task RequestDocumentSwitchDirtyDiscardRunsSwitchWithoutCancelCallback()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "one.md");
+        harness.Loader.Sources[path] = CreateSource(path, "alpha");
+
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        harness.ViewModel.EditorSession!.SourceText = "draft text";
+
+        var switchRan = 0;
+        var cancelRan = 0;
+        await harness.ViewModel.RequestDocumentSwitchWithDirtyCheckAsync(
+            () =>
+            {
+                switchRan++;
+                return Task.CompletedTask;
+            },
+            onCancel: () => cancelRan++);
+        Assert.True(harness.ViewModel.IsDirtyPromptOpen);
+
+        await harness.ViewModel.ConfirmDirtyDiscardCommand.ExecuteAsync(null);
+
+        Assert.False(harness.ViewModel.IsDirtyPromptOpen);
+        Assert.Equal(1, switchRan);
+        Assert.Equal(0, cancelRan);
+    }
+
+    [Fact]
+    public async Task RequestDocumentSwitchWithCleanEditorRunsImmediately()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "one.md");
+        harness.Loader.Sources[path] = CreateSource(path, "alpha");
+
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+
+        var switchRan = 0;
+        var cancelRan = 0;
+        await harness.ViewModel.RequestDocumentSwitchWithDirtyCheckAsync(
+            () =>
+            {
+                switchRan++;
+                return Task.CompletedTask;
+            },
+            onCancel: () => cancelRan++);
+
+        Assert.False(harness.ViewModel.IsDirtyPromptOpen);
+        Assert.Equal(1, switchRan);
+        Assert.Equal(0, cancelRan);
+    }
+
+    [Fact]
     public async Task OpenDroppedFileAsyncWhenEditorIsDirtyDefersNavigationUntilDiscard()
     {
         var harness = CreateHarness();

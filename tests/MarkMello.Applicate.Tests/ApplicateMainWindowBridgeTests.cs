@@ -34,6 +34,69 @@ public sealed class ApplicateMainWindowBridgeTests
     }
 
     [Fact]
+    public void EditModeTabSwitchRoutesThroughDirtyGateWithCancelRevert()
+    {
+        // Audit Critical #1: the edit-mode tab switch must run through the
+        // unsaved-changes prompt and revert the tab strip on Cancel. Locks the
+        // branch so an upstream merge cannot silently drop the gate.
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var editBranch = ExtractFromMarker(bridge, "// Audit Critical #1");
+
+        Assert.Contains("RequestDocumentSwitchWithDirtyCheckAsync", editBranch, StringComparison.Ordinal);
+        Assert.Contains("onCancel:", editBranch, StringComparison.Ordinal);
+        Assert.Contains("openDocs.Activate(previous);", editBranch, StringComparison.Ordinal);
+        Assert.Contains("inVmMirror = true;", editBranch, StringComparison.Ordinal);
+        // Save resolution re-assert: the queued action must land the service on
+        // the switch target even if the suppressed mirror ran in between.
+        Assert.Contains("openDocs.Activate(target);", editBranch, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EditModeFailedStubLoadBailsWithoutOverwritingDraft()
+    {
+        // Audit H2: a failed stub load must NOT publish an empty buffer into the
+        // editor (a later Ctrl+S would truncate the real file) and must NOT route
+        // through OpenPathAsync (its failure path destroys the session).
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var guard = ExtractFromMarker(bridge, "// Audit H2 guard");
+
+        Assert.Contains("if (!target.IsLoaded)", guard, StringComparison.Ordinal);
+        Assert.Contains("NotifyActiveTabLoadFailed", guard, StringComparison.Ordinal);
+
+        var bailIndex = guard.IndexOf("NotifyActiveTabLoadFailed", StringComparison.Ordinal);
+        var gateIndex = guard.IndexOf("RequestDocumentSwitchWithDirtyCheckAsync", StringComparison.Ordinal);
+        Assert.True(bailIndex >= 0 && gateIndex > bailIndex, "The H2 bail must run before the dirty-gated apply.");
+    }
+
+    [Fact]
+    public void DocumentMirrorSuppressesForeignActivationDuringPendingDirtySwitch()
+    {
+        // fable review blocker A: while a dirty-prompted switch is pending, a
+        // Save resolution publishes the OLD document; the mirror must not
+        // re-activate it (tabs/editor split-brain) — only the pending target may.
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+
+        Assert.Contains("pendingDirtySwitchTarget is null", bridge, StringComparison.Ordinal);
+        Assert.Contains("ReferenceEquals(known, pendingDirtySwitchTarget)", bridge, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ActivationDuringOpenDirtyPromptRevertsTabStrip()
+    {
+        // fable review blocker B: the prompt scrim does NOT cover the tab strip;
+        // an activation arriving while the prompt is open must snap the strip
+        // back to the document the editor holds.
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+
+        Assert.Contains("if (viewModel.IsDirtyPromptOpen)", bridge, StringComparison.Ordinal);
+        Assert.Contains("openDocs.Activate(editorDoc);", bridge, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SessionRestorePrefersCommandLineActivationBeforeViewModelDocumentExists()
     {
         var codeBehind = ReadMainWindowCodeBehind();

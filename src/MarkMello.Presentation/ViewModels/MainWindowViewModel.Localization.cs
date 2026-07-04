@@ -463,6 +463,7 @@ public partial class MainWindowViewModel
     private void ClearDirtyPromptState()
     {
         _pendingDirtyAction = null;
+        _pendingDirtyCancelAction = null;
         _dirtyPromptKind = null;
         _dirtyPromptErrorResult = null;
         IsDirtyPromptOpen = false;

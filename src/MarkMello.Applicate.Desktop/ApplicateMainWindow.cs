@@ -2326,6 +2326,24 @@ public sealed class ApplicateMainWindow : MainWindow
         };
     }
 
+    private static OpenDocument? FindOpenDocumentByPath(IOpenDocumentsService openDocs, string? path)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return null;
+        }
+
+        foreach (var doc in openDocs.OpenDocuments)
+        {
+            if (string.Equals(doc.FilePath, path, System.StringComparison.OrdinalIgnoreCase))
+            {
+                return doc;
+            }
+        }
+
+        return null;
+    }
+
     private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)
     {
         var openDocs = App.Services?.GetService<IOpenDocumentsService>();
@@ -2346,6 +2364,12 @@ public sealed class ApplicateMainWindow : MainWindow
         // back through Dispatcher.UIThread.Post before invoking the VM.
         var inServiceLoad = false;
         var inVmMirror = false;
+        // Non-null while a dirty-prompted tab switch is awaiting Save / Discard /
+        // Cancel. The Document-mirror must not re-Activate any OTHER document in
+        // that window (a Save resolution publishes the OLD doc via
+        // ApplySavedDocument before the queued switch runs, which would flip the
+        // tab strip back and leave tabs/editor split-brained).
+        OpenDocument? pendingDirtySwitchTarget = null;
 
         static double NormalizeScrollProgress(double progress)
             => double.IsFinite(progress) ? System.Math.Clamp(progress, 0, 100) : 0;
@@ -2378,6 +2402,35 @@ public sealed class ApplicateMainWindow : MainWindow
                     {
                         viewModel.CloseFileCommand.Execute(null);
                     }
+                    return;
+                }
+
+                // A tab click while the unsaved-changes prompt is already open:
+                // RunWithDirtyCheckAsync would drop the action anyway (early
+                // return on IsDirtyPromptOpen), but the service has already
+                // committed the click — snap the tab strip back to the document
+                // the editor still holds so the highlight stays truthful while
+                // the user resolves the prompt. (The prompt scrim does NOT cover
+                // the tab strip, so this is an ordinary click, not a rare race.)
+                if (viewModel.IsDirtyPromptOpen)
+                {
+                    var editorDoc = FindOpenDocumentByPath(
+                        openDocs,
+                        viewModel.EditorSession?.CurrentPath ?? viewModel.Document?.Path);
+                    if (editorDoc is not null
+                        && !ReferenceEquals(openDocs.ActiveDocument, editorDoc))
+                    {
+                        inVmMirror = true;
+                        try
+                        {
+                            openDocs.Activate(editorDoc);
+                        }
+                        finally
+                        {
+                            inVmMirror = false;
+                        }
+                    }
+
                     return;
                 }
 
@@ -2433,15 +2486,104 @@ public sealed class ApplicateMainWindow : MainWindow
                 // "tabs and file don't match" desync (user-reported).
                 if (viewModel.IsEditMode && viewModel.EditorSession is not null)
                 {
-                    inServiceLoad = true;
-                    try
+                    var target = args.ActiveDocument;
+
+                    // The tab we are leaving = the document the editor holds.
+                    var previous = FindOpenDocumentByPath(
+                        openDocs, viewModel.EditorSession.CurrentPath);
+
+                    // Audit H2 guard: the stub load above failed (swallowed
+                    // IOException / UnauthorizedAccessException) — its
+                    // SourceText is still EMPTY. Applying it would show an
+                    // empty editor for a file with real on-disk content, and
+                    // a later Ctrl+S would truncate the file. Bail WITHOUT
+                    // overwriting: keep the current session, snap the tab
+                    // strip back, and tell the user. (Do NOT route through
+                    // OpenPathAsync here — its failure path clears
+                    // IsEditMode/EditorSession, killing any draft.)
+                    if (!target.IsLoaded)
                     {
-                        ApplyOpenedDocumentInPlaceWithScroll(args.ActiveDocument);
+                        viewModel.NotifyActiveTabLoadFailed(target.DisplayName);
+                        if (previous is not null
+                            && !ReferenceEquals(openDocs.ActiveDocument, previous))
+                        {
+                            inVmMirror = true;
+                            try
+                            {
+                                openDocs.Activate(previous);
+                            }
+                            finally
+                            {
+                                inVmMirror = false;
+                            }
+                        }
+
+                        return;
                     }
-                    finally
-                    {
-                        inServiceLoad = false;
-                    }
+
+                    // Audit Critical #1: route the swap through the same
+                    // unsaved-changes prompt used by close/reload/open. Clean
+                    // editor -> runs immediately (behavior unchanged). Dirty
+                    // editor -> queues the swap behind Save / Discard / Cancel
+                    // instead of silently overwriting the draft. The service
+                    // already committed the click, so Cancel snaps the tab
+                    // strip back to the previous document.
+                    pendingDirtySwitchTarget = target;
+                    await viewModel.RequestDocumentSwitchWithDirtyCheckAsync(
+                        () =>
+                        {
+                            pendingDirtySwitchTarget = null;
+                            inServiceLoad = true;
+                            try
+                            {
+                                ApplyOpenedDocumentInPlaceWithScroll(target);
+                            }
+                            finally
+                            {
+                                inServiceLoad = false;
+                            }
+
+                            // A Save resolution published the OLD document via
+                            // ApplySavedDocument before this queued switch ran;
+                            // if its (suppressed) mirror left the service off
+                            // the target, re-assert the target so tabs and
+                            // editor land together.
+                            if (!ReferenceEquals(openDocs.ActiveDocument, target))
+                            {
+                                inVmMirror = true;
+                                try
+                                {
+                                    openDocs.Activate(target);
+                                }
+                                finally
+                                {
+                                    inVmMirror = false;
+                                }
+                            }
+
+                            return System.Threading.Tasks.Task.CompletedTask;
+                        },
+                        onCancel: () =>
+                        {
+                            // User kept the draft: editor stays on `previous`,
+                            // so the tab strip must revert to it as well.
+                            pendingDirtySwitchTarget = null;
+                            if (previous is null
+                                || ReferenceEquals(openDocs.ActiveDocument, previous))
+                            {
+                                return;
+                            }
+
+                            inVmMirror = true;
+                            try
+                            {
+                                openDocs.Activate(previous);
+                            }
+                            finally
+                            {
+                                inVmMirror = false;
+                            }
+                        }).ConfigureAwait(true);
                     return;
                 }
 
@@ -2649,8 +2791,15 @@ public sealed class ApplicateMainWindow : MainWindow
                             // File became unreadable between VM load and service mirror.
                         }
                     }
-                    else if (!ReferenceEquals(known, openDocs.ActiveDocument))
+                    else if (!ReferenceEquals(known, openDocs.ActiveDocument)
+                        && (pendingDirtySwitchTarget is null
+                            || ReferenceEquals(known, pendingDirtySwitchTarget)))
                     {
+                        // While a dirty-prompted tab switch is pending, a Save
+                        // resolution publishes the OLD document (ApplySavedDocument)
+                        // before the queued switch runs; re-activating it here
+                        // would flip the tab strip back and split-brain tabs vs
+                        // editor. Only the pending target may activate.
                         openDocs.Activate(known);
                     }
 

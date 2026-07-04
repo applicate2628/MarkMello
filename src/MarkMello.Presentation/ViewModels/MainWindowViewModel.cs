@@ -47,6 +47,11 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly object _openingPathsGate = new();
     private readonly Dictionary<string, int> _openingPathCounts = new(StringComparer.OrdinalIgnoreCase);
     private Func<Task>? _pendingDirtyAction;
+    // Fired ONLY when the user cancels the dirty prompt; lets a queued
+    // tab-switch revert the tab strip to the previous document (the service
+    // committed the click before the prompt opened). Cleared on every
+    // resolution via ClearDirtyPromptState, so it can never fire stale.
+    private Action? _pendingDirtyCancelAction;
     private readonly bool _showCustomTitleBar = OperatingSystem.IsWindows();
     private readonly string _aboutVersion;
     private readonly string _aboutLicense = "GPLv3";
@@ -959,8 +964,20 @@ public partial class MainWindowViewModel : ObservableObject
     [RelayCommand]
     private void CancelDirtyPrompt()
     {
+        var onCancel = _pendingDirtyCancelAction;
         ClearDirtyPrompt();
+        onCancel?.Invoke();
     }
+
+    /// <summary>
+    /// Route a service-driven document switch (tab click) through the same
+    /// unsaved-changes prompt used by close/reload/open. Clean editor: the
+    /// switch runs immediately (unchanged behavior). Dirty editor: the switch
+    /// is queued behind Save / Discard / Cancel; on Cancel the caller-supplied
+    /// callback reverts the tab strip so tabs and editor stay in sync.
+    /// </summary>
+    public Task RequestDocumentSwitchWithDirtyCheckAsync(Func<Task> switchAction, Action onCancel)
+        => RunWithDirtyCheckAsync(PendingDirtyActionKind.OpenFile, switchAction, onCancel);
 
     [RelayCommand]
     private void CycleTheme()
@@ -2051,7 +2068,7 @@ public partial class MainWindowViewModel : ObservableObject
         UpdateCommandStates();
     }
 
-    private async Task RunWithDirtyCheckAsync(PendingDirtyActionKind kind, Func<Task> action)
+    private async Task RunWithDirtyCheckAsync(PendingDirtyActionKind kind, Func<Task> action, Action? onCancel = null)
     {
         if (IsDirtyPromptOpen)
         {
@@ -2064,12 +2081,12 @@ public partial class MainWindowViewModel : ObservableObject
             return;
         }
 
-        QueueDirtyAction(kind, action);
+        QueueDirtyAction(kind, action, onCancel);
     }
 
     private bool RequiresDirtyResolution => IsEditMode && EditorSession?.IsDirty == true;
 
-    private void QueueDirtyAction(PendingDirtyActionKind kind, Func<Task> action)
+    private void QueueDirtyAction(PendingDirtyActionKind kind, Func<Task> action, Action? onCancel = null)
     {
         if (IsDirtyPromptOpen)
         {
@@ -2077,6 +2094,7 @@ public partial class MainWindowViewModel : ObservableObject
         }
 
         _pendingDirtyAction = action;
+        _pendingDirtyCancelAction = onCancel;
         SetDirtyPrompt(kind);
     }
 
