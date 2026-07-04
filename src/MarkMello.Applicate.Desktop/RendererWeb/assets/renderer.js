@@ -1790,8 +1790,10 @@
       refreshInitialVisibleMinimapContent();
       hasInitialLayoutSettled = true;
       updateWidthHandlePositionForCurrentLayout();
+      invalidateSourceLineAnchors();
     });
     controller.allMathRendered.then(() => {
+      invalidateSourceLineAnchors();
       const allMathNodes = Array.from(document.querySelectorAll("[data-tex]"));
       emitMark("mm-all-math-rendered", {
         totalCount: controller.totalMathCount,
@@ -2149,7 +2151,14 @@
       return;
     }
     suppressPreviewSourceLinePost();
-    window.scrollTo({ left: 0, top: scrollTop, behavior: "instant" });
+    window.scrollTo({
+      left: 0,
+      top: Math.max(0, scrollTop - getViewportAnchorY()),
+      behavior: "instant"
+    });
+  }
+  function invalidateSourceLineAnchors() {
+    sourceLineAnchors = [];
   }
   function suppressPreviewSourceLinePost() {
     const sequence = ++suppressPreviewSourceLineSequence;
@@ -4327,6 +4336,7 @@
         }
         queueMinimapRefreshAfterLayoutSettles();
         scheduleResizeReactions();
+        invalidateSourceLineAnchors();
         window.requestAnimationFrame(postScroll);
       });
       resizeObserver.observe(documentElement);
@@ -4334,6 +4344,7 @@
     }
     document.fonts?.ready.then(() => {
       queueMinimapRefreshAfterLayoutSettles();
+      invalidateSourceLineAnchors();
     }).catch(() => void 0);
   });
   var queuePostScroll = createScrollCoalescer({

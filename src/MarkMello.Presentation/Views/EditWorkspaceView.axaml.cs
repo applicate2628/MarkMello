@@ -171,17 +171,43 @@ public partial class EditWorkspaceView : UserControl
         EnsureEditorWriteBack(editor);
 
         var newText = text ?? string.Empty;
+        var currentText = editor.Document?.Text;
         // No-op when already in sync. This is the common case when the change
         // echoes a write-back that originated in the editor itself; rebuilding
         // the Document would reset the caret to the start on every keystroke.
-        if (string.Equals(editor.Document?.Text, newText, StringComparison.Ordinal))
+        if (string.Equals(currentText, newText, StringComparison.Ordinal))
         {
             return;
         }
 
-        // Replace whole Document — preserves AvaloniaEdit virtualization
-        // semantics and avoids partial-text-change events. Suppress the
-        // write-back so this session -> editor push does not bounce back.
+        // Surgical single-char delta (in-place task-toggle channel, edit mode):
+        // an external buffer change that flips exactly one char (TryFlipMarker's
+        // shape) is applied as a 1-char Document.Replace. Preserves caret,
+        // scroll, selection, and undo — the editor's ScrollViewer offset never
+        // moves, so the always-on preview scroll-sync never drags the preview
+        // to line 0. The invariant is general: a minimal external buffer delta
+        // must not destroy editor view/undo state, whoever produced it.
+        if (currentText is not null
+            && TryGetSingleCharDelta(currentText, newText, out var deltaOffset))
+        {
+            _suppressEditorWriteBack = true;
+            try
+            {
+                editor.Document!.Replace(deltaOffset, 1, newText[deltaOffset].ToString());
+            }
+            finally
+            {
+                _suppressEditorWriteBack = false;
+            }
+
+            return;
+        }
+
+        // Replace whole Document — fallback for genuine document swaps (load,
+        // tab switch, discard, external multi-char change). Preserves
+        // AvaloniaEdit virtualization semantics and avoids partial-text-change
+        // events. Suppress the write-back so this session -> editor push does
+        // not bounce back.
         _suppressEditorWriteBack = true;
         try
         {
@@ -193,6 +219,47 @@ public partial class EditWorkspaceView : UserControl
         }
 
         AttachFirstVisualLinesProbe(editor);
+    }
+
+    /// <summary>
+    /// True when <paramref name="newText"/> differs from <paramref name="oldText"/>
+    /// by exactly one char at one offset (equal lengths) — the shape the
+    /// task-toggle channel produces. Wider or length-changing edits return
+    /// false (full rebuild).
+    /// </summary>
+    internal static bool TryGetSingleCharDelta(string oldText, string newText, out int offset)
+    {
+        offset = -1;
+        if (oldText.Length != newText.Length)
+        {
+            return false;
+        }
+
+        var first = -1;
+        for (var i = 0; i < oldText.Length; i++)
+        {
+            if (oldText[i] != newText[i])
+            {
+                first = i;
+                break;
+            }
+        }
+
+        if (first < 0)
+        {
+            return false; // identical — the caller's equality guard owns this case
+        }
+
+        for (var i = oldText.Length - 1; i > first; i--)
+        {
+            if (oldText[i] != newText[i])
+            {
+                return false;
+            }
+        }
+
+        offset = first;
+        return true;
     }
 
     // Subscribe the editor -> session direction exactly once per TextEditor
@@ -289,7 +356,14 @@ public partial class EditWorkspaceView : UserControl
         _editorTextEditor = this.FindControl<TextEditor>("EditorTextEditor");
         _previewScrollViewer = this.FindControl<ScrollViewer>("PreviewScrollViewer");
         _previewDocumentView = this.FindControl<MarkdownDocumentView>("PreviewDocumentView");
-        _previewSourceLineSync = this.FindControl<Border>("PreviewDocumentFrame")?.Child as ISourceLineScrollSyncPreview;
+        // Structural lookup FIRST: the named Border was silently dropped by an
+        // upstream merge once already (the sync contract was dead wiring in
+        // Applicate — the fork injects its preview at runtime, so no .axaml
+        // carries the name). A visual-tree type scan survives future upstream
+        // rewrites; the named path stays as a cheap fast-path fallback.
+        _previewSourceLineSync =
+            this.GetVisualDescendants().OfType<ISourceLineScrollSyncPreview>().FirstOrDefault()
+            ?? this.FindControl<Border>("PreviewDocumentFrame")?.Child as ISourceLineScrollSyncPreview;
         var editorVisuals = _editorTextEditor?
             .GetVisualDescendants()
             .ToArray();
@@ -437,6 +511,12 @@ public partial class EditWorkspaceView : UserControl
             return;
         }
 
+        // The preview's sync toggle gates the whole line loop (default ON).
+        if (_previewSourceLineSync is { SyncEnabled: false })
+        {
+            return;
+        }
+
         if (_previewSourceLineSync is not null)
         {
             _ignorePreviewSourceLineUntil = DateTime.UtcNow + ScrollSyncFeedbackGuard;
@@ -483,6 +563,11 @@ public partial class EditWorkspaceView : UserControl
     private void OnPreviewSourceLineChanged(object? sender, SourceLineScrollSyncEventArgs e)
     {
         if (_isSynchronizingScroll || DateTime.UtcNow < _ignorePreviewSourceLineUntil)
+        {
+            return;
+        }
+
+        if (_previewSourceLineSync is { SyncEnabled: false })
         {
             return;
         }
@@ -586,12 +671,26 @@ public partial class EditWorkspaceView : UserControl
             return;
         }
 
-        var lineNumber = Math.Clamp(sourceLine + 1, 1, document.LineCount);
+        // ONE sync contract: the target line lands at the editor's 38%-viewport
+        // anchor — the same reference point BOTH panes read and write
+        // (preview writes its anchor the same way). ScrollToLine was
+        // middle-of-viewport with a 30% dead-zone (AvaloniaEdit LineMiddle +
+        // MinimumScrollFraction), one of the three inconsistent reference
+        // points that made panes settle on different chunks. For targets far
+        // outside VisualLines the offset fallback is approximate
+        // (line × DefaultLineHeight − anchorY); subsequent preview-source-line
+        // messages self-correct as the viewport approaches.
+        if (_editorScrollViewer is null
+            || !TryGetEditorVerticalOffsetForSourceLine(sourceLine, out var editorOffsetY))
+        {
+            return;
+        }
+
         _ignoreEditorScrollUntil = DateTime.UtcNow + ScrollSyncFeedbackGuard;
         _isSynchronizingScroll = true;
         try
         {
-            _editorTextEditor.ScrollToLine(lineNumber);
+            SetSynchronizedVerticalOffset(_editorScrollViewer, editorOffsetY);
         }
         finally
         {

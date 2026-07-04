@@ -874,8 +874,12 @@ function renderMath(): MathReadinessController {
     // next initialVisibleReady gates again.
     hasInitialLayoutSettled = true;
     updateWidthHandlePositionForCurrentLayout();
+    // Initial-visible math has inflated heights above/below anchors.
+    invalidateSourceLineAnchors();
   });
   controller.allMathRendered.then(() => {
+    // Full math pass settled — anchor tops may all have shifted.
+    invalidateSourceLineAnchors();
     const allMathNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-tex]"));
     emitMark("mm-all-math-rendered", {
       totalCount: controller.totalMathCount,
@@ -1321,7 +1325,23 @@ function scrollToSourceLine(sourceLine: number): void {
   }
 
   suppressPreviewSourceLinePost();
-  window.scrollTo({ left: 0, top: scrollTop, behavior: "instant" as ScrollBehavior });
+  // ONE sync contract: place the target line at the same 38%-viewport anchor
+  // the read side samples (window.scrollY + getViewportAnchorY()). Writing the
+  // line to the viewport TOP while reading it at 38% made the two panes settle
+  // on different chunks by exactly the anchor offset.
+  window.scrollTo({
+    left: 0,
+    top: Math.max(0, scrollTop - getViewportAnchorY()),
+    behavior: "instant" as ScrollBehavior
+  });
+}
+
+// Anchor positions are measured lazily and cached; every layout-affecting pass
+// (math/mermaid inflation, resize, fonts) must invalidate so the next lookup
+// re-reads REAL geometry — positions never come from stale or estimated
+// heights (the reload-viewport contract philosophy).
+function invalidateSourceLineAnchors(): void {
+  sourceLineAnchors = [];
 }
 
 function suppressPreviewSourceLinePost(): void {
@@ -4291,6 +4311,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // a single rAF via scheduleResizeReactions, so a fast window-edge drag
       // does not snap the chrome on every observer tick.
       scheduleResizeReactions();
+      invalidateSourceLineAnchors();
       window.requestAnimationFrame(postScroll);
     });
     resizeObserver.observe(documentElement);
@@ -4299,6 +4320,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.fonts?.ready.then(() => {
     queueMinimapRefreshAfterLayoutSettles();
+    invalidateSourceLineAnchors();
   }).catch(() => undefined);
 });
 

@@ -6,6 +6,13 @@ public interface ISourceLineScrollSyncPreview
 
     event EventHandler<SourceLineScrollSyncEventArgs>? PreviewSourceLineChanged;
 
+    /// <summary>
+    /// Whether the line-based scroll sync is enabled (the preview's sync
+    /// toggle). The sync loop's owner checks this before forwarding either
+    /// direction.
+    /// </summary>
+    bool SyncEnabled { get; }
+
     void ScrollToSourceLine(int sourceLine);
 }
 

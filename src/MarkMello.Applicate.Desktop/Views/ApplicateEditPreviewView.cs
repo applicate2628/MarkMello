@@ -69,17 +69,15 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     private EditorSessionViewModel? _session;
     private ScrollViewer? _hostScrollViewer;
     private ScrollBarVisibility? _hostScrollViewerVerticalMode;
-    private TextEditor? _editorTextEditor;
-    private ScrollViewer? _editorScrollViewer;
     private TextBox? _dropTargetTextBox;
     private MainWindowViewModel? _viewModel;
     private bool _isAttachedToHost;
     private bool _hostEventsWired;
-    private bool _syncEnabled;
+    // Line-based sync gate (the toolbar toggle). Default ON - a sync
+    // toggle defaulting to "no sync" is why the dead loop went unnoticed.
+    private bool _syncEnabled = true;
     private int _inactivePrimeVisibilityDepth;
     private bool _inactivePrimeRenderInFlight;
-    private DateTime _ignoreEditorScrollUntil;
-    private DateTime _ignorePreviewScrollUntil;
     private double? _pendingScrollRestoreProgress;
     // EP-A startup gate. Mirrors ApplicateViewerView._hasValidBounds. The
     // FIRST render after edit-preview becomes visible would otherwise fire
@@ -97,6 +95,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     public event EventHandler? SourceLineScrollSyncPreviewRendered;
 
     public event EventHandler<SourceLineScrollSyncEventArgs>? PreviewSourceLineChanged;
+
+    /// <summary>Line-sync gate (the toolbar toggle); default ON.</summary>
+    public bool SyncEnabled => _syncEnabled;
 
     internal event EventHandler? InactivePrimeRendered;
 
@@ -277,6 +278,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     private ToggleButton BuildSyncToggle()
     {
         var toggle = CreateToolbarToggle("⇅");
+        toggle.IsChecked = true;
         ToolTip.SetTip(toggle, "Editor ↔ preview scroll sync");
         toggle.IsCheckedChanged += OnSyncToggleChanged;
         return toggle;
@@ -284,56 +286,10 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
 
     private void OnSyncToggleChanged(object? sender, RoutedEventArgs e)
     {
+        // Gates the ONE line-based sync loop (owned by EditWorkspaceView).
+        // The percent-of-scroll-range forwarders were retired: percent
+        // mapping is wrong by construction for non-uniform rendered heights.
         _syncEnabled = _syncToggle.IsChecked == true;
-        if (_syncEnabled)
-        {
-            EnsureEditorWiring();
-            ForwardEditorScrollToPreview();
-        }
-    }
-
-    private void EnsureEditorWiring()
-    {
-        if (_editorTextEditor is not null && _editorScrollViewer is not null)
-        {
-            return;
-        }
-
-        var topLevel = TopLevel.GetTopLevel(this);
-        if (topLevel is null)
-        {
-            return;
-        }
-
-        var editor = topLevel.GetVisualDescendants()
-            .OfType<TextEditor>()
-            .FirstOrDefault(static editor => string.Equals(editor.Name, "EditorTextEditor", StringComparison.Ordinal));
-        if (editor is null)
-        {
-            return;
-        }
-
-        var scrollViewer = editor.GetVisualDescendants()
-            .OfType<ScrollViewer>()
-            .FirstOrDefault();
-        if (scrollViewer is null)
-        {
-            return;
-        }
-
-        _editorTextEditor = editor;
-        _editorScrollViewer = scrollViewer;
-        _editorScrollViewer.ScrollChanged += OnEditorScrollChanged;
-    }
-
-    private void TeardownEditorWiring()
-    {
-        if (_editorScrollViewer is not null)
-        {
-            _editorScrollViewer.ScrollChanged -= OnEditorScrollChanged;
-        }
-        _editorScrollViewer = null;
-        _editorTextEditor = null;
     }
 
     private static readonly string[] MarkdownInsertExtensions =
@@ -618,61 +574,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         }, DispatcherPriority.Background);
     }
 
-    private void OnEditorScrollChanged(object? sender, ScrollChangedEventArgs e)
-    {
-        if (!_syncEnabled)
-        {
-            return;
-        }
-
-        if (DateTime.UtcNow < _ignoreEditorScrollUntil)
-        {
-            return;
-        }
-
-        ForwardEditorScrollToPreview();
-    }
-
-    private void ForwardEditorScrollToPreview()
-    {
-        if (_editorScrollViewer is null)
-        {
-            return;
-        }
-
-        var maximum = _editorScrollViewer.Extent.Height - _editorScrollViewer.Viewport.Height;
-        if (maximum <= 0)
-        {
-            return;
-        }
-
-        var percent = SysMath.Clamp(_editorScrollViewer.Offset.Y / maximum * 100.0, 0, 100);
-
-        if (_isAttachedToHost && _sharedHost is not null)
-        {
-            _ignorePreviewScrollUntil = DateTime.UtcNow + SyncOriginGuard;
-            _sharedHost.View.ScrollToProgress(percent);
-        }
-    }
-
-    private void ForwardPreviewScrollToEditor(double previewProgressPercent)
-    {
-        if (_editorScrollViewer is null)
-        {
-            return;
-        }
-
-        var maximum = _editorScrollViewer.Extent.Height - _editorScrollViewer.Viewport.Height;
-        if (maximum <= 0)
-        {
-            return;
-        }
-
-        var targetOffset = SysMath.Clamp(previewProgressPercent / 100.0, 0, 1) * maximum;
-        _ignoreEditorScrollUntil = DateTime.UtcNow + SyncOriginGuard;
-        _editorScrollViewer.Offset = _editorScrollViewer.Offset.WithY(targetOffset);
-    }
-
     protected override void OnDataContextChanged(EventArgs e)
     {
         base.OnDataContextChanged(e);
@@ -719,7 +620,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         DetachAncestorVisibilityListeners();
         RestoreHostScrollMode();
         TeardownEditorDropWiring();
-        TeardownEditorWiring();
         AttachViewModel(null);
         AttachSession(null);
         _webRenderTimer.Stop();
@@ -991,18 +891,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         {
             _viewModel.ReadingProgress = e.ProgressPercent;
         }
-
-        if (!_syncEnabled)
-        {
-            return;
-        }
-
-        if (DateTime.UtcNow < _ignorePreviewScrollUntil)
-        {
-            return;
-        }
-
-        ForwardPreviewScrollToEditor(e.ProgressPercent);
     }
 
     private void OnSharedPreviewSourceLineChanged(object? sender, ApplicateWebPreviewSourceLineEventArgs e)

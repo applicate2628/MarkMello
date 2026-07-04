@@ -5,16 +5,43 @@ namespace MarkMello.Applicate.Tests;
 public sealed class ApplicateEditPreviewSyncTests
 {
     [Fact]
-    public void SyncToggleWiresToAvaloniaEditEditorScrollViewer()
+    public void PercentScrollForwardersAreRetired()
     {
+        // ONE sync contract (fable design design-editpreview-sync.md): the
+        // percent-of-scroll-range forwarders are DELETED — percent mapping is
+        // wrong by construction for non-uniform rendered heights. The ⇅ toggle
+        // now only gates the line-based loop owned by EditWorkspaceView.
         var codeBehind = ReadEditPreviewCodeBehind();
 
-        var ensureEditorWiring = ExtractMethodBody(codeBehind, "private void EnsureEditorWiring()");
+        Assert.DoesNotContain("ForwardEditorScrollToPreview", codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain("ForwardPreviewScrollToEditor", codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain("EnsureEditorWiring", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("public bool SyncEnabled => _syncEnabled;", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("_syncEnabled = true;", codeBehind, StringComparison.Ordinal);
+    }
 
-        Assert.Contains("OfType<TextEditor>()", ensureEditorWiring, StringComparison.Ordinal);
-        Assert.Contains("\"EditorTextEditor\"", ensureEditorWiring, StringComparison.Ordinal);
-        Assert.DoesNotContain("OfType<TextBox>()", ensureEditorWiring, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"EditorTextBox\"", ensureEditorWiring, StringComparison.Ordinal);
+    [Fact]
+    public void EditorSyncResolvesPreviewStructurallyAndWritesAnchorOffset()
+    {
+        // C1 (dead wiring): the sync preview must be resolved by TYPE from the
+        // visual tree — the "PreviewDocumentFrame" name was silently dropped by
+        // an upstream merge and no .axaml carries it. C3 (editor side): the
+        // editor write must use the 38%-anchor offset mapper, not ScrollToLine
+        // (middle + 30% dead-zone).
+        var workspace = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..", "..", "..", "..", "..",
+            "src", "MarkMello.Presentation", "Views", "EditWorkspaceView.axaml.cs"));
+
+        Assert.Contains("GetVisualDescendants().OfType<ISourceLineScrollSyncPreview>().FirstOrDefault()", workspace, StringComparison.Ordinal);
+
+        var scrollEditor = ExtractMethodBody(workspace, "private void ScrollEditorToSourceLine(int sourceLine)");
+        Assert.Contains("TryGetEditorVerticalOffsetForSourceLine", scrollEditor, StringComparison.Ordinal);
+        Assert.Contains("SetSynchronizedVerticalOffset", scrollEditor, StringComparison.Ordinal);
+        Assert.DoesNotContain(".ScrollToLine(", scrollEditor, StringComparison.Ordinal);
+
+        // The ⇅ gate is honored by both loop legs.
+        Assert.Contains("_previewSourceLineSync is { SyncEnabled: false }", workspace, StringComparison.Ordinal);
     }
 
     [Fact]
