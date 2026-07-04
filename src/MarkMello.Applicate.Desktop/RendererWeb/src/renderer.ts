@@ -139,6 +139,8 @@ type HostMessage =
   | { type: "append-document"; html: string; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; isFinal?: boolean; cacheKey?: string | null }
   | { type: "load-cached-document"; cacheKey: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; skipFrameWait?: boolean }
   | { type: "clear-document" }
+  | { type: "invalidate-document-cache-key" }
+  | { type: "set-task-checkbox"; line: number; checked: boolean }
   | { type: "scroll-to-heading"; id: string }
   | { type: "scroll-to-source-line"; sourceLine: number }
   | { type: "open-find-bar" }
@@ -3423,6 +3425,28 @@ function handleHostMessage(raw: unknown): void {
     currentDocumentRenderId = null;
     clearModeRevealShield();
     clearDocumentState(buildLoadDocumentDeps());
+    return;
+  }
+
+  if (message.type === "invalidate-document-cache-key") {
+    // In-place update channel (task-toggle commit): the DOM now shows content
+    // whose hash differs from the load-time key. Null the key so a later
+    // tab-away cannot store this DOM under the stale key (cache poisoning);
+    // the next tab-return then does a full truthful render.
+    currentDocumentCacheKey = null;
+    cancelProcessedDocumentCacheClone();
+    return;
+  }
+
+  if (message.type === "set-task-checkbox") {
+    // Surgical single-checkbox revert: programmatic .checked fires no change
+    // event, so this cannot loop back into a task-toggle post.
+    const box = document.querySelector<HTMLInputElement>(
+      `input.mm-task-checkbox[data-task-line="${message.line}"]`
+    );
+    if (box) {
+      box.checked = message.checked;
+    }
     return;
   }
 

@@ -540,6 +540,10 @@ public sealed class ApplicateSiblingMountTests
 
         public void SuppressNativeRendererForModeSwitch() => SuppressNativeRendererCallCount++;
 
+        public List<MarkdownSource> CommittedInPlaceSources { get; } = [];
+
+        public void CommitInPlaceSourceSwap(MarkdownSource source) => CommittedInPlaceSources.Add(source);
+
         public void RaiseRevealCompleted() => RevealCompleted?.Invoke(this, EventArgs.Empty);
     }
 
@@ -609,6 +613,10 @@ public sealed class ApplicateSiblingMountTests
         }
 
         public void SuppressNativeRendererForModeSwitch() => SuppressNativeRendererCallCount++;
+
+        public List<MarkdownSource> CommittedInPlaceSources { get; } = [];
+
+        public void CommitInPlaceSourceSwap(MarkdownSource source) => CommittedInPlaceSources.Add(source);
 
         public void SuppressNativeRendererForModeSwitch(ApplicateMode displayedMode)
         {

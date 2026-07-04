@@ -3694,6 +3694,20 @@
       clearDocumentState(buildLoadDocumentDeps());
       return;
     }
+    if (message.type === "invalidate-document-cache-key") {
+      currentDocumentCacheKey = null;
+      cancelProcessedDocumentCacheClone();
+      return;
+    }
+    if (message.type === "set-task-checkbox") {
+      const box = document.querySelector(
+        `input.mm-task-checkbox[data-task-line="${message.line}"]`
+      );
+      if (box) {
+        box.checked = message.checked;
+      }
+      return;
+    }
     if (message.type === "mode-settle-probe") {
       postPerfMark("mm-mode-settle-probe-received");
       applyModeSettleProbePreferences(message);

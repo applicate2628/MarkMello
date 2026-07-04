@@ -2352,6 +2352,34 @@ public sealed class ApplicateMainWindow : MainWindow
             return;
         }
 
+        // In-place update channel (task-toggle). Commit: a VERIFIED flip moves
+        // every snapshot silently — shared hosts (Source swap, no render) and
+        // the open-docs mirror — so nothing repaints and the scroll never
+        // moves. Revert: a refusal with unchanged disk sets the ONE checkbox
+        // back surgically (a value-equal reload would no-op and leave the DOM
+        // lying). Hosts are app-lifetime singletons: no unsubscribe needed.
+        var channelHostProvider = App.Services?.GetService<IApplicateSharedWebViewHostProvider>();
+        var channelViewerHost = channelHostProvider?.ViewerHost
+            ?? App.Services?.GetService<IApplicateSharedWebViewHost>();
+        var channelEditHost = channelHostProvider?.EditPreviewHost;
+        viewModel.TaskToggleCommitted += (_, source) =>
+        {
+            channelViewerHost?.CommitInPlaceSourceSwap(source);
+            if (channelEditHost is not null && !ReferenceEquals(channelEditHost, channelViewerHost))
+            {
+                channelEditHost.CommitInPlaceSourceSwap(source);
+            }
+
+            var mirrored = FindOpenDocumentByPath(openDocs, source.Path);
+            if (mirrored is not null
+                && !string.Equals(mirrored.SourceText, source.Content, System.StringComparison.Ordinal))
+            {
+                openDocs.UpdateSourceText(mirrored, source.Content);
+            }
+        };
+        viewModel.TaskToggleDomRevertRequested += (_, revert) =>
+            channelViewerHost?.View.SetTaskCheckboxState(revert.Line, revert.Checked);
+
         // Bidirectional sync between IOpenDocumentsService (tabs strip source
         // of truth) and the upstream `MainWindowViewModel.Document` value
         // (what actually renders). Flags prevent the two paths from ping-

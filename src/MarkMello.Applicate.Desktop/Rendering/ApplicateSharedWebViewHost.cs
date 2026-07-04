@@ -437,6 +437,19 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         RequestRender(_failureSource, _failureRequest);
     }
 
+    public void CommitInPlaceSourceSwap(MarkdownSource source)
+    {
+        // Keep a pending RetryRender truthful: if the failure snapshot is the
+        // same document, a later retry must render the just-written content.
+        if (_failureSource is not null
+            && string.Equals(_failureSource.Path, source.Path, StringComparison.OrdinalIgnoreCase))
+        {
+            _failureSource = source;
+        }
+
+        View.CommitInPlaceSourceSwap(source);
+    }
+
     public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
 
     public event EventHandler<ApplicateMinimapSettledEventArgs>? MinimapSettled;

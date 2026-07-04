@@ -3125,6 +3125,57 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     internal void ResetHostShortcutsForModeSwitch()
         => PostRendererMessage(new { type = "host-shortcuts-reset" });
 
+    /// <summary>
+    /// In-place update channel (task-toggle commit): silently move Source to
+    /// the just-written content WITHOUT queuing a render — the rendered DOM
+    /// already shows this state and UpdateInputs dedups by value, so a normal
+    /// property publish would cold-re-render + reset scroll for nothing. Also
+    /// invalidates the renderer's processed-document cache key so a later
+    /// tab-away cannot store the optimistically-flipped DOM under the OLD
+    /// content-hash key (cache poisoning) — the next tab-return does a full
+    /// truthful render instead.
+    /// </summary>
+    internal void CommitInPlaceSourceSwap(MarkdownSource source)
+    {
+        if (!_hasLoadedDocument
+            || _awaitingLayoutReady
+            || Source is null
+            || !string.Equals(Source.Path, source.Path, StringComparison.OrdinalIgnoreCase))
+        {
+            // Render in flight or a different document: skip; the next real
+            // render self-heals from disk.
+            return;
+        }
+
+        _isUpdatingInputs = true;
+        try
+        {
+            Source = source;
+        }
+        finally
+        {
+            _isUpdatingInputs = false;
+        }
+
+        PostRendererMessage(new { type = "invalidate-document-cache-key" });
+    }
+
+    /// <summary>
+    /// Surgical single-checkbox revert (task-toggle refusal with unchanged
+    /// disk): set the addressed checkbox back without any render or scroll
+    /// motion. A programmatic .checked assignment fires no change event, so
+    /// this cannot loop back into task-toggle.
+    /// </summary>
+    internal void SetTaskCheckboxState(int line, bool isChecked)
+    {
+        if (!_hasLoadedDocument)
+        {
+            return;
+        }
+
+        PostRendererMessage(new { type = "set-task-checkbox", line, @checked = isChecked });
+    }
+
     private void PostRendererMessage(object message)
     {
         var payload = JsonSerializer.Serialize(message);

@@ -6,29 +6,53 @@ using MarkMello.Domain;
 namespace MarkMello.Presentation.ViewModels;
 
 /// <summary>
-/// GFM task-list checkbox write-back. When the user clicks a rendered checkbox,
-/// the renderer reports the item's document source line, its identity key, and
-/// the new state; this flips the <c>[ ]</c>/<c>[x]</c> marker on that line — in
-/// the editor buffer while editing, or in the file (read-modify-write, then
-/// reload) while reading. The marker shape and identity key are owned by
-/// <see cref="TaskListIdentity"/>, shared verbatim with the HTML emission side.
+/// Payload of <see cref="MainWindowViewModel.TaskToggleDomRevertRequested"/>:
+/// the single checkbox at <paramref name="Line"/> must be set back to
+/// <paramref name="Checked"/> in the rendered DOM (surgical revert — no reload,
+/// no scroll motion).
+/// </summary>
+public sealed record TaskToggleRevertRequest(int Line, bool Checked);
+
+/// <summary>
+/// GFM task-list checkbox write-back — the in-place update channel.
+///
+/// <para>ONE logic (design: .scratch/plans/design-checkbox-scrolljump.md,
+/// fable-recommended Candidate C): a VERIFIED successful flip needs zero
+/// re-render — the file provably matches the optimistic DOM, so the in-memory
+/// snapshots are silently patched to the same state (<see cref="TaskToggleCommitted"/>)
+/// and nothing repaints, nothing scrolls. A refusal with UNCHANGED disk content
+/// gets a surgical single-checkbox DOM revert
+/// (<see cref="TaskToggleDomRevertRequested"/>). A full reload happens ONLY when
+/// the disk genuinely differs from the rendered snapshot (external edit) — the
+/// one case where a truthful full re-render is required.</para>
 /// </summary>
 public partial class MainWindowViewModel
 {
     // Serializes toggles: a click that arrives while a prior toggle's read →
-    // write → reload is still in flight is dropped, so two overlapping writes
-    // cannot clobber each other (lost update).
+    // write is still in flight is dropped, so two overlapping writes cannot
+    // clobber each other (lost update).
     private bool _isTogglingTask;
+
+    /// <summary>
+    /// Raised after a VERIFIED successful flip, carrying the patched in-memory
+    /// source (file == DOM == snapshot by construction). The host mirrors it
+    /// into the shared WebView surfaces and the open-documents service WITHOUT
+    /// any render request.
+    /// </summary>
+    public event EventHandler<MarkdownSource>? TaskToggleCommitted;
+
+    /// <summary>
+    /// Raised when a toggle was refused while the disk still matches the
+    /// rendered snapshot — the optimistically-flipped checkbox must be set back
+    /// surgically (a value-equal reload would no-op and leave the DOM lying).
+    /// </summary>
+    public event EventHandler<TaskToggleRevertRequest>? TaskToggleDomRevertRequested;
 
     /// <summary>
     /// Set the task marker on <paramref name="line"/> (0-based document source
     /// line) to <c>[x]</c> when <paramref name="isChecked"/>, else <c>[ ]</c> —
-    /// but only when the line's identity key still equals
-    /// <paramref name="expectedKey"/> (fail-closed: a null/missing key refuses).
-    /// Self-contained: never throws to the caller, never writes unless the target
-    /// line is verified, and in reading mode ALWAYS resyncs (reloads) afterwards
-    /// so an optimistic DOM checkbox can never keep lying about the file state —
-    /// on a successful flip the reload shows it, on any refusal it reverts it.
+    /// only when the line's identity key still equals <paramref name="expectedKey"/>
+    /// (fail-closed: null/missing refuses). Never throws to the caller.
     /// </summary>
     public async Task ToggleTaskLineAsync(int line, bool isChecked, string? expectedKey)
     {
@@ -42,9 +66,9 @@ public partial class MainWindowViewModel
         {
             if (IsEditMode && EditorSession is not null)
             {
-                // The editor buffer is authoritative while editing; the user still
-                // owns the save. A refused flip leaves the buffer untouched and
-                // the debounced preview re-render reconciles the DOM.
+                // The editor buffer is authoritative while editing; the user
+                // still owns the save. A refused flip leaves the buffer alone
+                // and the debounced preview re-render reconciles the DOM.
                 if (TryFlipMarker(EditorSession.SourceText, line, isChecked, expectedKey, out var editedBuffer))
                 {
                     EditorSession.SourceText = editedBuffer;
@@ -59,22 +83,50 @@ public partial class MainWindowViewModel
                 return;
             }
 
-            // Read the CURRENT file from disk (not the in-memory snapshot) so a
-            // whole-file write cannot silently clobber an external edit, and
-            // verify identity+shape+state before touching the line.
+            // Fresh disk read: a whole-file write must never clobber an
+            // external edit, and identity+shape+state are verified against
+            // what is REALLY on disk.
             if (await _openDocument.ExecuteAsync(path).ConfigureAwait(true)
-                is OpenDocumentResult.Success opened
-                && TryFlipMarker(opened.Source.Content, line, isChecked, expectedKey, out var newContent))
+                is not OpenDocumentResult.Success opened)
             {
-                // Typed failure (permissions / I/O) is a result, not an exception —
-                // check explicitly. Fall through to the resync either way.
-                _ = await _saveDocument.ExecuteAsync(path, newContent).ConfigureAwait(true);
+                // Disk unreadable: nothing safe to write; put the checkbox
+                // back to its pre-click state.
+                TaskToggleDomRevertRequested?.Invoke(this, new TaskToggleRevertRequest(line, !isChecked));
+                return;
             }
 
-            // ALWAYS resync in reading mode: re-render from disk truth. On a
-            // successful write this reveals the new state; on any refusal
-            // (identity mismatch, drift, not a marker, failed save) it reverts
-            // the optimistically-flipped DOM checkbox.
+            if (TryFlipMarker(opened.Source.Content, line, isChecked, expectedKey, out var newContent))
+            {
+                // Typed result CHECKED (a save failure is a result, not an
+                // exception): only a verified write commits the snapshots.
+                if (await _saveDocument.ExecuteAsync(path, newContent).ConfigureAwait(true)
+                    is SaveDocumentResult.Success)
+                {
+                    CommitTaskToggleSnapshot(path, newContent);
+                    return;
+                }
+
+                // Save failed → disk still holds the OLD state → the reload
+                // would publish value-equal content and no-op; the surgical
+                // revert is the only mechanism that actually reverts here.
+                TaskToggleDomRevertRequested?.Invoke(this, new TaskToggleRevertRequest(line, !isChecked));
+                return;
+            }
+
+            // Flip refused. Split by cause:
+            if (string.Equals(opened.Source.Content, Document?.Content, StringComparison.Ordinal))
+            {
+                // Disk == rendered snapshot: the refusal is local (null key /
+                // not a marker / already in the requested state). Revert the
+                // one checkbox to the ACTUAL disk state — no reload, no jump.
+                TaskToggleDomRevertRequested?.Invoke(
+                    this,
+                    new TaskToggleRevertRequest(line, ReadDiskCheckedState(opened.Source.Content, line, !isChecked)));
+                return;
+            }
+
+            // Disk != snapshot: an external edit changed the document under
+            // the view — the ONLY case that warrants a full truthful reload.
             if (CanReload())
             {
                 SuppressNextDocumentReveal?.Invoke(this, EventArgs.Empty);
@@ -83,8 +135,8 @@ public partial class MainWindowViewModel
         }
         catch (Exception)
         {
-            // Unexpected failure: leave the document as-is; the resync above (if
-            // reached) or the next render reconciles the DOM.
+            // Unexpected failure: leave the document as-is; the next real
+            // render reconciles the DOM.
         }
         finally
         {
@@ -93,12 +145,54 @@ public partial class MainWindowViewModel
     }
 
     /// <summary>
+    /// Move every in-memory snapshot to the just-written content WITHOUT any
+    /// render request: the DOM already shows this state and the view dedups
+    /// renders by value, so publishing through the Document setter (reference
+    /// identity) would trigger a full cold re-render + scroll reset for
+    /// nothing. The backing field is patched silently; downstream consumers
+    /// (edit-enter, health-fix, tab-return, theme re-render) all see the
+    /// flipped content. The native-fallback RenderedDocument refreshes
+    /// off-thread via the existing deferred queue.
+    /// </summary>
+    private void CommitTaskToggleSnapshot(string path, string newContent)
+    {
+        var current = _document;
+        if (current is null || !string.Equals(current.Path, path, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _document = new MarkdownSource(current.Path, current.FileName, newContent);
+        OnPropertyChanged(nameof(WordCount));
+        OnPropertyChanged(nameof(WordCountStatusLabel));
+        QueueDeferredRenderedDocument(_document);
+        TaskToggleCommitted?.Invoke(this, _document);
+    }
+
+    /// <summary>
+    /// The checked state the disk ACTUALLY holds at <paramref name="line"/>,
+    /// or <paramref name="fallback"/> when the line is not a task marker.
+    /// </summary>
+    private static bool ReadDiskCheckedState(string content, int line, bool fallback)
+    {
+        var lines = content.Split('\n');
+        if (line < 0 || line >= lines.Length)
+        {
+            return fallback;
+        }
+
+        var match = TaskListIdentity.TaskMarkerPattern.Match(lines[line]);
+        return match.Success
+            ? !string.Equals(match.Groups[2].Value, " ", StringComparison.Ordinal)
+            : fallback;
+    }
+
+    /// <summary>
     /// Flip the task marker on <paramref name="line"/> to the requested state,
     /// but only if that line currently IS a task marker in the OPPOSITE state
     /// AND its identity key equals <paramref name="expectedKey"/> (null/missing
-    /// key → refuse, fail-closed). Returns false (leaving
-    /// <paramref name="newContent"/> = input) otherwise. EOL-preserving: only
-    /// the single state char changes.
+    /// key → refuse, fail-closed). EOL-preserving: only the single state char
+    /// changes.
     /// </summary>
     private static bool TryFlipMarker(
         string content,
@@ -126,8 +220,8 @@ public partial class MainWindowViewModel
         }
 
         // Identity check: the line's label hash must still equal the key the
-        // renderer emitted, otherwise the view is stale (external edit shifted
-        // lines) and writing here would flip the WRONG item.
+        // renderer emitted, otherwise the view is stale and writing here would
+        // flip the WRONG item.
         if (!string.Equals(TaskListIdentity.ComputeKey(lines[line]), expectedKey, StringComparison.Ordinal))
         {
             return false;

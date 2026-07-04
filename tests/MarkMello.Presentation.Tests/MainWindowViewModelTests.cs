@@ -65,6 +65,105 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task TaskToggleSuccessPatchesSnapshotSilentlyWithoutReload()
+    {
+        // In-place channel: a verified flip writes the file, patches
+        // Document.Content in place, raises TaskToggleCommitted - and does NOT
+        // publish PropertyChanged(Document) (no re-render, no scroll motion).
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
+        harness.Loader.Sources[path] = CreateSource(path, "- [ ] alpha\n- [x] beta\n");
+        await harness.ViewModel.OpenPathAsync(path);
+
+        var documentChanges = 0;
+        harness.ViewModel.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(MainWindowViewModel.Document))
+            {
+                documentChanges++;
+            }
+        };
+        MarkdownSource? committed = null;
+        harness.ViewModel.TaskToggleCommitted += (_, source) => committed = source;
+        var reverts = new List<TaskToggleRevertRequest>();
+        harness.ViewModel.TaskToggleDomRevertRequested += (_, r) => reverts.Add(r);
+
+        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"));
+
+        var save = Assert.Single(harness.DocumentSaver.Saves);
+        Assert.Equal("- [x] alpha\n- [x] beta\n", save.Content);
+        Assert.Equal("- [x] alpha\n- [x] beta\n", harness.ViewModel.Document!.Content);
+        Assert.NotNull(committed);
+        Assert.Equal(0, documentChanges);
+        Assert.Empty(reverts);
+    }
+
+    [Fact]
+    public async Task TaskToggleSaveFailureRevertsSurgicallyWithoutCommit()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
+        harness.Loader.Sources[path] = CreateSource(path, "- [ ] alpha\n");
+        await harness.ViewModel.OpenPathAsync(path);
+
+        MarkdownSource? committed = null;
+        harness.ViewModel.TaskToggleCommitted += (_, source) => committed = source;
+        var reverts = new List<TaskToggleRevertRequest>();
+        harness.ViewModel.TaskToggleDomRevertRequested += (_, r) => reverts.Add(r);
+        harness.DocumentSaver.NextException = new IOException("disk full");
+
+        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"));
+
+        Assert.Null(committed);
+        var revert = Assert.Single(reverts);
+        Assert.Equal(0, revert.Line);
+        Assert.False(revert.Checked); // back to the pre-click state
+        Assert.Equal("- [ ] alpha\n", harness.ViewModel.Document!.Content);
+    }
+
+    [Fact]
+    public async Task TaskToggleAlreadyInStateRevertsToDiskStateWithoutSave()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
+        harness.Loader.Sources[path] = CreateSource(path, "- [x] alpha\n");
+        await harness.ViewModel.OpenPathAsync(path);
+
+        var reverts = new List<TaskToggleRevertRequest>();
+        harness.ViewModel.TaskToggleDomRevertRequested += (_, r) => reverts.Add(r);
+
+        // Request the state it already has: refusal with disk == snapshot.
+        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [x] alpha"));
+
+        Assert.Empty(harness.DocumentSaver.Saves);
+        var revert = Assert.Single(reverts);
+        Assert.True(revert.Checked); // actual disk state
+    }
+
+    [Fact]
+    public async Task TaskToggleExternalEditReloadsTruthfully()
+    {
+        // Disk changed under the view (line inserted above): identity refuses
+        // and the ONLY correct response is a full truthful reload.
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
+        harness.Loader.Sources[path] = CreateSource(path, "- [ ] alpha\n- [ ] beta\n");
+        await harness.ViewModel.OpenPathAsync(path);
+
+        // External edit shifts lines: "beta" now sits at line 2.
+        harness.Loader.Sources[path] = CreateSource(path, "intro\n- [ ] alpha\n- [ ] beta\n");
+
+        var reverts = new List<TaskToggleRevertRequest>();
+        harness.ViewModel.TaskToggleDomRevertRequested += (_, r) => reverts.Add(r);
+
+        await harness.ViewModel.ToggleTaskLineAsync(1, true, TaskListIdentity.ComputeKey("- [ ] beta"));
+
+        Assert.Empty(harness.DocumentSaver.Saves);
+        Assert.Empty(reverts);
+        Assert.Equal("intro\n- [ ] alpha\n- [ ] beta\n", harness.ViewModel.Document!.Content);
+    }
+
+    [Fact]
     public async Task RequestDocumentSwitchWithDirtyEditorQueuesPromptAndCancelPreservesDraft()
     {
         // Audit Critical #1 gate: a dirty editor must NOT be overwritten by a

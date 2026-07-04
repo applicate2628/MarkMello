@@ -232,6 +232,15 @@ public interface IApplicateSharedWebViewHost : IApplicateModeTransactionHost
     ApplicateWebMarkdownDocumentView View { get; }
 
     /// <summary>
+    /// Silently move this host's current source to <paramref name="source"/>
+    /// WITHOUT any render request — the in-place update channel (task-toggle
+    /// commit): the rendered DOM already shows this content, so only the
+    /// snapshots move. No-ops when the host holds a different document or a
+    /// render is in flight.
+    /// </summary>
+    void CommitInPlaceSourceSwap(MarkdownSource source);
+
+    /// <summary>
     /// Hide this host's native WebView HWND during a mode switch.
     /// </summary>
     void SuppressNativeRendererForModeSwitch();
