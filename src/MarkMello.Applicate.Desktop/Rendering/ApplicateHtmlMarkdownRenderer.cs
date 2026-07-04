@@ -98,7 +98,11 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
     {
         var baseDirectory = ResolveBaseDirectory(source.Path);
         var rendered = _markdownRenderer.Render(source.Content, baseDirectory);
-        var context = new RenderContext(imageSourceResolver, baseDirectory, cancellationToken);
+        var context = new RenderContext(
+            imageSourceResolver,
+            baseDirectory,
+            cancellationToken,
+            source.Content.Split('\n'));
 
         foreach (var block in rendered.Blocks)
         {
@@ -205,10 +209,57 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
     private static async Task RenderListAsync(RenderContext context, MarkdownListBlock list, int blockIndex, string kind)
     {
         var tag = list.IsOrdered ? "ol" : "ul";
-        context.Html.Append('<').Append(tag).Append(BlockDataAttributes(blockIndex, kind, list.SourceSpan)).AppendLine(">");
+
+        var hasTasks = false;
+        foreach (var i in list.Items)
+        {
+            if (i.TaskChecked is not null)
+            {
+                hasTasks = true;
+                break;
+            }
+        }
+
+        context.Html.Append('<').Append(tag);
+        if (hasTasks)
+        {
+            // Strips the bullet and reserves the checkbox gutter (see renderer.css).
+            context.Html.Append(" class=\"mm-task-list\"");
+        }
+        context.Html.Append(BlockDataAttributes(blockIndex, kind, list.SourceSpan)).AppendLine(">");
         foreach (var item in list.Items)
         {
-            context.Html.AppendLine("<li>");
+            if (item.TaskChecked is bool isChecked && item.TaskSourceLine is int taskLine)
+            {
+                // GFM task item: a real checkbox carrying its DOCUMENT-absolute
+                // source line plus an identity key of that raw line, so a click
+                // can toggle [ ]/[x] in the file (renderer.ts -> host IPC) and the
+                // write-back can refuse when the view went stale (external edit
+                // shifted lines). Key MUST come from the raw source line via the
+                // shared TaskListIdentity routine — never from the rendered label.
+                var taskKey = taskLine >= 0 && taskLine < context.SourceLines.Length
+                    ? TaskListIdentity.ComputeKey(context.SourceLines[taskLine])
+                    : null;
+                context.Html.Append("<li class=\"mm-task-item\"><input type=\"checkbox\" class=\"mm-task-checkbox\" data-task-line=\"")
+                    .Append(taskLine.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    .Append('"');
+                if (taskKey is not null)
+                {
+                    // Omitted when the slice is out of range or the line is not a
+                    // marker; the write-back then refuses (fail-closed).
+                    context.Html.Append(" data-task-key=\"").Append(taskKey).Append('"');
+                }
+                if (isChecked)
+                {
+                    context.Html.Append(" checked");
+                }
+                context.Html.AppendLine(">");
+            }
+            else
+            {
+                context.Html.AppendLine("<li>");
+            }
+
             foreach (var child in item.Blocks)
             {
                 await RenderBlockAsync(context, child).ConfigureAwait(false);
@@ -690,9 +741,18 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
     private sealed class RenderContext(
         IImageSourceResolver? imageSourceResolver,
         string? baseDirectory,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string[]? sourceLines = null)
     {
         public StringBuilder Html { get; } = new();
+
+        /// <summary>
+        /// RAW document source split on '\n' (lines keep any trailing '\r').
+        /// Used to compute each task item's identity key from the ORIGINAL
+        /// source line via <see cref="TaskListIdentity.ComputeKey"/> — the same
+        /// routine the write-back verify side uses, so the two cannot diverge.
+        /// </summary>
+        public string[] SourceLines { get; } = sourceLines ?? [];
 
         public StringBuilder PlainText { get; } = new();
 

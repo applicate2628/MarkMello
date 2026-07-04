@@ -51,6 +51,11 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
             }
 
             var protectedText = ProtectInlineMath(segment.Text, _normalizeTex, out var inlineMath);
+            // AFTER math tokenization (so no math text remains), BEFORE Markdig:
+            // wrap bare space-containing link destinations in <…> so CommonMark
+            // parses them. Line-count-preserving, so every line-indexed consumer
+            // (SourceSpan offsets, TaskSourceLine) stays correct.
+            protectedText = ApplicateLenientLinkNormalizer.Normalize(protectedText);
             var rendered = _inner.Render(protectedText, baseDirectory);
             var renderedBlocks = inlineMath.Count == 0
                 ? rendered.Blocks
@@ -84,7 +89,15 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
                 Items = list.Items
                     .Select(item => item with
                     {
-                        Blocks = OffsetSourceSpans(item.Blocks, lineOffset)
+                        Blocks = OffsetSourceSpans(item.Blocks, lineOffset),
+                        // TaskSourceLine is segment-relative (this renderer parses
+                        // each $$-delimited segment separately), exactly like
+                        // SourceSpan — offset it too, or a task-list checkbox after
+                        // display math carries the wrong line and a click would
+                        // toggle (and, in reading mode, WRITE) the wrong file line.
+                        TaskSourceLine = item.TaskSourceLine is { } taskLine
+                            ? taskLine + lineOffset
+                            : item.TaskSourceLine
                     })
                     .ToList()
             },

@@ -68,7 +68,20 @@ public sealed record MarkdownQuoteBlock(IReadOnlyList<MarkdownBlock> Blocks) : M
 
 public sealed record MarkdownListBlock(bool IsOrdered, IReadOnlyList<MarkdownListItem> Items) : MarkdownBlock;
 
-public sealed record MarkdownListItem(IReadOnlyList<MarkdownBlock> Blocks);
+/// <param name="Blocks">The item's rendered content.</param>
+/// <param name="TaskChecked">
+/// GFM task-list state: <c>null</c> when the item is a plain list item, otherwise
+/// <c>true</c>/<c>false</c> for a checked/unchecked <c>- [x]</c> / <c>- [ ]</c> checkbox.
+/// </param>
+/// <param name="TaskSourceLine">
+/// 0-based document source line of a task item's marker (indexes
+/// <c>Content.Split('\n')</c> directly), used to toggle <c>[ ]</c>/<c>[x]</c>
+/// in the file on click. <c>null</c> for non-task items.
+/// </param>
+public sealed record MarkdownListItem(
+    IReadOnlyList<MarkdownBlock> Blocks,
+    bool? TaskChecked = null,
+    int? TaskSourceLine = null);
 
 public sealed record MarkdownHorizontalRuleBlock() : MarkdownBlock;
 

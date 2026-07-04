@@ -255,6 +255,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     public event EventHandler<ApplicateWebWidthDragEventArgs>? WidthDragRequested;
 
+    /// <summary>Raised when a task-list checkbox is toggled (source line + new checked state).</summary>
+    public event EventHandler<ApplicateWebTaskToggleEventArgs>? TaskToggleRequested;
+
     public event EventHandler<ApplicateWebWheelEventArgs>? WheelRequested;
 
     public event EventHandler? ViewerInteractionRequested;
@@ -1935,6 +1938,21 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (type == "link-clicked")
             {
                 _ = HandleLinkClickedAsync(document.RootElement);
+                return;
+            }
+
+            if (type == "task-toggle")
+            {
+                if (document.RootElement.TryGetProperty("line", out var taskLineProp) && taskLineProp.TryGetInt32(out var taskLine)
+                    && document.RootElement.TryGetProperty("checked", out var taskCheckedProp))
+                {
+                    var taskKey = document.RootElement.TryGetProperty("key", out var taskKeyProp)
+                        && taskKeyProp.ValueKind == System.Text.Json.JsonValueKind.String
+                        ? taskKeyProp.GetString()
+                        : null;
+                    TaskToggleRequested?.Invoke(this, new ApplicateWebTaskToggleEventArgs(taskLine, taskCheckedProp.GetBoolean(), taskKey));
+                }
+
                 return;
             }
 

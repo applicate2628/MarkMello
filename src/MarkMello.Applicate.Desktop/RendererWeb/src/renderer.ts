@@ -72,6 +72,7 @@ type RendererMessage =
   | { type: "post-ready-enhancements-complete"; renderId?: number; hasMermaid: boolean; hasHljs: boolean }
   | { type: "theme-applied"; theme: RendererTheme; requestId: number }
   | { type: "link-clicked"; href: string; button: number; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }
+  | { type: "task-toggle"; line: number; checked: boolean; key: string | null }
   | { type: "minimap-state"; visible: boolean; reservedWidth: number }
   | { type: "minimap-settled"; transactionGeneration: number; visible: boolean; reservedWidth: number }
   | { type: "scroll"; scrollTop: number; scrollHeight: number; clientHeight: number; topBlockIndex: number | null }
@@ -3871,6 +3872,35 @@ function wireLinks(): void {
   });
 }
 
+function wireTaskCheckboxes(): void {
+  // GFM task-list checkbox: after the native toggle, ask the host to flip
+  // [ ]/[x] on the source line. The host writes the file (or the edit buffer)
+  // and reloads, re-rendering the checkbox from the authoritative source.
+  // Delegated on document so it survives document re-renders.
+  document.addEventListener("change", (event) => {
+    const target = event.target;
+    if (
+      !(target instanceof HTMLInputElement) ||
+      !target.classList.contains("mm-task-checkbox")
+    ) {
+      return;
+    }
+    const lineAttr = target.getAttribute("data-task-line");
+    if (lineAttr === null) {
+      return;
+    }
+    const line = Number.parseInt(lineAttr, 10);
+    if (Number.isNaN(line)) {
+      return;
+    }
+    // Identity key of the item's raw source line (host-computed). The host
+    // refuses the write when it no longer matches the disk line (stale view
+    // after an external edit); missing key → host refuses (fail-closed).
+    const key = target.getAttribute("data-task-key");
+    postHostMessage({ type: "task-toggle", line, checked: target.checked, key });
+  });
+}
+
 function wireViewerInteraction(): void {
   document.addEventListener("pointerdown", (event) => {
     if (event.button === 0) {
@@ -4195,6 +4225,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Defer renderMath / renderMermaid / renderCodeBlocks to runInitialRenderPipeline,
   // which is triggered by the first reading-preferences message from the host.
   wireLinks();
+  wireTaskCheckboxes();
   wireViewerInteraction();
   wireWheelProxy();
   wireFileDrop();

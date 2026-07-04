@@ -323,6 +323,38 @@ img {
   white-space: nowrap;
 }
 
+/* GFM task-list checkboxes (- [ ] / - [x]). The list drops its bullet and
+   reserves a small left gutter; the checkbox is pulled into that gutter and the
+   item's label stays on the SAME line as it. Markdig wraps the item text in a
+   block <p>, so the label <p> is inlined — otherwise the block would drop the
+   text onto the line below the inline checkbox. accent-color themes the native
+   checkbox with the app accent. */
+.mm-document ul.mm-task-list,
+.mm-document ol.mm-task-list {
+  list-style: none;
+  padding-left: 1.6em;
+}
+
+.mm-document li.mm-task-item {
+  list-style: none;
+}
+
+.mm-document li.mm-task-item > .mm-task-checkbox {
+  width: 1.05em;
+  height: 1.05em;
+  margin: 0 0.5em 0 -1.5em;
+  vertical-align: middle;
+  cursor: pointer;
+  accent-color: var(--mm-accent);
+}
+
+/* Keep the label on the checkbox's line. A nested sub-list stays a block and
+   drops below as expected; only the first paragraph is inlined. */
+.mm-document li.mm-task-item > p:first-of-type {
+  display: inline;
+  margin: 0;
+}
+
 .math-inline {
   overflow-wrap: anywhere;
 }

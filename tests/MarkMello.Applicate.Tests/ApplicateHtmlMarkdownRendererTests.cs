@@ -63,6 +63,75 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
+    public async Task TaskCheckboxSourceLineIsDocumentAbsoluteAfterDisplayMath()
+    {
+        // Regression for the segment-relative TaskSourceLine bug: this renderer
+        // splits on $$…$$ and parses each segment separately, so a task item after
+        // display math must have its data-task-line offset to the DOCUMENT line —
+        // otherwise a checkbox click writes the wrong (here: in-formula) file line.
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        // line0 $$ / 1 a=b / 2 $$ / 3 blank / 4 "- [ ] task"
+        const string markdown = "$$\na=b\n$$\n\n- [ ] task\n";
+        var source = new MarkdownSource("sample.md", "sample.md", markdown);
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        Assert.Contains(@"data-task-line=""4""", document.Html);
+        Assert.DoesNotContain(@"data-task-line=""1""", document.Html);
+    }
+
+    [Fact]
+    public async Task TaskCheckboxKeyMatchesRawSourceLineHash()
+    {
+        // Ship gate (design round-3 pin): the emitted data-task-key MUST equal
+        // TaskListIdentity.ComputeKey of the RAW document line. The label
+        // deliberately contains inline markup + math so hashing the RENDERED
+        // label (the M3 failure class) cannot false-pass, and display math above
+        // exercises the segment offset (F1 class) at the same time.
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        // line0 $$ / 1 a=b / 2 $$ / 3 blank / 4 task with markup+math
+        const string markdown = "$$\na=b\n$$\n\n- [ ] **bold** $x^2$ done\n";
+        var source = new MarkdownSource("sample.md", "sample.md", markdown);
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        var expectedKey = TaskListIdentity.ComputeKey("- [ ] **bold** $x^2$ done");
+        Assert.NotNull(expectedKey);
+        Assert.Contains(@"data-task-line=""4""", document.Html);
+        Assert.Contains($@"data-task-key=""{expectedKey}""", document.Html);
+    }
+
+    [Fact]
+    public async Task BlockquotedTaskItemEmitsCheckboxWithKey()
+    {
+        // A task item inside a blockquote renders an interactive checkbox; its
+        // key must hash the raw '>'-prefixed line so the write-back (whose
+        // marker pattern accepts blockquote prefixes) can verify and flip it.
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        const string markdown = "> - [ ] quoted task\n";
+        var source = new MarkdownSource("sample.md", "sample.md", markdown);
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        var expectedKey = TaskListIdentity.ComputeKey("> - [ ] quoted task");
+        Assert.NotNull(expectedKey);
+        Assert.Contains(@"data-task-line=""0""", document.Html);
+        Assert.Contains($@"data-task-key=""{expectedKey}""", document.Html);
+    }
+
+    [Fact]
     public async Task RenderKeepsAdjacentInlineMathSpansSeparateInHtml()
     {
         var renderer = new ApplicateHtmlMarkdownRenderer();

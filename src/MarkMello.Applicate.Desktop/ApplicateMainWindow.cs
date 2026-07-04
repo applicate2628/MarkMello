@@ -1477,6 +1477,23 @@ public sealed class ApplicateMainWindow : MainWindow
         var hostProvider = App.Services?.GetService<IApplicateSharedWebViewHostProvider>();
         var viewerHostForMode = hostProvider?.ViewerHost ?? App.Services?.GetService<IApplicateSharedWebViewHost>();
         var editHost = hostProvider?.EditPreviewHost ?? viewerHostForMode;
+
+        // GFM task-list checkbox clicks: the renderer posts task-toggle, the view
+        // re-raises it, and the VM flips [ ]/[x] on the source line (writing the
+        // file in reading mode, or the edit buffer in edit mode). Route from both
+        // the viewer and the edit-preview surface; the VM decides how to apply.
+        // Hosts are app-lifetime singletons, so no explicit unsubscribe is needed.
+        void OnTaskToggleRequested(object? _, ApplicateWebTaskToggleEventArgs e)
+            => _ = viewModel.ToggleTaskLineAsync(e.Line, e.Checked, e.Key);
+        if (viewerHostForMode is not null)
+        {
+            viewerHostForMode.View.TaskToggleRequested += OnTaskToggleRequested;
+        }
+        if (editHost is not null && !ReferenceEquals(editHost, viewerHostForMode))
+        {
+            editHost.View.TaskToggleRequested += OnTaskToggleRequested;
+        }
+
         ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-preview-start");
         var editPreview = new ApplicateEditPreviewView(editHost);
         ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-preview-end");

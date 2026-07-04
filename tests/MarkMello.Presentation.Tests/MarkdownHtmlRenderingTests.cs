@@ -83,6 +83,43 @@ public sealed class MarkdownHtmlRenderingTests
     }
 
     [Fact]
+    public void RenderCapturesTaskListCheckedState()
+    {
+        const string markdown = """
+        - [x] done
+        - [ ] todo
+        - plain
+        """;
+
+        var renderer = new MarkdigMarkdownDocumentRenderer();
+
+        var document = renderer.Render(markdown);
+
+        var list = Assert.IsType<MarkdownListBlock>(Assert.Single(document.Blocks));
+        Assert.Collection(
+            list.Items,
+            item => Assert.True(item.TaskChecked),
+            item => Assert.False(item.TaskChecked),
+            item => Assert.Null(item.TaskChecked));
+    }
+
+    [Fact]
+    public void RenderCapturesTaskItemZeroBasedSourceLine()
+    {
+        // Pins the source-line convention the checkbox write-back relies on:
+        // MarkdownListItem.TaskSourceLine must index text.Split('\n') directly.
+        const string markdown = "intro\n\n- [ ] first\n- [x] second\n";
+
+        var renderer = new MarkdigMarkdownDocumentRenderer();
+
+        var document = renderer.Render(markdown);
+
+        var list = Assert.IsType<MarkdownListBlock>(document.Blocks[^1]);
+        Assert.Equal(2, list.Items[0].TaskSourceLine); // "- [ ] first"
+        Assert.Equal(3, list.Items[1].TaskSourceLine); // "- [x] second"
+    }
+
+    [Fact]
     public void RenderPreservesHardLineBreakAsMarkdownLineBreakInline()
     {
         const string markdown = """

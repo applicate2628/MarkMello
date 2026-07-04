@@ -6,6 +6,7 @@ using MarkdigMarkdown = Markdig.Markdown;
 using Markdig.Extensions.Tables;
 using Markdig.Syntax;
 using Markdig.Syntax.Inlines;
+using Markdig.Extensions.TaskLists;
 using MarkMello.Application.Abstractions;
 using MarkMello.Domain;
 using CodeBlock = Markdig.Syntax.CodeBlock;
@@ -146,10 +147,28 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
                 continue;
             }
 
-            items.Add(new MarkdownListItem(ConvertBlocks(item)));
+            var (taskChecked, taskLine) = TryReadTaskState(item);
+            items.Add(new MarkdownListItem(ConvertBlocks(item), taskChecked, taskLine));
         }
 
         return new MarkdownListBlock(list.IsOrdered, items);
+    }
+
+    // GFM task item (`- [ ]` / `- [x]`). Markdig (UseAdvancedExtensions -> task
+    // lists) parses the marker into a TaskList inline at the head of the item's
+    // first paragraph. Return its Checked flag plus the item's 0-based source line
+    // (used to toggle the marker in the file on click). The TaskList inline carries
+    // no text, so ConvertInlines already drops it from the rendered content.
+    private static (bool? Checked, int? Line) TryReadTaskState(ListItemBlock item)
+    {
+        if (item.Count > 0
+            && item[0] is ParagraphBlock paragraph
+            && paragraph.Inline?.FirstChild is TaskList task)
+        {
+            return (task.Checked, item.Line);
+        }
+
+        return (null, null);
     }
 
     private static MarkdownTableBlock ConvertTable(Table table)

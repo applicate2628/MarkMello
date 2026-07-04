@@ -4044,6 +4044,24 @@
       });
     });
   }
+  function wireTaskCheckboxes() {
+    document.addEventListener("change", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement) || !target.classList.contains("mm-task-checkbox")) {
+        return;
+      }
+      const lineAttr = target.getAttribute("data-task-line");
+      if (lineAttr === null) {
+        return;
+      }
+      const line = Number.parseInt(lineAttr, 10);
+      if (Number.isNaN(line)) {
+        return;
+      }
+      const key = target.getAttribute("data-task-key");
+      postHostMessage({ type: "task-toggle", line, checked: target.checked, key });
+    });
+  }
   function wireViewerInteraction() {
     document.addEventListener("pointerdown", (event) => {
       if (event.button === 0) {
@@ -4275,6 +4293,7 @@
     applyViewerChromeState();
     applyDocumentScrollState();
     wireLinks();
+    wireTaskCheckboxes();
     wireViewerInteraction();
     wireWheelProxy();
     wireFileDrop();
