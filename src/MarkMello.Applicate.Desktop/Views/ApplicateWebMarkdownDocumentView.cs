@@ -3169,9 +3169,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     /// motion. A programmatic .checked assignment fires no change event, so
     /// this cannot loop back into task-toggle.
     /// </summary>
-    internal void SetTaskCheckboxState(int line, bool isChecked)
+    internal void SetTaskCheckboxState(int line, bool isChecked, string expectedPath)
     {
-        if (!_hasLoadedDocument)
+        // Document-identity guard, symmetric with CommitInPlaceSourceSwap: a
+        // revert message that was posted for one document must not flip a line
+        // on a since-switched document sharing this host. An empty expectedPath
+        // (untitled/draft) matches only an untitled Source.
+        if (!_hasLoadedDocument
+            || !string.Equals(Source?.Path ?? string.Empty, expectedPath, StringComparison.OrdinalIgnoreCase))
         {
             return;
         }

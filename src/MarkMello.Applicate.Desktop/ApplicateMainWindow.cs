@@ -2376,7 +2376,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 // FIRST so the swap's premise ("DOM already shows this
                 // content") becomes true, THEN swap. Keeps the prime warm
                 // (zero re-render on the next Ctrl+E) and truthful.
-                channelEditHost.View.SetTaskCheckboxState(commit.Line, commit.Checked);
+                channelEditHost.View.SetTaskCheckboxState(commit.Line, commit.Checked, commit.Source.Path);
                 channelEditHost.CommitInPlaceSourceSwap(commit.Source);
             }
 
@@ -2388,7 +2388,7 @@ public sealed class ApplicateMainWindow : MainWindow
             }
         };
         viewModel.TaskToggleDomRevertRequested += (_, revert) =>
-            channelViewerHost?.View.SetTaskCheckboxState(revert.Line, revert.Checked);
+            channelViewerHost?.View.SetTaskCheckboxState(revert.Line, revert.Checked, revert.Path);
 
         // Edit-originated toggle: the edit-preview DOM received the click, so
         // the silent swap's premise already holds there. The flip is an
@@ -2397,7 +2397,7 @@ public sealed class ApplicateMainWindow : MainWindow
         viewModel.EditPreviewTaskToggleCommitted += (_, commit) =>
             channelEditHost?.CommitInPlaceSourceSwap(commit.Source);
         viewModel.EditPreviewTaskToggleRevertRequested += (_, revert) =>
-            channelEditHost?.View.SetTaskCheckboxState(revert.Line, revert.Checked);
+            channelEditHost?.View.SetTaskCheckboxState(revert.Line, revert.Checked, revert.Path);
 
         // Bidirectional sync between IOpenDocumentsService (tabs strip source
         // of truth) and the upstream `MainWindowViewModel.Document` value

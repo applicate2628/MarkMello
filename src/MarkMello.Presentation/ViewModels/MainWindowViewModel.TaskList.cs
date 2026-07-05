@@ -8,10 +8,14 @@ namespace MarkMello.Presentation.ViewModels;
 /// <summary>
 /// Payload of <see cref="MainWindowViewModel.TaskToggleDomRevertRequested"/>:
 /// the single checkbox at <paramref name="Line"/> must be set back to
-/// <paramref name="Checked"/> in the rendered DOM (surgical revert — no reload,
-/// no scroll motion).
+/// <paramref name="Checked"/> in the rendered DOM of the document at
+/// <paramref name="Path"/> (surgical revert — no reload, no scroll motion).
+/// <paramref name="Path"/> is the document-identity guard: the host applies
+/// the revert only when the addressed surface still shows that document, the
+/// same ownership guard the silent source swap carries (a stale in-flight
+/// revert must not flip a line on a since-switched document).
 /// </summary>
-public sealed record TaskToggleRevertRequest(int Line, bool Checked);
+public sealed record TaskToggleRevertRequest(int Line, bool Checked, string Path);
 
 /// <summary>
 /// Payload of <see cref="MainWindowViewModel.TaskToggleCommitted"/>: the
@@ -121,9 +125,10 @@ public partial class MainWindowViewModel
                 if (EditorSession is not { } session)
                 {
                     // No live session to receive the flip — put the clicked
-                    // surface's checkbox back to its pre-click state.
+                    // surface's checkbox back to its pre-click state, guarded
+                    // by the current document's identity.
                     EditPreviewTaskToggleRevertRequested?.Invoke(
-                        this, new TaskToggleRevertRequest(line, !isChecked));
+                        this, new TaskToggleRevertRequest(line, !isChecked, CurrentDocumentPath ?? string.Empty));
                     return;
                 }
 
@@ -151,7 +156,10 @@ public partial class MainWindowViewModel
                 // the buffer's actual state or the DOM keeps lying.
                 EditPreviewTaskToggleRevertRequested?.Invoke(
                     this,
-                    new TaskToggleRevertRequest(line, ReadDiskCheckedState(session.SourceText, line, !isChecked)));
+                    new TaskToggleRevertRequest(
+                        line,
+                        ReadDiskCheckedState(session.SourceText, line, !isChecked),
+                        session.CurrentPath ?? string.Empty));
                 return;
             }
 
@@ -169,7 +177,7 @@ public partial class MainWindowViewModel
             {
                 // Disk unreadable: nothing safe to write; put the checkbox
                 // back to its pre-click state.
-                TaskToggleDomRevertRequested?.Invoke(this, new TaskToggleRevertRequest(line, !isChecked));
+                TaskToggleDomRevertRequested?.Invoke(this, new TaskToggleRevertRequest(line, !isChecked, path));
                 return;
             }
 
@@ -187,7 +195,7 @@ public partial class MainWindowViewModel
                 // Save failed → disk still holds the OLD state → the reload
                 // would publish value-equal content and no-op; the surgical
                 // revert is the only mechanism that actually reverts here.
-                TaskToggleDomRevertRequested?.Invoke(this, new TaskToggleRevertRequest(line, !isChecked));
+                TaskToggleDomRevertRequested?.Invoke(this, new TaskToggleRevertRequest(line, !isChecked, path));
                 return;
             }
 
@@ -199,7 +207,10 @@ public partial class MainWindowViewModel
                 // one checkbox to the ACTUAL disk state — no reload, no jump.
                 TaskToggleDomRevertRequested?.Invoke(
                     this,
-                    new TaskToggleRevertRequest(line, ReadDiskCheckedState(opened.Source.Content, line, !isChecked)));
+                    new TaskToggleRevertRequest(
+                        line,
+                        ReadDiskCheckedState(opened.Source.Content, line, !isChecked),
+                        path));
                 return;
             }
 

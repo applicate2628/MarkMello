@@ -138,6 +138,7 @@ public sealed class MainWindowViewModelTests
         Assert.Empty(harness.DocumentSaver.Saves);
         var revert = Assert.Single(reverts);
         Assert.True(revert.Checked); // actual disk state
+        Assert.Equal(path, revert.Path); // carries the document-identity guard
     }
 
     [Fact]
@@ -265,6 +266,7 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("- [x] alpha\n", session.SourceText);
         var revert = Assert.Single(reverts);
         Assert.True(revert.Checked); // buffer really holds [x]
+        Assert.Equal(path, revert.Path); // carries the document-identity guard
     }
 
     [Fact]
