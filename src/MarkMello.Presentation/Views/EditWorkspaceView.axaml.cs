@@ -421,6 +421,7 @@ public partial class EditWorkspaceView : UserControl
 
         SynchronizePreviewToEditor();
     }
+
     private void DetachScrollSynchronization()
     {
         DetachScrollBarDragHandlers();
@@ -645,25 +646,26 @@ public partial class EditWorkspaceView : UserControl
         var lineNumber = sourceLine + 1;
         try
         {
-            foreach (var visualLine in textView.VisualLines)
-            {
-                if (lineNumber < visualLine.FirstDocumentLine.LineNumber
-                    || lineNumber > visualLine.LastDocumentLine.LineNumber)
-                {
-                    continue;
-                }
-
-                offsetY = Math.Max(0, visualLine.VisualTop - GetViewportAnchorY(_editorScrollViewer));
-                return true;
-            }
+            // Height-tree lookup: soft-wrap-aware and the exact metric
+            // VisualLine.VisualTop is derived from, so this write mapping stays
+            // consistent with TryGetEditorSourceLineAtViewportAnchor's read
+            // mapping by construction. The former line*DefaultLineHeight
+            // fallback ignored wrapped lines and silently drifted the editor
+            // tens of source lines behind the preview on prose documents
+            // (runtime trace 2026-07-04: write placed line 236 at Y=4815, the
+            // read mapped Y=4815 back to line 162 — the panes were never
+            // actually in sync, and every preview re-render re-anchored to the
+            // editor's REAL line, which read as a huge jump).
+            var visualTop = textView.GetVisualTopByDocumentLine(lineNumber);
+            offsetY = Math.Max(0, visualTop - GetViewportAnchorY(_editorScrollViewer));
+            return true;
         }
-        catch (VisualLinesInvalidException)
+        catch (InvalidOperationException)
         {
+            // The TextView has no document attached yet (attach/detach
+            // transition window) — no mapping is available this tick.
             return false;
         }
-
-        offsetY = Math.Max(0, sourceLine * textView.DefaultLineHeight - GetViewportAnchorY(_editorScrollViewer));
-        return true;
     }
 
     private void ScrollEditorToSourceLine(int sourceLine)
@@ -678,10 +680,9 @@ public partial class EditWorkspaceView : UserControl
         // (preview writes its anchor the same way). ScrollToLine was
         // middle-of-viewport with a 30% dead-zone (AvaloniaEdit LineMiddle +
         // MinimumScrollFraction), one of the three inconsistent reference
-        // points that made panes settle on different chunks. For targets far
-        // outside VisualLines the offset fallback is approximate
-        // (line × DefaultLineHeight − anchorY); subsequent preview-source-line
-        // messages self-correct as the viewport approaches.
+        // points that made panes settle on different chunks. The offset comes
+        // from the height tree (wrap-aware), so it matches what the read side
+        // will report back for the landed position.
         if (_editorScrollViewer is null
             || !TryGetEditorVerticalOffsetForSourceLine(sourceLine, out var editorOffsetY))
         {
