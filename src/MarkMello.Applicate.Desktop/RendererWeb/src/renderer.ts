@@ -416,8 +416,48 @@ function captureCurrentProcessedDocumentCacheEntry(mode: "clone" | "move"): Proc
   const sourceNodes = Array.from(main.childNodes);
   const fragment = document.createDocumentFragment();
   if (mode === "clone") {
-    fragment.append(...sourceNodes.map(node => node.cloneNode(true)));
+    const clones = sourceNodes.map(node => node.cloneNode(true));
+    // Stamp each realized block's settled height onto its clone as
+    // contain-intrinsic-size. Top-level blocks are `content-visibility: auto;
+    // contain-intrinsic-size: auto 120px` (renderer.css): Chromium's
+    // last-remembered size is per-ELEMENT internal state that does NOT survive
+    // cloneNode, so a re-mounted clone reverts every off-screen block to the
+    // 120px estimate — the whole layout re-mounts ~1300px too short (runtime:
+    // scrollHeight 14107 on every cached re-mount vs ~15400 settled), the raw
+    // scrollTop restore then lands on the wrong content and scroll-anchoring
+    // drifts the endpoint (~127px/round-trip, .scratch/trace-offset.log).
+    // Persisting the realized offsetHeight of the blocks that WERE laid out at
+    // capture (near the viewport — the ones the restore position depends on)
+    // makes the clone re-mount at truthful geometry, so the existing pixel
+    // restore is simply correct. Off-screen blocks were themselves estimated at
+    // capture; stamping their estimate is a no-op, harmless.
+    for (let index = 0; index < sourceNodes.length; index++) {
+      const live = sourceNodes[index];
+      const clone = clones[index];
+      if (live instanceof HTMLElement && clone instanceof HTMLElement) {
+        const settledHeight = live.offsetHeight;
+        if (settledHeight > 0) {
+          clone.style.containIntrinsicSize = `auto ${settledHeight}px`;
+        }
+      }
+    }
+    fragment.append(...clones);
   } else {
+    // "move" mode reuses the live nodes; read their settled height BEFORE the
+    // append detaches them (offsetHeight is 0 once out of the document).
+    // Two-pass (read ALL heights, then write) so a containIntrinsicSize write
+    // on one live in-document node cannot dirty layout and force a synchronous
+    // reflow on the next node's offsetHeight read (layout thrash on the
+    // synchronous swap-away path). Clone mode writes to detached clones and has
+    // no such hazard.
+    const settledHeights = sourceNodes.map(node =>
+      node instanceof HTMLElement ? node.offsetHeight : 0);
+    for (let index = 0; index < sourceNodes.length; index++) {
+      const node = sourceNodes[index];
+      if (node instanceof HTMLElement && settledHeights[index] > 0) {
+        node.style.containIntrinsicSize = `auto ${settledHeights[index]}px`;
+      }
+    }
     fragment.append(...sourceNodes);
   }
 

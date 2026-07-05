@@ -1416,8 +1416,26 @@
     const sourceNodes = Array.from(main.childNodes);
     const fragment = document.createDocumentFragment();
     if (mode === "clone") {
-      fragment.append(...sourceNodes.map((node) => node.cloneNode(true)));
+      const clones = sourceNodes.map((node) => node.cloneNode(true));
+      for (let index = 0; index < sourceNodes.length; index++) {
+        const live = sourceNodes[index];
+        const clone = clones[index];
+        if (live instanceof HTMLElement && clone instanceof HTMLElement) {
+          const settledHeight = live.offsetHeight;
+          if (settledHeight > 0) {
+            clone.style.containIntrinsicSize = `auto ${settledHeight}px`;
+          }
+        }
+      }
+      fragment.append(...clones);
     } else {
+      const settledHeights = sourceNodes.map((node) => node instanceof HTMLElement ? node.offsetHeight : 0);
+      for (let index = 0; index < sourceNodes.length; index++) {
+        const node = sourceNodes[index];
+        if (node instanceof HTMLElement && settledHeights[index] > 0) {
+          node.style.containIntrinsicSize = `auto ${settledHeights[index]}px`;
+        }
+      }
       fragment.append(...sourceNodes);
     }
     const minimapSnapshot = captureMinimapSnapshot({
