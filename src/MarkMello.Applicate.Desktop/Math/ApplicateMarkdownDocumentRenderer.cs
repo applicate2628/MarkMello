@@ -38,6 +38,12 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
             return RenderedMarkdownDocument.Empty;
         }
 
+        // BEFORE display-math splitting: rewrite GitHub `​```math` fenced blocks to
+        // `$$ … $$` so SplitDisplayMath treats them as display math instead of
+        // letting Markdig render them as literal monospace TeX source. Line-count
+        // preserving, so SourceSpan / TaskSourceLine offsets below stay correct.
+        markdown = ApplicateMathCodeFenceNormalizer.Normalize(markdown);
+
         var blocks = new List<MarkdownBlock>();
         foreach (var segment in SplitDisplayMath(markdown))
         {

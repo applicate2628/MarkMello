@@ -178,4 +178,78 @@ public sealed class ApplicateMarkdownDocumentRendererTests
         Assert.DoesNotContain(chunks, chunk => chunk.Contains(@"\right]", StringComparison.Ordinal)
             && !chunk.Contains(@"\left[", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void RenderConvertsGithubMathFenceToDisplayMath()
+    {
+        // GitHub / ChatGPT emit display formulas as a ```math fenced block; it
+        // must render as a formula, not literal monospace TeX.
+        var renderer = new ApplicateMarkdownDocumentRenderer();
+
+        var document = renderer.Render("""
+            Before
+
+            ```math
+            R_{dc} \approx \frac{h}{\sigma \cdot 2 \pi r t}
+            ```
+
+            After
+            """);
+
+        Assert.Contains(document.Blocks, block => block is ApplicateMathBlock math
+            && math.Tex.Contains("R_{dc}", StringComparison.Ordinal));
+        // The fence must NOT survive as a code block.
+        Assert.DoesNotContain(document.Blocks, block => block is MarkdownCodeBlock);
+        Assert.Contains(document.Blocks, block => block is MarkdownParagraphBlock paragraph
+            && paragraph.Inlines.OfType<MarkdownTextInline>().Any(text => text.Text.Contains("After", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void RenderLeavesNonMathCodeFenceUntouched()
+    {
+        // A plain / language-tagged code block must stay a code block — only the
+        // exact `math` info string is treated as a formula, so a genuine TeX code
+        // sample is never misread.
+        var renderer = new ApplicateMarkdownDocumentRenderer();
+
+        var document = renderer.Render("""
+            ```text
+            R_{dc} \approx \frac{h}{x}
+            ```
+            """);
+
+        Assert.DoesNotContain(document.Blocks, block => block is ApplicateMathBlock);
+        Assert.Contains(document.Blocks, block => block is MarkdownCodeBlock code
+            && code.Code.Contains("R_{dc}", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void RenderMathFencePreservesSourceLinesLikeDollarDelimiters()
+    {
+        // The fence→$$ rewrite is line-count preserving: a task item after a
+        // ```math block must land on the SAME source line as after an equivalent
+        // $$…$$ block (a wrong line would make a reading-mode checkbox click
+        // write the wrong file line).
+        var renderer = new ApplicateMarkdownDocumentRenderer();
+
+        var fenced = renderer.Render("""
+            ```math
+            a = b
+            ```
+
+            - [ ] task after math
+            """);
+        var dollars = renderer.Render("""
+            $$
+            a = b
+            $$
+
+            - [ ] task after math
+            """);
+
+        var fencedTask = Assert.Single(fenced.Blocks.OfType<MarkdownListBlock>()).Items.Single().TaskSourceLine;
+        var dollarTask = Assert.Single(dollars.Blocks.OfType<MarkdownListBlock>()).Items.Single().TaskSourceLine;
+        Assert.NotNull(fencedTask);
+        Assert.Equal(dollarTask, fencedTask);
+    }
 }
