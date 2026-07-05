@@ -2388,6 +2388,15 @@ public sealed class ApplicateMainWindow : MainWindow
         viewModel.TaskToggleDomRevertRequested += (_, revert) =>
             channelViewerHost?.View.SetTaskCheckboxState(revert.Line, revert.Checked);
 
+        // Edit-originated toggle: the edit-preview DOM received the click, so
+        // the silent swap's premise already holds there. The flip is an
+        // UNSAVED buffer edit — the viewer snapshot and the open-docs mirror
+        // stay at disk content (the dirty/save flow owns them).
+        viewModel.EditPreviewTaskToggleCommitted += (_, commit) =>
+            channelEditHost?.CommitInPlaceSourceSwap(commit.Source);
+        viewModel.EditPreviewTaskToggleRevertRequested += (_, revert) =>
+            channelEditHost?.View.SetTaskCheckboxState(revert.Line, revert.Checked);
+
         // Bidirectional sync between IOpenDocumentsService (tabs strip source
         // of truth) and the upstream `MainWindowViewModel.Document` value
         // (what actually renders). Flags prevent the two paths from ping-

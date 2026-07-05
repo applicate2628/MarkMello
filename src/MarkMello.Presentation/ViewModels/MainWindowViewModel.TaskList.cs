@@ -59,6 +59,26 @@ public partial class MainWindowViewModel
     public event EventHandler<TaskToggleRevertRequest>? TaskToggleDomRevertRequested;
 
     /// <summary>
+    /// Edit-mode counterpart of <see cref="TaskToggleCommitted"/>: the click
+    /// happened in the edit-preview DOM (already optimistically flipped) and
+    /// the flip landed in the editor buffer as an unsaved edit. The host moves
+    /// the edit-preview surface's Source to the flipped buffer BEFORE the
+    /// debounced live-edit re-render runs, so that render dedups to a
+    /// value-equal no-op — zero repaint, zero scroll motion, exactly like
+    /// reading mode. Disk, viewer snapshot, and the open-docs mirror are NOT
+    /// touched: the user still owns the save.
+    /// </summary>
+    public event EventHandler<TaskToggleCommit>? EditPreviewTaskToggleCommitted;
+
+    /// <summary>
+    /// Edit-mode counterpart of <see cref="TaskToggleDomRevertRequested"/>: a
+    /// refused flip leaves the buffer unchanged, so NO re-render will run and
+    /// the optimistic DOM flip in the edit-preview would keep lying without a
+    /// surgical single-checkbox revert.
+    /// </summary>
+    public event EventHandler<TaskToggleRevertRequest>? EditPreviewTaskToggleRevertRequested;
+
+    /// <summary>
     /// Set the task marker on <paramref name="line"/> (0-based document source
     /// line) to <c>[x]</c> when <paramref name="isChecked"/>, else <c>[ ]</c> —
     /// only when the line's identity key still equals <paramref name="expectedKey"/>
@@ -77,13 +97,33 @@ public partial class MainWindowViewModel
             if (IsEditMode && EditorSession is not null)
             {
                 // The editor buffer is authoritative while editing; the user
-                // still owns the save. A refused flip leaves the buffer alone
-                // and the debounced preview re-render reconciles the DOM.
-                if (TryFlipMarker(EditorSession.SourceText, line, isChecked, expectedKey, out var editedBuffer))
+                // still owns the save.
+                var session = EditorSession;
+                if (TryFlipMarker(session.SourceText, line, isChecked, expectedKey, out var editedBuffer))
                 {
-                    EditorSession.SourceText = editedBuffer;
+                    // Same in-place channel as reading mode: swap the
+                    // edit-preview host's Source to the flipped buffer FIRST
+                    // (the DOM already shows it — the click's optimistic flip),
+                    // THEN publish the buffer. The debounced live-edit render
+                    // that follows sees a value-equal source and dedups to a
+                    // no-op, so nothing repaints and the scroll never moves.
+                    // Built from the same session fields the preview render
+                    // pipeline uses, so record equality holds by construction.
+                    EditPreviewTaskToggleCommitted?.Invoke(this, new TaskToggleCommit(
+                        new MarkdownSource(session.CurrentPath ?? string.Empty, session.FileName, editedBuffer),
+                        line,
+                        isChecked));
+                    session.SourceText = editedBuffer;
+                    return;
                 }
 
+                // Refused flip (stale key / not a marker / already in the
+                // requested state): the buffer is unchanged, so no re-render
+                // will run — revert the ONE optimistically-flipped checkbox to
+                // the buffer's actual state or the DOM keeps lying.
+                EditPreviewTaskToggleRevertRequested?.Invoke(
+                    this,
+                    new TaskToggleRevertRequest(line, ReadDiskCheckedState(session.SourceText, line, !isChecked)));
                 return;
             }
 
