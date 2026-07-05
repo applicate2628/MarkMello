@@ -903,13 +903,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
             return;
         }
 
-        // Keep the reading-anchor record fresh for edit->read->edit round-trips
-        // (the edit-entry seed reads it).
-        if (_viewModel is not null)
-        {
-            _viewModel.ReadingAnchorSourceLine = e.SourceLine;
-        }
-
         PreviewSourceLineChanged?.Invoke(this, new SourceLineScrollSyncEventArgs(e.SourceLine));
     }
 

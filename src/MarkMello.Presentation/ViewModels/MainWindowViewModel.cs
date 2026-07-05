@@ -1577,7 +1577,6 @@ public partial class MainWindowViewModel : ObservableObject
         _currentPath = null;
         State = ViewState.Viewing;
         ReadingProgress = 0;
-        ReadingAnchorSourceLine = null;
         ClearLoadError();
         CloseOverlayCore();
         EditorSession = new EditorSessionViewModel(
@@ -1618,7 +1617,6 @@ public partial class MainWindowViewModel : ObservableObject
         _currentPath = null;
         State = ViewState.NoDocument;
         ReadingProgress = 0;
-        ReadingAnchorSourceLine = null;
         ClearLoadError();
         RefreshWindowTitle();
         UpdateCommandStates();
@@ -1898,7 +1896,6 @@ public partial class MainWindowViewModel : ObservableObject
                 baseDirectory: TryGetDirectory(source.Path));
         }
         ReadingProgress = 0;
-        ReadingAnchorSourceLine = null;
         ClearLoadError();
 
         if (preserveEditModeAfterLoad)

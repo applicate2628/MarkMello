@@ -104,34 +104,21 @@ public sealed class ApplicateEditPreviewSyncTests
     }
 
     [Fact]
-    public void EditEntrySeedOpensEditorAtReadingAnchor()
+    public void EditSurfaceKeepsPerPaneStateWithoutEntrySeed()
     {
-        // Edit entry must seed BOTH panes to the recorded reading-anchor line
-        // (the primed fast path fires no events, so the seed is direct), and
-        // the rendered-event re-assert must be unconditional (the editor owns
-        // the position; no offset-0 guard).
+        // User-chosen model: each pane keeps ITS OWN state across mode
+        // switches; there is NO cross-mode entry seed dragging the edit
+        // surface to the reading anchor. The rendered-event re-assert stays
+        // unconditional (editor owns the position while editing).
         var workspace = File.ReadAllText(Path.Combine(
             AppContext.BaseDirectory,
             "..", "..", "..", "..", "..",
             "src", "MarkMello.Presentation", "Views", "EditWorkspaceView.axaml.cs"));
 
-        var seed = ExtractMethodBody(workspace, "private bool TryApplyEditEntrySeed()");
-        Assert.Contains("ReadingAnchorSourceLine", seed, StringComparison.Ordinal);
-        Assert.Contains("ScrollEditorToSourceLine(seedLine);", seed, StringComparison.Ordinal);
-        Assert.Contains("_previewSourceLineSync?.ScrollToSourceLine(seedLine);", seed, StringComparison.Ordinal);
-
+        Assert.DoesNotContain("TryApplyEditEntrySeed", workspace, StringComparison.Ordinal);
+        Assert.DoesNotContain("ReadingAnchorSourceLine", workspace, StringComparison.Ordinal);
         Assert.DoesNotContain("Offset.Y: 0", workspace, StringComparison.Ordinal);
-
-        // The viewer records the anchor the seed reads.
-        var viewer = ReadViewerCodeBehind();
-        Assert.Contains("ReadingAnchorSourceLine = e.SourceLine;", viewer, StringComparison.Ordinal);
     }
-
-    private static string ReadViewerCodeBehind()
-        => File.ReadAllText(Path.Combine(
-            AppContext.BaseDirectory,
-            "..", "..", "..", "..", "..",
-            "src", "MarkMello.Applicate.Desktop", "Views", "ApplicateViewerView.cs"));
 
     [Fact]
     public void EditPreviewVisibilityChainStillAttachesAndQueuesRender()

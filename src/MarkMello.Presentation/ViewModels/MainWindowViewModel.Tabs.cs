@@ -13,14 +13,4 @@ public partial class MainWindowViewModel
     /// </summary>
     public void NotifyActiveTabLoadFailed(string fileName)
         => EditorSession?.SetStatusMessage(_localization.Format("TabLoadFailed", fileName));
-
-    /// <summary>
-    /// Source line currently at the READING viewport's 38% anchor — recorded
-    /// live from the renderer's preview-source-line channel (viewer and
-    /// edit-preview surfaces both keep it fresh). The edit-entry seed reads it
-    /// so the editor opens at the reading position instead of the document
-    /// start. Null = never scrolled (seed 0 = top, correct). Cleared on every
-    /// document swap alongside ReadingProgress.
-    /// </summary>
-    public int? ReadingAnchorSourceLine { get; set; }
 }

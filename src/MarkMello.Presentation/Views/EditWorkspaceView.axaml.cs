@@ -37,10 +37,6 @@ public partial class EditWorkspaceView : UserControl
     private ScrollViewer? _activeScrollBarDragSource;
     private EditorSessionViewModel? _boundSession;
     private bool _firstVisualLinesLogged;
-    // One-shot per visual-tree attach: seeds the editor (and preview) to the
-    // READING anchor line on edit entry, so edit mode opens where the user was
-    // reading. Reset on detach.
-    private bool _entrySeedApplied;
     private DateTime _ignoreEditorScrollUntil;
     private DateTime _ignorePreviewSourceLineUntil;
     // Bidirectional source sync. The AvaloniaEdit source-pane spike (f1d18a9)
@@ -82,7 +78,6 @@ public partial class EditWorkspaceView : UserControl
         RemoveHandler(PointerReleasedEvent, OnScrollBarDragPointerReleased);
         RemoveHandler(PointerCaptureLostEvent, OnScrollBarDragPointerCaptureLost);
         DetachScrollSynchronization();
-        _entrySeedApplied = false;
         if (_writeBackEditor is not null)
         {
             _writeBackEditor.TextChanged -= OnEditorTextChanged;
@@ -424,46 +419,8 @@ public partial class EditWorkspaceView : UserControl
             _previewSourceLineSync.PreviewSourceLineChanged += OnPreviewSourceLineChanged;
         }
 
-        if (!TryApplyEditEntrySeed())
-        {
-            SynchronizePreviewToEditor();
-        }
+        SynchronizePreviewToEditor();
     }
-
-    /// <summary>
-    /// One-shot edit-entry seed: open the editor (and preview) at the READING
-    /// anchor line recorded by the viewer, instead of the document start. Both
-    /// panes get the SAME line value directly — no event round-trip, which the
-    /// primed fast path never fires. From this moment the editor owns the
-    /// position (the ONE 38%-anchor contract).
-    /// </summary>
-    private bool TryApplyEditEntrySeed()
-    {
-        if (_entrySeedApplied)
-        {
-            return false;
-        }
-
-        _entrySeedApplied = true;
-        if (_previewSourceLineSync is { SyncEnabled: false })
-        {
-            return false;
-        }
-
-        var viewModel = TopLevel.GetTopLevel(this)?.DataContext as MainWindowViewModel;
-        if (viewModel?.ReadingAnchorSourceLine is not int seedLine)
-        {
-            // Never-scrolled document: top is the position; the normal sync
-            // (editor at offset 0) is already correct.
-            return false;
-        }
-
-        ScrollEditorToSourceLine(seedLine);
-        _ignorePreviewSourceLineUntil = DateTime.UtcNow + ScrollSyncFeedbackGuard;
-        _previewSourceLineSync?.ScrollToSourceLine(seedLine);
-        return true;
-    }
-
     private void DetachScrollSynchronization()
     {
         DetachScrollBarDragHandlers();
