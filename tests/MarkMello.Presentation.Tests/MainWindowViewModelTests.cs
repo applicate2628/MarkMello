@@ -88,7 +88,7 @@ public sealed class MainWindowViewModelTests
         var reverts = new List<TaskToggleRevertRequest>();
         harness.ViewModel.TaskToggleDomRevertRequested += (_, r) => reverts.Add(r);
 
-        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"));
+        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.Viewer);
 
         var save = Assert.Single(harness.DocumentSaver.Saves);
         Assert.Equal("- [x] alpha\n- [x] beta\n", save.Content);
@@ -112,7 +112,7 @@ public sealed class MainWindowViewModelTests
         harness.ViewModel.TaskToggleDomRevertRequested += (_, r) => reverts.Add(r);
         harness.DocumentSaver.NextException = new IOException("disk full");
 
-        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"));
+        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.Viewer);
 
         Assert.Null(committed);
         var revert = Assert.Single(reverts);
@@ -133,7 +133,7 @@ public sealed class MainWindowViewModelTests
         harness.ViewModel.TaskToggleDomRevertRequested += (_, r) => reverts.Add(r);
 
         // Request the state it already has: refusal with disk == snapshot.
-        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [x] alpha"));
+        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [x] alpha"), TaskToggleOrigin.Viewer);
 
         Assert.Empty(harness.DocumentSaver.Saves);
         var revert = Assert.Single(reverts);
@@ -156,11 +156,160 @@ public sealed class MainWindowViewModelTests
         var reverts = new List<TaskToggleRevertRequest>();
         harness.ViewModel.TaskToggleDomRevertRequested += (_, r) => reverts.Add(r);
 
-        await harness.ViewModel.ToggleTaskLineAsync(1, true, TaskListIdentity.ComputeKey("- [ ] beta"));
+        await harness.ViewModel.ToggleTaskLineAsync(1, true, TaskListIdentity.ComputeKey("- [ ] beta"), TaskToggleOrigin.Viewer);
 
         Assert.Empty(harness.DocumentSaver.Saves);
         Assert.Empty(reverts);
         Assert.Equal("intro\n- [ ] alpha\n- [ ] beta\n", harness.ViewModel.Document!.Content);
+    }
+
+    [Fact]
+    public async Task TaskToggleDormantSessionFlipAdvancesBaselineAndStaysClean()
+    {
+        // Acceptance major #1: after a reading-mode toggle is WRITTEN to disk,
+        // a clean dormant session's buffer is flipped AND its persisted
+        // baseline follows the disk - a byte-identical buffer must not read
+        // as dirty, and Discard must not be able to revert a persisted flip.
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
+        harness.Loader.Sources[path] = CreateSource(path, "- [ ] alpha\n");
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null); // create session
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null); // back to reading, session dormant
+        Assert.False(harness.ViewModel.IsEditMode);
+        var session = harness.ViewModel.EditorSession;
+        Assert.NotNull(session);
+
+        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.Viewer);
+
+        Assert.Equal("- [x] alpha\n", session!.SourceText);
+        Assert.Equal("- [x] alpha\n", session.LastPersistedSource);
+        Assert.False(session.IsDirty);
+
+        // Discard is now a no-op against the REAL disk state.
+        session.DiscardChanges();
+        Assert.Equal("- [x] alpha\n", session.SourceText);
+    }
+
+    [Fact]
+    public async Task TaskToggleDormantDivergedBufferKeepsUserEditsAndBaselineFollowsDisk()
+    {
+        // The toggled line is intact (flip lands) while another line carries an
+        // unsaved user edit: the edit survives, the baseline still follows the
+        // disk we just wrote, and the session stays truthfully dirty.
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
+        harness.Loader.Sources[path] = CreateSource(path, "- [ ] alpha\nbeta\n");
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        var session = harness.ViewModel.EditorSession!;
+        session.SourceText = "- [ ] alpha\nbeta edited\n"; // diverged dormant buffer
+
+        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.Viewer);
+
+        Assert.Equal("- [x] alpha\nbeta edited\n", session.SourceText); // flip + user edit kept
+        Assert.Equal("- [x] alpha\nbeta\n", session.LastPersistedSource); // baseline == disk
+        Assert.True(session.IsDirty);
+    }
+
+    [Fact]
+    public async Task EditPreviewToggleCommitsBufferBeforePublishWithoutDiskWrite()
+    {
+        // Edit leg rides the in-place channel: the commit event fires BEFORE
+        // the buffer publish (so the host swaps Source before the debounced
+        // render runs) and the disk is never written - the user owns the save.
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
+        harness.Loader.Sources[path] = CreateSource(path, "- [ ] alpha\n");
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        var session = harness.ViewModel.EditorSession!;
+
+        TaskToggleCommit? committed = null;
+        string? bufferAtCommitTime = null;
+        harness.ViewModel.EditPreviewTaskToggleCommitted += (_, commit) =>
+        {
+            committed = commit;
+            bufferAtCommitTime = session.SourceText;
+        };
+
+        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.EditPreview);
+
+        Assert.Empty(harness.DocumentSaver.Saves);
+        Assert.NotNull(committed);
+        Assert.Equal("- [x] alpha\n", committed!.Source.Content);
+        Assert.Equal("- [ ] alpha\n", bufferAtCommitTime); // commit precedes publish
+        Assert.Equal("- [x] alpha\n", session.SourceText);
+        Assert.True(session.IsDirty); // unsaved buffer flip
+    }
+
+    [Fact]
+    public async Task EditPreviewToggleRefusalRevertsToBufferStateWithoutTouchingBuffer()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
+        harness.Loader.Sources[path] = CreateSource(path, "- [x] alpha\n");
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        var session = harness.ViewModel.EditorSession!;
+
+        var reverts = new List<TaskToggleRevertRequest>();
+        harness.ViewModel.EditPreviewTaskToggleRevertRequested += (_, r) => reverts.Add(r);
+
+        // Stale key (external view) -> refusal; the optimistic DOM flip must be
+        // reverted to the BUFFER's actual state.
+        await harness.ViewModel.ToggleTaskLineAsync(0, false, "deadbeef", TaskToggleOrigin.EditPreview);
+
+        Assert.Empty(harness.DocumentSaver.Saves);
+        Assert.Equal("- [x] alpha\n", session.SourceText);
+        var revert = Assert.Single(reverts);
+        Assert.True(revert.Checked); // buffer really holds [x]
+    }
+
+    [Fact]
+    public async Task ViewerOriginToggleWhileInEditModeStillRunsReadingLeg()
+    {
+        // Acceptance major #5: the leg follows the CLICKED surface, not the
+        // mode at dispatch time. A viewer click racing past Ctrl+E must still
+        // write the disk and keep the live session coherent (flip + baseline).
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
+        harness.Loader.Sources[path] = CreateSource(path, "- [ ] alpha\n");
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        Assert.True(harness.ViewModel.IsEditMode);
+        var session = harness.ViewModel.EditorSession!;
+
+        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.Viewer);
+
+        var save = Assert.Single(harness.DocumentSaver.Saves);
+        Assert.Equal("- [x] alpha\n", save.Content);
+        Assert.Equal("- [x] alpha\n", session.SourceText);
+        Assert.False(session.IsDirty);
+    }
+
+    [Fact]
+    public async Task EditPreviewOriginToggleAfterExitStillFlipsDormantBuffer()
+    {
+        // Mirror race: an edit-preview click processed after the exit to
+        // reading runs the edit leg against the dormant buffer - no disk
+        // write, truthfully dirty until the user saves.
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
+        harness.Loader.Sources[path] = CreateSource(path, "- [ ] alpha\n");
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null); // dormant
+        Assert.False(harness.ViewModel.IsEditMode);
+        var session = harness.ViewModel.EditorSession!;
+
+        await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.EditPreview);
+
+        Assert.Empty(harness.DocumentSaver.Saves);
+        Assert.Equal("- [x] alpha\n", session.SourceText);
+        Assert.True(session.IsDirty);
+        Assert.Equal("- [ ] alpha\n", harness.ViewModel.Document!.Content); // viewer snapshot untouched
     }
 
     [Fact]

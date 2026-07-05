@@ -24,6 +24,20 @@ public sealed record TaskToggleRevertRequest(int Line, bool Checked);
 public sealed record TaskToggleCommit(MarkdownSource Source, int Line, bool Checked);
 
 /// <summary>
+/// The surface whose DOM received the task-checkbox click. The channel's leg
+/// is selected by THIS, not by the current mode: both legs' correctness
+/// premise is "the clicked surface's DOM already shows the flipped state"
+/// (the renderer's optimistic flip), and a toggle message that crosses a
+/// Ctrl+E boundary in flight must still run the leg of the surface that was
+/// actually clicked — the mode at dispatch time is the wrong discriminator.
+/// </summary>
+public enum TaskToggleOrigin
+{
+    Viewer,
+    EditPreview,
+}
+
+/// <summary>
 /// GFM task-list checkbox write-back — the in-place update channel.
 ///
 /// <para>ONE logic (design: .scratch/plans/design-checkbox-scrolljump.md,
@@ -82,9 +96,12 @@ public partial class MainWindowViewModel
     /// Set the task marker on <paramref name="line"/> (0-based document source
     /// line) to <c>[x]</c> when <paramref name="isChecked"/>, else <c>[ ]</c> —
     /// only when the line's identity key still equals <paramref name="expectedKey"/>
-    /// (fail-closed: null/missing refuses). Never throws to the caller.
+    /// (fail-closed: null/missing refuses). The leg is selected by
+    /// <paramref name="origin"/> — the surface that was clicked — never by the
+    /// current mode (see <see cref="TaskToggleOrigin"/>). Never throws to the
+    /// caller.
     /// </summary>
-    public async Task ToggleTaskLineAsync(int line, bool isChecked, string? expectedKey)
+    public async Task ToggleTaskLineAsync(int line, bool isChecked, string? expectedKey, TaskToggleOrigin origin)
     {
         if (_isTogglingTask)
         {
@@ -94,11 +111,22 @@ public partial class MainWindowViewModel
         _isTogglingTask = true;
         try
         {
-            if (IsEditMode && EditorSession is not null)
+            if (origin == TaskToggleOrigin.EditPreview)
             {
-                // The editor buffer is authoritative while editing; the user
-                // still owns the save.
-                var session = EditorSession;
+                // The editor buffer is authoritative for edit-surface clicks;
+                // the user still owns the save. This holds even when the mode
+                // already flipped back to reading while the message was in
+                // flight: the flip lands in the (now dormant) buffer and the
+                // dirty flow owns it from there.
+                if (EditorSession is not { } session)
+                {
+                    // No live session to receive the flip — put the clicked
+                    // surface's checkbox back to its pre-click state.
+                    EditPreviewTaskToggleRevertRequested?.Invoke(
+                        this, new TaskToggleRevertRequest(line, !isChecked));
+                    return;
+                }
+
                 if (TryFlipMarker(session.SourceText, line, isChecked, expectedKey, out var editedBuffer))
                 {
                     // Same in-place channel as reading mode: swap the
@@ -219,12 +247,22 @@ public partial class MainWindowViewModel
         // the old text: a value-different render lands on the just-hidden
         // renderer (10s+ hidden-HWND message drain) AND visually reverts the
         // checkbox. Flip the session buffer through the same verified marker
-        // path — fail-closed: a diverged buffer (unsaved edits) is left alone;
-        // the dirty flow owns it.
-        if (EditorSession is { } session
-            && TryFlipMarker(session.SourceText, line, isChecked, TaskListIdentity.ComputeKey(newContent.Split('\n')[line]), out var sessionText))
+        // path — a diverged line (unsaved edit on it) keeps the user's text;
+        // the dirty flow owns it. Either way the session's persisted baseline
+        // MUST follow the disk we just wrote: leaving it at the pre-toggle
+        // content makes a byte-identical buffer read as dirty, and Discard/Save
+        // would silently revert the persisted toggle. ApplyPersistedTaskFlip
+        // also skips the session's synchronous whole-document preview rebuild —
+        // that parse does not belong on the zero-cost click path.
+        if (EditorSession is { } session)
         {
-            session.SourceText = sessionText;
+            var flipped = TryFlipMarker(
+                session.SourceText,
+                line,
+                isChecked,
+                TaskListIdentity.ComputeKey(newContent.Split('\n')[line]),
+                out var sessionText);
+            session.ApplyPersistedTaskFlip(flipped ? sessionText : session.SourceText, newContent);
         }
 
         OnPropertyChanged(nameof(WordCount));

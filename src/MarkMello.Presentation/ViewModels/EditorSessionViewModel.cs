@@ -233,6 +233,30 @@ public sealed class EditorSessionViewModel : ObservableObject
         RaiseDocumentMetricsChanged();
     }
 
+    /// <summary>
+    /// In-place task-toggle entry: the document on disk moved to
+    /// <paramref name="persistedContent"/> while this session holds the
+    /// (possibly dormant) buffer. The persisted baseline follows the disk so
+    /// <see cref="IsDirty"/> stays truthful and <see cref="DiscardChanges"/>
+    /// targets the REAL disk state instead of silently reverting a persisted
+    /// toggle; the buffer becomes <paramref name="sourceText"/> (the same flip
+    /// applied when the line was still intact, or the unchanged buffer when
+    /// the flip was refused). Deliberately skips the synchronous
+    /// <see cref="RenderedPreview"/> rebuild — a whole-document parse does not
+    /// belong on the zero-cost click path; the native-fallback preview
+    /// reconciles on the next SourceText change or document load.
+    /// </summary>
+    public void ApplyPersistedTaskFlip(string sourceText, string persistedContent)
+    {
+        var textChanged = SetProperty(ref _sourceText, sourceText ?? string.Empty, nameof(SourceText));
+        LastPersistedSource = persistedContent;
+        if (textChanged)
+        {
+            RaiseDocumentMetricsChanged();
+            OnPropertyChanged(nameof(IsDirty));
+        }
+    }
+
     public void DiscardChanges()
     {
         SourceText = LastPersistedSource;

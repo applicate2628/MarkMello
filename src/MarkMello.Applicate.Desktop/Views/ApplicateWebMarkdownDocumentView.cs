@@ -3127,9 +3127,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     /// <summary>
     /// In-place update channel (task-toggle commit): silently move Source to
-    /// the just-written content WITHOUT queuing a render — the rendered DOM
+    /// the committed content WITHOUT queuing a render — the rendered DOM
     /// already shows this state and UpdateInputs dedups by value, so a normal
-    /// property publish would cold-re-render + reset scroll for nothing. Also
+    /// property publish would cold-re-render + reset scroll for nothing. Two
+    /// legs share this entry: a reading-mode commit carries the just-written
+    /// DISK content; an edit-mode commit carries the just-flipped BUFFER
+    /// content (unsaved — the user still owns the save). Also
     /// invalidates the renderer's processed-document cache key so a later
     /// tab-away cannot store the optimistically-flipped DOM under the OLD
     /// content-hash key (cache poisoning) — the next tab-return does a full

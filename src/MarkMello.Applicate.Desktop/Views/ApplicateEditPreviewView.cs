@@ -1157,9 +1157,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         }
     }
 
-    private static double NormalizeReadingProgress(double progress)
-        => double.IsFinite(progress) ? SysMath.Clamp(progress, 0, 100) : 0;
-
     public void ScrollToSourceLine(int sourceLine)
     {
         if (!_isAttachedToHost || _sharedHost is null || sourceLine < 0)
