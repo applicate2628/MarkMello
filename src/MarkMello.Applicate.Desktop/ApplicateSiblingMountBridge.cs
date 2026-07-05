@@ -25,20 +25,15 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
     private readonly Func<object?> _getEditorSession;
     private readonly Func<object?> _getDocument;
     private readonly Func<ReadingPreferences> _getReadingPreferences;
-    private readonly IApplicateModeRevealSignal? _modeRevealSignal;
     private readonly IApplicateModeTransactionHost? _transactionHost;
     private readonly Panel? _modeRevealCoverHost;
     private readonly ApplicateModeRevealCoverWindow? _modeRevealCoverWindow;
-    private static readonly TimeSpan ModeRevealCoverFallbackTimeout = TimeSpan.FromMilliseconds(650);
     private volatile bool _disposed;
     private int _reconcilePending;
     private int _modeRevealCoverContinuationPending;
     private bool _desiredViewerVisible;
     private bool _desiredEditVisible;
-    private bool _modeRevealPending;
-    private bool _modeRevealCompleting;
     private bool _modeRevealCoverArmed;
-    private DispatcherTimer? _modeRevealFallbackTimer;
     private readonly ApplicateModeTransitionController _modeTransitionController = new(ApplicateMode.Viewer);
     private long _nextModeTransactionGeneration;
     private long _activeModeTransactionGeneration;
@@ -65,7 +60,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         Func<object?> getDocument,
         Func<ReadingPreferences> getReadingPreferences,
         object viewerContent,
-        IApplicateModeRevealSignal? modeRevealSignal = null,
         IApplicateModeTransactionHost? transactionHost = null,
         Panel? modeRevealCoverHost = null)
     {
@@ -78,7 +72,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         _getEditorSession = getEditorSession;
         _getDocument = getDocument;
         _getReadingPreferences = getReadingPreferences;
-        _modeRevealSignal = modeRevealSignal;
         _transactionHost = transactionHost;
         _modeRevealCoverHost = modeRevealCoverHost;
         _viewerSlot.Content = viewerContent;
@@ -100,10 +93,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
 
         _viewerSlot.PropertyChanged += OnSlotPropertyChanged;
         _editSlot.PropertyChanged += OnSlotPropertyChanged;
-        if (_modeRevealSignal is not null)
-        {
-            _modeRevealSignal.RevealCompleted += OnModeRevealCompleted;
-        }
         if (_transactionHost is not null)
         {
             _transactionHost.CommitCompleted += OnTransactionCommitCompleted;
@@ -200,36 +189,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         MarshalReconcile();
     }
 
-    private void OnModeRevealCompleted(object? sender, EventArgs e)
-    {
-        if (_disposed || !_modeRevealPending)
-        {
-            return;
-        }
-
-        _modeRevealPending = false;
-        _modeRevealCompleting = true;
-        _modeRevealCoverArmed = false;
-        ReleaseModeRevealFallback();
-        MarshalReconcile();
-    }
-
-    private void OnModeRevealFallbackTick(object? sender, EventArgs e)
-    {
-        if (_disposed || !_modeRevealPending)
-        {
-            ReleaseModeRevealFallback();
-            return;
-        }
-
-        ApplicateTrace.DiagMs("pane-seq", "bridge-reveal-cover-fallback");
-        _modeRevealPending = false;
-        _modeRevealCompleting = true;
-        _modeRevealCoverArmed = false;
-        ReleaseModeRevealFallback();
-        MarshalReconcile();
-    }
-
     private void OnVmPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (_disposed)
@@ -299,7 +258,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         var previousEditVisible = _desiredEditVisible;
         var modeSlotSwitch = (previousViewerVisible && editVisible)
             || (previousEditVisible && viewerVisible);
-        var releaseCoverAfterReconcile = _modeRevealCompleting;
         if (TryReconcileTransactionalModeSwitch(
             viewerVisible,
             editVisible,
@@ -310,7 +268,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         }
 
         ApplyModeTransactionGenerationContext(modeSlotSwitch, viewerVisible, editVisible);
-        if (_modeRevealCoverArmed && !modeSlotSwitch && !_modeRevealPending)
+        if (_modeRevealCoverArmed && !modeSlotSwitch)
         {
             _modeRevealCoverArmed = false;
             HideModeRevealCover();
@@ -320,39 +278,12 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
                 $"viewerVis={viewerVisible} editVis={editVisible}");
         }
 
-        if (viewerVisible || editVisible)
+        if (!viewerVisible && !editVisible)
         {
-            if (modeSlotSwitch && _modeRevealSignal is not null)
-            {
-                if (!_modeRevealCoverArmed && TryPrimeModeRevealCover())
-                {
-                    _modeRevealCoverArmed = true;
-                    QueueModeRevealCoveredReconcile();
-                    return;
-                }
-
-                _modeRevealCoverArmed = false;
-                _modeRevealSignal.SuppressNativeRendererForModeSwitch();
-                _modeRevealPending = true;
-                RestartModeRevealFallback();
-            }
-        }
-        else
-        {
-            _modeRevealPending = false;
             _modeRevealCoverArmed = false;
             HideModeRevealCover();
-            ReleaseModeRevealFallback();
         }
 
-        var keepViewerCover = _modeRevealPending && previousViewerVisible && !viewerVisible && editVisible;
-        // The edit surface contains live editor chrome, the preview splitter,
-        // and the editor minimap; carrying it over the reading reveal leaves
-        // visible residues between frames. The shared WebView host owns the
-        // reading renderer reveal, so edit -> reading does not keep edit as a
-        // cover.
-        var keepEditCover = false;
-        var instantSlotVisuals = _modeRevealPending || _modeRevealCompleting;
         _desiredViewerVisible = viewerVisible;
         _desiredEditVisible = editVisible;
 
@@ -361,32 +292,32 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         ApplicateTrace.DiagMs(
             "pane-seq",
             "bridge-reconcile-enter",
-            $"viewerVis={viewerVisible} editVis={editVisible} coverViewer={keepViewerCover} coverEdit={keepEditCover} revealPending={_modeRevealPending} editSlotPrev={_editSlot.IsVisible}");
+            $"viewerVis={viewerVisible} editVis={editVisible} editSlotPrev={_editSlot.IsVisible}");
 
-        var viewerPaintVisible = (viewerVisible && !keepEditCover) || keepViewerCover;
-        var editPaintVisible = (editVisible && !keepViewerCover) || keepEditCover;
+        var viewerPaintVisible = viewerVisible;
+        var editPaintVisible = editVisible;
         ApplySlotState(
             _viewerSlot,
-            viewerVisible || keepViewerCover,
-            viewerVisible && !_modeRevealPending,
+            viewerVisible,
+            viewerVisible,
             viewerPaintVisible ? 1.0 : 0.0,
-            instantSlotVisuals);
+            false);
         ApplySlotState(
             _editSlot,
-            editVisible || keepEditCover,
-            editVisible && !keepViewerCover,
+            editVisible,
+            editVisible,
             editPaintVisible ? 1.0 : 0.0,
-            instantSlotVisuals);
+            false);
         ApplicateTrace.DiagMs(
             "pane-seq",
             "bridge-edit-slot-applied",
             $"editSlotIsVisible={_editSlot.IsVisible} editSlotBounds={_editSlot.Bounds.Width:F0}x{_editSlot.Bounds.Height:F0}");
 
-        // Read -> edit still keeps the previous viewer painted until the
-        // shared WebView reports final-layout reveal. Edit -> reading does
-        // not keep edit painted: the live edit layer contains the splitter
-        // and preview chrome that produced the visible between-frame residue.
-        ApplyOpacity(_editContent, editPaintVisible ? 1.0 : 0.0, instantSlotVisuals);
+        // Edit -> reading does not keep edit painted: the live edit layer
+        // contains the splitter and preview chrome that produced the visible
+        // between-frame residue. The transactional mode-switch path owns any
+        // cross-fade hold; this tail runs only for non-transitional reconciles.
+        ApplyOpacity(_editContent, editPaintVisible ? 1.0 : 0.0, false);
 
         ApplicateTrace.ModeToggle($"Bridge slots: viewerSlot.Bounds={_viewerSlot.Bounds} editSlot.Bounds={_editSlot.Bounds}");
 
@@ -401,11 +332,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         {
             _editContent.DataContext = session;
         }
-        if (releaseCoverAfterReconcile)
-        {
-            HideModeRevealCover();
-        }
-        _modeRevealCompleting = false;
         var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         ApplicateTrace.ModeToggle($"Reconcile out: elapsed={elapsedMs:F2}ms sessionChanged={sessionChanged}");
     }
@@ -490,10 +416,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
             QueueModeRevealCoveredReconcile();
             return true;
         }
-
-        _modeRevealPending = false;
-        _modeRevealCompleting = false;
-        ReleaseModeRevealFallback();
 
         if (requestedMode is null)
         {
@@ -912,29 +834,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         ];
     }
 
-    private void RestartModeRevealFallback()
-    {
-        ReleaseModeRevealFallback();
-        _modeRevealFallbackTimer = new DispatcherTimer
-        {
-            Interval = ModeRevealCoverFallbackTimeout
-        };
-        _modeRevealFallbackTimer.Tick += OnModeRevealFallbackTick;
-        _modeRevealFallbackTimer.Start();
-    }
-
-    private void ReleaseModeRevealFallback()
-    {
-        if (_modeRevealFallbackTimer is null)
-        {
-            return;
-        }
-
-        _modeRevealFallbackTimer.Stop();
-        _modeRevealFallbackTimer.Tick -= OnModeRevealFallbackTick;
-        _modeRevealFallbackTimer = null;
-    }
-
     private bool TryPrimeModeRevealCover()
     {
         if (_modeRevealCoverHost is null || _modeRevealCoverWindow is null)
@@ -1037,10 +936,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         _disposed = true;
         _viewerSlot.PropertyChanged -= OnSlotPropertyChanged;
         _editSlot.PropertyChanged -= OnSlotPropertyChanged;
-        if (_modeRevealSignal is not null)
-        {
-            _modeRevealSignal.RevealCompleted -= OnModeRevealCompleted;
-        }
         if (_transactionHost is not null)
         {
             _transactionHost.CommitCompleted -= OnTransactionCommitCompleted;
@@ -1048,7 +943,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
             _transactionHost.RendererSettled -= OnTransactionRendererSettled;
             _transactionHost.RendererFailed -= OnTransactionRendererFailed;
         }
-        ReleaseModeRevealFallback();
         HideModeRevealCover();
         _modeRevealCoverWindow?.Dispose();
         _vm.PropertyChanged -= OnVmPropertyChanged;

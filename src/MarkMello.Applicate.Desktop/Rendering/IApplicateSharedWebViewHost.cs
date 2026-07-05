@@ -134,13 +134,6 @@ public sealed record ApplicateRendererFailureEvent(
     DateTime Timestamp,
     Exception? Exception = null);
 
-internal interface IApplicateModeRevealSignal
-{
-    event EventHandler? RevealCompleted;
-
-    void SuppressNativeRendererForModeSwitch();
-}
-
 /// <summary>
 /// Owns the single application-wide WebView2-backed document view.
 ///
@@ -239,11 +232,6 @@ public interface IApplicateSharedWebViewHost : IApplicateModeTransactionHost
     /// render is in flight.
     /// </summary>
     void CommitInPlaceSourceSwap(MarkdownSource source);
-
-    /// <summary>
-    /// Hide this host's native WebView HWND during a mode switch.
-    /// </summary>
-    void SuppressNativeRendererForModeSwitch();
 
     /// <summary>
     /// Register the offscreen warmup panel. Called once at app startup by

@@ -1601,7 +1601,6 @@ public sealed class ApplicateMainWindow : MainWindow
             () => viewModel.Document,
             () => viewModel.ReadingPreferences,
             viewerContent: viewModel,
-            modeRevealSignal: null,
             transactionHost: _modeTransactionHostRouter,
             modeRevealCoverHost: siblingPanel);
 

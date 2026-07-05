@@ -13,7 +13,7 @@ using MarkMello.Domain;
 namespace MarkMello.Applicate.Desktop.Rendering;
 
 /// <inheritdoc cref="IApplicateSharedWebViewHost"/>
-public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IApplicateModeRevealSignal
+public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost
 {
     private const int RendererFrameWaitSkipDocumentContentLength = 1024 * 1024;
 
@@ -458,8 +458,6 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
 
     public event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled;
 
-    public event EventHandler? RevealCompleted;
-
     internal static bool ShouldSkipRendererFrameSettleForTransaction(long transactionGeneration)
         // Transactional Commit() is already gated by UpdateInputs' synchronous
         // preference application or by DocumentRendered's layout/minimap quorum.
@@ -470,12 +468,6 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
     internal static bool ShouldSkipRendererFrameWait(MarkdownSource? source, long transactionGeneration)
         => transactionGeneration > 0
             || source?.Content.Length > RendererFrameWaitSkipDocumentContentLength;
-
-    public void SuppressNativeRendererForModeSwitch()
-    {
-        ApplicateTrace.ModeToggle($"SharedHost.SuppressNativeRendererForModeSwitch gen={_activeGeneration}");
-        View.ParkNativeWebViewForReparent();
-    }
 
     public void SuppressNativeRendererForModeSwitch(ApplicateMode displayedMode)
     {
@@ -711,7 +703,6 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
             View.RevealNativeRenderer(TimeSpan.Zero);
             RevealCurrentParent(modeSwitchDuration);
             ApplicateTrace.DiagMs("pane-seq", "host-hwnd-shown", "path=immediate");
-            RaiseRevealCompleted();
         }
 
         _state = HostState.Committed;
@@ -879,10 +870,7 @@ public sealed class ApplicateSharedWebViewHost : IApplicateSharedWebViewHost, IA
         View.RevealNativeRenderer(duration);
         RevealCurrentParent(duration);
         ApplicateTrace.DiagMs("pane-seq", "host-hwnd-shown", "path=deferred-after-settle");
-        RaiseRevealCompleted();
     }
-
-    private void RaiseRevealCompleted() => RevealCompleted?.Invoke(this, EventArgs.Empty);
 
     private static void PrepareTargetForReveal(Panel target)
     {
