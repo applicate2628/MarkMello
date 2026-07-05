@@ -173,6 +173,20 @@ public partial class MainWindowViewModel
         }
 
         _document = new MarkdownSource(current.Path, current.FileName, newContent);
+
+        // A dormant EditorSession (edit mode entered earlier, currently reading)
+        // still holds the PRE-toggle buffer. Left stale, the next Ctrl+E renders
+        // the old text: a value-different render lands on the just-hidden
+        // renderer (10s+ hidden-HWND message drain) AND visually reverts the
+        // checkbox. Flip the session buffer through the same verified marker
+        // path — fail-closed: a diverged buffer (unsaved edits) is left alone;
+        // the dirty flow owns it.
+        if (EditorSession is { } session
+            && TryFlipMarker(session.SourceText, line, isChecked, TaskListIdentity.ComputeKey(newContent.Split('\n')[line]), out var sessionText))
+        {
+            session.SourceText = sessionText;
+        }
+
         OnPropertyChanged(nameof(WordCount));
         OnPropertyChanged(nameof(WordCountStatusLabel));
         QueueDeferredRenderedDocument(_document);
