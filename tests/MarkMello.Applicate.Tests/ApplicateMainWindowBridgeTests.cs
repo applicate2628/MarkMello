@@ -96,7 +96,7 @@ public sealed class ApplicateMainWindowBridgeTests
         var codeBehind = ReadMainWindowCodeBehind();
         var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
 
-        var editPatchIndex = bridge.IndexOf("channelEditHost.View.SetTaskCheckboxState(commit.Line, commit.Checked);", StringComparison.Ordinal);
+        var editPatchIndex = bridge.IndexOf("channelEditHost.View.SetTaskCheckboxState(commit.Line, commit.Checked, commit.Source.Path);", StringComparison.Ordinal);
         var editSwapIndex = bridge.IndexOf("channelEditHost.CommitInPlaceSourceSwap(commit.Source);", StringComparison.Ordinal);
         Assert.True(editPatchIndex >= 0, "Edit host must receive the surgical checkbox patch.");
         Assert.True(editSwapIndex > editPatchIndex, "The silent swap may run only AFTER the edit host's DOM was patched.");
