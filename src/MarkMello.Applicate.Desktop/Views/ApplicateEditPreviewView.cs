@@ -77,7 +77,11 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     private bool _syncEnabled = true;
     private int _inactivePrimeVisibilityDepth;
     private bool _inactivePrimeRenderInFlight;
-    private double? _pendingScrollRestoreProgress;
+    // True while a REAL render (not the value-equal fast path) is in flight for
+    // this surface; used only as the ReadingProgress stomp-guard. The percent
+    // scroll restore is DELETED on this surface (one 38%-anchor line contract;
+    // the rendered-event editor->preview leg IS the restore).
+    private bool _awaitingRenderRestore;
     // EP-A startup gate. Mirrors ApplicateViewerView._hasValidBounds. The
     // FIRST render after edit-preview becomes visible would otherwise fire
     // while _webSlot.Bounds is still 0x0 (Avalonia hasn't measured the
@@ -881,7 +885,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
             return;
         }
 
-        if (_pendingScrollRestoreProgress.HasValue && !_sharedHost.View.LastLayoutReadyWasCached)
+        if (_awaitingRenderRestore && !_sharedHost.View.LastLayoutReadyWasCached)
         {
             return;
         }
@@ -897,6 +901,13 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         if (!_isAttachedToHost)
         {
             return;
+        }
+
+        // Keep the reading-anchor record fresh for edit->read->edit round-trips
+        // (the edit-entry seed reads it).
+        if (_viewModel is not null)
+        {
+            _viewModel.ReadingAnchorSourceLine = e.SourceLine;
         }
 
         PreviewSourceLineChanged?.Invoke(this, new SourceLineScrollSyncEventArgs(e.SourceLine));
@@ -929,8 +940,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
 
     private void OnSharedDocumentRendered(object? sender, EventArgs e)
     {
-        var restoreProgress = _pendingScrollRestoreProgress;
-        _pendingScrollRestoreProgress = null;
+        _awaitingRenderRestore = false;
         ApplicateTrace.ModeToggle("SharedView Rendered (edit-preview)");
         if (_inactivePrimeRenderInFlight && !_isAttachedToHost)
         {
@@ -945,17 +955,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         _failureView.IsVisible = false;
         _documentRenderedForCurrentRequest = true;
         _headingUpdater.FlushPending();
-        if (restoreProgress.HasValue
-            && _isAttachedToHost
-            && _sharedHost is not null
-            && !_sharedHost.View.LastLayoutReadyWasCached)
-        {
-            _sharedHost.View.ScrollToProgress(restoreProgress.Value);
-            if (_viewModel is not null)
-            {
-                _viewModel.ReadingProgress = restoreProgress.Value;
-            }
-        }
+        // Percent restore deleted (one line contract): the
+        // SourceLineScrollSyncPreviewRendered event drives the editor->preview
+        // line re-assert, which lands the position from real anchor geometry.
         SourceLineScrollSyncPreviewRendered?.Invoke(this, EventArgs.Empty);
     }
 
@@ -968,11 +970,11 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         // The single source of truth for "active consumer" is _isAttachedToHost.
         if (!_isAttachedToHost)
         {
-            _pendingScrollRestoreProgress = null;
+            _awaitingRenderRestore = false;
             return;
         }
 
-        _pendingScrollRestoreProgress = null;
+        _awaitingRenderRestore = false;
         _failureView.ShowFailure(
             e,
             retry: e.Kind == ApplicateRendererFailureKind.DocumentRenderFailed ? RetryCurrentRender : null);
@@ -1072,10 +1074,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
             ImageSourceResolver: _session.ImageSourceResolver,
             AvailableContentWidth: widths.WebColumnWidth);
 
-        var restoreProgress = NormalizeReadingProgress(_viewModel?.ReadingProgress ?? 0);
-        var shouldRestoreScroll = restoreProgress > 0
-            && !_sharedHost.View.HasLoadedDocumentForSource(source);
-        _pendingScrollRestoreProgress = shouldRestoreScroll ? restoreProgress : null;
+        _awaitingRenderRestore = !_sharedHost.View.HasLoadedDocumentForSource(source);
         _sharedHost.RequestRender(
             source,
             request,
@@ -1113,7 +1112,7 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
             ImageSourceResolver: imageSourceResolver,
             AvailableContentWidth: widths.WebColumnWidth);
 
-        _pendingScrollRestoreProgress = null;
+        _awaitingRenderRestore = false;
         ApplicateTrace.DiagMs(
             "pane-seq",
             "editpreview-inactive-prime-request",

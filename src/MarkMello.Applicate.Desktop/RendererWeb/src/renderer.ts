@@ -303,6 +303,10 @@ let lastPostedMinimapState: PostedMinimapState = { hasPosted: false, visible: fa
 // stale literals that drifted from C#.
 let minimapPolicy: MinimapPolicy | null = null;
 let sourceLineAnchors: SourceLineAnchor[] = [];
+// Last PROGRAMMATIC line target (host scroll-to-source-line). Re-asserted after
+// every layout-invalidating pass (math/fonts/resize/final append) so the target
+// line stays at the anchor as geometry inflates; cleared on real user scroll.
+let pendingSourceLineTarget: number | null = null;
 let previewSourceLineFrameRequested = false;
 let suppressPreviewSourceLineEmit = false;
 let suppressPreviewSourceLineSequence = 0;
@@ -1226,6 +1230,9 @@ function appendProgressiveDocumentHtml(message: Extract<HostMessage, { type: "ap
   }
 
   ensureChromeNodes(false, { refreshMinimap: false });
+  // Appended blocks are absent from the anchor cache — invalidate (which also
+  // re-asserts a live programmatic line target against the FINAL geometry).
+  invalidateSourceLineAnchors();
   postPerfMark("mm-progressive-append-end", {
     htmlLength: message.html.length,
     renderId: message.renderId ?? null,
@@ -1324,6 +1331,7 @@ function scrollToSourceLine(sourceLine: number): void {
     return;
   }
 
+  pendingSourceLineTarget = sourceLine;
   suppressPreviewSourceLinePost();
   // ONE sync contract: place the target line at the same 38%-viewport anchor
   // the read side samples (window.scrollY + getViewportAnchorY()). Writing the
@@ -1342,6 +1350,17 @@ function scrollToSourceLine(sourceLine: number): void {
 // heights (the reload-viewport contract philosophy).
 function invalidateSourceLineAnchors(): void {
   sourceLineAnchors = [];
+  // Geometry changed under a live programmatic target: re-assert it so the
+  // target line returns to the anchor with FRESH measurements (idempotent —
+  // re-suppresses its own echo; a real user scroll cleared the target).
+  if (pendingSourceLineTarget !== null) {
+    const target = pendingSourceLineTarget;
+    window.requestAnimationFrame(() => {
+      if (pendingSourceLineTarget === target) {
+        scrollToSourceLine(target);
+      }
+    });
+  }
 }
 
 function suppressPreviewSourceLinePost(): void {
@@ -1367,6 +1386,10 @@ function queuePreviewSourceLinePost(): void {
     if (suppressPreviewSourceLineEmit || !documentScrollEnabled) {
       return;
     }
+
+    // A scroll surviving the suppress window is REAL user scroll: the user
+    // takes over, the programmatic line target dies.
+    pendingSourceLineTarget = null;
 
     if (sourceLineAnchors.length === 0) {
       refreshSourceLineAnchors();
@@ -3746,6 +3769,7 @@ function resetModuleGlobalsForLoadDocument(): void {
   previewSourceLineFrameRequested = false;
   suppressPreviewSourceLineEmit = false;
   lastPostedPreviewSourceLine = null;
+  pendingSourceLineTarget = null;
 }
 
 type EnsureChromeNodesOptions = {
@@ -3834,7 +3858,15 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
         ownsCompleteFreshBody === true),
     cancelCurrentMathController: () => { currentController?.cancel(); },
     resetModuleGlobals: resetModuleGlobalsForLoadDocument,
-    scrollWindowToTop: () => { window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior }); },
+    scrollWindowToTop: () => {
+      // The swap's own scroll-to-top must NOT post preview-source-line≈0 —
+      // that echo zeroed the editor on every cold load (entry, tab switch,
+      // keystroke/checkbox re-render; rule-0 probe P1 caught it live).
+      // resetModuleGlobals cleared the flag earlier in this load, so
+      // re-suppress right before the write.
+      suppressPreviewSourceLinePost();
+      window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior });
+    },
     // Mirror selected renderer-side perf marks into the host's
     // [renderer-perf] stream. Only `mm-load-document` is bridged from this
     // path per round-2 plan item C; other marks are bridged at their own

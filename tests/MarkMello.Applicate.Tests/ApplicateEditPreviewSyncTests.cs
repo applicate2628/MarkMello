@@ -85,19 +85,53 @@ public sealed class ApplicateEditPreviewSyncTests
     }
 
     [Fact]
-    public void EditPreviewPreservesReadingProgressAcrossPreviewRerender()
+    public void EditPreviewRestoreIsLineBasedNotPercent()
     {
+        // ONE 38%-anchor line contract (design-editpreview-rerender-restore.md):
+        // the percent ScrollToProgress restore is DELETED on this surface — the
+        // rendered event drives the editor->preview line re-assert instead.
+        // Only the ReadingProgress stomp-guard remains (bool, not percent value).
         var codeBehind = ReadEditPreviewCodeBehind();
         var applyRender = ExtractMethodBody(codeBehind, "private void ApplyWebPreviewSource()");
         var scrollHandler = ExtractMethodBody(codeBehind, "private void OnSharedScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)");
         var renderedHandler = ExtractMethodBody(codeBehind, "private void OnSharedDocumentRendered(object? sender, EventArgs e)");
 
-        Assert.Contains("_pendingScrollRestoreProgress", applyRender, StringComparison.Ordinal);
+        Assert.Contains("_awaitingRenderRestore = !_sharedHost.View.HasLoadedDocumentForSource(source);", applyRender, StringComparison.Ordinal);
         Assert.Contains("_viewModel.ReadingProgress = e.ProgressPercent;", scrollHandler, StringComparison.Ordinal);
-        Assert.Contains("_pendingScrollRestoreProgress.HasValue && !_sharedHost.View.LastLayoutReadyWasCached", scrollHandler, StringComparison.Ordinal);
-        Assert.Contains("!_sharedHost.View.LastLayoutReadyWasCached", renderedHandler, StringComparison.Ordinal);
-        Assert.Contains("_sharedHost.View.ScrollToProgress(restoreProgress.Value);", renderedHandler, StringComparison.Ordinal);
+        Assert.Contains("_awaitingRenderRestore && !_sharedHost.View.LastLayoutReadyWasCached", scrollHandler, StringComparison.Ordinal);
+        Assert.DoesNotContain("ScrollToProgress", renderedHandler, StringComparison.Ordinal);
+        Assert.Contains("SourceLineScrollSyncPreviewRendered?.Invoke(this, EventArgs.Empty);", renderedHandler, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void EditEntrySeedOpensEditorAtReadingAnchor()
+    {
+        // Edit entry must seed BOTH panes to the recorded reading-anchor line
+        // (the primed fast path fires no events, so the seed is direct), and
+        // the rendered-event re-assert must be unconditional (the editor owns
+        // the position; no offset-0 guard).
+        var workspace = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..", "..", "..", "..", "..",
+            "src", "MarkMello.Presentation", "Views", "EditWorkspaceView.axaml.cs"));
+
+        var seed = ExtractMethodBody(workspace, "private bool TryApplyEditEntrySeed()");
+        Assert.Contains("ReadingAnchorSourceLine", seed, StringComparison.Ordinal);
+        Assert.Contains("ScrollEditorToSourceLine(seedLine);", seed, StringComparison.Ordinal);
+        Assert.Contains("_previewSourceLineSync?.ScrollToSourceLine(seedLine);", seed, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("Offset.Y: 0", workspace, StringComparison.Ordinal);
+
+        // The viewer records the anchor the seed reads.
+        var viewer = ReadViewerCodeBehind();
+        Assert.Contains("ReadingAnchorSourceLine = e.SourceLine;", viewer, StringComparison.Ordinal);
+    }
+
+    private static string ReadViewerCodeBehind()
+        => File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..", "..", "..", "..", "..",
+            "src", "MarkMello.Applicate.Desktop", "Views", "ApplicateViewerView.cs"));
 
     [Fact]
     public void EditPreviewVisibilityChainStillAttachesAndQueuesRender()

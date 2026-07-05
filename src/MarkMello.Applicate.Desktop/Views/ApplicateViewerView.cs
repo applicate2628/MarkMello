@@ -533,6 +533,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
         _sharedHost.View.DocumentRendered += OnHostDocumentRendered;
         _sharedHost.View.ScrollStateChanged += OnHostScrollStateChanged;
+        _sharedHost.View.PreviewSourceLineChanged += OnHostPreviewSourceLineChanged;
         _sharedHost.View.MinimapStateChanged += OnHostMinimapStateChanged;
         _sharedHost.View.WidthDragRequested += OnHostWidthDragRequested;
         _sharedHost.View.WheelRequested += OnHostWheelRequested;
@@ -556,6 +557,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
         _sharedHost.View.DocumentRendered -= OnHostDocumentRendered;
         _sharedHost.View.ScrollStateChanged -= OnHostScrollStateChanged;
+        _sharedHost.View.PreviewSourceLineChanged -= OnHostPreviewSourceLineChanged;
         _sharedHost.View.MinimapStateChanged -= OnHostMinimapStateChanged;
         _sharedHost.View.WidthDragRequested -= OnHostWidthDragRequested;
         _sharedHost.View.WheelRequested -= OnHostWheelRequested;
@@ -931,6 +933,19 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
 
     private static double NormalizeReadingProgress(double progress)
         => double.IsFinite(progress) ? SysMath.Clamp(progress, 0, 100) : 0;
+
+    // Records the READING anchor line (38% viewport) so the edit-entry seed
+    // can open the editor at the reading position. The renderer posts
+    // preview-source-line in viewer mode too; nobody recorded it before.
+    private void OnHostPreviewSourceLineChanged(object? sender, ApplicateWebPreviewSourceLineEventArgs e)
+    {
+        if (!_isAttachedToHost || _viewModel is null)
+        {
+            return;
+        }
+
+        _viewModel.ReadingAnchorSourceLine = e.SourceLine;
+    }
 
     private void OnHostScrollStateChanged(object? sender, ApplicateWebDocumentScrollEventArgs e)
     {

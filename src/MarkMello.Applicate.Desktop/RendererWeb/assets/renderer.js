@@ -1343,6 +1343,7 @@
   var lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
   var minimapPolicy = null;
   var sourceLineAnchors = [];
+  var pendingSourceLineTarget = null;
   var previewSourceLineFrameRequested = false;
   var suppressPreviewSourceLineEmit = false;
   var suppressPreviewSourceLineSequence = 0;
@@ -2069,6 +2070,7 @@
       setCurrentProcessedDocumentCacheKey(message.cacheKey);
     }
     ensureChromeNodes(false, { refreshMinimap: false });
+    invalidateSourceLineAnchors();
     postPerfMark("mm-progressive-append-end", {
       htmlLength: message.html.length,
       renderId: message.renderId ?? null,
@@ -2150,6 +2152,7 @@
     if (scrollTop === null) {
       return;
     }
+    pendingSourceLineTarget = sourceLine;
     suppressPreviewSourceLinePost();
     window.scrollTo({
       left: 0,
@@ -2159,6 +2162,14 @@
   }
   function invalidateSourceLineAnchors() {
     sourceLineAnchors = [];
+    if (pendingSourceLineTarget !== null) {
+      const target = pendingSourceLineTarget;
+      window.requestAnimationFrame(() => {
+        if (pendingSourceLineTarget === target) {
+          scrollToSourceLine(target);
+        }
+      });
+    }
   }
   function suppressPreviewSourceLinePost() {
     const sequence = ++suppressPreviewSourceLineSequence;
@@ -2181,6 +2192,7 @@
       if (suppressPreviewSourceLineEmit || !documentScrollEnabled) {
         return;
       }
+      pendingSourceLineTarget = null;
       if (sourceLineAnchors.length === 0) {
         refreshSourceLineAnchors();
       }
@@ -3929,6 +3941,7 @@
     previewSourceLineFrameRequested = false;
     suppressPreviewSourceLineEmit = false;
     lastPostedPreviewSourceLine = null;
+    pendingSourceLineTarget = null;
   }
   function ensureChromeNodes(useCachedDocumentState = false, options = {}) {
     ensureMinimap();
@@ -3992,6 +4005,7 @@
       },
       resetModuleGlobals: resetModuleGlobalsForLoadDocument,
       scrollWindowToTop: () => {
+        suppressPreviewSourceLinePost();
         window.scrollTo({ left: 0, top: 0, behavior: "instant" });
       },
       // Mirror selected renderer-side perf marks into the host's

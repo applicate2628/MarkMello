@@ -37,6 +37,10 @@ public partial class EditWorkspaceView : UserControl
     private ScrollViewer? _activeScrollBarDragSource;
     private EditorSessionViewModel? _boundSession;
     private bool _firstVisualLinesLogged;
+    // One-shot per visual-tree attach: seeds the editor (and preview) to the
+    // READING anchor line on edit entry, so edit mode opens where the user was
+    // reading. Reset on detach.
+    private bool _entrySeedApplied;
     private DateTime _ignoreEditorScrollUntil;
     private DateTime _ignorePreviewSourceLineUntil;
     // Bidirectional source sync. The AvaloniaEdit source-pane spike (f1d18a9)
@@ -78,6 +82,7 @@ public partial class EditWorkspaceView : UserControl
         RemoveHandler(PointerReleasedEvent, OnScrollBarDragPointerReleased);
         RemoveHandler(PointerCaptureLostEvent, OnScrollBarDragPointerCaptureLost);
         DetachScrollSynchronization();
+        _entrySeedApplied = false;
         if (_writeBackEditor is not null)
         {
             _writeBackEditor.TextChanged -= OnEditorTextChanged;
@@ -419,7 +424,44 @@ public partial class EditWorkspaceView : UserControl
             _previewSourceLineSync.PreviewSourceLineChanged += OnPreviewSourceLineChanged;
         }
 
-        SynchronizePreviewToEditor();
+        if (!TryApplyEditEntrySeed())
+        {
+            SynchronizePreviewToEditor();
+        }
+    }
+
+    /// <summary>
+    /// One-shot edit-entry seed: open the editor (and preview) at the READING
+    /// anchor line recorded by the viewer, instead of the document start. Both
+    /// panes get the SAME line value directly — no event round-trip, which the
+    /// primed fast path never fires. From this moment the editor owns the
+    /// position (the ONE 38%-anchor contract).
+    /// </summary>
+    private bool TryApplyEditEntrySeed()
+    {
+        if (_entrySeedApplied)
+        {
+            return false;
+        }
+
+        _entrySeedApplied = true;
+        if (_previewSourceLineSync is { SyncEnabled: false })
+        {
+            return false;
+        }
+
+        var viewModel = TopLevel.GetTopLevel(this)?.DataContext as MainWindowViewModel;
+        if (viewModel?.ReadingAnchorSourceLine is not int seedLine)
+        {
+            // Never-scrolled document: top is the position; the normal sync
+            // (editor at offset 0) is already correct.
+            return false;
+        }
+
+        ScrollEditorToSourceLine(seedLine);
+        _ignorePreviewSourceLineUntil = DateTime.UtcNow + ScrollSyncFeedbackGuard;
+        _previewSourceLineSync?.ScrollToSourceLine(seedLine);
+        return true;
     }
 
     private void DetachScrollSynchronization()
@@ -495,22 +537,10 @@ public partial class EditWorkspaceView : UserControl
     }
 
     private void OnPreviewDocumentRendered(object? sender, EventArgs e)
-    {
-        // Reading -> edit handoff: on first entry the editor sits untouched at
-        // offset 0 while the preview has just RESTORED the reading position.
-        // Forcing the editor->preview leg here would drag the preview to the
-        // document top, discarding that restore. Skip while the editor is
-        // untouched — the preview's own restore scroll posts its source line
-        // and the existing preview->editor leg aligns the editor to the
-        // reading position instead. Once the user scrolls the editor, renders
-        // re-anchor to the editor as designed.
-        if (_editorScrollViewer is { Offset.Y: 0 })
-        {
-            return;
-        }
-
-        SynchronizePreviewToEditor();
-    }
+        // The editor owns the position (seeded at entry; held through 1-char
+        // toggle Replace) — the rendered-event editor->preview re-assert IS the
+        // re-render restore. Unconditional; SyncEnabled gates inside.
+        => SynchronizePreviewToEditor();
 
     private void OnPreviewDocumentRenderInvalidated(object? sender, EventArgs e)
     {
