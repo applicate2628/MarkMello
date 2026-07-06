@@ -222,7 +222,8 @@ public sealed class MainWindowOverlayTests
         Assert.Contains("RowDefinitions=\"Auto,Auto,Auto\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("ColumnDefinitions=\"Auto,156\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"UpdateStatusContent\"", appUpdates, StringComparison.Ordinal);
-        Assert.Contains("IsIndeterminate=\"{Binding IsUpdateBusy}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("Value=\"{Binding DownloadProgressPercent}\"", appUpdates, StringComparison.Ordinal);
+        Assert.Contains("IsIndeterminate=\"{Binding IsUpdateProgressIndeterminate}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Opacity=\"{Binding UpdateBusyIndicatorOpacity}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Content=\"{Binding CheckForUpdatesLabel}\"", appUpdates, StringComparison.Ordinal);
         Assert.Contains("Content=\"{Binding DownloadUpdateLabel}\"", appUpdates, StringComparison.Ordinal);

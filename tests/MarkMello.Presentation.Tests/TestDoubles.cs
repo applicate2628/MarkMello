@@ -268,6 +268,7 @@ internal sealed class StubUpdateService : IUpdateService
 
     public Task<UpdateDownloadResult> DownloadUpdateAsync(
         AppUpdatePackage package,
+        IProgress<UpdateDownloadProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         LastDownloadTask = NextDownloadTask ?? Task.FromResult(NextDownloadResult);

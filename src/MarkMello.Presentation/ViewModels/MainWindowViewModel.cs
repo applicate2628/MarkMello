@@ -233,6 +233,15 @@ public partial class MainWindowViewModel : ObservableObject
     [ObservableProperty]
     private bool _isDownloadingUpdate;
 
+    // Download progress for the update panel bar. Percent is 0-100; the bar
+    // stays indeterminate (sweep) while checking or while a download has no
+    // Content-Length, and becomes a real percentage once progress is reported.
+    [ObservableProperty]
+    private double _downloadProgressPercent;
+
+    [ObservableProperty]
+    private bool _isUpdateProgressIndeterminate = true;
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsAlwaysOnTopDisabled))]
     private bool _isAlwaysOnTop;
@@ -1236,13 +1245,26 @@ public partial class MainWindowViewModel : ObservableObject
         }
 
         IsDownloadingUpdate = true;
+        DownloadProgressPercent = 0;
+        IsUpdateProgressIndeterminate = true;
         SetUpdateStatus(new UpdateStatusSnapshot.DownloadingState(_availableUpdatePackage));
         UpdateCommandStates();
+
+        // Progress<T> captures the current (UI) SynchronizationContext, so the
+        // report callback marshals back to the UI thread automatically.
+        var downloadProgress = new Progress<UpdateDownloadProgress>(report =>
+        {
+            if (report.Percent is { } percent)
+            {
+                IsUpdateProgressIndeterminate = false;
+                DownloadProgressPercent = percent;
+            }
+        });
 
         try
         {
             var result = await _updateService
-                .DownloadUpdateAsync(_availableUpdatePackage)
+                .DownloadUpdateAsync(_availableUpdatePackage, downloadProgress)
                 .ConfigureAwait(true);
 
             switch (result)
@@ -1262,6 +1284,7 @@ public partial class MainWindowViewModel : ObservableObject
         finally
         {
             IsDownloadingUpdate = false;
+            IsUpdateProgressIndeterminate = true;
             UpdateCommandStates();
         }
     }

@@ -8,6 +8,7 @@ public interface IUpdateService
 
     Task<UpdateDownloadResult> DownloadUpdateAsync(
         AppUpdatePackage package,
+        IProgress<UpdateDownloadProgress>? progress = null,
         CancellationToken cancellationToken = default);
 
     Task<UpdatePrepareResult> PrepareDownloadedUpdateAsync(

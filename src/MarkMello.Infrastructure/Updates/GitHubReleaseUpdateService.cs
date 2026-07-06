@@ -126,6 +126,7 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
 
     public async Task<UpdateDownloadResult> DownloadUpdateAsync(
         AppUpdatePackage package,
+        IProgress<UpdateDownloadProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(package);
@@ -155,12 +156,19 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
                     $"GitHub download returned {(int)response.StatusCode} {response.ReasonPhrase}.");
             }
 
+            var totalBytes = response.Content.Headers.ContentLength;
             await using (var sourceStream = await response.Content
                                .ReadAsStreamAsync(cancellationToken)
                                .ConfigureAwait(false))
             await using (var destinationStream = File.Create(temporaryPath))
             {
-                await sourceStream.CopyToAsync(destinationStream, cancellationToken).ConfigureAwait(false);
+                await CopyWithProgressAsync(
+                        sourceStream,
+                        destinationStream,
+                        totalBytes,
+                        progress,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
 
             if (File.Exists(destinationPath))
@@ -182,6 +190,40 @@ public sealed class GitHubReleaseUpdateService : IUpdateService
             return new UpdateDownloadResult.Failed(
                 $"Couldn't download the update: {ex.Message}");
         }
+    }
+
+    // Buffered copy that counts bytes and reports throttled progress. Replaces
+    // Stream.CopyToAsync (which is opaque) so the update panel can show a real
+    // download percentage. Reports at the start (to leave the indeterminate
+    // sweep as soon as the total size is known), then every ~256 KB, and once
+    // more at the end so the bar reaches 100%.
+    private static async Task CopyWithProgressAsync(
+        Stream source,
+        Stream destination,
+        long? totalBytes,
+        IProgress<UpdateDownloadProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        const int reportThresholdBytes = 256 * 1024;
+        var buffer = new byte[81920];
+        long received = 0;
+        long lastReported = 0;
+
+        progress?.Report(new UpdateDownloadProgress(0, totalBytes));
+
+        int read;
+        while ((read = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+        {
+            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+            received += read;
+            if (received - lastReported >= reportThresholdBytes)
+            {
+                lastReported = received;
+                progress?.Report(new UpdateDownloadProgress(received, totalBytes));
+            }
+        }
+
+        progress?.Report(new UpdateDownloadProgress(received, totalBytes));
     }
 
     public Task<UpdatePrepareResult> PrepareDownloadedUpdateAsync(

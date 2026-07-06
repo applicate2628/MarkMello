@@ -84,7 +84,8 @@
                                Height="2"
                                Minimum="0"
                                Maximum="100"
-                               IsIndeterminate="{Binding IsUpdateBusy}"
+                               Value="{Binding DownloadProgressPercent}"
+                               IsIndeterminate="{Binding IsUpdateProgressIndeterminate}"
                                Opacity="{Binding UpdateBusyIndicatorOpacity}"
                                Background="{DynamicResource MmBorderSoftBrush}"
                                Foreground="{DynamicResource MmAccentBrush}">
