@@ -121,6 +121,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private string? _lastPostedTheme;
     private long _lastPostedThemeTimestamp;
     private long _themeRequestSequence;
+    private Microsoft.Web.WebView2.Core.CoreWebView2? _nativeUiCore;
     private bool _isWebWidthDragging;
     private long _renderSequence;
     private NativeWindowPlacement? _pendingNativeHiddenPaintPlacement;
@@ -1700,6 +1701,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private void OnNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
     {
         _isLoadingGeneratedDocument = false;
+        // Ready the native-UI (context menu / print dialog) theme once WebView2
+        // has navigated — the CoreWebView2 pointer is available by now.
+        TryApplyNativeUiColorScheme();
         // NavigationCompleted with IsSuccess=false on our local file:// pipeline
         // is dominated by superseded-navigate events (rapid tab switches cancel
         // the in-flight navigate). Real WebView load errors surface through the
@@ -2849,6 +2853,37 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             SendThemeFromThemeVariantChange();
         }
+
+        // Also theme the WebView2 NATIVE UI (context menu, print dialog) to
+        // match the app theme; independent of the document theme above.
+        TryApplyNativeUiColorScheme();
+    }
+
+    // Themes the WebView2 native UI surfaces (context menu, print dialog) via
+    // the official managed SDK: wrap the native ICoreWebView2 pointer Avalonia
+    // exposes as a raw nint (CreateFromComICoreWebView2) and set
+    // Profile.PreferredColorScheme. Best-effort polish; the document theming
+    // is separate and unaffected if this fails (e.g. an old WebView2 runtime
+    // without Profile support).
+    private void TryApplyNativeUiColorScheme()
+    {
+        try
+        {
+            if (_webView.TryGetPlatformHandle() is not IWindowsWebView2PlatformHandle platformHandle
+                || platformHandle.CoreWebView2 == IntPtr.Zero)
+            {
+                return;
+            }
+
+            _nativeUiCore ??= Microsoft.Web.WebView2.Core.CoreWebView2.CreateFromComICoreWebView2(platformHandle.CoreWebView2);
+            _nativeUiCore.Profile.PreferredColorScheme = GetThemeName() == "dark"
+                ? Microsoft.Web.WebView2.Core.CoreWebView2PreferredColorScheme.Dark
+                : Microsoft.Web.WebView2.Core.CoreWebView2PreferredColorScheme.Light;
+        }
+        catch (Exception ex)
+        {
+            ApplicateTrace.DiagMs("startup-webview", "native-ui-color-scheme-failed", $"reason={ex.GetType().Name}");
+        }
     }
 
     private void SendThemeFromThemeVariantChange()
@@ -3434,6 +3469,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         _disposed = true;
+        _nativeUiCore = null;
         CancelRender();
         DeleteCurrentGeneratedDocument();
         _webView.EnvironmentRequested -= OnEnvironmentRequested;
