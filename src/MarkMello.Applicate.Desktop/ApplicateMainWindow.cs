@@ -2733,6 +2733,18 @@ public sealed class ApplicateMainWindow : MainWindow
                 // VM keeps its document and this branch is never entered.
                 Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
                 {
+                    // CreateNewDocument also clears VM.Document (before it installs
+                    // the new untitled EditorSession), but that is NOT a tab close:
+                    // the untitled session now owns the window. By the time this
+                    // posted lambda runs, a real CloseFile has left EditorSession
+                    // null, while CreateNewDocument has set it to the untitled
+                    // session. Mirroring a close here would close the active tab
+                    // and destroy the just-created untitled draft (audit H3 family).
+                    if (viewModel.EditorSession is not null)
+                    {
+                        return;
+                    }
+
                     var active = openDocs.ActiveDocument;
                     if (active is null)
                     {
