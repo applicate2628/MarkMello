@@ -875,13 +875,21 @@ function renderMath(): MathReadinessController {
   emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
   const katex = hostWindow.katex ?? undefined;
   const controller = renderMathInit({ katex, documentRoot: document });
-  const phaseBGeneration = layoutReadyGeneration;
+  // Phase B fires after allMathRendered to re-clone the minimap when the
+  // document height genuinely drifted (>=100px). The staleness guard must key
+  // off document IDENTITY (currentDocumentCacheKey — same token used by
+  // scheduleCachedMermaidResume), NOT layoutReadyGeneration: the latter is
+  // bumped by this same render's scheduleLayoutReady BETWEEN this capture and
+  // Phase B firing, so the old generation-token guard always cancelled and the
+  // rebuild was dead on every initial render. isCancelled() still guards a real
+  // new-document load.
+  const phaseBDocumentCacheKey = currentDocumentCacheKey;
   const initialVisualSettleReady = schedulePhaseBRebuild({
     allMathRendered: controller.allMathRendered,
     getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
     getCachedDocumentHeight: () => minimapDocumentHeight,
     refresh: (phase) => {
-      if (phaseBGeneration !== layoutReadyGeneration || controller.isCancelled()) {
+      if (phaseBDocumentCacheKey !== currentDocumentCacheKey || controller.isCancelled()) {
         return;
       }
 

@@ -1780,13 +1780,13 @@
     emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
     const katex = hostWindow.katex ?? void 0;
     const controller = renderMath({ katex, documentRoot: document });
-    const phaseBGeneration = layoutReadyGeneration;
+    const phaseBDocumentCacheKey = currentDocumentCacheKey;
     const initialVisualSettleReady = schedulePhaseBRebuild({
       allMathRendered: controller.allMathRendered,
       getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
       getCachedDocumentHeight: () => minimapDocumentHeight,
       refresh: (phase) => {
-        if (phaseBGeneration !== layoutReadyGeneration || controller.isCancelled()) {
+        if (phaseBDocumentCacheKey !== currentDocumentCacheKey || controller.isCancelled()) {
           return;
         }
         refreshMinimapContent(phase);
