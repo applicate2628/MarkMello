@@ -2875,7 +2875,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 return;
             }
 
-            _nativeUiCore ??= Microsoft.Web.WebView2.Core.CoreWebView2.CreateFromComICoreWebView2(platformHandle.CoreWebView2);
+            if (_nativeUiCore is null)
+            {
+                _nativeUiCore = Microsoft.Web.WebView2.Core.CoreWebView2.CreateFromComICoreWebView2(platformHandle.CoreWebView2);
+                // H7: a WebView2 renderer/browser process crash mid-load would
+                // otherwise leave the shell-ready TCS unresolved forever (a
+                // permanent blank surface). ProcessFailed fires only on a real
+                // crash, never on a healthy path, so it cannot false-fire.
+                _nativeUiCore.ProcessFailed += OnCoreProcessFailed;
+            }
             _nativeUiCore.Profile.PreferredColorScheme = GetThemeName() == "dark"
                 ? Microsoft.Web.WebView2.Core.CoreWebView2PreferredColorScheme.Dark
                 : Microsoft.Web.WebView2.Core.CoreWebView2PreferredColorScheme.Light;
@@ -2884,6 +2892,24 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             ApplicateTrace.DiagMs("startup-webview", "native-ui-color-scheme-failed", $"reason={ex.GetType().Name}");
         }
+    }
+
+    // H7: recover from a WebView2 process crash instead of hanging blank. A
+    // crash means the shell page can never post document-ready, so the
+    // shell-ready TCS would stay pending forever and every awaiter would wait
+    // indefinitely. Fault it so awaiters unblock + a later render re-navigates
+    // (rather than re-awaiting a poisoned TCS), and surface the failure view.
+    private void OnCoreProcessFailed(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedEventArgs e)
+    {
+        ApplicateTrace.DiagMs("pane-seq", "core-process-failed", $"kind={e.ProcessFailedKind}");
+        var shellReady = _shellReady;
+        if (shellReady is not null && !shellReady.Task.IsCompleted)
+        {
+            _shellNavigated = false;
+            shellReady.TrySetResult(false);
+        }
+
+        FallbackRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void SendThemeFromThemeVariantChange()
@@ -3469,7 +3495,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         _disposed = true;
-        _nativeUiCore = null;
+        if (_nativeUiCore is not null)
+        {
+            _nativeUiCore.ProcessFailed -= OnCoreProcessFailed;
+            _nativeUiCore = null;
+        }
         CancelRender();
         DeleteCurrentGeneratedDocument();
         _webView.EnvironmentRequested -= OnEnvironmentRequested;
