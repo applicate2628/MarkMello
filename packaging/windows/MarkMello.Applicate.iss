@@ -65,6 +65,17 @@ Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 UsePreviousAppDir=yes
+; In-place update: close the running instance so its locked files can be
+; overwritten, then relaunch it after install. Restart Manager does the work
+; (CloseApplications shuts it down, RestartApplications brings it back);
+; AppMutex matches the app's single-instance mutex
+; (ApplicateSingleInstanceService.cs:9, unqualified => Local namespace) so Setup
+; can detect the running instance as an explicit fallback close prompt. The [Run]
+; postinstall entry still covers the fresh-install Launch checkbox; the app's
+; single-instance mutex dedupes any redundant launch.
+CloseApplications=yes
+RestartApplications=yes
+AppMutex=MarkMello.Applicate.SingleInstance
 OutputDir={#MyOutputDir}
 OutputBaseFilename={#MyOutputBaseName}
 SetupIconFile={#MySetupIconFile}
