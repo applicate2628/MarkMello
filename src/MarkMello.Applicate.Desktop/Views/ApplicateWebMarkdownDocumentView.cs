@@ -1760,12 +1760,21 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         try
         {
             using var document = JsonDocument.Parse(e.Body);
+            // A valid-JSON-but-non-object payload ([], null, "x", 0) parses fine,
+            // but TryGetProperty below throws InvalidOperationException on a
+            // non-object root (the narrow JsonException catch would not catch it).
+            // A renderer message is always an object; anything else is malformed.
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return;
+            }
+
             if (!document.RootElement.TryGetProperty("type", out var typeProperty))
             {
                 return;
             }
 
-            var type = typeProperty.GetString();
+            var type = SafeGetString(typeProperty);
             if (type == "document-ready")
             {
                 if (_shellMode && !_shellDocumentReadyConsumed)
@@ -1855,7 +1864,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             {
                 if (document.RootElement.TryGetProperty("text", out var textProp))
                 {
-                    var text = textProp.GetString();
+                    var text = SafeGetString(textProp);
                     if (text is null)
                     {
                         return;
@@ -1880,7 +1889,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 // forwards as `[renderer-perf] <name> ms=<elapsed>`.
                 if (document.RootElement.TryGetProperty("name", out var nameProp))
                 {
-                    var name = nameProp.GetString();
+                    var name = SafeGetString(nameProp);
                     if (!string.IsNullOrEmpty(name))
                     {
                         string extras = string.Empty;
@@ -1931,10 +1940,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
             if (type == "csp-violation")
             {
-                var blocked = document.RootElement.TryGetProperty("blockedURI", out var b) ? b.GetString() : "";
-                var directive = document.RootElement.TryGetProperty("violatedDirective", out var d) ? d.GetString() : "";
-                var sourceFile = document.RootElement.TryGetProperty("sourceFile", out var s) ? s.GetString() : "";
-                var line = document.RootElement.TryGetProperty("lineNumber", out var l) && l.TryGetInt32(out var lineVal) ? lineVal : 0;
+                var blocked = document.RootElement.TryGetProperty("blockedURI", out var b) ? SafeGetString(b) ?? "" : "";
+                var directive = document.RootElement.TryGetProperty("violatedDirective", out var d) ? SafeGetString(d) ?? "" : "";
+                var sourceFile = document.RootElement.TryGetProperty("sourceFile", out var s) ? SafeGetString(s) ?? "" : "";
+                var line = document.RootElement.TryGetProperty("lineNumber", out var l) && l.ValueKind == JsonValueKind.Number && l.TryGetInt32(out var lineVal) ? lineVal : 0;
                 Console.Error.WriteLine($"[CSP] {directive} blocked {blocked} at {sourceFile}:{line}");
                 return;
             }
@@ -1947,8 +1956,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
             if (type == "task-toggle")
             {
-                if (document.RootElement.TryGetProperty("line", out var taskLineProp) && taskLineProp.TryGetInt32(out var taskLine)
-                    && document.RootElement.TryGetProperty("checked", out var taskCheckedProp))
+                if (document.RootElement.TryGetProperty("line", out var taskLineProp) && taskLineProp.ValueKind == JsonValueKind.Number && taskLineProp.TryGetInt32(out var taskLine)
+                    && document.RootElement.TryGetProperty("checked", out var taskCheckedProp) && taskCheckedProp.ValueKind is JsonValueKind.True or JsonValueKind.False)
                 {
                     var taskKey = document.RootElement.TryGetProperty("key", out var taskKeyProp)
                         && taskKeyProp.ValueKind == System.Text.Json.JsonValueKind.String
@@ -1976,7 +1985,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             {
                 if (document.RootElement.TryGetProperty("combo", out var comboElement))
                 {
-                    var combo = comboElement.GetString();
+                    var combo = SafeGetString(comboElement);
                     if (!string.IsNullOrEmpty(combo))
                     {
                         HostShortcutHandler?.Invoke(combo);
@@ -2027,7 +2036,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             {
                 if (document.RootElement.TryGetProperty("message", out var messageElement))
                 {
-                    var message = messageElement.GetString();
+                    var message = SafeGetString(messageElement);
                     if (!string.IsNullOrEmpty(message))
                     {
                         Console.Error.WriteLine(message);
@@ -2075,8 +2084,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
-        var name = nameProp.GetString();
-        var text = textProp.GetString();
+        var name = SafeGetString(nameProp);
+        var text = SafeGetString(textProp);
         if (string.IsNullOrWhiteSpace(name) || text is null)
         {
             return;
@@ -2129,10 +2138,24 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
     }
 
+    // Single owner of "safely read a string field from an untrusted renderer
+    // message": JsonElement.GetString() throws InvalidOperationException when the
+    // field is present but is NOT a JSON string, which would crash the UI thread.
+    // Returning null on a non-string kind degrades a malformed field to the same
+    // handled case as a JSON null, WITHOUT broadening the message-loop catch
+    // (which would also swallow genuine handler exceptions).
+    private static string? SafeGetString(JsonElement element)
+        => element.ValueKind == JsonValueKind.String ? element.GetString() : null;
+
     private static string MakeSafeFileName(string input)
     {
         var invalid = Path.GetInvalidFileNameChars();
-        Span<char> buffer = stackalloc char[input.Length];
+        // `input` is a wire-supplied file name whose length is not otherwise
+        // bounded; a very long name would overflow the stack (an uncatchable
+        // crash), so only small names stay on the stack.
+        const int MaxStackFileNameChars = 256;
+        char[]? heapBuffer = input.Length > MaxStackFileNameChars ? new char[input.Length] : null;
+        Span<char> buffer = heapBuffer ?? stackalloc char[input.Length];
         for (var i = 0; i < input.Length; i++)
         {
             var c = input[i];
@@ -2215,7 +2238,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             }
             var text = entry.TryGetProperty("text", out var textProp)
                        && textProp.ValueKind == JsonValueKind.String
-                ? textProp.GetString() ?? string.Empty
+                ? SafeGetString(textProp) ?? string.Empty
                 : string.Empty;
             // Indent is pre-computed here so the host-side TOC row can bind
             // to a primitive double without a value converter — keeps the
@@ -2253,7 +2276,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 continue;
             }
 
-            var text = textProp.GetString();
+            var text = SafeGetString(textProp);
             if (string.IsNullOrEmpty(text))
             {
                 continue;
@@ -2403,7 +2426,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         settled = null;
         if (!root.TryGetProperty("type", out var typeProperty)
             || typeProperty.ValueKind != JsonValueKind.String
-            || !string.Equals(typeProperty.GetString(), "minimap-settled", StringComparison.Ordinal)
+            || !string.Equals(SafeGetString(typeProperty), "minimap-settled", StringComparison.Ordinal)
             || !root.TryGetProperty("transactionGeneration", out var generationProperty)
             || generationProperty.ValueKind != JsonValueKind.Number
             || !generationProperty.TryGetInt64(out var transactionGeneration)
@@ -2425,7 +2448,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         settled = null;
         if (!root.TryGetProperty("type", out var typeProperty)
             || typeProperty.ValueKind != JsonValueKind.String
-            || !string.Equals(typeProperty.GetString(), "mode-toggle-settled", StringComparison.Ordinal))
+            || !string.Equals(SafeGetString(typeProperty), "mode-toggle-settled", StringComparison.Ordinal))
         {
             return false;
         }
@@ -2450,17 +2473,17 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     internal static bool IsViewerInteractionMessage(JsonElement root)
         => root.TryGetProperty("type", out var typeProperty)
            && typeProperty.ValueKind == JsonValueKind.String
-           && string.Equals(typeProperty.GetString(), "viewer-interaction", StringComparison.Ordinal);
+           && string.Equals(SafeGetString(typeProperty), "viewer-interaction", StringComparison.Ordinal);
 
     internal static bool IsLayoutReadyMessage(JsonElement root)
         => root.TryGetProperty("type", out var typeProperty)
            && typeProperty.ValueKind == JsonValueKind.String
-           && string.Equals(typeProperty.GetString(), "layout-ready", StringComparison.Ordinal);
+           && string.Equals(SafeGetString(typeProperty), "layout-ready", StringComparison.Ordinal);
 
     internal static bool IsPostReadyEnhancementsCompleteMessage(JsonElement root)
         => root.TryGetProperty("type", out var typeProperty)
            && typeProperty.ValueKind == JsonValueKind.String
-           && string.Equals(typeProperty.GetString(), "post-ready-enhancements-complete", StringComparison.Ordinal);
+           && string.Equals(SafeGetString(typeProperty), "post-ready-enhancements-complete", StringComparison.Ordinal);
 
     private void ConfigureDocumentRevealGate(long renderId, bool requiresPostReadyEnhancements)
     {
@@ -2622,7 +2645,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private void HandleWidthDragMessage(JsonElement root)
     {
         if (!root.TryGetProperty("phase", out var phaseProperty)
-            || !TryReadWidthDragPhase(phaseProperty.GetString(), out var phase))
+            || !TryReadWidthDragPhase(SafeGetString(phaseProperty), out var phase))
         {
             return;
         }
@@ -2696,7 +2719,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
-        var href = hrefProperty.GetString();
+        var href = SafeGetString(hrefProperty);
         if (string.IsNullOrWhiteSpace(href))
         {
             return;
@@ -3388,7 +3411,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     }
 
     private static double ReadDouble(JsonElement root, string name)
-        => root.TryGetProperty(name, out var property) && property.TryGetDouble(out var value) && double.IsFinite(value)
+        => root.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.Number && property.TryGetDouble(out var value) && double.IsFinite(value)
             ? value
             : 0;
 
