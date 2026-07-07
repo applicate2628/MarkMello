@@ -228,7 +228,15 @@ public sealed class EditorSessionViewModel : ObservableObject
         CurrentPath = source.Path;
         FileName = source.FileName;
         LastPersistedSource = source.Content;
-        SourceText = source.Content;
+        // Do NOT overwrite SourceText. A save PERSISTS the buffer, it does not
+        // RELOAD it: source.Content is the snapshot SaveEditorAsync captured
+        // before its async disk write, so if the user kept typing during that
+        // write the live buffer is now newer, and assigning the snapshot back
+        // would silently discard those keystrokes. LastPersistedSource above keeps
+        // IsDirty truthful — the buffer is dirty exactly when it moved past what
+        // was persisted; when nothing was typed during the save the buffer already
+        // equals source.Content so no change is visible. (Reload replaces the
+        // buffer through ApplyLoadedDocument, which DOES set SourceText.)
         StatusMessage = string.Empty;
         RaiseDocumentMetricsChanged();
     }
