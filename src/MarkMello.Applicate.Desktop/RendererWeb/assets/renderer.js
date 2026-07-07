@@ -2244,7 +2244,7 @@
     }
     return Math.max(24, Math.min(viewportHeight * 0.38, viewportHeight - 24));
   }
-  function postLayoutReady() {
+  function postLayoutReady(renderId) {
     try {
       const scrollState = getScrollState();
       const topBlockIndex = findTopVisibleBlockIndex();
@@ -2257,7 +2257,8 @@
       });
       postHostMessage({
         type: "layout-ready",
-        ...scrollState
+        ...scrollState,
+        renderId
       });
       postPerfMark("mm-layout-ready");
       flushPostLayoutReadyWork();
@@ -2286,7 +2287,8 @@
       scrollTop: layoutState.scrollTop,
       scrollHeight: layoutState.scrollHeight,
       clientHeight: layoutState.clientHeight,
-      cached: true
+      cached: true,
+      renderId: currentDocumentRenderId
     });
     postPerfMark("mm-layout-ready", { cached: true });
     flushPostLayoutReadyWork();
@@ -2345,6 +2347,7 @@
   }
   function scheduleLayoutReady(skipFrameWait = false) {
     const generation = ++layoutReadyGeneration;
+    const scheduledRenderId = currentDocumentRenderId;
     let completed = false;
     let posted = false;
     let frameFallbackTimer;
@@ -2363,7 +2366,7 @@
       if (path === "frame-fallback") {
         postPerfMark("mm-layout-ready-frame-fallback", { generation });
       }
-      postLayoutReady();
+      postLayoutReady(scheduledRenderId);
     };
     const complete = () => {
       if (completed || generation !== layoutReadyGeneration) {

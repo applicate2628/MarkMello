@@ -68,7 +68,7 @@ type RendererWindow = Window & {
 
 type RendererMessage =
   | { type: "document-ready"; mathCount: number }
-  | { type: "layout-ready"; scrollTop: number; scrollHeight: number; clientHeight: number; cached?: boolean }
+  | { type: "layout-ready"; scrollTop: number; scrollHeight: number; clientHeight: number; cached?: boolean; renderId?: number | null }
   | { type: "post-ready-enhancements-complete"; renderId?: number; hasMermaid: boolean; hasHljs: boolean }
   | { type: "theme-applied"; theme: RendererTheme; requestId: number }
   | { type: "link-clicked"; href: string; button: number; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }
@@ -1475,7 +1475,7 @@ function getViewportAnchorY(): number {
   return Math.max(24, Math.min(viewportHeight * 0.38, viewportHeight - 24));
 }
 
-function postLayoutReady(): void {
+function postLayoutReady(renderId: number | null): void {
   try {
     const scrollState = getScrollState();
     const topBlockIndex = findTopVisibleBlockIndex();
@@ -1488,7 +1488,8 @@ function postLayoutReady(): void {
     });
     postHostMessage({
       type: "layout-ready",
-      ...scrollState
+      ...scrollState,
+      renderId
     });
     postPerfMark("mm-layout-ready");
     flushPostLayoutReadyWork();
@@ -1520,7 +1521,8 @@ function postCachedLayoutReady(): void {
     scrollTop: layoutState.scrollTop,
     scrollHeight: layoutState.scrollHeight,
     clientHeight: layoutState.clientHeight,
-    cached: true
+    cached: true,
+    renderId: currentDocumentRenderId
   });
   postPerfMark("mm-layout-ready", { cached: true });
   flushPostLayoutReadyWork();
@@ -1586,6 +1588,10 @@ function restoreCachedScrollPosition(): void {
 
 function scheduleLayoutReady(skipFrameWait = false): void {
   const generation = ++layoutReadyGeneration;
+  // Capture the render this layout-ready belongs to NOW, so the host can gate a
+  // stale layout-ready by renderId even when a later render mutated the global
+  // currentDocumentRenderId before this scheduled callback fired.
+  const scheduledRenderId = currentDocumentRenderId;
   let completed = false;
   let posted = false;
   let frameFallbackTimer: number | undefined;
@@ -1607,7 +1613,7 @@ function scheduleLayoutReady(skipFrameWait = false): void {
     if (path === "frame-fallback") {
       postPerfMark("mm-layout-ready-frame-fallback", { generation });
     }
-    postLayoutReady();
+    postLayoutReady(scheduledRenderId);
   };
 
   const complete = () => {

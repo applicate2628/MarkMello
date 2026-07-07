@@ -1120,6 +1120,30 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _clientHeight = 0;
         CancelRender();
 
+        // Free cache-fallback entries left by superseded renders: a new render
+        // supersedes all prior ones (renderId is monotonic), so their
+        // load-cached-document entries -- each pinning a full BodyHtml -- are dead
+        // weight; sweep them deterministically here rather than relying on a stale
+        // layout-ready arriving to trigger the per-message cleanup.
+        if (_pendingRendererCacheFallbackLoads.Count > 0)
+        {
+            List<long>? supersededFallbacks = null;
+            foreach (var pendingKey in _pendingRendererCacheFallbackLoads.Keys)
+            {
+                if (pendingKey < renderId)
+                {
+                    (supersededFallbacks ??= new List<long>()).Add(pendingKey);
+                }
+            }
+            if (supersededFallbacks is not null)
+            {
+                foreach (var staleKey in supersededFallbacks)
+                {
+                    _pendingRendererCacheFallbackLoads.Remove(staleKey);
+                }
+            }
+        }
+
         var source = Source;
         ApplicateTrace.ModeToggle(
             $"Web.QueueRender id={renderId} source={source?.Path ?? "(null)"} shell={_shellMode} theme={GetThemeName()}");
@@ -1849,6 +1873,23 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
             if (IsLayoutReadyMessage(document.RootElement))
             {
+                // Drop a stale in-flight layout-ready: a superseded render can still
+                // deliver a queued layout-ready whose renderId no longer matches the
+                // active reveal gate; promoting it would fire DocumentRendered/reveal
+                // for the WRONG document with the old doc's scroll. Mirrors the
+                // renderId gate the post-ready-enhancements + cache-miss handlers
+                // already apply. An absent/null renderId skips the gate (backward-
+                // compatible with an un-stamped message).
+                if (document.RootElement.TryGetProperty("renderId", out var layoutReadyRenderIdProperty)
+                    && layoutReadyRenderIdProperty.ValueKind == JsonValueKind.Number
+                    && layoutReadyRenderIdProperty.TryGetInt64(out var layoutReadyRenderId)
+                    && layoutReadyRenderId != _activeRevealRenderId)
+                {
+                    ApplicateTrace.DiagMs("diag-gate", "layout-ready-dropped-stale",
+                        $"msgRenderId={layoutReadyRenderId} active={_activeRevealRenderId}");
+                    return;
+                }
+
                 ApplicateTrace.DiagMs("diag-gate", "ipc-layout-ready",
                     $"awaiting={_awaitingLayoutReady} hasLoaded={_hasLoadedDocument} hasLayoutBefore={_hasLayoutReady} cached={ReadBoolean(document.RootElement, "cached")}");
                 if (!_hasLoadedDocument && _activeRevealRenderId > 0)
