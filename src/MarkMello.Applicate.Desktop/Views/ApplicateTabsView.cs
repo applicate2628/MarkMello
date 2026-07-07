@@ -17,6 +17,7 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MarkMello.Applicate.Desktop.Editing;
+using MarkMello.Presentation.Localization;
 
 namespace MarkMello.Applicate.Desktop.Views;
 
@@ -749,11 +750,12 @@ internal sealed class ApplicateTabsView : UserControl
 
     private ContextMenu BuildTabContextMenu(OpenDocument doc)
     {
-        // Standard tab context menu: close current/others/right/all, then
+        // Standard tab context menu: close current/others/left/right/all, then
         // path utilities. Items rebuild per tab because IsEnabled depends
         // on the document's position in the strip at the moment the menu
         // opens.
         var menu = new ContextMenu();
+        var tabIndex = _openDocsService.OpenDocuments.IndexOf(doc);
 
         var closeItem = new MenuItem { Header = "Close" };
         closeItem.Click += (_, _) => CloseDocument(doc);
@@ -765,11 +767,18 @@ internal sealed class ApplicateTabsView : UserControl
         };
         closeOthersItem.Click += (_, _) => CloseOthers(doc);
 
+        var closeToLeftItem = new MenuItem
+        {
+            Header = ResolveText("TabCloseToLeft", "Close to the Left"),
+            IsEnabled = tabIndex > 0
+        };
+        closeToLeftItem.Click += (_, _) => CloseToLeft(doc);
+
         var closeToRightItem = new MenuItem
         {
-            Header = "Close to the Right",
-            IsEnabled = _openDocsService.OpenDocuments.IndexOf(doc) <
-                        _openDocsService.OpenDocuments.Count - 1
+            Header = ResolveText("TabCloseToRight", "Close to the Right"),
+            IsEnabled = tabIndex >= 0 &&
+                        tabIndex < _openDocsService.OpenDocuments.Count - 1
         };
         closeToRightItem.Click += (_, _) => CloseToRight(doc);
 
@@ -784,6 +793,7 @@ internal sealed class ApplicateTabsView : UserControl
 
         menu.Items.Add(closeItem);
         menu.Items.Add(closeOthersItem);
+        menu.Items.Add(closeToLeftItem);
         menu.Items.Add(closeToRightItem);
         menu.Items.Add(closeAllItem);
         menu.Items.Add(new Separator());
@@ -831,6 +841,22 @@ internal sealed class ApplicateTabsView : UserControl
         }
         var toClose = _openDocsService.OpenDocuments
             .Skip(anchorIndex + 1)
+            .ToList();
+        foreach (var doc in toClose)
+        {
+            _openDocsService.Close(doc);
+        }
+    }
+
+    private void CloseToLeft(OpenDocument anchor)
+    {
+        var anchorIndex = _openDocsService.OpenDocuments.IndexOf(anchor);
+        if (anchorIndex < 0)
+        {
+            return;
+        }
+        var toClose = _openDocsService.OpenDocuments
+            .Take(anchorIndex)
             .ToList();
         foreach (var doc in toClose)
         {
@@ -1210,5 +1236,18 @@ internal sealed class ApplicateTabsView : UserControl
         }
 
         return new SolidColorBrush(Color.FromRgb(0x88, 0x88, 0x88));
+    }
+
+    private static string ResolveText(string resourceKey, string fallback)
+    {
+        var app = Avalonia.Application.Current;
+        if (app is not null
+            && app.TryGetResource("Localization", null, out var value)
+            && value is ILocalizationService localization)
+        {
+            return localization[resourceKey];
+        }
+
+        return fallback;
     }
 }
