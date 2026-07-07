@@ -2744,6 +2744,19 @@ public sealed class ApplicateMainWindow : MainWindow
                 // OpenPathAsync disk/read pipeline; keep OpenPathAsync only
                 // as the typed-error fallback when a restored stub could not
                 // be materialized.
+                //
+                // Stale-activation guard: this handler is posted async (rapid
+                // A->B->A queues several lambdas), and EnsureLoadedAsync above may
+                // have awaited. If a newer activation has since superseded this one
+                // (openDocs.ActiveDocument moved on), applying args.ActiveDocument
+                // now would paint the wrong document under the now-current tab
+                // (tabs show B, doc area shows A). Skip it — the current
+                // activation's own posted lambda applies the correct document.
+                if (!ReferenceEquals(args.ActiveDocument, openDocs.ActiveDocument))
+                {
+                    return;
+                }
+
                 var wasEditMode = viewModel.IsEditMode;
                 inServiceLoad = true;
                 try
@@ -2755,6 +2768,13 @@ public sealed class ApplicateMainWindow : MainWindow
                     else
                     {
                         await viewModel.OpenPathAsync(newPath).ConfigureAwait(true);
+                        // A newer activation may have superseded us during the
+                        // async load; if so, the correct doc's own lambda will
+                        // re-apply it, so stop rather than leave this stale one.
+                        if (!ReferenceEquals(args.ActiveDocument, openDocs.ActiveDocument))
+                        {
+                            return;
+                        }
                     }
 
                     if (wasEditMode
