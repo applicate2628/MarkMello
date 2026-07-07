@@ -298,7 +298,8 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
 
     private static async Task RenderTableAsync(RenderContext context, MarkdownTableBlock table, int blockIndex, string kind)
     {
-        context.Html.Append("<table").Append(BlockDataAttributes(blockIndex, kind, table.SourceSpan)).AppendLine(">");
+        context.Html.Append("<div class=\"mm-table-scroll\"").Append(BlockDataAttributes(blockIndex, kind, table.SourceSpan)).AppendLine(">");
+        context.Html.AppendLine("<table>");
         if (table.Header.Count > 0)
         {
             context.Html.AppendLine("<thead><tr>");
@@ -327,6 +328,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         }
 
         context.Html.AppendLine("</tbody></table>");
+        context.Html.AppendLine("</div>");
     }
 
     private static async Task RenderImageBlockAsync(

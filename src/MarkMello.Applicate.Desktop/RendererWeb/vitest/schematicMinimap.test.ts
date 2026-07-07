@@ -53,6 +53,22 @@ describe("walkDocumentBlocks", () => {
     expect(blocks).toEqual([]);
     document.body.removeChild(root);
   });
+
+  it("classifies a markdown table scroll wrapper as a table block", () => {
+    const root = document.createElement("div");
+    root.className = "mm-document";
+    root.innerHTML = `
+      <div class="mm-table-scroll" data-mm-block-kind="table">
+        <table><tr><td>x</td></tr></table>
+      </div>
+    `;
+    document.body.appendChild(root);
+
+    const blocks: DocumentBlock[] = walkDocumentBlocks({ documentRoot: root, documentHeight: 1000 });
+
+    expect(blocks.map((b: DocumentBlock) => b.kind)).toEqual<DocumentBlockKind[]>(["table"]);
+    document.body.removeChild(root);
+  });
 });
 
 describe("renderSchematicSvg", () => {

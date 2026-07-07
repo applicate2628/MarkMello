@@ -55,6 +55,7 @@ export function walkDocumentBlocks(input: SchematicMinimapInput): DocumentBlock[
 }
 
 export function classifyDocumentBlockElement(el: HTMLElement): DocumentBlockKind | null {
+  if (el.dataset["mmBlockKind"] === "table") return "table";
   const tag = el.tagName.toLowerCase();
   if (tag === "h1") return "heading-1";
   if (tag === "h2") return "heading-2";

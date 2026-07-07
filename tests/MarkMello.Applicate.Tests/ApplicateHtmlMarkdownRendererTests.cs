@@ -334,6 +334,26 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
+    public async Task RenderWrapsMarkdownTablesInHorizontalScrollContainer()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        const string sourceText = "| A | B |\n| - | - |\n| `wide_cell_AAAAAAAAAAAAAAAAAAAAAAAA` | text |\n";
+        var source = new MarkdownSource("table.md", "table.md", sourceText);
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        Assert.Contains("<div class=\"mm-table-scroll\" data-mm-block-index=\"0\" data-mm-block-kind=\"table\"", document.Html);
+        Assert.Contains("data-mm-source-line=\"0\" data-mm-source-end-line=\"2\"", document.Html);
+        Assert.Contains("<table>", document.Html);
+        Assert.Contains("</tbody></table>", document.Html);
+        Assert.DoesNotContain("<table data-mm-block-index", document.Html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RenderKeepsSourceLineMetadataAcrossDisplayMathSegments()
     {
         var renderer = new ApplicateHtmlMarkdownRenderer();
@@ -502,6 +522,8 @@ public sealed class ApplicateHtmlMarkdownRendererTests
             .ReadTextAssetAsync("renderer.css", CancellationToken.None);
 
         Assert.Contains(".mm-document table", css, StringComparison.Ordinal);
+        Assert.Contains(".mm-table-scroll", css, StringComparison.Ordinal);
+        Assert.Contains("overflow-x: auto;", css, StringComparison.Ordinal);
         Assert.Contains("border-collapse: collapse;", css, StringComparison.Ordinal);
         Assert.Contains(".mm-document th", css, StringComparison.Ordinal);
         Assert.Contains(".mm-document td", css, StringComparison.Ordinal);

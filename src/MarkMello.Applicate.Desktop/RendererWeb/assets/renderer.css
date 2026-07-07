@@ -277,11 +277,24 @@ img {
   -webkit-user-drag: none;
 }
 
+.mm-table-scroll {
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: 20px 0 24px;
+  overflow-x: auto;
+}
+
+.mm-document .mm-table-scroll > table {
+  width: auto;
+  max-width: 100%;
+  margin: 0;
+}
+
 .mm-document table {
-  /* Wrap wide tables to fit the viewport instead of overflowing with a
-     horizontal scrollbar. display:table + width:auto shrinks to content for
-     narrow tables, max-width:100% caps wide ones, and table-layout:auto then
-     wraps the cells (see th/td white-space:normal) so the table fits. */
+  /* Tables shrink to fit and wrap their cells as before; the .mm-table-scroll
+     wrapper only catches a genuinely unshrinkable table (e.g. nowrap code
+     cells), which then scrolls inside the document column instead of
+     expanding the page under the fixed viewer chrome. */
   display: table;
   width: auto;
   max-width: 100%;

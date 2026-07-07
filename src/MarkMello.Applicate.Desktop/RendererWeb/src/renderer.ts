@@ -454,8 +454,9 @@ function captureCurrentProcessedDocumentCacheEntry(mode: "clone" | "move"): Proc
       node instanceof HTMLElement ? node.offsetHeight : 0);
     for (let index = 0; index < sourceNodes.length; index++) {
       const node = sourceNodes[index];
-      if (node instanceof HTMLElement && settledHeights[index] > 0) {
-        node.style.containIntrinsicSize = `auto ${settledHeights[index]}px`;
+      const settledHeight = settledHeights[index] ?? 0;
+      if (node instanceof HTMLElement && settledHeight > 0) {
+        node.style.containIntrinsicSize = `auto ${settledHeight}px`;
       }
     }
     fragment.append(...sourceNodes);
