@@ -23,9 +23,9 @@ public sealed class ApplicateEditPreviewSyncTests
     [Fact]
     public void EditorSyncResolvesPreviewStructurallyAndWritesAnchorOffset()
     {
-        // C1 (dead wiring): the sync preview must be resolved by TYPE from the
-        // visual tree — the "PreviewDocumentFrame" name was silently dropped by
-        // an upstream merge and no .axaml carries it. C3 (editor side): the
+        // C1: Applicate injects a typed preview sync mount point instead of
+        // letting the edit view rediscover fork-owned preview structure. The
+        // native fallback remains for non-Applicate use. C3 (editor side): the
         // editor write must use the 38%-anchor offset mapper, not ScrollToLine
         // (middle + 30% dead-zone).
         var workspace = File.ReadAllText(Path.Combine(
@@ -33,6 +33,12 @@ public sealed class ApplicateEditPreviewSyncTests
             "..", "..", "..", "..", "..",
             "src", "MarkMello.Presentation", "Views", "EditWorkspaceView.axaml.cs"));
 
+        Assert.Contains("UseResolvedPreviewSourceLineSync", workspace, StringComparison.Ordinal);
+        Assert.Contains("_hasResolvedPreviewSourceLineSync", workspace, StringComparison.Ordinal);
+        Assert.Contains("ResolvePreviewSourceLineSync()", workspace, StringComparison.Ordinal);
+        // The native fallback must stay a STRUCTURAL type-scan (the named-Border
+        // path was silently deleted by an upstream merge once; a name-only lookup
+        // would re-create exactly that fragility) — fable gate B1.
         Assert.Contains("GetVisualDescendants().OfType<ISourceLineScrollSyncPreview>().FirstOrDefault()", workspace, StringComparison.Ordinal);
 
         var scrollEditor = ExtractMethodBody(workspace, "private void ScrollEditorToSourceLine(int sourceLine)");

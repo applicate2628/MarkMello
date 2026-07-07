@@ -31,6 +31,8 @@ public partial class EditWorkspaceView : UserControl
     private ScrollViewer? _previewScrollViewer;
     private MarkdownDocumentView? _previewDocumentView;
     private ISourceLineScrollSyncPreview? _previewSourceLineSync;
+    private ISourceLineScrollSyncPreview? _resolvedPreviewSourceLineSync;
+    private bool _hasResolvedPreviewSourceLineSync;
     private readonly List<ScrollBar> _scrollBarsWithDragHandlers = [];
     private readonly DispatcherTimer _scrollBarDragSettleTimer;
     private bool _isSynchronizingScroll;
@@ -356,14 +358,9 @@ public partial class EditWorkspaceView : UserControl
         _editorTextEditor = this.FindControl<TextEditor>("EditorTextEditor");
         _previewScrollViewer = this.FindControl<ScrollViewer>("PreviewScrollViewer");
         _previewDocumentView = this.FindControl<MarkdownDocumentView>("PreviewDocumentView");
-        // Structural lookup FIRST: the named Border was silently dropped by an
-        // upstream merge once already (the sync contract was dead wiring in
-        // Applicate — the fork injects its preview at runtime, so no .axaml
-        // carries the name). A visual-tree type scan survives future upstream
-        // rewrites; the named path stays as a cheap fast-path fallback.
-        _previewSourceLineSync =
-            this.GetVisualDescendants().OfType<ISourceLineScrollSyncPreview>().FirstOrDefault()
-            ?? this.FindControl<Border>("PreviewDocumentFrame")?.Child as ISourceLineScrollSyncPreview;
+        _previewSourceLineSync = _hasResolvedPreviewSourceLineSync
+            ? _resolvedPreviewSourceLineSync
+            : ResolvePreviewSourceLineSync();
         var editorVisuals = _editorTextEditor?
             .GetVisualDescendants()
             .ToArray();
@@ -421,6 +418,17 @@ public partial class EditWorkspaceView : UserControl
 
         SynchronizePreviewToEditor();
     }
+
+    public void UseResolvedPreviewSourceLineSync(ISourceLineScrollSyncPreview? previewSourceLineSync)
+    {
+        _hasResolvedPreviewSourceLineSync = true;
+        _resolvedPreviewSourceLineSync = previewSourceLineSync;
+        _previewSourceLineSync = previewSourceLineSync;
+    }
+
+    private ISourceLineScrollSyncPreview? ResolvePreviewSourceLineSync()
+        => this.GetVisualDescendants().OfType<ISourceLineScrollSyncPreview>().FirstOrDefault()
+            ?? this.FindControl<Border>("PreviewDocumentFrame")?.Child as ISourceLineScrollSyncPreview;
 
     private void DetachScrollSynchronization()
     {

@@ -80,6 +80,7 @@ public sealed class ApplicateMainWindow : MainWindow
     private ApplicateDocumentSwitchRevealCoordinator? _editDocumentSwitchRevealCoordinator;
     private ApplicateThemeSwitchRevealCoordinator? _viewerThemeSwitchRevealCoordinator;
     private ApplicateThemeSwitchRevealCoordinator? _editThemeSwitchRevealCoordinator;
+    private readonly ApplicateMountPoints _mountPoints;
     private bool _editModeHotkeyDown;
 
     public ApplicateMainWindow(
@@ -90,6 +91,7 @@ public sealed class ApplicateMainWindow : MainWindow
         : base(viewModel, startupSmokeTestOptions, settings)
     {
         ApplicateTrace.DiagMs("startup-applicate-window", "applicate-ctor-start");
+        _mountPoints = ApplicateMountPoints.Resolve(this);
         var holdStartupDocumentReveal = ShouldHoldStartupDocumentReveal();
         if (holdStartupDocumentReveal)
         {
@@ -655,7 +657,7 @@ public sealed class ApplicateMainWindow : MainWindow
             return;
         }
 
-        var bodyPanel = this.FindControl<Panel>("BodyPanel");
+        var bodyPanel = _mountPoints.BodyPanel;
         if (bodyPanel is null)
         {
             return;
@@ -714,7 +716,7 @@ public sealed class ApplicateMainWindow : MainWindow
             return;
         }
 
-        var bodyPanel = this.FindControl<Panel>("BodyPanel");
+        var bodyPanel = _mountPoints.BodyPanel;
         if (bodyPanel is null)
         {
             return;
@@ -948,10 +950,7 @@ public sealed class ApplicateMainWindow : MainWindow
 
     private void InstallViewerHostTemplate(IDataTemplate viewerTemplate)
     {
-        var bodyPanel = this.FindControl<Panel>("BodyPanel");
-        var viewerHost = bodyPanel?.Children
-            .OfType<ContentControl>()
-            .FirstOrDefault(static control => control.GetType() == typeof(ContentControl) && control.Name is null);
+        var viewerHost = _mountPoints.ViewerContentSlot;
         if (viewerHost is null)
         {
             return;
@@ -962,7 +961,7 @@ public sealed class ApplicateMainWindow : MainWindow
 
     private void InstallTabsAndWelcome()
     {
-        var bodyPanel = this.FindControl<Panel>("BodyPanel");
+        var bodyPanel = _mountPoints.BodyPanel;
         var openDocs = App.Services?.GetService<IOpenDocumentsService>();
         if (bodyPanel is null || openDocs is null)
         {
@@ -1431,9 +1430,7 @@ public sealed class ApplicateMainWindow : MainWindow
             return;
         }
 
-        var viewerHost = contentPanel.Children
-            .OfType<ContentControl>()
-            .FirstOrDefault(cc => cc.GetType() == typeof(ContentControl) && cc.Name is null);
+        var viewerHost = _mountPoints.ViewerContentSlot;
         if (viewerHost is null)
         {
             return;
@@ -1506,45 +1503,24 @@ public sealed class ApplicateMainWindow : MainWindow
         };
         ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-workspace-end");
         ApplicateTrace.DiagMs("startup-synthetic-mount", "replace-preview-start");
-        if (!editWorkspace.TryReplacePreviewDocumentView(editPreview))
+        var editPreviewMountPoints = _mountPoints.ResolveEditPreviewMountPoints(editWorkspace, editPreview);
+        editWorkspace.UseResolvedPreviewSourceLineSync(editPreviewMountPoints.PreviewSourceLineSync);
+        if (editPreviewMountPoints.PreviewDocumentFrame is { } parentBorder)
         {
-            // Upstream merge (5c329d8 "sync source and preview scrolling")
-            // dropped the `Name="PreviewDocumentFrame"` from the wrapper Border
-            // in EditWorkspaceView.axaml:189, so TryReplacePreviewDocumentView
-            // (which depends on that name) now always returns false. Locate
-            // the wrapper by walking from the still-named MarkdownDocumentView.
-            var nativeDocView = editWorkspace.FindControl<MarkdownDocumentView>("PreviewDocumentView");
-            if (nativeDocView?.Parent is Border parentBorder)
+            if (editPreviewMountPoints.UsedPreviewDocumentFrameFallback)
             {
-                // The upstream Border holds the readable-column cap for the
-                // native MarkdownDocumentView path: MaxWidth bound to
-                // DocumentColumnMaxWidth (constant 964px) + HorizontalAlignment
-                // =Center. For the WebView path, that cap is wrong — renderer.js
-                // already owns the readable column via AvailableContentWidth,
-                // so the outer cap leaves the WebView wrapper stuck at 964px
-                // and centered in any wider pane, pushing the WebView2's
-                // internal scrollbar 50+ DIPs inward from the pane right edge.
-                //
-                // Fix: dispose the binding expression first so the LocalValue
-                // write below isn't overwritten when the Bridge later sets
-                // DataContext = session and the binding re-fires. Avalonia 11
-                // has no public ClearBinding; BindingExpressionBase implements
-                // IDisposable and disposing tears down the OneWay subscription.
+                // The fallback Border holds the readable-column cap for the
+                // native MarkdownDocumentView path. For the WebView path,
+                // renderer.js owns the readable column via AvailableContentWidth.
                 Avalonia.Data.BindingOperations
                     .GetBindingExpressionBase(parentBorder, Border.MaxWidthProperty)
                     ?.Dispose();
                 parentBorder.HorizontalAlignment = HorizontalAlignment.Stretch;
                 parentBorder.MaxWidth = double.PositiveInfinity;
-                // The XAML Border still carried a DoubleTransition on
-                // MaxWidth (legacy column-width animation for the upstream
-                // MarkdownDocumentView path). After we set MaxWidth to
-                // PositiveInfinity, the transition is no longer meaningful
-                // and just costs an animation registration per layout pass.
-                // Null it out so no animation infrastructure stays attached
-                // to this Border in the WebView path.
                 parentBorder.Transitions = null;
-                parentBorder.Child = editPreview;
             }
+
+            parentBorder.Child = editPreview;
         }
         ApplicateTrace.DiagMs("startup-synthetic-mount", "replace-preview-end");
 
@@ -3453,7 +3429,7 @@ public sealed class ApplicateMainWindow : MainWindow
 
     private void InstallWarmupPanelForHost(IApplicateSharedWebViewHost sharedHost, int index)
     {
-        var bodyPanel = this.FindControl<Panel>("BodyPanel");
+        var bodyPanel = _mountPoints.BodyPanel;
         if (bodyPanel is null)
         {
             return;
