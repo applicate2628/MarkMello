@@ -131,6 +131,28 @@ public sealed class MarkdownMathHealthAnalyzerTests
     }
 
     [Fact]
+    public void JoinedButStillOpenSpanIsUnrepairableAndLeavesSourceUnchanged()
+    {
+        // A missing closing $ whose span crosses NON-blank lines: the fold joins
+        // them but the span is STILL open afterward. It must be reported as
+        // unrepairable ONCE (never ALSO counted repairable), and the source left
+        // byte-unchanged — otherwise the banner offers a "fix" that rewrites the
+        // file (collapsing the lines) WITHOUT closing the math, and after the
+        // write repairable flips to 0 so the banner hides the still-broken doc.
+        const string text = "$a +\nb plain\nc plain\n";
+
+        var result = MarkdownMathHealthAnalyzer.Analyze(text);
+
+        Assert.False(result.HasRepairableDefects);
+        Assert.Equal(0, result.RepairableDefectCount);
+        Assert.Equal(1, result.UnrepairableDefectCount);
+        var defect = Assert.Single(result.Defects);
+        Assert.Equal(MarkdownMathDefectKind.WrappedInlineMath, defect.Kind);
+        Assert.False(defect.Repaired);
+        Assert.Equal(text, result.RepairedText); // unchanged — no unsafe rewrite
+    }
+
+    [Fact]
     public void MultiLineWrapJoinsAllSegments()
     {
         const string text = "$a +\nb +\nc$ done\n";

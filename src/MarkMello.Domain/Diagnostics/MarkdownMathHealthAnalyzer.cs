@@ -371,6 +371,7 @@ public static class MarkdownMathHealthAnalyzer
             // Wrapped inline math: fold following lines until the span closes,
             // never crossing a blank line, a fence marker, or a "$$" toggle.
             var startLine = i + 1; // 1-based
+            var startIndex = i;
             var acc = line;
             var joined = 0;
             while (LineEndsWithOpenInlineMath(acc) && i + 1 < lines.Count)
@@ -389,38 +390,44 @@ public static class MarkdownMathHealthAnalyzer
                 joined++;
             }
 
-            var stillOpen = LineEndsWithOpenInlineMath(acc);
-            if (joined > 0)
+            if (!LineEndsWithOpenInlineMath(acc))
             {
+                // The fold closed the span (a bare open line with joined == 0 is
+                // still open, so reaching here means joined > 0) — a real repair.
+                // Emit the joined line.
                 repairable++;
                 defects.Add(new MarkdownMathDefect(
                     MarkdownMathDefectKind.WrappedInlineMath,
                     startLine,
                     joined + 1,
-                    Repaired: !stillOpen,
+                    Repaired: true,
                     Preview: Preview(acc)));
+                output.Add(acc);
             }
-            else if (stillOpen)
+            else
             {
-                // A line that opens a span with nothing to join into (genuine
-                // missing delimiter) — report, but we cannot safely auto-fix.
+                // Still open after folding (or nothing to fold): a genuinely
+                // missing delimiter the join cannot close. Report it exactly ONCE
+                // as unrepairable and leave the source lines byte-identical (like
+                // the unterminated \[ case). Counting it repairable (the old bug)
+                // let the banner offer a "fix" that rewrote the file by collapsing
+                // the lines WITHOUT closing the math, then — because the inflated
+                // repairable count drops to 0 on the re-scan of the joined text —
+                // hid the still-broken document. Emitting the ORIGINAL lines keeps
+                // the repair confined to spans it can actually close.
                 unrepairable++;
                 defects.Add(new MarkdownMathDefect(
                     MarkdownMathDefectKind.WrappedInlineMath,
                     startLine,
-                    1,
+                    joined + 1,
                     Repaired: false,
                     Preview: Preview(acc)));
+                for (var k = startIndex; k <= i; k++)
+                {
+                    output.Add(lines[k]);
+                }
             }
 
-            if (stillOpen && joined > 0)
-            {
-                // Folded lines but still unbalanced: count the residue as
-                // unrepairable too (the join did not fully close the span).
-                unrepairable++;
-            }
-
-            output.Add(acc);
             i++;
         }
 
