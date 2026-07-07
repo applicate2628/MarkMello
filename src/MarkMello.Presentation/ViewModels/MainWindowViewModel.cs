@@ -1186,9 +1186,30 @@ public partial class MainWindowViewModel : ObservableObject
                     break;
 
                 case UpdateCheckResult.UpdateAvailable updateAvailable:
+                    // A re-check (the periodic 5-min timer, or a manual check) that
+                    // returns the SAME release we already downloaded this session must
+                    // NOT silently discard the completed download and force a full
+                    // re-download. Preserve the downloaded path (and its ready status)
+                    // when the tag matches; only a different (newer) release resets it.
+                    var sameReleaseAlreadyDownloaded =
+                        _availableUpdatePackage is not null
+                        && string.Equals(
+                            _availableUpdatePackage.ReleaseTag,
+                            updateAvailable.Package.ReleaseTag,
+                            StringComparison.Ordinal)
+                        && !string.IsNullOrWhiteSpace(DownloadedUpdatePath);
                     _availableUpdatePackage = updateAvailable.Package;
-                    DownloadedUpdatePath = null;
-                    SetUpdateStatus(new UpdateStatusSnapshot.UpdateAvailableState(updateAvailable.Package));
+                    if (sameReleaseAlreadyDownloaded)
+                    {
+                        SetUpdateStatus(new UpdateStatusSnapshot.DownloadReadyState(
+                            updateAvailable.Package,
+                            DownloadedUpdatePath!));
+                    }
+                    else
+                    {
+                        DownloadedUpdatePath = null;
+                        SetUpdateStatus(new UpdateStatusSnapshot.UpdateAvailableState(updateAvailable.Package));
+                    }
                     break;
 
                 case UpdateCheckResult.Failed failed:

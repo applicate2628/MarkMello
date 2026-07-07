@@ -1196,6 +1196,28 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task CheckForUpdatesCommandWhenSameReleaseAlreadyDownloadedKeepsNativeAction()
+    {
+        var harness = CreateHarness();
+        var package = CreateUpdatePackage();
+        var downloadedPath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", package.AssetName);
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
+        harness.UpdateService.NextDownloadResult = new UpdateDownloadResult.Success(package, downloadedPath);
+
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+        await harness.ViewModel.DownloadUpdateCommand.ExecuteAsync(null);
+
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+
+        Assert.Equal(downloadedPath, harness.ViewModel.DownloadedUpdatePath);
+        Assert.Equal("Update ready", harness.ViewModel.UpdateStatusTitle);
+        Assert.False(harness.ViewModel.CanDownloadAvailableUpdate);
+        Assert.True(harness.ViewModel.CanOpenDownloadedUpdate);
+        Assert.Equal("Ready", harness.ViewModel.UpdateStateBadge);
+    }
+
+    [Fact]
     public async Task DownloadUpdateCommandWhilePendingKeepsDownloadSlotVisible()
     {
         var harness = CreateHarness();
