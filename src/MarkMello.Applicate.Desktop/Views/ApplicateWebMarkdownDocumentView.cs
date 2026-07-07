@@ -1263,6 +1263,16 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             {
                 if (rendererCacheKey is not null)
                 {
+                    // Bound the dedup set: this view is a process-lifetime singleton, so
+                    // without a cap the set grows for every distinct (theme, doc,
+                    // body-hash) forever. A dropped key only costs one redundant full
+                    // re-post (the renderer treats a cache miss as a full load), so
+                    // clearing at the cap is safe -- it is an optimization, not state.
+                    if (_postedRendererDocumentCacheKeys.Count >= 512)
+                    {
+                        _postedRendererDocumentCacheKeys.Clear();
+                    }
+
                     _postedRendererDocumentCacheKeys.Add(rendererCacheKey);
                 }
 
@@ -1293,6 +1303,16 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             {
                 if (rendererCacheKey is not null)
                 {
+                    // Bound the dedup set: this view is a process-lifetime singleton, so
+                    // without a cap the set grows for every distinct (theme, doc,
+                    // body-hash) forever. A dropped key only costs one redundant full
+                    // re-post (the renderer treats a cache miss as a full load), so
+                    // clearing at the cap is safe -- it is an optimization, not state.
+                    if (_postedRendererDocumentCacheKeys.Count >= 512)
+                    {
+                        _postedRendererDocumentCacheKeys.Clear();
+                    }
+
                     _postedRendererDocumentCacheKeys.Add(rendererCacheKey);
                 }
 
