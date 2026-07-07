@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using MarkMello.Application.UseCases;
 using MarkMello.Domain.Diagnostics;
 
 namespace MarkMello.Presentation.ViewModels;
@@ -121,7 +122,20 @@ public partial class MainWindowViewModel
                 // Back up the original next to the file BEFORE overwriting, so the
                 // repair is reversible without relying on version control.
                 await _saveDocument.SaveBackupAsync(path + ".bak", liveText).ConfigureAwait(true);
-                await _saveDocument.ExecuteAsync(path, result.RepairedText).ConfigureAwait(true);
+                var saveResult = await _saveDocument
+                    .ExecuteAsync(path, result.RepairedText)
+                    .ConfigureAwait(true);
+                if (saveResult is not SaveDocumentResult.Success)
+                {
+                    // The write failed (I/O, permissions, invalid path). ExecuteAsync
+                    // maps those to a typed failure instead of throwing, so ignoring
+                    // its result would treat a failed save as success — dismissing
+                    // the banner and reloading a file that still holds the UNREPAIRED
+                    // content. Bail so the banner stays up (the document was not
+                    // fixed) and nothing reloads, exactly like the backup-throw path
+                    // in the catch below.
+                    return;
+                }
             }
 
             IsDocumentHealthDismissed = true;

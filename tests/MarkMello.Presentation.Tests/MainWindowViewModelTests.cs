@@ -1563,6 +1563,33 @@ public sealed class MainWindowViewModelTests
             ArchitectureName: "x64",
             InstallAction: AppUpdateInstallAction.LaunchInstaller);
 
+    [Fact]
+    public async Task DocumentHealthFixThatFailsToWriteKeepsBannerAndDoesNotClaimSuccess()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "health.md");
+        // A hard-wrapped inline $…$ span — a repairable math defect.
+        harness.Loader.Sources[path] = CreateSource(path, "Note $a =\nb$ tail\n");
+
+        await harness.ViewModel.OpenPathAsync(path);
+        harness.ViewModel.AnalyzeCurrentDocumentHealth();
+        Assert.True(harness.ViewModel.IsDocumentHealthBannerVisible);
+
+        // Backup succeeds; the main document write fails (disk full / permissions).
+        harness.DocumentSaver.ThrowFor = savePath =>
+            savePath.EndsWith(".bak", StringComparison.Ordinal)
+                ? null
+                : new IOException("disk full");
+
+        await harness.ViewModel.ApplyDocumentHealthFixCommand.ExecuteAsync(null);
+
+        // A failed write must NOT be reported as success: the banner stays up so
+        // the user knows the document was not repaired, and the main file was
+        // never written (only the ".bak" backup is recorded).
+        Assert.True(harness.ViewModel.IsDocumentHealthBannerVisible);
+        Assert.DoesNotContain(harness.DocumentSaver.Saves, save => save.Path == path);
+    }
+
     private static TestHarness CreateHarness(
         IRendererReadinessService? rendererReadiness = null,
         IMarkdownDocumentRenderer? markdownRenderer = null)

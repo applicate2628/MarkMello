@@ -11,8 +11,20 @@ internal sealed class RecordingDocumentSaver : IDocumentSaver
 
     public Exception? NextException { get; set; }
 
+    /// <summary>
+    /// Optional per-path failure: return an exception to make <see cref="SaveAsync"/>
+    /// throw for that path, or null to let it succeed. Lets a test fail one write
+    /// (e.g. the main document) while another (e.g. the ".bak" backup) succeeds.
+    /// </summary>
+    public Func<string, Exception?>? ThrowFor { get; set; }
+
     public Task SaveAsync(string path, string content, CancellationToken cancellationToken = default)
     {
+        if (ThrowFor?.Invoke(path) is Exception pathException)
+        {
+            return Task.FromException(pathException);
+        }
+
         if (NextException is Exception exception)
         {
             NextException = null;
