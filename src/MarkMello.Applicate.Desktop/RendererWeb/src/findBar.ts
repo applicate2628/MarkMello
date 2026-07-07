@@ -128,6 +128,49 @@ function makeHighlight(ranges: Range[]): unknown | null {
 }
 
 /**
+ * Case-insensitive match offsets for `needle` within `haystack`, returned as
+ * [start, end) index pairs that are VALID in `haystack` (the ORIGINAL string) —
+ * so a caller may pass them straight to `Range.setStart`/`setEnd` on the text
+ * node whose value is `haystack`.
+ *
+ * `String.prototype.toLowerCase()` can change a string's length: 'İ' (U+0130,
+ * common in Turkish text) lowercases to 'i̇' (two code units), and other locale
+ * expansions exist. The old code computed `indexOf` offsets in the LOWERCASED
+ * text and applied them to the ORIGINAL DOM text node; once a length-expanding
+ * character preceded a match, the offset overshot the node length and
+ * `setEnd` threw `IndexSizeError`, which propagated out of the search and broke
+ * find entirely (no try/catch on the build path).
+ *
+ * When lowercasing preserves the length (all ASCII and the overwhelming
+ * majority of real text) the lowercased offset IS the original offset — the
+ * fast path. When it does not, a lowercased offset has no unambiguous original
+ * mapping, so those matches are skipped rather than mis-placed or thrown — a
+ * bounded, documented limitation like the cross-text-node-boundary one above.
+ */
+export function findCaseInsensitiveMatchOffsets(
+  haystack: string,
+  needle: string
+): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  if (needle.length === 0) {
+    return out;
+  }
+  const lowered = needle.toLowerCase();
+  const text = haystack.toLowerCase();
+  // Skip when lowercasing changed the length (offsets would be invalid in the
+  // original node) or the node is shorter than the needle.
+  if (text.length !== haystack.length || text.length < lowered.length) {
+    return out;
+  }
+  let idx = text.indexOf(lowered);
+  while (idx !== -1) {
+    out.push([idx, idx + lowered.length]);
+    idx = text.indexOf(lowered, idx + lowered.length);
+  }
+  return out;
+}
+
+/**
  * Build an ordered list of match Ranges for `needle` under `root`. Document
  * order, case-insensitive, per-text-node (a match spanning a text-node boundary
  * — e.g. a word split by an inline element — is not found; pre-existing
@@ -138,7 +181,6 @@ export function buildMatches(root: Node, needle: string): Range[] {
   if (needle.length === 0) {
     return out;
   }
-  const lowered = needle.toLowerCase();
 
   const walker = document.createTreeWalker(
     root,
@@ -166,17 +208,14 @@ export function buildMatches(root: Node, needle: string): Range[] {
   );
 
   for (let cur = walker.nextNode(); cur !== null; cur = walker.nextNode()) {
-    const text = (cur.nodeValue ?? "").toLowerCase();
-    if (text.length < lowered.length) {
-      continue;
-    }
-    let idx = text.indexOf(lowered);
-    while (idx !== -1) {
+    // Offsets come back valid in cur.nodeValue (the ORIGINAL text), so setStart/
+    // setEnd can never overshoot the node — the old lowercased-offset math threw
+    // IndexSizeError on text containing length-expanding characters (e.g. 'İ').
+    for (const [start, end] of findCaseInsensitiveMatchOffsets(cur.nodeValue ?? "", needle)) {
       const range = document.createRange();
-      range.setStart(cur, idx);
-      range.setEnd(cur, idx + lowered.length);
+      range.setStart(cur, start);
+      range.setEnd(cur, end);
       out.push(range);
-      idx = text.indexOf(lowered, idx + lowered.length);
     }
   }
 

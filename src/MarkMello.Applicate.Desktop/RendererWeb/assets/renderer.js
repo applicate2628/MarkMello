@@ -780,12 +780,28 @@
     }
     return new ctor(...ranges);
   }
-  function buildMatches(root, needle) {
+  function findCaseInsensitiveMatchOffsets(haystack, needle) {
     const out = [];
     if (needle.length === 0) {
       return out;
     }
     const lowered = needle.toLowerCase();
+    const text = haystack.toLowerCase();
+    if (text.length !== haystack.length || text.length < lowered.length) {
+      return out;
+    }
+    let idx = text.indexOf(lowered);
+    while (idx !== -1) {
+      out.push([idx, idx + lowered.length]);
+      idx = text.indexOf(lowered, idx + lowered.length);
+    }
+    return out;
+  }
+  function buildMatches(root, needle) {
+    const out = [];
+    if (needle.length === 0) {
+      return out;
+    }
     const walker = document.createTreeWalker(
       root,
       NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
@@ -811,17 +827,11 @@
       }
     );
     for (let cur = walker.nextNode(); cur !== null; cur = walker.nextNode()) {
-      const text = (cur.nodeValue ?? "").toLowerCase();
-      if (text.length < lowered.length) {
-        continue;
-      }
-      let idx = text.indexOf(lowered);
-      while (idx !== -1) {
+      for (const [start, end] of findCaseInsensitiveMatchOffsets(cur.nodeValue ?? "", needle)) {
         const range = document.createRange();
-        range.setStart(cur, idx);
-        range.setEnd(cur, idx + lowered.length);
+        range.setStart(cur, start);
+        range.setEnd(cur, end);
         out.push(range);
-        idx = text.indexOf(lowered, idx + lowered.length);
       }
     }
     return out;
