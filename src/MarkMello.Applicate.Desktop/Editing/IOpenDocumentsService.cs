@@ -59,6 +59,15 @@ public interface IOpenDocumentsService
 
     void Activate(OpenDocument document);
 
+    /// <summary>
+    /// Clear the active document (no open file is active) WITHOUT closing
+    /// anything — used when a session-only untitled document owns the window, so
+    /// the tabs strip shows no highlighted file tab. Fires
+    /// <see cref="ActiveDocumentChanged"/> with a null document; no-op when the
+    /// active document is already null.
+    /// </summary>
+    void ClearActive();
+
     void Close(OpenDocument document);
 
     /// <summary>

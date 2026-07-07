@@ -148,6 +148,8 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
         SetActive(document);
     }
 
+    public void ClearActive() => SetActive(null);
+
     public void Close(OpenDocument document)
     {
         ArgumentNullException.ThrowIfNull(document);

@@ -2417,6 +2417,20 @@ public sealed class ApplicateMainWindow : MainWindow
         // tab strip back and leave tabs/editor split-brained).
         OpenDocument? pendingDirtySwitchTarget = null;
 
+        // Last non-null active FILE path — preserved so a session save while a
+        // session-only untitled owns the window (ActiveDocument cleared to null)
+        // still records the last real file to restore, not the first tab.
+        string? lastActivePath = null;
+
+        // A session-only untitled document (created by Ctrl+N) owns the window:
+        // VM.Document is null (no file rendered) AND the editor session is the
+        // untitled one (CurrentPath is null — set to a real path only on load/
+        // save). In this state no OPEN FILE is active, so the null-mirror must not
+        // treat the Document clear as a tab close, and no file tab may stay
+        // highlighted.
+        bool UntitledSessionOwnsWindow()
+            => viewModel.Document is null && viewModel.EditorSession is { CurrentPath: null };
+
         static double NormalizeScrollProgress(double progress)
             => double.IsFinite(progress) ? System.Math.Clamp(progress, 0, 100) : 0;
 
@@ -2444,6 +2458,14 @@ public sealed class ApplicateMainWindow : MainWindow
             {
                 if (args.ActiveDocument is null)
                 {
+                    // A session-only untitled document owns the window: clearing
+                    // the active FILE tab is NOT a close — do not run CloseFile
+                    // (which would destroy the untitled draft). Just let the tabs
+                    // strip show no highlighted file tab.
+                    if (UntitledSessionOwnsWindow())
+                    {
+                        return;
+                    }
                     if (viewModel.CloseFileCommand.CanExecute(null))
                     {
                         viewModel.CloseFileCommand.Execute(null);
@@ -2470,6 +2492,26 @@ public sealed class ApplicateMainWindow : MainWindow
                         try
                         {
                             openDocs.Activate(editorDoc);
+                        }
+                        finally
+                        {
+                            inVmMirror = false;
+                        }
+                    }
+                    else if (editorDoc is null
+                        && UntitledSessionOwnsWindow()
+                        && openDocs.ActiveDocument is not null)
+                    {
+                        // Same click, but the editor holds a session-only untitled
+                        // (no path -> editorDoc null): there is no file tab to snap
+                        // back to, so clear the active file instead. Otherwise the
+                        // tab the user just clicked stays highlighted over the
+                        // untitled for the whole time the prompt is open. Same
+                        // inVmMirror latch as the snap-back above.
+                        inVmMirror = true;
+                        try
+                        {
+                            openDocs.ClearActive();
                         }
                         finally
                         {
@@ -2574,6 +2616,33 @@ public sealed class ApplicateMainWindow : MainWindow
                     // instead of silently overwriting the draft. The service
                     // already committed the click, so Cancel snaps the tab
                     // strip back to the previous document.
+                    //
+                    // When a DIRTY session-only untitled owns the window, that
+                    // queued prompt leaves the just-clicked file tab highlighted
+                    // over the untitled for the whole time it is open. Clear the
+                    // active file first so no tab is highlighted behind the draft.
+                    // Gate on IsDirty (mirrors the VM's private
+                    // RequiresDirtyResolution = IsEditMode && EditorSession.IsDirty):
+                    // a CLEAN untitled switches immediately with no prompt, and an
+                    // unconditional clear there would add a null->target
+                    // double-Rebuild flicker on every clean switch. Hold the
+                    // inVmMirror latch (as P1/P2/P4 do) so this null activation does
+                    // not re-enter the handler and reach the CloseFile branch.
+                    if (UntitledSessionOwnsWindow()
+                        && viewModel.EditorSession.IsDirty
+                        && openDocs.ActiveDocument is not null)
+                    {
+                        inVmMirror = true;
+                        try
+                        {
+                            openDocs.ClearActive();
+                        }
+                        finally
+                        {
+                            inVmMirror = false;
+                        }
+                    }
+
                     pendingDirtySwitchTarget = target;
                     await viewModel.RequestDocumentSwitchWithDirtyCheckAsync(
                         () =>
@@ -2625,11 +2694,33 @@ public sealed class ApplicateMainWindow : MainWindow
                         },
                         onCancel: () =>
                         {
-                            // User kept the draft: editor stays on `previous`,
-                            // so the tab strip must revert to it as well.
+                            // User kept the draft: the editor stays on `previous`,
+                            // so the tab strip must revert to it as well. When an
+                            // untitled session owns the window there is NO `previous`
+                            // file to revert to (CurrentPath is null) — clear the
+                            // active file instead, so the tab the user clicked does
+                            // not stay highlighted behind the kept untitled draft.
                             pendingDirtySwitchTarget = null;
-                            if (previous is null
-                                || ReferenceEquals(openDocs.ActiveDocument, previous))
+                            if (previous is null)
+                            {
+                                if (UntitledSessionOwnsWindow()
+                                    && openDocs.ActiveDocument is not null)
+                                {
+                                    inVmMirror = true;
+                                    try
+                                    {
+                                        openDocs.ClearActive();
+                                    }
+                                    finally
+                                    {
+                                        inVmMirror = false;
+                                    }
+                                }
+
+                                return;
+                            }
+
+                            if (ReferenceEquals(openDocs.ActiveDocument, previous))
                             {
                                 return;
                             }
@@ -2733,13 +2824,38 @@ public sealed class ApplicateMainWindow : MainWindow
                 // VM keeps its document and this branch is never entered.
                 Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
                 {
-                    // CreateNewDocument also clears VM.Document (before it installs
-                    // the new untitled EditorSession), but that is NOT a tab close:
-                    // the untitled session now owns the window. By the time this
-                    // posted lambda runs, a real CloseFile has left EditorSession
-                    // null, while CreateNewDocument has set it to the untitled
-                    // session. Mirroring a close here would close the active tab
-                    // and destroy the just-created untitled draft (audit H3 family).
+                    // CreateNewDocument (Ctrl+N) also clears VM.Document before it
+                    // installs the untitled EditorSession, but a session-only
+                    // untitled now owns the window — NOT a close. Clear the active
+                    // FILE tab (so none stays highlighted while the editor shows
+                    // the untitled) WITHOUT closing, then bail.
+                    //
+                    // Snapshot/restore inVmMirror rather than forcing it false: a
+                    // concurrent Save-As mirror (the non-null-Document branch
+                    // below) may be parked on an await while holding this same
+                    // latch (dirty untitled -> Ctrl+N -> Save-As posts that mirror
+                    // FIRST, then this one). Clobbering the latch to false would let
+                    // that mirror's post-await SetActive re-enter UNSUPPRESSED and
+                    // swallow the freshly-created untitled draft.
+                    if (UntitledSessionOwnsWindow())
+                    {
+                        var priorMirror = inVmMirror;
+                        inVmMirror = true;
+                        try
+                        {
+                            openDocs.ClearActive();
+                        }
+                        finally
+                        {
+                            inVmMirror = priorMirror;
+                        }
+                        return;
+                    }
+
+                    // Defensive: a real CloseFile leaves EditorSession null before
+                    // it nulls Document, so this never fires today; kept so any
+                    // future Document-null-with-a-live-session path is still not
+                    // read as a tab close.
                     if (viewModel.EditorSession is not null)
                     {
                         return;
@@ -2862,6 +2978,16 @@ public sealed class ApplicateMainWindow : MainWindow
                         {
                             // File became unreadable between VM load and service mirror.
                         }
+
+                        // While this save-mirror was parked on the file read, a
+                        // Ctrl+N may have installed a session-only untitled that now
+                        // owns the window. OpenAsync's own activation is stale in
+                        // that case — re-clear so no file tab stays highlighted over
+                        // the untitled editor (suppressed via the latch held here).
+                        if (UntitledSessionOwnsWindow())
+                        {
+                            openDocs.ClearActive();
+                        }
                     }
                     else if (!ReferenceEquals(known, openDocs.ActiveDocument)
                         && (pendingDirtySwitchTarget is null
@@ -2902,16 +3028,38 @@ public sealed class ApplicateMainWindow : MainWindow
                 return;
             }
 
+            var openPaths = openDocs.OpenDocuments.Select(d => d.FilePath).ToList();
+            // ActivePath must ALWAYS be an OPEN path (or null). Guard BOTH inputs:
+            //  - ActiveDocument may briefly still point at a just-removed file
+            //    (Close removes the doc from OpenDocuments — firing this
+            //    CollectionChanged save — BEFORE it re-points ActiveDocument);
+            //  - the last-active-file fallback restores the last-viewed file after a
+            //    session-only untitled owns the window (Ctrl+N leaves the file tabs
+            //    open), but must not resurrect a file that was closed.
+            // A dangling ActivePath with empty OpenPaths would make the next startup
+            // hold the reveal gate for a doc that never restores (15s fallback).
+            string? PathIfStillOpen(string? path)
+                => path is not null && openPaths.Contains(path, System.StringComparer.OrdinalIgnoreCase)
+                    ? path
+                    : null;
             var snapshot = new ApplicateSession
             {
-                OpenPaths = openDocs.OpenDocuments.Select(d => d.FilePath).ToList(),
-                ActivePath = openDocs.ActiveDocument?.FilePath,
+                OpenPaths = openPaths,
+                ActivePath = PathIfStillOpen(openDocs.ActiveDocument?.FilePath)
+                    ?? PathIfStillOpen(lastActivePath),
             };
             _ = sessionStore.SaveAsync(snapshot).AsTask();
         }
 
         ((INotifyCollectionChanged)openDocs.OpenDocuments).CollectionChanged += (_, _) => SaveSession();
-        openDocs.ActiveDocumentChanged += (_, _) => SaveSession();
+        openDocs.ActiveDocumentChanged += (_, _) =>
+        {
+            if (openDocs.ActiveDocument is not null)
+            {
+                lastActivePath = openDocs.ActiveDocument.FilePath;
+            }
+            SaveSession();
+        };
 
         Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
         {
