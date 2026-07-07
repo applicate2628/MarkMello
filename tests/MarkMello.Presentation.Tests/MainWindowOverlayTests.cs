@@ -513,13 +513,13 @@ public sealed class MainWindowOverlayTests
             "MarkMello.Applicate.Desktop",
             "ApplicateMainWindow.cs"));
 
-        var coordinatorStart = applicateWindowCode.IndexOf(
-            "new ApplicateDocumentSwitchRevealCoordinator(",
+        var compositorStart = applicateWindowCode.IndexOf(
+            "new ApplicateAirspaceCompositor(",
             StringComparison.Ordinal);
 
-        Assert.True(coordinatorStart >= 0, "document-switch reveal coordinator should be wired.");
-        var coordinatorBlock = applicateWindowCode[coordinatorStart..];
-        Assert.Contains("siblingPanel,", coordinatorBlock, StringComparison.Ordinal);
-        Assert.DoesNotContain("_tocContentGrid,", coordinatorBlock, StringComparison.Ordinal);
+        Assert.True(compositorStart >= 0, "document-switch reveal compositor should be wired.");
+        var compositorBlock = applicateWindowCode[compositorStart..];
+        Assert.Contains("new ApplicateAirspaceCompositor(siblingPanel, viewModel)", compositorBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("_tocContentGrid,", compositorBlock, StringComparison.Ordinal);
     }
 }

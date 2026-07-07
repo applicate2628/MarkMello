@@ -32,13 +32,13 @@ public sealed class ApplicateWebHostMessagingTests
         "src",
         "renderer.ts");
 
-    private static readonly string DocumentSwitchRevealCoordinatorSourcePath = Path.Combine(
+    private static readonly string AirspaceCompositorSourcePath = Path.Combine(
         AppContext.BaseDirectory,
         "..", "..", "..", "..", "..",
         "src",
         "MarkMello.Applicate.Desktop",
         "Rendering",
-        "ApplicateDocumentSwitchRevealCoordinator.cs");
+        "ApplicateAirspaceCompositor.cs");
 
     private static readonly string ThemeSwitchRevealCoordinatorSourcePath = Path.Combine(
         AppContext.BaseDirectory,
@@ -360,7 +360,7 @@ public sealed class ApplicateWebHostMessagingTests
     public void DocumentSwitchCoverWaitsForPostReadyRevealSignal()
     {
         var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
-        var coordinatorSource = File.ReadAllText(DocumentSwitchRevealCoordinatorSourcePath);
+        var compositorSource = File.ReadAllText(AirspaceCompositorSourcePath);
         var rendererSource = File.ReadAllText(RendererSourcePath);
         var completeLayoutReady = ExtractMethodBody(viewSource, "private void CompleteLayoutReady()");
         var completeDocumentRenderVisualReady = ExtractMethodBody(viewSource, "private void CompleteDocumentRenderVisualReady()");
@@ -375,19 +375,24 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("RevealNativeDocument(TimeSpan.Zero);", completeDocumentRenderVisualReady, StringComparison.Ordinal);
         Assert.Contains("DocumentRendered?.Invoke", completeDocumentRenderVisualReady, StringComparison.Ordinal);
 
-        Assert.Contains("_host.View.DocumentRevealReady += OnDocumentRevealReady;", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("ApplicateMode _mode", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("e.Mode != _mode", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("clearHeadingsOnRendererFailure", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("skipInitialCoverSession", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("_skipNextCoverSession", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("_skipNextDocumentChangeCover", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("\"doc-switch-cover-skipped\"", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("_commitCompletedForCover", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("_documentRevealReadyForCover", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("TryHideCoverAfterCommitAndRevealReady()", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("ApplicateMotion.ModeSwitchDuration(_viewModel.ReadingPreferences)", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("_cover.Hide(duration)", coordinatorSource, StringComparison.Ordinal);
+        Assert.Contains("_host.View.DocumentRevealReady += value;", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_signals.DocumentRevealReady += OnDocumentRevealReady;", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("ApplicateMode _mode", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("e.Mode != _mode", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("clearHeadingsOnRendererFailure", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("skipInitialCoverSession", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_skipNextCoverSession", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_skipNextDocumentChangeCover", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("\"doc-switch-cover-skipped\"", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("\"doc-switch-cover-shown\"", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("\"doc-switch-cover-hidden\"", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("\"doc-switch-cover-deferred\"", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("\"doc-switch-cover-fallback\"", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_commitCompletedForCover", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_documentRevealReadyForCover", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("TryHideCoverAfterCommitAndRevealReady()", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("ApplicateMotion.ModeSwitchDuration(_documentState.ReadingPreferences)", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_cover.Hide(duration)", compositorSource, StringComparison.Ordinal);
 
         Assert.Contains("postReadyEnhancementsCompleted", rendererSource, StringComparison.Ordinal);
         Assert.Contains("post-ready-enhancements-complete", rendererSource, StringComparison.Ordinal);

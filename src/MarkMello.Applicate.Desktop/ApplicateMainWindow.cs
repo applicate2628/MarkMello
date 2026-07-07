@@ -76,8 +76,7 @@ public sealed class ApplicateMainWindow : MainWindow
     private Panel? _tabsContentPanel;
     private ApplicateSiblingMountBridge? _siblingMountBridge;
     private ApplicateModeTransactionHostRouter? _modeTransactionHostRouter;
-    private ApplicateDocumentSwitchRevealCoordinator? _viewerDocumentSwitchRevealCoordinator;
-    private ApplicateDocumentSwitchRevealCoordinator? _editDocumentSwitchRevealCoordinator;
+    private ApplicateAirspaceCompositor? _airspaceCompositor;
     private ApplicateThemeSwitchRevealCoordinator? _viewerThemeSwitchRevealCoordinator;
     private ApplicateThemeSwitchRevealCoordinator? _editThemeSwitchRevealCoordinator;
     private readonly ApplicateMountPoints _mountPoints;
@@ -1580,16 +1579,16 @@ public sealed class ApplicateMainWindow : MainWindow
             transactionHost: _modeTransactionHostRouter,
             modeRevealCoverHost: siblingPanel);
 
-        // Atomic reveal for viewer DOCUMENT switches (tab change, startup,
-        // reload): hold a solid cover over the document slot until the new
-        // document has committed and painted. The TOC column stays visible and
-        // swaps its row model in place.
+        // Atomic reveal for DOCUMENT switches (tab change, startup, reload):
+        // the airspace compositor holds a solid cover over the document slot
+        // until the new document has committed and painted. The TOC column
+        // stays visible and swaps its row model in place.
+        _airspaceCompositor?.Dispose();
+        _airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel);
         if (viewerHostForMode is not null)
         {
-            _viewerDocumentSwitchRevealCoordinator = new ApplicateDocumentSwitchRevealCoordinator(
-                siblingPanel,
+            _airspaceCompositor.RegisterDocumentSession(
                 viewerHostForMode,
-                viewModel,
                 ApplicateMode.Viewer,
                 // Reader surface only: IsViewer is `State == Viewing`, which is
                 // also true in edit mode (edit is a sub-mode of Viewing).
@@ -1603,10 +1602,8 @@ public sealed class ApplicateMainWindow : MainWindow
         }
         if (editHost is not null)
         {
-            _editDocumentSwitchRevealCoordinator = new ApplicateDocumentSwitchRevealCoordinator(
-                siblingPanel,
+            _airspaceCompositor.RegisterDocumentSession(
                 editHost,
-                viewModel,
                 ApplicateMode.Edit,
                 () => viewModel.IsViewer && viewModel.IsEditMode,
                 clearHeadingsOnRendererFailure: false,
@@ -2185,10 +2182,8 @@ public sealed class ApplicateMainWindow : MainWindow
 
     private void OnApplicateMainWindowClosed(object? sender, EventArgs e)
     {
-        _viewerDocumentSwitchRevealCoordinator?.Dispose();
-        _viewerDocumentSwitchRevealCoordinator = null;
-        _editDocumentSwitchRevealCoordinator?.Dispose();
-        _editDocumentSwitchRevealCoordinator = null;
+        _airspaceCompositor?.Dispose();
+        _airspaceCompositor = null;
         _viewerThemeSwitchRevealCoordinator?.Dispose();
         _viewerThemeSwitchRevealCoordinator = null;
         _editThemeSwitchRevealCoordinator?.Dispose();
