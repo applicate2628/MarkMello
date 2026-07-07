@@ -983,16 +983,23 @@ async function renderMermaidNodes(
   installLazyMermaidObserver(lazyNodes, generation, mermaid);
   if (eagerNodes.length === 0) return;
 
+  // Budget the EAGER batch's wall-clock. When it expires we stop starting new
+  // eager renders — but we must NOT bump mermaidRenderGeneration. The lazy
+  // IntersectionObserver installed just above holds THIS generation; bumping it
+  // makes every not-yet-scrolled lazy diagram abort as stale in
+  // enqueueLazyMermaidRender, so a document whose eager batch is slow (watchdog
+  // fires) would silently never render its lazy diagrams. A local flag stops the
+  // eager loop while leaving the lazy generation — and any in-flight render,
+  // already bounded by its own per-diagram timeout — intact.
+  let eagerBudgetExpired = false;
   const watchdog = window.setTimeout(() => {
-    if (generation === mermaidRenderGeneration) {
-      ++mermaidRenderGeneration;
-    }
+    eagerBudgetExpired = true;
   }, MERMAID_WATCHDOG_MS);
 
   try {
     for (const node of eagerNodes) {
       await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
-      if (generation !== mermaidRenderGeneration) return;
+      if (eagerBudgetExpired || generation !== mermaidRenderGeneration) return;
     }
   } finally {
     window.clearTimeout(watchdog);

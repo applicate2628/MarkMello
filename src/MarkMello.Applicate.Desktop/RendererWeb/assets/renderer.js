@@ -1862,15 +1862,14 @@
     });
     installLazyMermaidObserver(lazyNodes, generation, mermaid);
     if (eagerNodes.length === 0) return;
+    let eagerBudgetExpired = false;
     const watchdog = window.setTimeout(() => {
-      if (generation === mermaidRenderGeneration) {
-        ++mermaidRenderGeneration;
-      }
+      eagerBudgetExpired = true;
     }, MERMAID_WATCHDOG_MS);
     try {
       for (const node of eagerNodes) {
         await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
-        if (generation !== mermaidRenderGeneration) return;
+        if (eagerBudgetExpired || generation !== mermaidRenderGeneration) return;
       }
     } finally {
       window.clearTimeout(watchdog);
