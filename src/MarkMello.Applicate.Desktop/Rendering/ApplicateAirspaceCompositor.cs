@@ -1624,7 +1624,29 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
                 HideModeRevealCover();
             }
 
-            ApplyTransactionalSlotStates();
+            try
+            {
+                ApplyTransactionalSlotStates();
+            }
+            catch (Exception reconcileSlotEx)
+            {
+                // Same invariant on another return path (all-return-paths discipline):
+                // when generation > 0 the outgoing native was just suppressed above; an
+                // unguarded throw would strand it hidden. Roll back so the outgoing
+                // native is visible, then return true so we do NOT fall through to the
+                // legacy slot path, which would re-drive the same throwing adapter
+                // outside the transaction (a rethrow that can take down the dispatcher).
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "bridge-transaction-reconcile-slot-failed",
+                    $"generation={generation} target={requestedMode.Value} exceptionType={reconcileSlotEx.GetType().Name}");
+                RollbackActiveModeTransaction(
+                    reason: "reconcile-slot-failed",
+                    committedRollbackMode: outgoingMode,
+                    applyOutgoingSlotState: true);
+                return true;
+            }
+
             TryApplyLayoutSettledForActiveTransaction();
             ApplicateTrace.DiagMs(
                 "pane-seq",
@@ -1940,7 +1962,29 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
                 return;
             }
 
-            ApplyCommittedModeSlotStates(mode);
+            try
+            {
+                ApplyCommittedModeSlotStates(mode);
+            }
+            catch (Exception commitSlotEx)
+            {
+                // Symmetric with the rollback-path hardening (219870f): this commit
+                // slot write runs while the outgoing native is still suppressed and
+                // before the cover hides. An unguarded throw would skip the reveal +
+                // cover hide and leave a stuck blank with no fallback timer. Route to
+                // the same rollback the rejected-reveal branch uses so a visible native
+                // is restored before anything uncovers.
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "bridge-transaction-commit-slot-failed",
+                    $"generation={generation} mode={mode} exceptionType={commitSlotEx.GetType().Name}");
+                RollbackActiveModeTransaction(
+                    reason: "commit-slot-failed",
+                    committedRollbackMode: _suppressedOutgoingMode,
+                    applyOutgoingSlotState: true);
+                return;
+            }
+
             if (!_hostRevealIntents.RevealNativeRendererForCommittedTransaction(generation))
             {
                 ApplicateTrace.DiagMs(

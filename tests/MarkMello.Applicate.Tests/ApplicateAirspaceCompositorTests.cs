@@ -617,6 +617,90 @@ public sealed class ApplicateAirspaceCompositorTests
     }
 
     [Fact]
+    public void ModeSessionRollsBackOutgoingBeforeCoverHideWhenCommitPathSlotWriteThrows()
+    {
+        // Symmetric with the rollback-path fix (219870f): if the commit-SUCCESS slot
+        // write (ApplyCommittedModeSlotStates for the TARGET mode) throws while the
+        // outgoing native is suppressed and before the cover hides, the compositor must
+        // roll back to a visible outgoing native instead of hiding the cover over a
+        // stuck blank with no fallback timer.
+        var state = new FakeDocumentRevealState();
+        var events = new List<string>();
+        var slotAdapter = new FakeModeSlotAdapter(events);
+        var host = new FakeModeHostRevealIntents(slotAdapter.RevealSnapshot, events);
+        var covers = new FakeCoverFactory(events);
+        var scheduler = new FakeAirspaceScheduler();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            new FakePaintGate(),
+            scheduler);
+        using var modeSession = compositor.RegisterModeSession(
+            host,
+            slotAdapter,
+            () => ReadingPreferences.Default);
+
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        scheduler.Flush();
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        var generation = slotAdapter.EditGeneration;
+
+        host.RaiseCommitCompleted(generation, ApplicateMode.Edit);
+        host.RaiseMinimapSettledNotApplicable(generation);
+        // Fail the commit-path slot write, applied for the TARGET mode (Edit). The
+        // rollback then applies the outgoing mode (Viewer), which does NOT throw.
+        slotAdapter.ThrowApplyCommittedModeStateForMode = ApplicateMode.Edit;
+        host.RaiseRendererSettled(generation);
+        scheduler.Flush();
+
+        Assert.Contains("slot-committed-throw:Edit", events);
+        Assert.Equal(new[] { ApplicateMode.Viewer }, host.RestoredModes);
+        var restore = events.LastIndexOf("restore:Viewer");
+        var hide = events.LastIndexOf("cover-hide:immediate");
+        Assert.True(restore >= 0);
+        Assert.True(hide > restore);
+    }
+
+    [Fact]
+    public void ModeSessionRollsBackAndStaysTrueWhenReconcileSlotWriteThrows()
+    {
+        // The reconcile slot write (ApplyTransactionalSlotStates) runs right after the
+        // outgoing native is suppressed. A throw there must roll back to a visible
+        // native AND return true so TryReconcile does not fall through to the legacy
+        // slot path (which would re-drive the same throwing adapter outside the
+        // transaction).
+        var state = new FakeDocumentRevealState();
+        var events = new List<string>();
+        var slotAdapter = new FakeModeSlotAdapter(events);
+        var host = new FakeModeHostRevealIntents(slotAdapter.RevealSnapshot, events);
+        var covers = new FakeCoverFactory(events);
+        var scheduler = new FakeAirspaceScheduler();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            new FakePaintGate(),
+            scheduler);
+        using var modeSession = compositor.RegisterModeSession(
+            host,
+            slotAdapter,
+            () => ReadingPreferences.Default);
+
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        scheduler.Flush();
+
+        // The next reconcile opens the real transaction (suppresses outgoing) and then
+        // applies the transactional slot state — fail exactly that write.
+        slotAdapter.ThrowOnApplyTransactionalModeState = true;
+        var result = modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true);
+
+        Assert.True(result);
+        Assert.Contains("slot-transaction-throw:Edit", events);
+        Assert.Equal(new[] { ApplicateMode.Viewer }, host.RestoredModes);
+    }
+
+    [Fact]
     public void ModePolicyLivesInCompositorAndBridgeIsOnlySlotAdapter()
     {
         var compositor = File.ReadAllText(AirspaceCompositorSourcePath);
@@ -859,11 +943,19 @@ public sealed class ApplicateAirspaceCompositorTests
             _events?.Add("generation:clear");
         }
 
+        public bool ThrowOnApplyTransactionalModeState { get; set; }
+
         public void ApplyTransactionalModeState(
             ApplicateMode requestedMode,
             ApplicateModeSlotState viewer,
             ApplicateModeSlotState edit)
         {
+            if (ThrowOnApplyTransactionalModeState)
+            {
+                _events?.Add($"slot-transaction-throw:{requestedMode}");
+                throw new InvalidOperationException("transactional slot failure (test)");
+            }
+
             ViewerState = viewer;
             EditState = edit;
             _events?.Add($"slot-transaction:{requestedMode}");
