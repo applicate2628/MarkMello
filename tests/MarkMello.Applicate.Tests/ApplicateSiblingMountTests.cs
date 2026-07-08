@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.IO;
 using System.Reflection;
 using System.Threading;
@@ -7,12 +8,15 @@ using Avalonia.Controls;
 using Avalonia;
 using Avalonia.Animation;
 using Avalonia.Headless;
+using Avalonia.Styling;
 using Avalonia.Threading;
 using MarkMello.Applicate.Desktop;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views;
 using MarkMello.Applicate.Tests.Fakes;
 using MarkMello.Domain;
+using MarkMello.Presentation.Services;
+using MarkMello.Presentation.ViewModels;
 using Xunit;
 
 namespace MarkMello.Applicate.Tests;
@@ -25,6 +29,13 @@ public sealed class ApplicateSiblingMountTests
         "src",
         "MarkMello.Applicate.Desktop",
         "ApplicateSiblingMountBridge.cs");
+    private static readonly string AirspaceCompositorSourcePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..",
+        "src",
+        "MarkMello.Applicate.Desktop",
+        "Rendering",
+        "ApplicateAirspaceCompositor.cs");
     private static readonly string CoverWindowSourcePath = Path.Combine(
         AppContext.BaseDirectory,
         "..", "..", "..", "..", "..",
@@ -52,7 +63,25 @@ public sealed class ApplicateSiblingMountTests
             () => vm.EditorSession, () => vm.Document,
             () => vm.ReadingPreferences,
             viewerContent: vm,
-            hostRevealIntents: hostRevealIntents);
+            modeRevealSessionFactory: hostRevealIntents is null
+                ? null
+                : adapter => CreateModeRevealSession(hostRevealIntents, adapter, vm));
+
+    private static IApplicateModeRevealSession CreateModeRevealSession(
+        IApplicateHostRevealIntents hostRevealIntents,
+        IApplicateModeTransitionSlotAdapter adapter,
+        FakeMainWindowVm vm)
+    {
+        var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            new FakeDocumentRevealState(),
+            static () => new NoCoverPresenter(),
+            new NoopPaintGate());
+        return compositor.RegisterModeSession(
+            hostRevealIntents,
+            adapter,
+            () => vm.ReadingPreferences);
+    }
 
     [Fact]
     public void OpeningDocumentInReaderModeShowsViewerSlot()
@@ -116,6 +145,7 @@ public sealed class ApplicateSiblingMountTests
     public void StartupCoverCanShowSplashWithoutChangingTransitionShieldPath()
     {
         var bridge = File.ReadAllText(BridgeSourcePath);
+        var compositor = File.ReadAllText(AirspaceCompositorSourcePath);
         var cover = File.ReadAllText(CoverWindowSourcePath);
 
         Assert.Contains("public bool Show(Control host, ThemeVariant? themeVariant = null)", cover, StringComparison.Ordinal);
@@ -130,8 +160,8 @@ public sealed class ApplicateSiblingMountTests
         Assert.Contains("Foreground = accentBrush", cover, StringComparison.Ordinal);
         Assert.Contains("\"Preparing document...\"", cover, StringComparison.Ordinal);
         Assert.Contains("\"startup-splash\"", cover, StringComparison.Ordinal);
-        Assert.Contains("TryPrimeModeRevealCover", bridge, StringComparison.Ordinal);
-        Assert.Contains("_modeRevealCoverWindow.Show(_modeRevealCoverHost)", bridge, StringComparison.Ordinal);
+        Assert.Contains("ShowStartupSplash", compositor, StringComparison.Ordinal);
+        Assert.DoesNotContain("TryPrimeModeRevealCover", bridge, StringComparison.Ordinal);
         Assert.DoesNotContain("ShowStartupSplash", bridge, StringComparison.Ordinal);
     }
 
@@ -139,14 +169,16 @@ public sealed class ApplicateSiblingMountTests
     public void BridgeModeRevealCoverSupportsAnimatedRelease()
     {
         var bridge = File.ReadAllText(BridgeSourcePath);
+        var compositor = File.ReadAllText(AirspaceCompositorSourcePath);
         var cover = File.ReadAllText(CoverWindowSourcePath);
 
         Assert.Contains("public void Hide(TimeSpan duration)", cover, StringComparison.Ordinal);
         Assert.Contains("new DoubleTransition", cover, StringComparison.Ordinal);
         Assert.Contains("Visual.OpacityProperty", cover, StringComparison.Ordinal);
         Assert.Contains("new DispatcherTimer", cover, StringComparison.Ordinal);
-        Assert.Contains("HideModeRevealCoverAnimated()", bridge, StringComparison.Ordinal);
-        Assert.Contains("ApplicateMotion.ModeSwitchDuration(_getReadingPreferences())", bridge, StringComparison.Ordinal);
+        Assert.Contains("HideModeRevealCoverAnimated()", compositor, StringComparison.Ordinal);
+        Assert.Contains("ApplicateMotion.ModeSwitchDuration(_getReadingPreferences())", compositor, StringComparison.Ordinal);
+        Assert.DoesNotContain("HideModeRevealCoverAnimated()", bridge, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -226,9 +258,12 @@ public sealed class ApplicateSiblingMountTests
     public void ModeSwitchCoverUsesSeparateWindowForNativeWebViewAirspace()
     {
         var bridge = File.ReadAllText(BridgeSourcePath);
+        var compositor = File.ReadAllText(AirspaceCompositorSourcePath);
         var coverWindow = File.ReadAllText(CoverWindowSourcePath);
 
-        Assert.Contains("ApplicateModeRevealCoverWindow", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateModeRevealCoverWindow", bridge, StringComparison.Ordinal);
+        Assert.Contains("ApplicateModeRevealCoverWindow", compositor, StringComparison.Ordinal);
+        Assert.Contains("ModeRevealSession", compositor, StringComparison.Ordinal);
         Assert.DoesNotContain("_modeRevealCoverPopup", bridge, StringComparison.Ordinal);
         Assert.Contains("new Window", coverWindow, StringComparison.Ordinal);
         Assert.Contains("ShowInTaskbar = false", coverWindow, StringComparison.Ordinal);
@@ -238,13 +273,14 @@ public sealed class ApplicateSiblingMountTests
         Assert.Contains(".Show(owner)", coverWindow, StringComparison.Ordinal);
         Assert.Contains("_owner.PositionChanged += OnOwnerPositionChanged", coverWindow, StringComparison.Ordinal);
         Assert.Contains("bridge-cover-window-repositioned", coverWindow, StringComparison.Ordinal);
-        Assert.Contains("bridge-cover-cancelled", bridge, StringComparison.Ordinal);
+        Assert.Contains("bridge-cover-cancelled", compositor, StringComparison.Ordinal);
+        Assert.DoesNotContain("bridge-cover-cancelled", bridge, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void TransactionCommitDisarmsCoverBeforeNextModeSwitch()
+    public void TransactionCommitDisarmsCompositorCoverBeforeNextModeSwitch()
     {
-        var source = File.ReadAllText(BridgeSourcePath);
+        var source = File.ReadAllText(AirspaceCompositorSourcePath);
         var commit = ExtractMethodBody(
             source,
             source.IndexOf("private void CommitQueuedModeTransaction()", StringComparison.Ordinal));
@@ -257,9 +293,9 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void TransactionRevealRejectionRestoresShieldAndHidesCover()
+    public void TransactionRevealRejectionRestoresShieldAndHidesCompositorCover()
     {
-        var source = File.ReadAllText(BridgeSourcePath);
+        var source = File.ReadAllText(AirspaceCompositorSourcePath);
         var commit = ExtractMethodBody(
             source,
             source.IndexOf("private void CommitQueuedModeTransaction()", StringComparison.Ordinal));
@@ -276,9 +312,9 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void TransactionCancellationDisarmsCoverBeforeNextModeSwitch()
+    public void TransactionCancellationDisarmsCompositorCoverBeforeNextModeSwitch()
     {
-        var source = File.ReadAllText(BridgeSourcePath);
+        var source = File.ReadAllText(AirspaceCompositorSourcePath);
         var reconcile = ExtractMethodBody(
             source,
             source.IndexOf("private bool TryReconcileTransactionalModeSwitch(", StringComparison.Ordinal));
@@ -335,7 +371,7 @@ public sealed class ApplicateSiblingMountTests
     [Fact]
     public void TransactionalModeSwitchSuppressesOutgoingNativeRendererBeforeSlotVisibilityChanges()
     {
-        var source = File.ReadAllText(BridgeSourcePath);
+        var source = File.ReadAllText(AirspaceCompositorSourcePath);
         var reconcile = ExtractMethodBody(
             source,
             source.IndexOf("private bool TryReconcileTransactionalModeSwitch(", StringComparison.Ordinal));
@@ -372,7 +408,7 @@ public sealed class ApplicateSiblingMountTests
     [Fact]
     public void TransactionalModeSwitchRestoresOutgoingBeforeCoverHideOnRollback()
     {
-        var source = File.ReadAllText(BridgeSourcePath);
+        var source = File.ReadAllText(AirspaceCompositorSourcePath);
         var rollback = ExtractMethodBody(
             source,
             source.IndexOf("private void RollbackActiveModeTransaction(", StringComparison.Ordinal));
@@ -396,23 +432,23 @@ public sealed class ApplicateSiblingMountTests
             source,
             source.IndexOf("private void CommitQueuedModeTransaction()", StringComparison.Ordinal)),
             StringComparison.Ordinal);
+        var modeSessionStart = source.IndexOf("private sealed class ModeRevealSession", StringComparison.Ordinal);
         Assert.Contains("RollbackActiveModeTransaction(", ExtractMethodBody(
             source,
-            source.IndexOf("public void Dispose()", StringComparison.Ordinal)),
+            source.IndexOf("public void Dispose()", modeSessionStart, StringComparison.Ordinal)),
             StringComparison.Ordinal);
     }
 
     [Fact]
-    public void BridgeConsumesHostRevealIntentSeamWithoutTransactionHostInternals()
+    public void BridgeConsumesModeRevealSessionWithoutHostRevealInternals()
     {
         var source = File.ReadAllText(BridgeSourcePath);
 
-        Assert.Contains("IApplicateHostRevealIntents? hostRevealIntents", source, StringComparison.Ordinal);
-        Assert.Contains("_hostRevealIntents.CommitCompleted += OnTransactionCommitCompleted;", source, StringComparison.Ordinal);
-        Assert.Contains("_hostRevealIntents.MinimapSettled += OnTransactionMinimapSettled;", source, StringComparison.Ordinal);
-        Assert.Contains("_hostRevealIntents.RendererSettled += OnTransactionRendererSettled;", source, StringComparison.Ordinal);
-        Assert.Contains("_hostRevealIntents.RendererFailed += OnTransactionRendererFailed;", source, StringComparison.Ordinal);
-        Assert.Contains("_hostRevealIntents.RevealNativeRendererForCommittedTransaction(generation)", source, StringComparison.Ordinal);
+        Assert.Contains("IApplicateModeRevealSession", source, StringComparison.Ordinal);
+        Assert.Contains("IApplicateModeTransitionSlotAdapter", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("IApplicateHostRevealIntents", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("_hostRevealIntents", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("RevealNativeRendererForCommittedTransaction", source, StringComparison.Ordinal);
         Assert.DoesNotContain("IApplicateModeTransactionHost", source, StringComparison.Ordinal);
         Assert.DoesNotContain("IApplicateSharedWebViewHost", source, StringComparison.Ordinal);
         Assert.DoesNotContain("ApplicateSharedWebViewHost", source, StringComparison.Ordinal);
@@ -502,6 +538,70 @@ public sealed class ApplicateSiblingMountTests
                     ApplicateRendererFailureKind.DocumentRenderFailed,
                     DocumentPath: null,
                     DateTime.UtcNow));
+    }
+
+    private sealed class FakeDocumentRevealState : IApplicateDocumentRevealState
+    {
+        public event PropertyChangedEventHandler? PropertyChanged
+        {
+            add { }
+            remove { }
+        }
+
+        public event EventHandler? DocumentTransitionStarting
+        {
+            add { }
+            remove { }
+        }
+
+        public event EventHandler? SuppressNextDocumentReveal
+        {
+            add { }
+            remove { }
+        }
+
+        public event EventHandler<ThemeTransitionStartingEventArgs>? ThemeTransitionStarting
+        {
+            add { }
+            remove { }
+        }
+
+        public MarkdownSource? Document => null;
+
+        public ReadingPreferences ReadingPreferences => ReadingPreferences.Default;
+
+        public void ClearDocumentHeadings()
+        {
+        }
+    }
+
+    private sealed class NoCoverPresenter : IApplicateAirspaceCoverPresenter
+    {
+        public bool Show(Control host) => false;
+
+        public bool Show(Control host, ThemeVariant? themeVariant) => false;
+
+        public bool ShowStartupSplash(Control host, string? documentName) => false;
+
+        public bool UpdateBrush(Control host, ThemeVariant? themeVariant) => false;
+
+        public void Hide()
+        {
+        }
+
+        public void Hide(TimeSpan duration)
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class NoopPaintGate : IApplicateAirspacePaintGate
+    {
+        public void AfterTwoFrames(Control anchor, Action action)
+            => action();
     }
 
     private sealed class FakeTransactionHost(

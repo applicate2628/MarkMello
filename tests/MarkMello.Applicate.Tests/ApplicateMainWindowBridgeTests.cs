@@ -171,6 +171,7 @@ public sealed class ApplicateMainWindowBridgeTests
     {
         var codeBehind = ReadMainWindowCodeBehind();
         var compositor = ReadAirspaceCompositorSource();
+        var hostAdapters = ReadAirspaceCompositorHostAdaptersSource();
         var constructor = ExtractMethodBody(codeBehind, "public ApplicateMainWindow(");
         var shouldHold = ExtractMethodBody(codeBehind, "private static bool ShouldHoldStartupDocumentReveal()");
         var gate = ExtractMethodBody(codeBehind, "private void InstallStartupDocumentRevealGate(MainWindowViewModel viewModel)");
@@ -201,8 +202,9 @@ public sealed class ApplicateMainWindowBridgeTests
 
         Assert.Contains("RegisterStartupSession", compositor, StringComparison.Ordinal);
         Assert.Contains("ShowStartupSplash", compositor, StringComparison.Ordinal);
-        Assert.Contains("ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait(", compositor, StringComparison.Ordinal);
-        Assert.Contains("ApplicateSharedWebViewHost.RendererSettleFallbackTimeout", compositor, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateSharedWebViewHost.", compositor, StringComparison.Ordinal);
+        Assert.Contains("ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait(", hostAdapters, StringComparison.Ordinal);
+        Assert.Contains("ApplicateSharedWebViewHost.RendererSettleFallbackTimeout", hostAdapters, StringComparison.Ordinal);
         Assert.Contains("\"startup-window-cover-shown\"", compositor, StringComparison.Ordinal);
         Assert.Contains("\"startup-window-renderer-settle-armed\"", compositor, StringComparison.Ordinal);
         Assert.Contains("\"startup-window-renderer-settle-complete\"", compositor, StringComparison.Ordinal);
@@ -252,8 +254,9 @@ public sealed class ApplicateMainWindowBridgeTests
         var removedType = "ApplicateThemeSwitchReveal" + "Coordinator";
 
         Assert.Contains("bool skipInitialViewerDocumentSwitchCover = false", codeBehind, StringComparison.Ordinal);
-        Assert.Contains("_airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel);", installSiblingViews, StringComparison.Ordinal);
-        Assert.Contains("_airspaceCompositor.RegisterDocumentSession(", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("var airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel);", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("_airspaceCompositor = airspaceCompositor;", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("airspaceCompositor.RegisterDocumentSession(", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("viewerHostForMode,", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("ApplicateMode.Viewer,", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("() => viewModel.IsViewer && !viewModel.IsEditMode", installSiblingViews, StringComparison.Ordinal);
@@ -264,7 +267,7 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("() => viewModel.IsViewer && viewModel.IsEditMode", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("clearHeadingsOnRendererFailure: false", installSiblingViews, StringComparison.Ordinal);
 
-        Assert.Contains("_airspaceCompositor.RegisterThemeSession(", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("airspaceCompositor.RegisterThemeSession(", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("viewerHostForMode,", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("editHost,", installSiblingViews, StringComparison.Ordinal);
         Assert.DoesNotContain(removedReaderField, codeBehind, StringComparison.Ordinal);
@@ -421,6 +424,19 @@ public sealed class ApplicateMainWindowBridgeTests
             "MarkMello.Applicate.Desktop",
             "Rendering",
             "ApplicateAirspaceCompositor.cs"));
+
+    private static string ReadAirspaceCompositorHostAdaptersSource()
+        => File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Rendering",
+            "ApplicateAirspaceCompositor.HostAdapters.cs"));
 
     private static string ExtractFromMarker(string source, string marker)
     {

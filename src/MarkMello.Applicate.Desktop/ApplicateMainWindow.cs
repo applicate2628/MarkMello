@@ -1274,6 +1274,16 @@ public sealed class ApplicateMainWindow : MainWindow
         _modeTransactionHostRouter = viewerHostForMode is not null && editHost is not null
             ? new ApplicateModeTransactionHostRouter(viewerHostForMode, editHost)
             : null;
+        var hostRevealIntents = _modeTransactionHostRouter is null
+            ? null
+            : new SharedWebViewHostRevealIntents(_modeTransactionHostRouter);
+
+        // Atomic reveal for DOCUMENT/THEME/MODE switches: the airspace
+        // compositor holds the solid cover and owns native-HWND reveal intent.
+        // The TOC column stays visible and swaps its row model in place.
+        _airspaceCompositor?.Dispose();
+        var airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel);
+        _airspaceCompositor = airspaceCompositor;
 
         _siblingMountBridge = new ApplicateSiblingMountBridge(
             viewModel,
@@ -1286,33 +1296,28 @@ public sealed class ApplicateMainWindow : MainWindow
             () => viewModel.Document,
             () => viewModel.ReadingPreferences,
             viewerContent: viewModel,
-            hostRevealIntents: _modeTransactionHostRouter is null
+            modeRevealSessionFactory: hostRevealIntents is null
                 ? null
-                : new SharedWebViewHostRevealIntents(_modeTransactionHostRouter),
-            modeRevealCoverHost: siblingPanel);
-
-        // Atomic reveal for DOCUMENT switches (tab change, startup, reload):
-        // the airspace compositor holds a solid cover over the document slot
-        // until the new document has committed and painted. The TOC column
-        // stays visible and swaps its row model in place.
-        _airspaceCompositor?.Dispose();
-        _airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel);
+                : adapter => airspaceCompositor.RegisterModeSession(
+                    hostRevealIntents,
+                    adapter,
+                    () => viewModel.ReadingPreferences));
         if (viewerHostForMode is not null)
         {
-            _airspaceCompositor.RegisterDocumentSession(
+            airspaceCompositor.RegisterDocumentSession(
                 viewerHostForMode,
                 ApplicateMode.Viewer,
                 // Reader surface only: IsViewer is `State == Viewing`, which is
                 // also true in edit mode (edit is a sub-mode of Viewing).
                 () => viewModel.IsViewer && !viewModel.IsEditMode,
                 skipInitialCoverSession: skipInitialViewerDocumentSwitchCover);
-            _airspaceCompositor.RegisterThemeSession(
+            airspaceCompositor.RegisterThemeSession(
                 viewerHostForMode,
                 () => viewModel.IsViewer && !viewModel.IsEditMode);
         }
         if (editHost is not null)
         {
-            _airspaceCompositor.RegisterDocumentSession(
+            airspaceCompositor.RegisterDocumentSession(
                 editHost,
                 ApplicateMode.Edit,
                 () => viewModel.IsViewer && viewModel.IsEditMode,
@@ -1322,7 +1327,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 // WebView reveal to resolve a doc-switch cover — skip it instead
                 // of stalling on the 8s fallback. A real switch still covers.
                 suppressSamePathReloadCover: true);
-            _airspaceCompositor.RegisterThemeSession(
+            airspaceCompositor.RegisterThemeSession(
                 editHost,
                 () => viewModel.IsViewer && viewModel.IsEditMode);
         }

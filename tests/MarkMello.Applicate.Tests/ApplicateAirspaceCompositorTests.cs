@@ -1,3 +1,4 @@
+using System.IO;
 using System.ComponentModel;
 using Avalonia;
 using Avalonia.Controls;
@@ -14,6 +15,20 @@ namespace MarkMello.Applicate.Tests;
 
 public sealed class ApplicateAirspaceCompositorTests
 {
+    private static readonly string AirspaceCompositorSourcePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..",
+        "src",
+        "MarkMello.Applicate.Desktop",
+        "Rendering",
+        "ApplicateAirspaceCompositor.cs");
+    private static readonly string BridgeSourcePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..",
+        "src",
+        "MarkMello.Applicate.Desktop",
+        "ApplicateSiblingMountBridge.cs");
+
     [Fact]
     public void DocumentTransitionStartingRaisesCoverBeforeDocumentMutationForActiveSurface()
     {
@@ -445,6 +460,135 @@ public sealed class ApplicateAirspaceCompositorTests
         Assert.Equal(1, cover.HideAnimatedCount);
     }
 
+    [Fact]
+    public void ModeSessionWaitsForLayoutCommitMinimapAndRendererBeforeNativeReveal()
+    {
+        var state = new FakeDocumentRevealState();
+        var events = new List<string>();
+        var slotAdapter = new FakeModeSlotAdapter(events);
+        var host = new FakeModeHostRevealIntents(slotAdapter.RevealSnapshot, events);
+        var covers = new FakeCoverFactory(events);
+        var scheduler = new FakeAirspaceScheduler();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            new FakePaintGate(),
+            scheduler);
+        using var modeSession = compositor.RegisterModeSession(
+            host,
+            slotAdapter,
+            () => ReadingPreferences.Default);
+
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        var cover = Assert.Single(covers.Created);
+        Assert.Equal(1, cover.ShowCount);
+        Assert.Equal(1, scheduler.PendingCount);
+        Assert.Equal(0, slotAdapter.EditGeneration);
+
+        scheduler.Flush();
+        Assert.Equal(1, slotAdapter.ReconcileRequestCount);
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+
+        var generation = slotAdapter.EditGeneration;
+        Assert.True(generation > 0);
+        Assert.Equal(0, slotAdapter.ViewerGeneration);
+        Assert.Equal(new[] { ApplicateMode.Viewer }, host.SuppressedModes);
+        Assert.True(slotAdapter.ViewerState.IsVisible);
+        Assert.False(slotAdapter.ViewerState.IsInteractive);
+        Assert.True(slotAdapter.EditState.IsVisible);
+        Assert.False(slotAdapter.EditState.IsInteractive);
+        Assert.Equal(0.0, slotAdapter.EditState.Opacity);
+
+        host.RaiseCommitCompleted(generation, ApplicateMode.Edit);
+        scheduler.Flush();
+        Assert.Empty(host.RevealedGenerations);
+
+        host.RaiseMinimapSettledNotApplicable(generation);
+        scheduler.Flush();
+        Assert.Empty(host.RevealedGenerations);
+
+        host.RaiseRendererSettled(generation);
+        Assert.Equal(1, scheduler.PendingCount);
+        scheduler.Flush();
+
+        var reveal = Assert.Single(host.RevealedGenerations);
+        Assert.Equal(generation, reveal.Generation);
+        Assert.Equal(0.0, reveal.ViewerOpacity);
+        Assert.Equal(1.0, reveal.EditOpacity);
+        Assert.Equal(ApplicateMode.Edit, slotAdapter.CommittedMode);
+        Assert.Equal(1, slotAdapter.ClearGenerationCount);
+        Assert.Empty(host.RestoredModes);
+        Assert.Equal(1, cover.HideAnimatedCount);
+        Assert.Equal(ApplicateMotion.ModeSwitchDuration(ReadingPreferences.Default), cover.LastHideDuration);
+    }
+
+    [Fact]
+    public void ModeSessionRestoresOutgoingBeforeCoverHideWhenNativeRevealIsRejected()
+    {
+        var state = new FakeDocumentRevealState();
+        var events = new List<string>();
+        var slotAdapter = new FakeModeSlotAdapter(events);
+        var host = new FakeModeHostRevealIntents(slotAdapter.RevealSnapshot, events)
+        {
+            RejectReveals = true
+        };
+        var covers = new FakeCoverFactory(events);
+        var scheduler = new FakeAirspaceScheduler();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            new FakePaintGate(),
+            scheduler);
+        using var modeSession = compositor.RegisterModeSession(
+            host,
+            slotAdapter,
+            () => ReadingPreferences.Default);
+
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        scheduler.Flush();
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        var generation = slotAdapter.EditGeneration;
+
+        host.RaiseCommitCompleted(generation, ApplicateMode.Edit);
+        host.RaiseMinimapSettledNotApplicable(generation);
+        host.RaiseRendererSettled(generation);
+        scheduler.Flush();
+
+        Assert.Equal(new[] { ApplicateMode.Viewer }, host.RestoredModes);
+        Assert.Equal(ApplicateMode.Viewer, slotAdapter.CommittedMode);
+        Assert.Equal(1, Assert.Single(covers.Created).HideImmediateCount);
+        var restore = events.LastIndexOf("restore:Viewer");
+        var hide = events.LastIndexOf("cover-hide:immediate");
+        Assert.True(restore >= 0);
+        Assert.True(hide > restore);
+    }
+
+    [Fact]
+    public void ModePolicyLivesInCompositorAndBridgeIsOnlySlotAdapter()
+    {
+        var compositor = File.ReadAllText(AirspaceCompositorSourcePath);
+        var bridge = File.ReadAllText(BridgeSourcePath);
+
+        Assert.Contains("RegisterModeSession", compositor, StringComparison.Ordinal);
+        Assert.Contains("ModeRevealSession", compositor, StringComparison.Ordinal);
+        Assert.Contains("IApplicateHostRevealIntents", compositor, StringComparison.Ordinal);
+        Assert.Contains("bridge-cover-visible", compositor, StringComparison.Ordinal);
+        Assert.Contains("bridge-cover-hidden", compositor, StringComparison.Ordinal);
+        Assert.Contains("bridge-transaction-outgoing-native-suppressed", compositor, StringComparison.Ordinal);
+        Assert.Contains("bridge-transaction-outgoing-native-restored-before-cover-hide", compositor, StringComparison.Ordinal);
+        Assert.Contains("bridge-transaction-committed", compositor, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("IApplicateHostRevealIntents", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("_hostRevealIntents", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateModeRevealCoverWindow", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("TryPrimeModeRevealCover", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("QueueModeTransactionCommit", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("RollbackActiveModeTransaction", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateModeTransitionController", bridge, StringComparison.Ordinal);
+    }
+
     private static MarkdownSource Source(string path)
         => Source(path, $"# {path}");
 
@@ -564,6 +708,8 @@ public sealed class ApplicateAirspaceCompositorTests
     {
         public int SettleProbeRequestCount { get; private set; }
 
+        public TimeSpan RendererSettleFallbackTimeout => ApplicateSharedWebViewHost.RendererSettleFallbackTimeout;
+
         public event EventHandler? DocumentRevealReady;
 
         public event EventHandler<IReadOnlyList<DocumentHeading>>? HeadingsChanged;
@@ -571,6 +717,9 @@ public sealed class ApplicateAirspaceCompositorTests
         public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
 
         public event EventHandler? RendererSettled;
+
+        public bool ShouldSkipRendererFrameWait(MarkdownSource? source, long transactionGeneration)
+            => ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait(source, transactionGeneration);
 
         public void RequestRendererSettleProbe()
             => SettleProbeRequestCount++;
@@ -621,20 +770,190 @@ public sealed class ApplicateAirspaceCompositorTests
                     DateTime.UtcNow));
     }
 
-    private sealed class FakeCoverFactory
+    private sealed class FakeModeSlotAdapter(List<string>? events = null) : IApplicateModeTransitionSlotAdapter
     {
+        private readonly List<string>? _events = events;
+
+        public ApplicateModeSlotState ViewerState { get; private set; }
+
+        public ApplicateModeSlotState EditState { get; private set; }
+
+        public long ViewerGeneration { get; private set; }
+
+        public long EditGeneration { get; private set; }
+
+        public ApplicateMode? CommittedMode { get; private set; }
+
+        public int ClearGenerationCount { get; private set; }
+
+        public int ReconcileRequestCount { get; private set; }
+
+        public bool TargetLayoutSettled { get; set; } = true;
+
+        public (double ViewerOpacity, double EditOpacity) RevealSnapshot()
+            => (ViewerState.Opacity, EditState.Opacity);
+
+        public void ApplyTransactionGenerationContext(ApplicateMode requestedMode, long generation)
+        {
+            ViewerGeneration = requestedMode == ApplicateMode.Viewer ? generation : 0;
+            EditGeneration = requestedMode == ApplicateMode.Edit ? generation : 0;
+            _events?.Add($"generation:{requestedMode}:{generation}");
+        }
+
+        public void ClearTransactionGenerationContext()
+        {
+            ViewerGeneration = 0;
+            EditGeneration = 0;
+            ClearGenerationCount++;
+            _events?.Add("generation:clear");
+        }
+
+        public void ApplyTransactionalModeState(
+            ApplicateMode requestedMode,
+            ApplicateModeSlotState viewer,
+            ApplicateModeSlotState edit)
+        {
+            ViewerState = viewer;
+            EditState = edit;
+            _events?.Add($"slot-transaction:{requestedMode}");
+        }
+
+        public void ApplyCommittedModeState(ApplicateMode mode, bool applySlotState)
+        {
+            CommittedMode = mode;
+            if (applySlotState)
+            {
+                ViewerState = new ApplicateModeSlotState(
+                    mode == ApplicateMode.Viewer,
+                    mode == ApplicateMode.Viewer,
+                    mode == ApplicateMode.Viewer ? 1.0 : 0.0);
+                EditState = new ApplicateModeSlotState(
+                    mode == ApplicateMode.Edit,
+                    mode == ApplicateMode.Edit,
+                    mode == ApplicateMode.Edit ? 1.0 : 0.0);
+            }
+            _events?.Add($"slot-committed:{mode}:apply={applySlotState}");
+        }
+
+        public bool IsModeSlotLayoutSettled(ApplicateMode mode)
+            => TargetLayoutSettled;
+
+        public void ReconcileModeTransition()
+        {
+            ReconcileRequestCount++;
+            _events?.Add("reconcile-requested");
+        }
+    }
+
+    private sealed class FakeModeHostRevealIntents(
+        Func<(double ViewerOpacity, double EditOpacity)> slotSnapshot,
+        List<string>? events = null) : IApplicateHostRevealIntents
+    {
+        public readonly record struct RevealSnapshot(
+            long Generation,
+            double ViewerOpacity,
+            double EditOpacity);
+
+        private readonly List<string>? _events = events;
+
+        public List<RevealSnapshot> RevealedGenerations { get; } = [];
+
+        public List<ApplicateMode> SuppressedModes { get; } = [];
+
+        public List<ApplicateMode> RestoredModes { get; } = [];
+
+        public bool RejectReveals { get; set; }
+
+        public bool ThrowOnRestore { get; set; }
+
+        public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
+
+        public event EventHandler<ApplicateMinimapSettledEventArgs>? MinimapSettled;
+
+        public event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted;
+
+        public event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled;
+
+        public void SuppressOutgoingNativeRenderer(ApplicateMode displayedMode)
+        {
+            SuppressedModes.Add(displayedMode);
+            _events?.Add($"suppress:{displayedMode}");
+        }
+
+        public void RestoreOutgoingNativeRenderer(ApplicateMode displayedMode)
+        {
+            RestoredModes.Add(displayedMode);
+            _events?.Add($"restore:{displayedMode}");
+            if (ThrowOnRestore)
+            {
+                throw new InvalidOperationException("restore failed");
+            }
+        }
+
+        public bool RevealNativeRendererForCommittedTransaction(long transactionGeneration)
+        {
+            var snapshot = slotSnapshot();
+            RevealedGenerations.Add(
+                new RevealSnapshot(
+                    transactionGeneration,
+                    snapshot.ViewerOpacity,
+                    snapshot.EditOpacity));
+            _events?.Add($"reveal:{transactionGeneration}");
+            return !RejectReveals;
+        }
+
+        public void RaiseCommitCompleted(long generation, ApplicateMode mode)
+            => CommitCompleted?.Invoke(
+                this,
+                new ApplicateCommitCompletedEventArgs(
+                    mode,
+                    new Rect(0, 0, 800, 600),
+                    generation));
+
+        public void RaiseMinimapSettledNotApplicable(long generation)
+            => MinimapSettled?.Invoke(
+                this,
+                ApplicateMinimapSettledEventArgs.NotApplicable(generation));
+
+        public void RaiseMinimapSettled(long generation, bool visible = true, double reservedWidth = 168)
+            => MinimapSettled?.Invoke(
+                this,
+                new ApplicateMinimapSettledEventArgs(
+                    generation,
+                    new ApplicateWebMinimapStateEventArgs(visible, reservedWidth)));
+
+        public void RaiseRendererSettled(long generation)
+            => RendererSettled?.Invoke(
+                this,
+                new ApplicateRendererSettledEventArgs(generation));
+
+        public void RaiseRendererFailed()
+            => RendererFailed?.Invoke(
+                this,
+                new ApplicateRendererFailureEvent(
+                    ApplicateRendererFailureKind.DocumentRenderFailed,
+                    DocumentPath: null,
+                    DateTime.UtcNow));
+    }
+
+    private sealed class FakeCoverFactory(List<string>? events = null)
+    {
+        private readonly List<string>? _events = events;
+
         public List<FakeCoverPresenter> Created { get; } = [];
 
         public FakeCoverPresenter Create()
         {
-            var presenter = new FakeCoverPresenter();
+            var presenter = new FakeCoverPresenter(_events);
             Created.Add(presenter);
             return presenter;
         }
     }
 
-    private sealed class FakeCoverPresenter : IApplicateAirspaceCoverPresenter
+    private sealed class FakeCoverPresenter(List<string>? events = null) : IApplicateAirspaceCoverPresenter
     {
+        private readonly List<string>? _events = events;
+
         public int ShowCount { get; private set; }
 
         public int StartupSplashShowCount { get; private set; }
@@ -656,6 +975,7 @@ public sealed class ApplicateAirspaceCompositorTests
         public bool Show(Control host)
         {
             ShowCount++;
+            _events?.Add("cover-show");
             return true;
         }
 
@@ -663,6 +983,7 @@ public sealed class ApplicateAirspaceCompositorTests
         {
             ShowCount++;
             LastShowThemeVariant = themeVariant;
+            _events?.Add("cover-show");
             return true;
         }
 
@@ -670,6 +991,7 @@ public sealed class ApplicateAirspaceCompositorTests
         {
             StartupSplashShowCount++;
             StartupSplashDocumentName = documentName;
+            _events?.Add("cover-show-startup");
             return true;
         }
 
@@ -681,7 +1003,10 @@ public sealed class ApplicateAirspaceCompositorTests
         }
 
         public void Hide()
-            => HideImmediateCount++;
+        {
+            HideImmediateCount++;
+            _events?.Add("cover-hide:immediate");
+        }
 
         public void Hide(TimeSpan duration)
         {
@@ -689,10 +1014,12 @@ public sealed class ApplicateAirspaceCompositorTests
             if (duration <= TimeSpan.Zero)
             {
                 HideImmediateCount++;
+                _events?.Add("cover-hide:immediate");
                 return;
             }
 
             HideAnimatedCount++;
+            _events?.Add("cover-hide:animated");
         }
 
         public void Dispose()

@@ -40,6 +40,14 @@ public sealed class ApplicateWebHostMessagingTests
         "Rendering",
         "ApplicateAirspaceCompositor.cs");
 
+    private static readonly string AirspaceCompositorHostAdaptersSourcePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..",
+        "src",
+        "MarkMello.Applicate.Desktop",
+        "Rendering",
+        "ApplicateAirspaceCompositor.HostAdapters.cs");
+
     private static readonly string MainWindowSourcePath = Path.Combine(
         AppContext.BaseDirectory,
         "..", "..", "..", "..", "..",
@@ -368,6 +376,7 @@ public sealed class ApplicateWebHostMessagingTests
     {
         var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
         var compositorSource = File.ReadAllText(AirspaceCompositorSourcePath);
+        var compositorHostAdaptersSource = File.ReadAllText(AirspaceCompositorHostAdaptersSourcePath);
         var rendererSource = File.ReadAllText(RendererSourcePath);
         var completeLayoutReady = ExtractMethodBody(viewSource, "private void CompleteLayoutReady()");
         var completeDocumentRenderVisualReady = ExtractMethodBody(viewSource, "private void CompleteDocumentRenderVisualReady()");
@@ -382,7 +391,7 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("RevealNativeDocument(TimeSpan.Zero);", completeDocumentRenderVisualReady, StringComparison.Ordinal);
         Assert.Contains("DocumentRendered?.Invoke", completeDocumentRenderVisualReady, StringComparison.Ordinal);
 
-        Assert.Contains("_host.View.DocumentRevealReady += value;", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_host.View.DocumentRevealReady += value;", compositorHostAdaptersSource, StringComparison.Ordinal);
         Assert.Contains("_signals.DocumentRevealReady += OnDocumentRevealReady;", compositorSource, StringComparison.Ordinal);
         Assert.Contains("ApplicateMode _mode", compositorSource, StringComparison.Ordinal);
         Assert.Contains("e.Mode != _mode", compositorSource, StringComparison.Ordinal);

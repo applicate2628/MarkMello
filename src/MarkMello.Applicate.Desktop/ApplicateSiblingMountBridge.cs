@@ -25,29 +25,11 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
     private readonly Func<object?> _getEditorSession;
     private readonly Func<object?> _getDocument;
     private readonly Func<ReadingPreferences> _getReadingPreferences;
-    private readonly IApplicateHostRevealIntents? _hostRevealIntents;
-    private readonly Panel? _modeRevealCoverHost;
-    private readonly ApplicateModeRevealCoverWindow? _modeRevealCoverWindow;
+    private readonly IApplicateModeRevealSession? _modeRevealSession;
     private volatile bool _disposed;
     private int _reconcilePending;
-    private int _modeRevealCoverContinuationPending;
     private bool _desiredViewerVisible;
     private bool _desiredEditVisible;
-    private bool _modeRevealCoverArmed;
-    private readonly ApplicateModeTransitionController _modeTransitionController = new(ApplicateMode.Viewer);
-    private long _nextModeTransactionGeneration;
-    private long _activeModeTransactionGeneration;
-    private ApplicateMode? _activeModeTransactionTarget;
-    // Single-slot by design: MarkMello has exactly two mode hosts (Viewer/Edit),
-    // and the bridge owns at most one native-reveal transaction at a time.
-    // A future third mode or nested mode transaction must replace this with
-    // an explicit map/stack.
-    private ApplicateMode? _suppressedOutgoingMode;
-    private long _suppressedOutgoingModeTransactionGeneration;
-    private long _pendingModeTransactionCommitGeneration;
-    private ApplicateMode _pendingModeTransactionCommitMode;
-    private int _modeTransactionCommitPending;
-    private bool _modeTransactionRollbackInProgress;
 
     public ApplicateSiblingMountBridge(
         INotifyPropertyChanged vm,
@@ -60,8 +42,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         Func<object?> getDocument,
         Func<ReadingPreferences> getReadingPreferences,
         object viewerContent,
-        IApplicateHostRevealIntents? hostRevealIntents = null,
-        Panel? modeRevealCoverHost = null)
+        Func<IApplicateModeTransitionSlotAdapter, IApplicateModeRevealSession>? modeRevealSessionFactory = null)
     {
         _vm = vm;
         _viewerSlot = viewerSlot;
@@ -72,13 +53,8 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         _getEditorSession = getEditorSession;
         _getDocument = getDocument;
         _getReadingPreferences = getReadingPreferences;
-        _hostRevealIntents = hostRevealIntents;
-        _modeRevealCoverHost = modeRevealCoverHost;
         _viewerSlot.Content = viewerContent;
-        if (_modeRevealCoverHost is not null)
-        {
-            _modeRevealCoverWindow = new ApplicateModeRevealCoverWindow();
-        }
+        _modeRevealSession = modeRevealSessionFactory?.Invoke(new ModeTransitionSlotAdapter(this));
         InstallModeSwitchFades(_getReadingPreferences());
         _viewerSlot.Opacity = 0.0;
         _editSlot.Opacity = 0.0;
@@ -93,13 +69,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
 
         _viewerSlot.PropertyChanged += OnSlotPropertyChanged;
         _editSlot.PropertyChanged += OnSlotPropertyChanged;
-        if (_hostRevealIntents is not null)
-        {
-            _hostRevealIntents.CommitCompleted += OnTransactionCommitCompleted;
-            _hostRevealIntents.MinimapSettled += OnTransactionMinimapSettled;
-            _hostRevealIntents.RendererSettled += OnTransactionRendererSettled;
-            _hostRevealIntents.RendererFailed += OnTransactionRendererFailed;
-        }
         _vm.PropertyChanged += OnVmPropertyChanged;
         Reconcile();
     }
@@ -112,7 +81,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         }
         var slotName = ReferenceEquals(sender, _viewerSlot) ? "viewerSlot" : "editSlot";
         ApplicateTrace.ModeToggle($"{slotName}.{e.Property.Name}: {e.OldValue} -> {e.NewValue}");
-        TryApplyLayoutSettledForActiveTransaction();
+        _modeRevealSession?.TryApplyLayoutSettledForActiveTransaction();
     }
 
     internal void ForceReconcile() => MarshalReconcile();
@@ -131,62 +100,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
     {
         ApplicateModeTransactionContext.SetTransactionGeneration(_viewerSlot, 0);
         ApplicateModeTransactionContext.SetTransactionGeneration(_editSlot, 0);
-    }
-
-    private void OnTransactionCommitCompleted(object? sender, ApplicateCommitCompletedEventArgs e)
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        if (_modeTransitionController.ApplyCommitCompleted(e.TransactionGeneration, e.Mode))
-        {
-            QueueModeTransactionCommit(e.TransactionGeneration, e.Mode);
-        }
-    }
-
-    private void OnTransactionMinimapSettled(object? sender, ApplicateMinimapSettledEventArgs e)
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        var snapshot = _modeTransitionController.Snapshot;
-        if (_modeTransitionController.ApplyMinimapSettled(e.TransactionGeneration))
-        {
-            QueueModeTransactionCommit(e.TransactionGeneration, snapshot.RequestedMode);
-        }
-    }
-
-    private void OnTransactionRendererSettled(object? sender, ApplicateRendererSettledEventArgs e)
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        var snapshot = _modeTransitionController.Snapshot;
-        if (_modeTransitionController.ApplyRendererSettled(e.TransactionGeneration))
-        {
-            QueueModeTransactionCommit(e.TransactionGeneration, snapshot.RequestedMode);
-        }
-    }
-
-    private void OnTransactionRendererFailed(object? sender, ApplicateRendererFailureEvent e)
-    {
-        if (_disposed || _activeModeTransactionGeneration <= 0)
-        {
-            return;
-        }
-
-        _modeTransitionController.ApplyRendererFailed(_activeModeTransactionGeneration);
-        RollbackActiveModeTransaction(
-            reason: "renderer-failure",
-            committedRollbackMode: null,
-            applyOutgoingSlotState: true);
-        MarshalReconcile();
     }
 
     private void OnVmPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -267,23 +180,6 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
             return;
         }
 
-        ApplyModeTransactionGenerationContext(modeSlotSwitch, viewerVisible, editVisible);
-        if (_modeRevealCoverArmed && !modeSlotSwitch)
-        {
-            _modeRevealCoverArmed = false;
-            HideModeRevealCover();
-            ApplicateTrace.DiagMs(
-                "pane-seq",
-                "bridge-cover-cancelled",
-                $"viewerVis={viewerVisible} editVis={editVisible}");
-        }
-
-        if (!viewerVisible && !editVisible)
-        {
-            _modeRevealCoverArmed = false;
-            HideModeRevealCover();
-        }
-
         _desiredViewerVisible = viewerVisible;
         _desiredEditVisible = editVisible;
 
@@ -342,7 +238,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         bool modeSlotSwitch,
         object? session)
     {
-        if (_hostRevealIntents is null)
+        if (_modeRevealSession is null)
         {
             return false;
         }
@@ -352,417 +248,26 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
             : editVisible
                 ? ApplicateMode.Edit
                 : (ApplicateMode?)null;
-        if (_modeTransactionRollbackInProgress)
-        {
-            ApplicateTrace.DiagMs(
-                "pane-seq",
-                "bridge-transaction-rollback-in-progress-request-ignored",
-                $"requested={requestedMode?.ToString() ?? "(null)"} active={_activeModeTransactionGeneration}");
-            return true;
-        }
-
-        if (_activeModeTransactionGeneration > 0)
-        {
-            if (requestedMode is null)
-            {
-                CancelModeTransaction();
-                return false;
-            }
-
-            if (_activeModeTransactionTarget == requestedMode)
-            {
-                var activeTargetSessionChanged = !ReferenceEquals(_editContent.DataContext, session);
-                if (activeTargetSessionChanged)
-                {
-                    _editContent.DataContext = session;
-                }
-
-                TryApplyLayoutSettledForActiveTransaction();
-                ApplicateTrace.DiagMs(
-                    "pane-seq",
-                    "bridge-transaction-reconcile-active-target",
-                    $"generation={_activeModeTransactionGeneration} target={requestedMode.Value}");
-                return true;
-            }
-
-            if (_suppressedOutgoingMode == requestedMode)
-            {
-                RollbackActiveModeTransaction(
-                    reason: "rapid-toggle",
-                    committedRollbackMode: requestedMode.Value,
-                    applyOutgoingSlotState: true);
-                return true;
-            }
-        }
-
-        var transactionActive = _modeTransitionController.Snapshot.IsSwitching
-            || _activeModeTransactionGeneration > 0;
-        if (!transactionActive && !modeSlotSwitch)
-        {
-            if (requestedMode is not null)
-            {
-                _modeTransitionController.ResetDisplayedMode(requestedMode.Value);
-            }
-
-            return false;
-        }
-
-        if (!transactionActive
-            && modeSlotSwitch
-            && !_modeRevealCoverArmed
-            && TryPrimeModeRevealCover())
-        {
-            _modeRevealCoverArmed = true;
-            QueueModeRevealCoveredReconcile();
-            return true;
-        }
-
-        if (requestedMode is null)
-        {
-            CancelModeTransaction();
-            return false;
-        }
-
-        var outgoingMode = _modeTransitionController.Snapshot.DisplayedMode;
-        var generation = _modeTransitionController.RequestMode(requestedMode.Value);
-        if (generation > 0)
-        {
-            _activeModeTransactionGeneration = generation;
-            _activeModeTransactionTarget = requestedMode.Value;
-            ApplyTransactionGenerationContext(requestedMode.Value, generation);
-            SuppressOutgoingNativeRendererForActiveTransaction(
-                generation,
-                outgoingMode,
-                requestedMode.Value);
-        }
-        else
-        {
-            _activeModeTransactionGeneration = 0;
-            _activeModeTransactionTarget = null;
-            _suppressedOutgoingModeTransactionGeneration = 0;
-            _suppressedOutgoingMode = null;
-            _pendingModeTransactionCommitGeneration = 0;
-            _modeRevealCoverArmed = false;
-            ClearTransactionGenerationContext();
-            HideModeRevealCover();
-        }
-
-        _desiredViewerVisible = viewerVisible;
-        _desiredEditVisible = editVisible;
-        ApplyTransactionalSlotStates();
-
-        var sessionChanged = !ReferenceEquals(_editContent.DataContext, session);
-        if (sessionChanged)
+        var handled = _modeRevealSession.TryReconcile(requestedMode, modeSlotSwitch);
+        if (handled
+            && requestedMode == ApplicateMode.Edit
+            && !ReferenceEquals(_editContent.DataContext, session))
         {
             _editContent.DataContext = session;
         }
 
-        TryApplyLayoutSettledForActiveTransaction();
-        ApplicateTrace.DiagMs(
-            "pane-seq",
-            "bridge-transaction-reconcile",
-            $"viewerVis={viewerVisible} editVis={editVisible} generation={generation} target={requestedMode.Value}");
-        return true;
-    }
-
-    private void SuppressOutgoingNativeRendererForActiveTransaction(
-        long generation,
-        ApplicateMode outgoingMode,
-        ApplicateMode requestedMode)
-    {
-        if (_hostRevealIntents is null
-            || generation <= 0
-            || outgoingMode == requestedMode
-            || _suppressedOutgoingModeTransactionGeneration == generation)
-        {
-            return;
-        }
-
-        _hostRevealIntents.SuppressOutgoingNativeRenderer(outgoingMode);
-        _suppressedOutgoingMode = outgoingMode;
-        _suppressedOutgoingModeTransactionGeneration = generation;
-        ApplicateTrace.DiagMs(
-            "pane-seq",
-            "bridge-transaction-outgoing-native-suppressed",
-            $"generation={generation} outgoing={outgoingMode} target={requestedMode}");
-    }
-
-    private void ClearSuppressedOutgoingNativeRendererForCompletedTransaction(
-        long generation,
-        ApplicateMode targetMode,
-        string reason)
-    {
-        if (generation <= 0 || _suppressedOutgoingModeTransactionGeneration != generation)
-        {
-            return;
-        }
-
-        var outgoingMode = _suppressedOutgoingMode;
-        _suppressedOutgoingMode = null;
-        _suppressedOutgoingModeTransactionGeneration = 0;
-        ApplicateTrace.DiagMs(
-            "pane-seq",
-            "bridge-transaction-outgoing-native-suppression-cleared",
-            $"generation={generation} outgoing={outgoingMode?.ToString() ?? "(null)"} target={targetMode} reason={reason}");
-    }
-
-    private void CancelModeTransaction()
-    {
-        if (_activeModeTransactionGeneration > 0)
-        {
-            _modeTransitionController.ApplyRendererFailed(_activeModeTransactionGeneration);
-        }
-
-        RollbackActiveModeTransaction(
-            reason: "cancel",
-            committedRollbackMode: _suppressedOutgoingMode,
-            applyOutgoingSlotState: true);
-    }
-
-    private void RollbackActiveModeTransaction(
-        string reason,
-        ApplicateMode? committedRollbackMode,
-        bool applyOutgoingSlotState)
-    {
-        if (_modeTransactionRollbackInProgress)
-        {
-            ApplicateTrace.DiagMs(
-                "pane-seq",
-                "bridge-transaction-rollback-reentry-ignored",
-                $"reason={reason} active={_activeModeTransactionGeneration}");
-            return;
-        }
-
-        var generation = _suppressedOutgoingModeTransactionGeneration > 0
-            ? _suppressedOutgoingModeTransactionGeneration
-            : _activeModeTransactionGeneration;
-        var outgoingMode = _suppressedOutgoingMode;
-        var targetMode = _activeModeTransactionTarget;
-        var restoreSucceeded = false;
-        var restoreFailed = false;
-        _modeTransactionRollbackInProgress = true;
-
-        try
-        {
-            _activeModeTransactionGeneration = 0;
-            _activeModeTransactionTarget = null;
-            _pendingModeTransactionCommitGeneration = 0;
-            _modeRevealCoverArmed = false;
-            ClearTransactionGenerationContext();
-            _suppressedOutgoingMode = null;
-            _suppressedOutgoingModeTransactionGeneration = 0;
-
-            var rollbackMode = committedRollbackMode ?? outgoingMode;
-            if (rollbackMode is not null)
-            {
-                _modeTransitionController.ResetDisplayedMode(rollbackMode.Value);
-                _desiredViewerVisible = rollbackMode.Value == ApplicateMode.Viewer;
-                _desiredEditVisible = rollbackMode.Value == ApplicateMode.Edit;
-                if (applyOutgoingSlotState)
-                {
-                    ApplyCommittedModeSlotStates(rollbackMode.Value);
-                }
-            }
-
-            if (_hostRevealIntents is null || outgoingMode is null)
-            {
-                ApplicateTrace.DiagMs(
-                    "pane-seq",
-                    "bridge-transaction-outgoing-native-restore-skipped",
-                    $"generation={generation} outgoing={outgoingMode?.ToString() ?? "(null)"} target={targetMode?.ToString() ?? "(null)"} reason={reason}");
-                return;
-            }
-
-            try
-            {
-                _hostRevealIntents.RestoreOutgoingNativeRenderer(outgoingMode.Value);
-                restoreSucceeded = true;
-                ApplicateTrace.DiagMs(
-                    "pane-seq",
-                    "bridge-transaction-outgoing-native-restored-before-cover-hide",
-                    $"generation={generation} outgoing={outgoingMode.Value} target={targetMode?.ToString() ?? "(null)"} reason={reason}");
-            }
-            catch (Exception ex)
-            {
-                restoreFailed = true;
-                ApplicateTrace.DiagMs(
-                    "pane-seq",
-                    "bridge-transaction-outgoing-native-restore-failed",
-                    $"generation={generation} outgoing={outgoingMode.Value} target={targetMode?.ToString() ?? "(null)"} reason={reason} exceptionType={ex.GetType().Name}");
-            }
-        }
-        finally
-        {
-            _suppressedOutgoingMode = null;
-            _suppressedOutgoingModeTransactionGeneration = 0;
-            _modeTransactionRollbackInProgress = false;
-            if (restoreFailed)
-            {
-                ApplicateTrace.DiagMs(
-                    "pane-seq",
-                    "bridge-transaction-outgoing-native-restore-failed-but-bookkeeping-cleared",
-                    $"generation={generation} outgoing={outgoingMode?.ToString() ?? "(null)"} target={targetMode?.ToString() ?? "(null)"} reason={reason}");
-            }
-            else if (!restoreSucceeded)
-            {
-                ApplicateTrace.DiagMs(
-                    "pane-seq",
-                    "bridge-transaction-outgoing-native-bookkeeping-cleared-without-restore",
-                    $"generation={generation} outgoing={outgoingMode?.ToString() ?? "(null)"} target={targetMode?.ToString() ?? "(null)"} reason={reason}");
-            }
-
-            HideModeRevealCover();
-        }
-    }
-
-    private void ApplyTransactionalSlotStates()
-    {
-        var viewer = _modeTransitionController.GetSlotState(ApplicateMode.Viewer);
-        var edit = _modeTransitionController.GetSlotState(ApplicateMode.Edit);
-        ApplySlotState(_viewerSlot, viewer.IsVisible, viewer.IsInteractive, viewer.Opacity, instant: true);
-        ApplySlotState(_editSlot, edit.IsVisible, edit.IsInteractive, edit.Opacity, instant: true);
-        ApplyOpacity(_editContent, edit.Opacity > 0 ? 1.0 : 0.0, instant: true);
-    }
-
-    private void TryApplyLayoutSettledForActiveTransaction()
-    {
-        if (_hostRevealIntents is null)
-        {
-            return;
-        }
-
-        var snapshot = _modeTransitionController.Snapshot;
-        if (!snapshot.IsSwitching)
-        {
-            return;
-        }
-
-        var target = snapshot.RequestedMode == ApplicateMode.Viewer
-            ? (Control)_viewerSlot
-            : _editSlot;
-        if (!target.IsVisible || target.Bounds.Width <= 0 || target.Bounds.Height <= 0)
-        {
-            return;
-        }
-
-        if (_modeTransitionController.ApplyLayoutSettled(snapshot.ActiveGeneration))
-        {
-            QueueModeTransactionCommit(snapshot.ActiveGeneration, snapshot.RequestedMode);
-        }
-    }
-
-    private void QueueModeTransactionCommit(long generation, ApplicateMode mode)
-    {
-        if (generation <= 0)
-        {
-            return;
-        }
-
-        _pendingModeTransactionCommitGeneration = generation;
-        _pendingModeTransactionCommitMode = mode;
-        if (Interlocked.Exchange(ref _modeTransactionCommitPending, 1) != 0)
-        {
-            return;
-        }
-
-        Dispatcher.UIThread.Post(CommitQueuedModeTransaction, DispatcherPriority.Render);
-    }
-
-    private void CommitQueuedModeTransaction()
-    {
-        Interlocked.Exchange(ref _modeTransactionCommitPending, 0);
-        if (_disposed || _hostRevealIntents is null)
-        {
-            return;
-        }
-
-        var generation = _pendingModeTransactionCommitGeneration;
-        var mode = _pendingModeTransactionCommitMode;
-        _pendingModeTransactionCommitGeneration = 0;
-        if (generation <= 0
-            || generation != _activeModeTransactionGeneration
-            || _activeModeTransactionTarget != mode)
-        {
-            if (generation > 0)
-            {
-                ApplicateTrace.DiagMs(
-                    "pane-seq",
-                    "bridge-transaction-stale-commit-discarded",
-                    $"generation={generation} active={_activeModeTransactionGeneration} target={_activeModeTransactionTarget?.ToString() ?? "(null)"} requested={mode}");
-            }
-
-            return;
-        }
-
-        ApplyCommittedModeSlotStates(mode);
-        if (!_hostRevealIntents.RevealNativeRendererForCommittedTransaction(generation))
-        {
-            ApplicateTrace.DiagMs(
-                "pane-seq",
-                "bridge-transaction-native-reveal-rejected",
-                $"generation={generation} mode={mode}");
-            RollbackActiveModeTransaction(
-                reason: "rejected-reveal",
-                committedRollbackMode: _suppressedOutgoingMode,
-                applyOutgoingSlotState: true);
-            return;
-        }
-
-        _modeTransitionController.ResetDisplayedMode(mode);
-        _activeModeTransactionGeneration = 0;
-        _activeModeTransactionTarget = null;
-        _desiredViewerVisible = mode == ApplicateMode.Viewer;
-        _desiredEditVisible = mode == ApplicateMode.Edit;
-        _modeRevealCoverArmed = false;
-        ClearTransactionGenerationContext();
-        ClearSuppressedOutgoingNativeRendererForCompletedTransaction(
-            generation,
-            mode,
-            reason: "success");
-        HideModeRevealCoverAnimated();
-        ApplicateTrace.DiagMs(
-            "pane-seq",
-            "bridge-transaction-committed",
-            $"generation={generation} mode={mode}");
+        return handled;
     }
 
     private void ApplyCommittedModeSlotStates(ApplicateMode mode)
     {
+        _desiredViewerVisible = mode == ApplicateMode.Viewer;
+        _desiredEditVisible = mode == ApplicateMode.Edit;
         var viewerVisible = mode == ApplicateMode.Viewer;
         var editVisible = mode == ApplicateMode.Edit;
         ApplySlotState(_viewerSlot, viewerVisible, viewerVisible, viewerVisible ? 1.0 : 0.0, instant: true);
         ApplySlotState(_editSlot, editVisible, editVisible, editVisible ? 1.0 : 0.0, instant: true);
         ApplyOpacity(_editContent, editVisible ? 1.0 : 0.0, instant: true);
-    }
-
-    private void ApplyModeTransactionGenerationContext(bool modeSlotSwitch, bool viewerVisible, bool editVisible)
-    {
-        if (modeSlotSwitch)
-        {
-            var requestedMode = editVisible ? ApplicateMode.Edit : ApplicateMode.Viewer;
-            if (_activeModeTransactionGeneration <= 0 || _activeModeTransactionTarget != requestedMode)
-            {
-                _activeModeTransactionGeneration = checked(++_nextModeTransactionGeneration);
-                _activeModeTransactionTarget = requestedMode;
-            }
-
-            ApplyTransactionGenerationContext(requestedMode, _activeModeTransactionGeneration);
-            return;
-        }
-
-        var visibleMode = viewerVisible
-            ? ApplicateMode.Viewer
-            : editVisible
-                ? ApplicateMode.Edit
-                : (ApplicateMode?)null;
-        if (visibleMode is not null && _activeModeTransactionTarget == visibleMode.Value)
-        {
-            return;
-        }
-
-        _activeModeTransactionGeneration = 0;
-        _activeModeTransactionTarget = null;
-        ClearTransactionGenerationContext();
     }
 
     // IsHitTestVisible gates click/wheel/drag-drop independently of IsEnabled.
@@ -834,118 +339,63 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         ];
     }
 
-    private bool TryPrimeModeRevealCover()
-    {
-        if (_modeRevealCoverHost is null || _modeRevealCoverWindow is null)
-        {
-            return false;
-        }
-
-        if (!_modeRevealCoverWindow.Show(_modeRevealCoverHost))
-        {
-            return false;
-        }
-
-        _modeRevealCoverHost.UpdateLayout();
-        ApplicateTrace.DiagMs(
-            "pane-seq",
-            "bridge-cover-visible",
-            $"surface=window hostBounds={_modeRevealCoverHost.Bounds.Width:F0}x{_modeRevealCoverHost.Bounds.Height:F0}");
-        return true;
-    }
-
-    private void QueueModeRevealCoveredReconcile()
-    {
-        if (Interlocked.Exchange(ref _modeRevealCoverContinuationPending, 1) != 0)
-        {
-            return;
-        }
-
-        var topLevel = _modeRevealCoverHost is null ? null : TopLevel.GetTopLevel(_modeRevealCoverHost);
-        if (topLevel is null)
-        {
-            ApplicateTrace.DiagMs("pane-seq", "bridge-cover-wait-frame", "path=dispatcher-fallback");
-            Dispatcher.UIThread.Post(ContinueModeRevealCoveredReconcile, DispatcherPriority.Background);
-            return;
-        }
-
-        ApplicateTrace.DiagMs("pane-seq", "bridge-cover-wait-frame", "path=animation-frame");
-        topLevel.RequestAnimationFrame(_ =>
-        {
-            if (_disposed)
-            {
-                Interlocked.Exchange(ref _modeRevealCoverContinuationPending, 0);
-                return;
-            }
-
-            ApplicateTrace.DiagMs("pane-seq", "bridge-cover-frame", "step=1");
-            topLevel.RequestAnimationFrame(_ =>
-            {
-                ApplicateTrace.DiagMs("pane-seq", "bridge-cover-frame", "step=2");
-                ContinueModeRevealCoveredReconcile();
-            });
-        });
-    }
-
-    private void ContinueModeRevealCoveredReconcile()
-    {
-        Interlocked.Exchange(ref _modeRevealCoverContinuationPending, 0);
-        if (_disposed)
-        {
-            return;
-        }
-
-        Reconcile();
-    }
-
-    private void HideModeRevealCover()
-    {
-        HideModeRevealCover(TimeSpan.Zero);
-    }
-
-    private void HideModeRevealCoverAnimated()
-    {
-        HideModeRevealCover(ApplicateMotion.ModeSwitchDuration(_getReadingPreferences()));
-    }
-
-    private void HideModeRevealCover(TimeSpan duration)
-    {
-        if (_modeRevealCoverWindow is null)
-        {
-            return;
-        }
-
-        _modeRevealCoverWindow.Hide(duration);
-        ApplicateTrace.DiagMs("pane-seq", "bridge-cover-hidden");
-    }
-
     public void Dispose()
     {
         if (_disposed)
         {
             return;
         }
-        if (_suppressedOutgoingMode is not null || _activeModeTransactionGeneration > 0)
-        {
-            RollbackActiveModeTransaction(
-                reason: "dispose",
-                committedRollbackMode: null,
-                applyOutgoingSlotState: false);
-        }
 
+        _modeRevealSession?.Dispose();
         _disposed = true;
         _viewerSlot.PropertyChanged -= OnSlotPropertyChanged;
         _editSlot.PropertyChanged -= OnSlotPropertyChanged;
-        if (_hostRevealIntents is not null)
-        {
-            _hostRevealIntents.CommitCompleted -= OnTransactionCommitCompleted;
-            _hostRevealIntents.MinimapSettled -= OnTransactionMinimapSettled;
-            _hostRevealIntents.RendererSettled -= OnTransactionRendererSettled;
-            _hostRevealIntents.RendererFailed -= OnTransactionRendererFailed;
-        }
-        HideModeRevealCover();
-        _modeRevealCoverWindow?.Dispose();
         _vm.PropertyChanged -= OnVmPropertyChanged;
+    }
+
+    private sealed class ModeTransitionSlotAdapter(ApplicateSiblingMountBridge bridge)
+        : IApplicateModeTransitionSlotAdapter
+    {
+        private readonly ApplicateSiblingMountBridge _bridge = bridge;
+
+        public void ApplyTransactionGenerationContext(ApplicateMode requestedMode, long generation)
+            => _bridge.ApplyTransactionGenerationContext(requestedMode, generation);
+
+        public void ClearTransactionGenerationContext()
+            => _bridge.ClearTransactionGenerationContext();
+
+        public void ApplyTransactionalModeState(
+            ApplicateMode requestedMode,
+            ApplicateModeSlotState viewer,
+            ApplicateModeSlotState edit)
+        {
+            _bridge._desiredViewerVisible = requestedMode == ApplicateMode.Viewer;
+            _bridge._desiredEditVisible = requestedMode == ApplicateMode.Edit;
+            ApplySlotState(_bridge._viewerSlot, viewer.IsVisible, viewer.IsInteractive, viewer.Opacity, instant: true);
+            ApplySlotState(_bridge._editSlot, edit.IsVisible, edit.IsInteractive, edit.Opacity, instant: true);
+            ApplyOpacity(_bridge._editContent, edit.Opacity > 0 ? 1.0 : 0.0, instant: true);
+        }
+
+        public void ApplyCommittedModeState(ApplicateMode mode, bool applySlotState)
+        {
+            _bridge._desiredViewerVisible = mode == ApplicateMode.Viewer;
+            _bridge._desiredEditVisible = mode == ApplicateMode.Edit;
+            if (applySlotState)
+            {
+                _bridge.ApplyCommittedModeSlotStates(mode);
+            }
+        }
+
+        public bool IsModeSlotLayoutSettled(ApplicateMode mode)
+        {
+            var target = mode == ApplicateMode.Viewer
+                ? (Control)_bridge._viewerSlot
+                : _bridge._editSlot;
+            return target.IsVisible && target.Bounds.Width > 0 && target.Bounds.Height > 0;
+        }
+
+        public void ReconcileModeTransition()
+            => _bridge.MarshalReconcile();
     }
 }
 
@@ -966,203 +416,4 @@ internal sealed class ApplicateModeTransactionContext
 
     public static void SetTransactionGeneration(AvaloniaObject target, long generation)
         => target.SetValue(TransactionGenerationProperty, generation > 0 ? generation : 0);
-}
-
-internal readonly record struct ApplicateModeSlotState(
-    bool IsVisible,
-    bool IsInteractive,
-    double Opacity);
-
-internal readonly record struct ApplicateModeTransitionSnapshot(
-    ApplicateMode DisplayedMode,
-    ApplicateMode RequestedMode,
-    long ActiveGeneration,
-    bool IsSwitching,
-    bool IsReadyToCommit,
-    bool IsAborted,
-    bool LayoutSettled,
-    bool CommitCompleted,
-    bool MinimapSettled,
-    bool RendererSettled);
-
-internal sealed class ApplicateModeTransitionController
-{
-    private long _nextGeneration;
-    private long _activeGeneration;
-    private ApplicateMode _displayedMode;
-    private ApplicateMode _requestedMode;
-    private bool _layoutSettled;
-    private bool _commitCompleted;
-    private bool _minimapSettled;
-    private bool _rendererSettled;
-    private bool _isAborted;
-
-    public ApplicateModeTransitionController(ApplicateMode displayedMode)
-    {
-        _displayedMode = displayedMode;
-        _requestedMode = displayedMode;
-    }
-
-    public ApplicateModeTransitionSnapshot Snapshot => new(
-        _displayedMode,
-        _requestedMode,
-        _activeGeneration,
-        _activeGeneration > 0,
-        _activeGeneration > 0 && _layoutSettled && _commitCompleted && _minimapSettled && _rendererSettled,
-        _isAborted,
-        _layoutSettled,
-        _commitCompleted,
-        _minimapSettled,
-        _rendererSettled);
-
-    public long RequestMode(ApplicateMode requestedMode)
-    {
-        if (_activeGeneration > 0 && requestedMode == _requestedMode)
-        {
-            return _activeGeneration;
-        }
-
-        _requestedMode = requestedMode;
-        _isAborted = false;
-
-        if (requestedMode == _displayedMode)
-        {
-            ClearActiveTransaction();
-            return 0;
-        }
-
-        _activeGeneration = checked(++_nextGeneration);
-        _layoutSettled = false;
-        _commitCompleted = false;
-        _minimapSettled = false;
-        _rendererSettled = false;
-        return _activeGeneration;
-    }
-
-    public void ResetDisplayedMode(ApplicateMode displayedMode)
-    {
-        _displayedMode = displayedMode;
-        _requestedMode = displayedMode;
-        _isAborted = false;
-        ClearActiveTransaction();
-    }
-
-    public bool ApplyLayoutSettled(long generation)
-    {
-        if (!IsActiveGeneration(generation))
-        {
-            return false;
-        }
-
-        _layoutSettled = true;
-        return TryCommit();
-    }
-
-    public bool ApplyCommitCompleted(long generation, ApplicateMode mode)
-    {
-        if (!IsActiveGeneration(generation) || mode != _requestedMode)
-        {
-            return false;
-        }
-
-        _commitCompleted = true;
-        return TryCommit();
-    }
-
-    public bool ApplyMinimapSettled(long generation)
-    {
-        if (!IsActiveGeneration(generation))
-        {
-            return false;
-        }
-
-        _minimapSettled = true;
-        return TryCommit();
-    }
-
-    public bool ApplyRendererSettled(long generation)
-    {
-        if (!IsActiveGeneration(generation))
-        {
-            return false;
-        }
-
-        _rendererSettled = true;
-        return TryCommit();
-    }
-
-    public bool ApplyRendererFailed(long generation)
-    {
-        if (!IsActiveGeneration(generation))
-        {
-            return false;
-        }
-
-        _isAborted = true;
-        ClearActiveTransaction();
-        return true;
-    }
-
-    public ApplicateModeSlotState GetSlotState(ApplicateMode mode)
-    {
-        if (_activeGeneration > 0)
-        {
-            if (mode == _displayedMode)
-            {
-                return new ApplicateModeSlotState(
-                    IsVisible: true,
-                    IsInteractive: false,
-                    Opacity: 1.0);
-            }
-
-            if (mode == _requestedMode)
-            {
-                return new ApplicateModeSlotState(
-                    IsVisible: true,
-                    IsInteractive: false,
-                    Opacity: 0.0);
-            }
-        }
-        else if (mode == _displayedMode)
-        {
-            return new ApplicateModeSlotState(
-                IsVisible: true,
-                IsInteractive: true,
-                Opacity: 1.0);
-        }
-
-        return new ApplicateModeSlotState(
-            IsVisible: false,
-            IsInteractive: false,
-            Opacity: 0.0);
-    }
-
-    private bool IsActiveGeneration(long generation)
-        => generation > 0 && generation == _activeGeneration;
-
-    private bool TryCommit()
-    {
-        if (_activeGeneration == 0
-            || !_layoutSettled
-            || !_commitCompleted
-            || !_minimapSettled
-            || !_rendererSettled)
-        {
-            return false;
-        }
-
-        _displayedMode = _requestedMode;
-        _isAborted = false;
-        ClearActiveTransaction();
-        return true;
-    }
-
-    private void ClearActiveTransaction()
-    {
-        _activeGeneration = 0;
-        _layoutSettled = false;
-        _commitCompleted = false;
-        _minimapSettled = false;
-        _rendererSettled = false;
-    }
 }

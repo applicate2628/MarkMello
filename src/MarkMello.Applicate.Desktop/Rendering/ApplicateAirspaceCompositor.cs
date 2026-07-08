@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Threading;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Styling;
@@ -15,10 +16,9 @@ namespace MarkMello.Applicate.Desktop.Rendering;
 
 /// <summary>
 /// Single airspace-transition policy owner for Applicate's WebView-backed
-/// surfaces. Stage A owns DOCUMENT, STARTUP, and THEME reveal sessions; mode
-/// sessions remain on their existing owner until their cutover slice.
+/// surfaces. Stage A owns DOCUMENT, STARTUP, THEME, and MODE reveal sessions.
 /// </summary>
-internal sealed class ApplicateAirspaceCompositor : IDisposable
+internal sealed partial class ApplicateAirspaceCompositor : IDisposable
 {
     private readonly Control _coverHost;
     private readonly IApplicateDocumentRevealState _documentState;
@@ -28,6 +28,7 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
     private readonly List<IDisposable> _startupSessions = [];
     private readonly List<DocumentRevealSession> _documentSessions = [];
     private readonly List<IDisposable> _themeSessions = [];
+    private readonly List<IApplicateModeRevealSession> _modeSessions = [];
     private bool _disposed;
 
     public ApplicateAirspaceCompositor(Control coverHost, MainWindowViewModel viewModel)
@@ -52,20 +53,6 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         _coverFactory = coverFactory ?? throw new ArgumentNullException(nameof(coverFactory));
         _paintGate = paintGate ?? throw new ArgumentNullException(nameof(paintGate));
         _scheduler = scheduler ?? new DispatcherAirspaceScheduler();
-    }
-
-    public IDisposable RegisterStartupSession(
-        Window window,
-        IApplicateSharedWebViewHost? host,
-        MainWindowViewModel viewModel)
-    {
-        ArgumentNullException.ThrowIfNull(window);
-        ArgumentNullException.ThrowIfNull(viewModel);
-
-        return RegisterStartupSession(
-            new WindowStartupRevealShell(window),
-            host is null ? null : new SharedWebViewStartupRevealSignals(host),
-            new MainWindowStartupRevealState(viewModel));
     }
 
     internal IDisposable RegisterStartupSession(
@@ -98,25 +85,6 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         return session;
     }
 
-    public IDisposable RegisterDocumentSession(
-        IApplicateSharedWebViewHost host,
-        ApplicateMode mode,
-        Func<bool> isActiveSurface,
-        bool clearHeadingsOnRendererFailure = true,
-        bool skipInitialCoverSession = false,
-        bool suppressSamePathReloadCover = false)
-    {
-        ArgumentNullException.ThrowIfNull(host);
-
-        return RegisterDocumentSession(
-            new SharedWebViewDocumentRevealSignals(host),
-            mode,
-            isActiveSurface,
-            clearHeadingsOnRendererFailure,
-            skipInitialCoverSession,
-            suppressSamePathReloadCover);
-    }
-
     internal IDisposable RegisterDocumentSession(
         IApplicateDocumentRevealSignals signals,
         ApplicateMode mode,
@@ -144,17 +112,6 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         return session;
     }
 
-    public IDisposable RegisterThemeSession(
-        IApplicateSharedWebViewHost host,
-        Func<bool> isActiveSurface)
-    {
-        ArgumentNullException.ThrowIfNull(host);
-
-        return RegisterThemeSession(
-            new SharedWebViewThemeRevealSignals(host),
-            isActiveSurface);
-    }
-
     internal IDisposable RegisterThemeSession(
         IApplicateThemeRevealSignals signals,
         Func<bool> isActiveSurface)
@@ -172,6 +129,27 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
             _scheduler,
             isActiveSurface);
         _themeSessions.Add(session);
+        return session;
+    }
+
+    internal IApplicateModeRevealSession RegisterModeSession(
+        IApplicateHostRevealIntents hostRevealIntents,
+        IApplicateModeTransitionSlotAdapter slotAdapter,
+        Func<ReadingPreferences> getReadingPreferences)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(hostRevealIntents);
+        ArgumentNullException.ThrowIfNull(slotAdapter);
+        ArgumentNullException.ThrowIfNull(getReadingPreferences);
+
+        var session = new ModeRevealSession(
+            _coverHost,
+            hostRevealIntents,
+            slotAdapter,
+            _coverFactory(),
+            _scheduler,
+            getReadingPreferences);
+        _modeSessions.Add(session);
         return session;
     }
 
@@ -200,6 +178,12 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
             session.Dispose();
         }
         _themeSessions.Clear();
+
+        foreach (var session in _modeSessions)
+        {
+            session.Dispose();
+        }
+        _modeSessions.Clear();
     }
 
     private sealed class StartupRevealSession : IDisposable
@@ -244,7 +228,7 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
             _headingsReady = !_waitForHeadings || state.HasDocumentHeadings;
             _fallbackTimer = scheduler.CreateTimer(FallbackTimeout, OnFallbackTick);
             _rendererSettleFallbackTimer = scheduler.CreateTimer(
-                ApplicateSharedWebViewHost.RendererSettleFallbackTimeout,
+                signals.RendererSettleFallbackTimeout,
                 OnRendererSettleFallbackTick);
 
             _shell.Opened += OnStartupWindowOpened;
@@ -356,7 +340,7 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
 
         private bool ShouldWaitForRendererSettle()
             => !_rendererSettleReady
-               && ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait(
+               && _signals.ShouldSkipRendererFrameWait(
                    _state.Document,
                    transactionGeneration: 0);
 
@@ -1190,6 +1174,573 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         }
     }
 
+    private sealed class ModeRevealSession : IApplicateModeRevealSession
+    {
+        private readonly Control _coverHost;
+        private readonly IApplicateHostRevealIntents _hostRevealIntents;
+        private readonly IApplicateModeTransitionSlotAdapter _slotAdapter;
+        private readonly IApplicateAirspaceCoverPresenter _cover;
+        private readonly IApplicateAirspaceScheduler _scheduler;
+        private readonly Func<ReadingPreferences> _getReadingPreferences;
+        private readonly ApplicateModeTransitionController _modeTransitionController = new(ApplicateMode.Viewer);
+        private int _modeRevealCoverContinuationPending;
+        private bool _modeRevealCoverArmed;
+        private long _activeModeTransactionGeneration;
+        private ApplicateMode? _activeModeTransactionTarget;
+        private ApplicateMode? _suppressedOutgoingMode;
+        private long _suppressedOutgoingModeTransactionGeneration;
+        private long _pendingModeTransactionCommitGeneration;
+        private ApplicateMode _pendingModeTransactionCommitMode;
+        private int _modeTransactionCommitPending;
+        private bool _modeTransactionRollbackInProgress;
+        private bool _disposed;
+
+        public ModeRevealSession(
+            Control coverHost,
+            IApplicateHostRevealIntents hostRevealIntents,
+            IApplicateModeTransitionSlotAdapter slotAdapter,
+            IApplicateAirspaceCoverPresenter cover,
+            IApplicateAirspaceScheduler scheduler,
+            Func<ReadingPreferences> getReadingPreferences)
+        {
+            _coverHost = coverHost;
+            _hostRevealIntents = hostRevealIntents;
+            _slotAdapter = slotAdapter;
+            _cover = cover;
+            _scheduler = scheduler;
+            _getReadingPreferences = getReadingPreferences;
+
+            _hostRevealIntents.CommitCompleted += OnTransactionCommitCompleted;
+            _hostRevealIntents.MinimapSettled += OnTransactionMinimapSettled;
+            _hostRevealIntents.RendererSettled += OnTransactionRendererSettled;
+            _hostRevealIntents.RendererFailed += OnTransactionRendererFailed;
+        }
+
+        public bool TryReconcile(ApplicateMode? requestedMode, bool modeSlotSwitch)
+            => TryReconcileTransactionalModeSwitch(requestedMode, modeSlotSwitch);
+
+        private bool TryReconcileTransactionalModeSwitch(ApplicateMode? requestedMode, bool modeSlotSwitch)
+        {
+            if (_disposed)
+            {
+                return false;
+            }
+
+            if (_modeTransactionRollbackInProgress)
+            {
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "bridge-transaction-rollback-in-progress-request-ignored",
+                    $"requested={requestedMode?.ToString() ?? "(null)"} active={_activeModeTransactionGeneration}");
+                return true;
+            }
+
+            if (_activeModeTransactionGeneration > 0)
+            {
+                if (requestedMode is null)
+                {
+                    CancelModeTransaction();
+                    return false;
+                }
+
+                if (_activeModeTransactionTarget == requestedMode)
+                {
+                    TryApplyLayoutSettledForActiveTransaction();
+                    ApplicateTrace.DiagMs(
+                        "pane-seq",
+                        "bridge-transaction-reconcile-active-target",
+                        $"generation={_activeModeTransactionGeneration} target={requestedMode.Value}");
+                    return true;
+                }
+
+                if (_suppressedOutgoingMode == requestedMode)
+                {
+                    RollbackActiveModeTransaction(
+                        reason: "rapid-toggle",
+                        committedRollbackMode: requestedMode.Value,
+                        applyOutgoingSlotState: true);
+                    return true;
+                }
+            }
+
+            var transactionActive = _modeTransitionController.Snapshot.IsSwitching
+                || _activeModeTransactionGeneration > 0;
+            if (!transactionActive && !modeSlotSwitch)
+            {
+                if (_modeRevealCoverArmed)
+                {
+                    _modeRevealCoverArmed = false;
+                    HideModeRevealCover();
+                    ApplicateTrace.DiagMs(
+                        "pane-seq",
+                        "bridge-cover-cancelled",
+                        $"requested={requestedMode?.ToString() ?? "(null)"}");
+                }
+
+                if (requestedMode is not null)
+                {
+                    _modeTransitionController.ResetDisplayedMode(requestedMode.Value);
+                }
+
+                return false;
+            }
+
+            if (!transactionActive
+                && modeSlotSwitch
+                && !_modeRevealCoverArmed
+                && TryPrimeModeRevealCover())
+            {
+                _modeRevealCoverArmed = true;
+                QueueModeRevealCoveredReconcile();
+                return true;
+            }
+
+            if (requestedMode is null)
+            {
+                CancelModeTransaction();
+                return false;
+            }
+
+            var outgoingMode = _modeTransitionController.Snapshot.DisplayedMode;
+            var generation = _modeTransitionController.RequestMode(requestedMode.Value);
+            if (generation > 0)
+            {
+                _activeModeTransactionGeneration = generation;
+                _activeModeTransactionTarget = requestedMode.Value;
+                _slotAdapter.ApplyTransactionGenerationContext(requestedMode.Value, generation);
+                SuppressOutgoingNativeRendererForActiveTransaction(
+                    generation,
+                    outgoingMode,
+                    requestedMode.Value);
+            }
+            else
+            {
+                _activeModeTransactionGeneration = 0;
+                _activeModeTransactionTarget = null;
+                _suppressedOutgoingModeTransactionGeneration = 0;
+                _suppressedOutgoingMode = null;
+                _pendingModeTransactionCommitGeneration = 0;
+                _modeRevealCoverArmed = false;
+                _slotAdapter.ClearTransactionGenerationContext();
+                HideModeRevealCover();
+            }
+
+            ApplyTransactionalSlotStates();
+            TryApplyLayoutSettledForActiveTransaction();
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "bridge-transaction-reconcile",
+                $"generation={generation} target={requestedMode.Value}");
+            return true;
+        }
+
+        private void OnTransactionCommitCompleted(object? sender, ApplicateCommitCompletedEventArgs e)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            if (_modeTransitionController.ApplyCommitCompleted(e.TransactionGeneration, e.Mode))
+            {
+                QueueModeTransactionCommit(e.TransactionGeneration, e.Mode);
+            }
+        }
+
+        private void OnTransactionMinimapSettled(object? sender, ApplicateMinimapSettledEventArgs e)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            var snapshot = _modeTransitionController.Snapshot;
+            if (_modeTransitionController.ApplyMinimapSettled(e.TransactionGeneration))
+            {
+                QueueModeTransactionCommit(e.TransactionGeneration, snapshot.RequestedMode);
+            }
+        }
+
+        private void OnTransactionRendererSettled(object? sender, ApplicateRendererSettledEventArgs e)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            var snapshot = _modeTransitionController.Snapshot;
+            if (_modeTransitionController.ApplyRendererSettled(e.TransactionGeneration))
+            {
+                QueueModeTransactionCommit(e.TransactionGeneration, snapshot.RequestedMode);
+            }
+        }
+
+        private void OnTransactionRendererFailed(object? sender, ApplicateRendererFailureEvent e)
+        {
+            if (_disposed || _activeModeTransactionGeneration <= 0)
+            {
+                return;
+            }
+
+            _modeTransitionController.ApplyRendererFailed(_activeModeTransactionGeneration);
+            RollbackActiveModeTransaction(
+                reason: "renderer-failure",
+                committedRollbackMode: null,
+                applyOutgoingSlotState: true);
+            _slotAdapter.ReconcileModeTransition();
+        }
+
+        private void SuppressOutgoingNativeRendererForActiveTransaction(
+            long generation,
+            ApplicateMode outgoingMode,
+            ApplicateMode requestedMode)
+        {
+            if (generation <= 0
+                || outgoingMode == requestedMode
+                || _suppressedOutgoingModeTransactionGeneration == generation)
+            {
+                return;
+            }
+
+            _hostRevealIntents.SuppressOutgoingNativeRenderer(outgoingMode);
+            _suppressedOutgoingMode = outgoingMode;
+            _suppressedOutgoingModeTransactionGeneration = generation;
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "bridge-transaction-outgoing-native-suppressed",
+                $"generation={generation} outgoing={outgoingMode} target={requestedMode}");
+        }
+
+        private void ClearSuppressedOutgoingNativeRendererForCompletedTransaction(
+            long generation,
+            ApplicateMode targetMode,
+            string reason)
+        {
+            if (generation <= 0 || _suppressedOutgoingModeTransactionGeneration != generation)
+            {
+                return;
+            }
+
+            var outgoingMode = _suppressedOutgoingMode;
+            _suppressedOutgoingMode = null;
+            _suppressedOutgoingModeTransactionGeneration = 0;
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "bridge-transaction-outgoing-native-suppression-cleared",
+                $"generation={generation} outgoing={outgoingMode?.ToString() ?? "(null)"} target={targetMode} reason={reason}");
+        }
+
+        private void CancelModeTransaction()
+        {
+            if (_activeModeTransactionGeneration > 0)
+            {
+                _modeTransitionController.ApplyRendererFailed(_activeModeTransactionGeneration);
+            }
+
+            RollbackActiveModeTransaction(
+                reason: "cancel",
+                committedRollbackMode: _suppressedOutgoingMode,
+                applyOutgoingSlotState: true);
+        }
+
+        private void RollbackActiveModeTransaction(
+            string reason,
+            ApplicateMode? committedRollbackMode,
+            bool applyOutgoingSlotState)
+        {
+            if (_modeTransactionRollbackInProgress)
+            {
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "bridge-transaction-rollback-reentry-ignored",
+                    $"reason={reason} active={_activeModeTransactionGeneration}");
+                return;
+            }
+
+            var generation = _suppressedOutgoingModeTransactionGeneration > 0
+                ? _suppressedOutgoingModeTransactionGeneration
+                : _activeModeTransactionGeneration;
+            var outgoingMode = _suppressedOutgoingMode;
+            var targetMode = _activeModeTransactionTarget;
+            var restoreSucceeded = false;
+            var restoreFailed = false;
+            _modeTransactionRollbackInProgress = true;
+
+            try
+            {
+                _activeModeTransactionGeneration = 0;
+                _activeModeTransactionTarget = null;
+                _pendingModeTransactionCommitGeneration = 0;
+                _modeRevealCoverArmed = false;
+                _slotAdapter.ClearTransactionGenerationContext();
+                _suppressedOutgoingMode = null;
+                _suppressedOutgoingModeTransactionGeneration = 0;
+
+                var rollbackMode = committedRollbackMode ?? outgoingMode;
+                if (rollbackMode is not null)
+                {
+                    _modeTransitionController.ResetDisplayedMode(rollbackMode.Value);
+                    _slotAdapter.ApplyCommittedModeState(rollbackMode.Value, applyOutgoingSlotState);
+                }
+
+                if (outgoingMode is null)
+                {
+                    ApplicateTrace.DiagMs(
+                        "pane-seq",
+                        "bridge-transaction-outgoing-native-restore-skipped",
+                        $"generation={generation} outgoing={outgoingMode?.ToString() ?? "(null)"} target={targetMode?.ToString() ?? "(null)"} reason={reason}");
+                    return;
+                }
+
+                try
+                {
+                    _hostRevealIntents.RestoreOutgoingNativeRenderer(outgoingMode.Value);
+                    restoreSucceeded = true;
+                    ApplicateTrace.DiagMs(
+                        "pane-seq",
+                        "bridge-transaction-outgoing-native-restored-before-cover-hide",
+                        $"generation={generation} outgoing={outgoingMode.Value} target={targetMode?.ToString() ?? "(null)"} reason={reason}");
+                }
+                catch (Exception ex)
+                {
+                    restoreFailed = true;
+                    ApplicateTrace.DiagMs(
+                        "pane-seq",
+                        "bridge-transaction-outgoing-native-restore-failed",
+                        $"generation={generation} outgoing={outgoingMode.Value} target={targetMode?.ToString() ?? "(null)"} reason={reason} exceptionType={ex.GetType().Name}");
+                }
+            }
+            finally
+            {
+                _suppressedOutgoingMode = null;
+                _suppressedOutgoingModeTransactionGeneration = 0;
+                _modeTransactionRollbackInProgress = false;
+                if (restoreFailed)
+                {
+                    ApplicateTrace.DiagMs(
+                        "pane-seq",
+                        "bridge-transaction-outgoing-native-restore-failed-but-bookkeeping-cleared",
+                        $"generation={generation} outgoing={outgoingMode?.ToString() ?? "(null)"} target={targetMode?.ToString() ?? "(null)"} reason={reason}");
+                }
+                else if (!restoreSucceeded)
+                {
+                    ApplicateTrace.DiagMs(
+                        "pane-seq",
+                        "bridge-transaction-outgoing-native-bookkeeping-cleared-without-restore",
+                        $"generation={generation} outgoing={outgoingMode?.ToString() ?? "(null)"} target={targetMode?.ToString() ?? "(null)"} reason={reason}");
+                }
+
+                HideModeRevealCover();
+            }
+        }
+
+        private void ApplyTransactionalSlotStates()
+        {
+            var snapshot = _modeTransitionController.Snapshot;
+            var viewer = _modeTransitionController.GetSlotState(ApplicateMode.Viewer);
+            var edit = _modeTransitionController.GetSlotState(ApplicateMode.Edit);
+            _slotAdapter.ApplyTransactionalModeState(snapshot.RequestedMode, viewer, edit);
+        }
+
+        public void TryApplyLayoutSettledForActiveTransaction()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            var snapshot = _modeTransitionController.Snapshot;
+            if (!snapshot.IsSwitching)
+            {
+                return;
+            }
+
+            if (!_slotAdapter.IsModeSlotLayoutSettled(snapshot.RequestedMode))
+            {
+                return;
+            }
+
+            if (_modeTransitionController.ApplyLayoutSettled(snapshot.ActiveGeneration))
+            {
+                QueueModeTransactionCommit(snapshot.ActiveGeneration, snapshot.RequestedMode);
+            }
+        }
+
+        private void QueueModeTransactionCommit(long generation, ApplicateMode mode)
+        {
+            if (generation <= 0)
+            {
+                return;
+            }
+
+            _pendingModeTransactionCommitGeneration = generation;
+            _pendingModeTransactionCommitMode = mode;
+            if (Interlocked.Exchange(ref _modeTransactionCommitPending, 1) != 0)
+            {
+                return;
+            }
+
+            _scheduler.Post(CommitQueuedModeTransaction, DispatcherPriority.Render);
+        }
+
+        private void CommitQueuedModeTransaction()
+        {
+            Interlocked.Exchange(ref _modeTransactionCommitPending, 0);
+            if (_disposed)
+            {
+                return;
+            }
+
+            var generation = _pendingModeTransactionCommitGeneration;
+            var mode = _pendingModeTransactionCommitMode;
+            _pendingModeTransactionCommitGeneration = 0;
+            if (generation <= 0
+                || generation != _activeModeTransactionGeneration
+                || _activeModeTransactionTarget != mode)
+            {
+                if (generation > 0)
+                {
+                    ApplicateTrace.DiagMs(
+                        "pane-seq",
+                        "bridge-transaction-stale-commit-discarded",
+                        $"generation={generation} active={_activeModeTransactionGeneration} target={_activeModeTransactionTarget?.ToString() ?? "(null)"} requested={mode}");
+                }
+
+                return;
+            }
+
+            ApplyCommittedModeSlotStates(mode);
+            if (!_hostRevealIntents.RevealNativeRendererForCommittedTransaction(generation))
+            {
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "bridge-transaction-native-reveal-rejected",
+                    $"generation={generation} mode={mode}");
+                RollbackActiveModeTransaction(
+                    reason: "rejected-reveal",
+                    committedRollbackMode: _suppressedOutgoingMode,
+                    applyOutgoingSlotState: true);
+                return;
+            }
+
+            _modeTransitionController.ResetDisplayedMode(mode);
+            _activeModeTransactionGeneration = 0;
+            _activeModeTransactionTarget = null;
+            _modeRevealCoverArmed = false;
+            _slotAdapter.ClearTransactionGenerationContext();
+            ClearSuppressedOutgoingNativeRendererForCompletedTransaction(
+                generation,
+                mode,
+                reason: "success");
+            HideModeRevealCoverAnimated();
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "bridge-transaction-committed",
+                $"generation={generation} mode={mode}");
+        }
+
+        private void ApplyCommittedModeSlotStates(ApplicateMode mode)
+            => _slotAdapter.ApplyCommittedModeState(mode, applySlotState: true);
+
+        private bool TryPrimeModeRevealCover()
+        {
+            if (!_cover.Show(_coverHost))
+            {
+                return false;
+            }
+
+            _coverHost.UpdateLayout();
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "bridge-cover-visible",
+                $"surface=window hostBounds={_coverHost.Bounds.Width:F0}x{_coverHost.Bounds.Height:F0}");
+            return true;
+        }
+
+        private void QueueModeRevealCoveredReconcile()
+        {
+            if (Interlocked.Exchange(ref _modeRevealCoverContinuationPending, 1) != 0)
+            {
+                return;
+            }
+
+            var topLevel = TopLevel.GetTopLevel(_coverHost);
+            if (topLevel is null)
+            {
+                ApplicateTrace.DiagMs("pane-seq", "bridge-cover-wait-frame", "path=dispatcher-fallback");
+                _scheduler.Post(ContinueModeRevealCoveredReconcile, DispatcherPriority.Background);
+                return;
+            }
+
+            ApplicateTrace.DiagMs("pane-seq", "bridge-cover-wait-frame", "path=animation-frame");
+            topLevel.RequestAnimationFrame(_ =>
+            {
+                if (_disposed)
+                {
+                    Interlocked.Exchange(ref _modeRevealCoverContinuationPending, 0);
+                    return;
+                }
+
+                ApplicateTrace.DiagMs("pane-seq", "bridge-cover-frame", "step=1");
+                topLevel.RequestAnimationFrame(_ =>
+                {
+                    ApplicateTrace.DiagMs("pane-seq", "bridge-cover-frame", "step=2");
+                    ContinueModeRevealCoveredReconcile();
+                });
+            });
+        }
+
+        private void ContinueModeRevealCoveredReconcile()
+        {
+            Interlocked.Exchange(ref _modeRevealCoverContinuationPending, 0);
+            if (_disposed)
+            {
+                return;
+            }
+
+            _slotAdapter.ReconcileModeTransition();
+        }
+
+        private void HideModeRevealCover()
+        {
+            HideModeRevealCover(TimeSpan.Zero);
+        }
+
+        private void HideModeRevealCoverAnimated()
+        {
+            HideModeRevealCover(ApplicateMotion.ModeSwitchDuration(_getReadingPreferences()));
+        }
+
+        private void HideModeRevealCover(TimeSpan duration)
+        {
+            _cover.Hide(duration);
+            ApplicateTrace.DiagMs("pane-seq", "bridge-cover-hidden");
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            if (_suppressedOutgoingMode is not null || _activeModeTransactionGeneration > 0)
+            {
+                RollbackActiveModeTransaction(
+                    reason: "dispose",
+                    committedRollbackMode: null,
+                    applyOutgoingSlotState: false);
+            }
+
+            _disposed = true;
+            _hostRevealIntents.CommitCompleted -= OnTransactionCommitCompleted;
+            _hostRevealIntents.MinimapSettled -= OnTransactionMinimapSettled;
+            _hostRevealIntents.RendererSettled -= OnTransactionRendererSettled;
+            _hostRevealIntents.RendererFailed -= OnTransactionRendererFailed;
+            HideModeRevealCover();
+            _cover.Dispose();
+        }
+    }
+
     private sealed class MainWindowDocumentRevealState(MainWindowViewModel viewModel) : IApplicateDocumentRevealState
     {
         private readonly MainWindowViewModel _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
@@ -1241,90 +1792,6 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         public bool IsTocPreferredVisible => _viewModel.IsTocPreferredVisible;
 
         public bool HasDocumentHeadings => _viewModel.HasDocumentHeadings;
-    }
-
-    private sealed class SharedWebViewDocumentRevealSignals(IApplicateSharedWebViewHost host)
-        : IApplicateDocumentRevealSignals
-    {
-        private readonly IApplicateSharedWebViewHost _host = host ?? throw new ArgumentNullException(nameof(host));
-
-        public event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted
-        {
-            add => _host.CommitCompleted += value;
-            remove => _host.CommitCompleted -= value;
-        }
-
-        public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed
-        {
-            add => _host.RendererFailed += value;
-            remove => _host.RendererFailed -= value;
-        }
-
-        public event EventHandler? DocumentRevealReady
-        {
-            add => _host.View.DocumentRevealReady += value;
-            remove => _host.View.DocumentRevealReady -= value;
-        }
-    }
-
-    private sealed class SharedWebViewStartupRevealSignals(IApplicateSharedWebViewHost host)
-        : IApplicateStartupRevealSignals
-    {
-        private readonly IApplicateSharedWebViewHost _host = host ?? throw new ArgumentNullException(nameof(host));
-
-        public event EventHandler? DocumentRevealReady
-        {
-            add => _host.View.DocumentRevealReady += value;
-            remove => _host.View.DocumentRevealReady -= value;
-        }
-
-        public event EventHandler<IReadOnlyList<DocumentHeading>>? HeadingsChanged
-        {
-            add => _host.View.HeadingsChanged += value;
-            remove => _host.View.HeadingsChanged -= value;
-        }
-
-        public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed
-        {
-            add => _host.RendererFailed += value;
-            remove => _host.RendererFailed -= value;
-        }
-
-        public event EventHandler? RendererSettled
-        {
-            add => _host.View.ModeToggleSettled += value;
-            remove => _host.View.ModeToggleSettled -= value;
-        }
-
-        public void RequestRendererSettleProbe()
-            => _host.View.RequestModeToggleSettleProbe();
-    }
-
-    private sealed class SharedWebViewThemeRevealSignals(IApplicateSharedWebViewHost host)
-        : IApplicateThemeRevealSignals
-    {
-        private readonly IApplicateSharedWebViewHost _host = host ?? throw new ArgumentNullException(nameof(host));
-
-        public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed
-        {
-            add => _host.RendererFailed += value;
-            remove => _host.RendererFailed -= value;
-        }
-
-        public event EventHandler<ApplicateWebThemeChangeSentEventArgs>? ThemeChangeSent
-        {
-            add => _host.View.ThemeChangeSent += value;
-            remove => _host.View.ThemeChangeSent -= value;
-        }
-
-        public event EventHandler<ApplicateWebThemeAppliedEventArgs>? ThemeApplied
-        {
-            add => _host.View.ThemeApplied += value;
-            remove => _host.View.ThemeApplied -= value;
-        }
-
-        public bool HasLoadedDocumentForSource(MarkdownSource? source)
-            => _host.View.HasLoadedDocumentForSource(source);
     }
 
     private sealed class WindowStartupRevealShell(Window window) : IApplicateStartupRevealShell
@@ -1502,45 +1969,6 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
     }
 }
 
-internal sealed class SharedWebViewHostRevealIntents(IApplicateModeTransactionHost host)
-    : IApplicateHostRevealIntents
-{
-    private readonly IApplicateModeTransactionHost _host = host ?? throw new ArgumentNullException(nameof(host));
-
-    public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed
-    {
-        add => _host.RendererFailed += value;
-        remove => _host.RendererFailed -= value;
-    }
-
-    public event EventHandler<ApplicateMinimapSettledEventArgs>? MinimapSettled
-    {
-        add => _host.MinimapSettled += value;
-        remove => _host.MinimapSettled -= value;
-    }
-
-    public event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted
-    {
-        add => _host.CommitCompleted += value;
-        remove => _host.CommitCompleted -= value;
-    }
-
-    public event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled
-    {
-        add => _host.RendererSettled += value;
-        remove => _host.RendererSettled -= value;
-    }
-
-    public void SuppressOutgoingNativeRenderer(ApplicateMode displayedMode)
-        => _host.SuppressNativeRendererForModeSwitch(displayedMode);
-
-    public void RestoreOutgoingNativeRenderer(ApplicateMode displayedMode)
-        => _host.RestoreNativeRendererAfterModeSwitchSuppression(displayedMode);
-
-    public bool RevealNativeRendererForCommittedTransaction(long transactionGeneration)
-        => _host.RevealNativeWebViewForCommittedTransaction(transactionGeneration);
-}
-
 internal interface IApplicateDocumentRevealState : INotifyPropertyChanged
 {
     event EventHandler? DocumentTransitionStarting;
@@ -1576,6 +2004,8 @@ internal interface IApplicateStartupRevealState : INotifyPropertyChanged
 
 internal interface IApplicateStartupRevealSignals
 {
+    TimeSpan RendererSettleFallbackTimeout { get; }
+
     event EventHandler? DocumentRevealReady;
 
     event EventHandler<IReadOnlyList<DocumentHeading>>? HeadingsChanged;
@@ -1584,24 +2014,233 @@ internal interface IApplicateStartupRevealSignals
 
     event EventHandler? RendererSettled;
 
+    bool ShouldSkipRendererFrameWait(MarkdownSource? source, long transactionGeneration);
+
     void RequestRendererSettleProbe();
 }
 
-internal interface IApplicateHostRevealIntents
+internal interface IApplicateModeRevealSession : IDisposable
 {
-    event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
+    bool TryReconcile(ApplicateMode? requestedMode, bool modeSlotSwitch);
 
-    event EventHandler<ApplicateMinimapSettledEventArgs>? MinimapSettled;
+    void TryApplyLayoutSettledForActiveTransaction();
+}
 
-    event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted;
+internal interface IApplicateModeTransitionSlotAdapter
+{
+    void ApplyTransactionGenerationContext(ApplicateMode requestedMode, long generation);
 
-    event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled;
+    void ClearTransactionGenerationContext();
 
-    void SuppressOutgoingNativeRenderer(ApplicateMode displayedMode);
+    void ApplyTransactionalModeState(
+        ApplicateMode requestedMode,
+        ApplicateModeSlotState viewer,
+        ApplicateModeSlotState edit);
 
-    void RestoreOutgoingNativeRenderer(ApplicateMode displayedMode);
+    void ApplyCommittedModeState(ApplicateMode mode, bool applySlotState);
 
-    bool RevealNativeRendererForCommittedTransaction(long transactionGeneration);
+    bool IsModeSlotLayoutSettled(ApplicateMode mode);
+
+    void ReconcileModeTransition();
+}
+
+internal readonly record struct ApplicateModeSlotState(
+    bool IsVisible,
+    bool IsInteractive,
+    double Opacity);
+
+internal readonly record struct ApplicateModeTransitionSnapshot(
+    ApplicateMode DisplayedMode,
+    ApplicateMode RequestedMode,
+    long ActiveGeneration,
+    bool IsSwitching,
+    bool IsReadyToCommit,
+    bool IsAborted,
+    bool LayoutSettled,
+    bool CommitCompleted,
+    bool MinimapSettled,
+    bool RendererSettled);
+
+internal sealed class ApplicateModeTransitionController
+{
+    private long _nextGeneration;
+    private long _activeGeneration;
+    private ApplicateMode _displayedMode;
+    private ApplicateMode _requestedMode;
+    private bool _layoutSettled;
+    private bool _commitCompleted;
+    private bool _minimapSettled;
+    private bool _rendererSettled;
+    private bool _isAborted;
+
+    public ApplicateModeTransitionController(ApplicateMode displayedMode)
+    {
+        _displayedMode = displayedMode;
+        _requestedMode = displayedMode;
+    }
+
+    public ApplicateModeTransitionSnapshot Snapshot => new(
+        _displayedMode,
+        _requestedMode,
+        _activeGeneration,
+        _activeGeneration > 0,
+        _activeGeneration > 0 && _layoutSettled && _commitCompleted && _minimapSettled && _rendererSettled,
+        _isAborted,
+        _layoutSettled,
+        _commitCompleted,
+        _minimapSettled,
+        _rendererSettled);
+
+    public long RequestMode(ApplicateMode requestedMode)
+    {
+        if (_activeGeneration > 0 && requestedMode == _requestedMode)
+        {
+            return _activeGeneration;
+        }
+
+        _requestedMode = requestedMode;
+        _isAborted = false;
+
+        if (requestedMode == _displayedMode)
+        {
+            ClearActiveTransaction();
+            return 0;
+        }
+
+        _activeGeneration = checked(++_nextGeneration);
+        _layoutSettled = false;
+        _commitCompleted = false;
+        _minimapSettled = false;
+        _rendererSettled = false;
+        return _activeGeneration;
+    }
+
+    public void ResetDisplayedMode(ApplicateMode displayedMode)
+    {
+        _displayedMode = displayedMode;
+        _requestedMode = displayedMode;
+        _isAborted = false;
+        ClearActiveTransaction();
+    }
+
+    public bool ApplyLayoutSettled(long generation)
+    {
+        if (!IsActiveGeneration(generation))
+        {
+            return false;
+        }
+
+        _layoutSettled = true;
+        return TryCommit();
+    }
+
+    public bool ApplyCommitCompleted(long generation, ApplicateMode mode)
+    {
+        if (!IsActiveGeneration(generation) || mode != _requestedMode)
+        {
+            return false;
+        }
+
+        _commitCompleted = true;
+        return TryCommit();
+    }
+
+    public bool ApplyMinimapSettled(long generation)
+    {
+        if (!IsActiveGeneration(generation))
+        {
+            return false;
+        }
+
+        _minimapSettled = true;
+        return TryCommit();
+    }
+
+    public bool ApplyRendererSettled(long generation)
+    {
+        if (!IsActiveGeneration(generation))
+        {
+            return false;
+        }
+
+        _rendererSettled = true;
+        return TryCommit();
+    }
+
+    public bool ApplyRendererFailed(long generation)
+    {
+        if (!IsActiveGeneration(generation))
+        {
+            return false;
+        }
+
+        _isAborted = true;
+        ClearActiveTransaction();
+        return true;
+    }
+
+    public ApplicateModeSlotState GetSlotState(ApplicateMode mode)
+    {
+        if (_activeGeneration > 0)
+        {
+            if (mode == _displayedMode)
+            {
+                return new ApplicateModeSlotState(
+                    IsVisible: true,
+                    IsInteractive: false,
+                    Opacity: 1.0);
+            }
+
+            if (mode == _requestedMode)
+            {
+                return new ApplicateModeSlotState(
+                    IsVisible: true,
+                    IsInteractive: false,
+                    Opacity: 0.0);
+            }
+        }
+        else if (mode == _displayedMode)
+        {
+            return new ApplicateModeSlotState(
+                IsVisible: true,
+                IsInteractive: true,
+                Opacity: 1.0);
+        }
+
+        return new ApplicateModeSlotState(
+            IsVisible: false,
+            IsInteractive: false,
+            Opacity: 0.0);
+    }
+
+    private bool IsActiveGeneration(long generation)
+        => generation > 0 && generation == _activeGeneration;
+
+    private bool TryCommit()
+    {
+        if (_activeGeneration == 0
+            || !_layoutSettled
+            || !_commitCompleted
+            || !_minimapSettled
+            || !_rendererSettled)
+        {
+            return false;
+        }
+
+        _displayedMode = _requestedMode;
+        _isAborted = false;
+        ClearActiveTransaction();
+        return true;
+    }
+
+    private void ClearActiveTransaction()
+    {
+        _activeGeneration = 0;
+        _layoutSettled = false;
+        _commitCompleted = false;
+        _minimapSettled = false;
+        _rendererSettled = false;
+    }
 }
 
 internal interface IApplicateThemeRevealSignals
