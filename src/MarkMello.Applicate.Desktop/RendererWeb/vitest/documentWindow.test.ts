@@ -1,0 +1,293 @@
+import { describe, expect, it } from "vitest";
+import {
+  DEFAULT_RENDER_AHEAD,
+  DocumentWindowModel,
+  buildDocumentWindowModelFromLiveBlocks,
+  buildDocumentWindowModelsFromLiveBlocks,
+  collectLiveDocumentSectionElements,
+  computeLiveBlockWindowRange,
+  readLiveBlockMeasuredHeights,
+  summarizeEstimateHeightErrors,
+  type SectionModelEntry,
+} from "../src/documentWindow";
+import type { IntrinsicSizeMetrics } from "../src/sectionIntrinsicSize";
+
+const metrics: IntrinsicSizeMetrics = {
+  charsPerLine: 40,
+  fontSizePx: 18,
+  lineHeightPx: 30,
+};
+
+function entry(sectionIndex: number, blockIndex: number, estimatedHeight: number): SectionModelEntry {
+  return {
+    blockIndex,
+    cumulativeTop: 0,
+    estimatedHeight,
+    headingLevel: 0,
+    kind: "paragraph",
+    measuredHeight: undefined,
+    sectionIndex,
+  };
+}
+
+function block(index: number, top: number, height: number, kind = "paragraph"): HTMLElement {
+  const element = document.createElement("p");
+  element.dataset.mmBlockIndex = String(index);
+  element.dataset.mmBlockKind = kind;
+  element.textContent = `block ${index}`;
+  Object.defineProperty(element, "offsetTop", {
+    configurable: true,
+    get: () => top,
+  });
+  Object.defineProperty(element, "offsetHeight", {
+    configurable: true,
+    get: () => height,
+  });
+  return element;
+}
+
+function setDocumentScrollRoot(scrollTop: number, clientHeight: number): void {
+  const root = document.documentElement;
+  Object.defineProperty(document, "scrollingElement", {
+    configurable: true,
+    get: () => root,
+  });
+  Object.defineProperty(root, "scrollTop", {
+    configurable: true,
+    get: () => scrollTop,
+  });
+  Object.defineProperty(root, "clientHeight", {
+    configurable: true,
+    get: () => clientHeight,
+  });
+}
+
+function mermaidBlock(index: number, top: number, height: number): HTMLElement {
+  const element = block(index, top, height, "code");
+  element.className = "mm-mermaid";
+  const code = document.createElement("code");
+  code.dataset.mmMermaid = "";
+  code.textContent = "flowchart LR\nA --> B";
+  element.append(code);
+  return element;
+}
+
+describe("document window model", () => {
+  it("maintains measured-height prefix sums and total height", () => {
+    const model = new DocumentWindowModel([
+      entry(0, 10, 100),
+      entry(1, 11, 120),
+      entry(2, 12, 80),
+    ]);
+
+    expect(model.getTotalHeight()).toBe(300);
+    expect(model.sectionTop(2)).toBe(220);
+
+    const update = model.updateMeasuredHeightsByBlockIndex([
+      { blockIndex: 11, measuredHeight: 150 },
+    ]);
+
+    expect(update.updatedCount).toBe(1);
+    expect(update.maxAbsDelta).toBe(30);
+    expect(model.getTotalHeight()).toBe(330);
+    expect(model.sectionTop(2)).toBe(250);
+  });
+
+  it("computes windows, anchors, and spacer math from the same height model", () => {
+    const model = new DocumentWindowModel([
+      entry(0, 20, 100),
+      entry(1, 21, 150),
+      entry(2, 22, 200),
+      entry(3, 23, 120),
+    ]);
+
+    const range = model.computeWindowRange(260, 100, {
+      aboveViewports: 0,
+      belowViewports: 0,
+      minAbovePx: 0,
+      minBelowPx: 0,
+    });
+    expect(range).toEqual({ start: 2, end: 2 });
+
+    const anchor = model.captureAnchor(275);
+    expect(anchor).toEqual({ blockIndex: 22, intraOffset: 25, sectionIndex: 2 });
+
+    model.updateMeasuredHeightsByBlockIndex([
+      { blockIndex: 21, measuredHeight: 180 },
+    ]);
+    expect(model.scrollTopForAnchor(anchor)).toBe(305);
+
+    expect(model.computeSpacerHeights({ start: 1, end: 2 })).toEqual({
+      bottomSpacer: 120,
+      topSpacer: 100,
+      totalHeight: 600,
+      windowHeight: 380,
+    });
+  });
+
+  it("builds a shadow model from live block geometry including margin gaps", () => {
+    const blocks = [
+      block(30, 24, 40, "heading"),
+      block(31, 84, 50),
+      block(32, 164, 60),
+    ];
+
+    const model = buildDocumentWindowModelFromLiveBlocks(blocks, metrics, 260);
+
+    expect(model.getSectionCount()).toBe(3);
+    expect(model.sectionTop(0)).toBe(24);
+    expect(model.sectionTop(1)).toBe(84);
+    expect(model.sectionTop(2)).toBe(164);
+    expect(model.sectionEffectiveHeight(0)).toBe(60);
+    expect(model.sectionEffectiveHeight(1)).toBe(80);
+    expect(model.sectionEffectiveHeight(2)).toBe(96);
+    expect(model.getTotalHeight()).toBe(260);
+    expect(model.captureAnchor(100)).toEqual({ blockIndex: 31, intraOffset: 16, sectionIndex: 1 });
+  });
+
+  it("builds estimate-only and measured twin models with per-kind estimate error stats", () => {
+    const blocks = [
+      block(70, 0, 40, "heading"),
+      block(71, 64, 110, "math"),
+      mermaidBlock(72, 200, 140),
+      block(73, 360, 40, "paragraph"),
+    ];
+
+    const models = buildDocumentWindowModelsFromLiveBlocks(blocks, metrics, 440);
+
+    expect(models.measuredModel.getTotalHeight()).toBe(440);
+    expect(models.estimateOnlyModel.getTotalHeight()).not.toBe(440);
+    expect(models.estimateOnlyModel.sections.every(section => section.measuredHeight === undefined)).toBe(true);
+    expect(models.measuredModel.sections.every(section => section.measuredHeight !== undefined)).toBe(true);
+    expect(models.estimateHeightError.byKind.math).toMatchObject({
+      count: 1,
+      maxAbsError: 28,
+      meanAbsError: 28,
+    });
+    expect(models.estimateHeightError.byKind.mermaid.count).toBe(1);
+    expect(models.estimateHeightError.byKind.mermaid.worstOffenders[0]).toMatchObject({
+      blockIndex: 72,
+      measuredHeight: 160,
+    });
+  });
+
+  it("flags content-visibility placeholder measurements and excludes them from estimate-error stats", () => {
+    setDocumentScrollRoot(0, 240);
+    const placeholder = block(74, 1000, 120, "paragraph");
+    placeholder.style.setProperty("content-visibility", "auto");
+    placeholder.style.setProperty("contain-intrinsic-size", "auto 120px");
+    const rememberedReal = block(75, 1164, 110, "paragraph");
+
+    const models = buildDocumentWindowModelsFromLiveBlocks([
+      placeholder,
+      rememberedReal,
+    ], metrics, 1300);
+
+    expect(models.measuredModel.sections[0]).toMatchObject({
+      blockIndex: 74,
+      measuredHeight: 164,
+      measuredHeightPlaceholder: true,
+    });
+    expect(models.estimateHeightError.placeholderCount).toBe(1);
+    expect(models.estimateHeightError.byKind.paragraph.placeholderCount).toBe(1);
+    expect(models.estimateHeightError.byKind.paragraph.count).toBe(1);
+    expect(models.estimateHeightError.worstOffenders.every(offender => offender.blockIndex !== 74)).toBe(true);
+  });
+
+  it("summarizes remembered-real measurements while skipping placeholder entries", () => {
+    const estimateModel = new DocumentWindowModel([
+      { ...entry(0, 76, 600), kind: "paragraph" },
+      { ...entry(1, 77, 150), kind: "paragraph" },
+    ]);
+    const measuredModel = new DocumentWindowModel([
+      { ...entry(0, 76, 600), kind: "paragraph", measuredHeight: 120, measuredHeightPlaceholder: true },
+      { ...entry(1, 77, 150), kind: "paragraph", measuredHeight: 164 },
+    ]);
+
+    const summary = summarizeEstimateHeightErrors(estimateModel, measuredModel);
+
+    expect(summary.placeholderCount).toBe(1);
+    expect(summary.count).toBe(1);
+    expect(summary.byKind.paragraph).toMatchObject({
+      count: 1,
+      maxAbsError: 14,
+      meanAbsError: 14,
+      placeholderCount: 1,
+    });
+    expect(summary.worstOffenders).toEqual([
+      expect.objectContaining({ blockIndex: 77, measuredHeight: 164 }),
+    ]);
+  });
+
+  it("skips zero-box live blocks before deriving measurements and windows", () => {
+    const blocks = [
+      block(80, 0, 100),
+      block(81, 0, 0, "code"),
+      block(82, 260, 80),
+    ];
+
+    const models = buildDocumentWindowModelsFromLiveBlocks(blocks, metrics, 360);
+    const updates = readLiveBlockMeasuredHeights(blocks, 360);
+
+    expect(models.measuredModel.sections.map(section => section.blockIndex)).toEqual([80, 82]);
+    expect(models.measuredModel.sectionEffectiveHeight(0)).toBe(260);
+    expect(models.measuredModel.getTotalHeight()).toBe(360);
+    expect(updates).toEqual([
+      { blockIndex: 80, measuredHeight: 260 },
+      { blockIndex: 82, measuredHeight: 100 },
+    ]);
+    expect(computeLiveBlockWindowRange(blocks, 280, 40, {
+      ...DEFAULT_RENDER_AHEAD,
+      aboveViewports: 0,
+      belowViewports: 0,
+      minAbovePx: 0,
+      minBelowPx: 0,
+    })).toEqual({ start: 1, end: 1 });
+  });
+
+  it("computes the live block window range with the same render-ahead contract", () => {
+    const blocks = [
+      block(40, 0, 50),
+      block(41, 100, 50),
+      block(42, 200, 50),
+      block(43, 300, 50),
+      block(44, 400, 50),
+    ];
+
+    expect(computeLiveBlockWindowRange(blocks, 225, 50, {
+      ...DEFAULT_RENDER_AHEAD,
+      aboveViewports: 0,
+      belowViewports: 0,
+      minAbovePx: 75,
+      minBelowPx: 75,
+    })).toEqual({ start: 2, end: 3 });
+  });
+
+  it("collects only top-level live document sections for the shadow model", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    const topLevel = block(50, 0, 100);
+    const nested = block(999, 0, 25);
+    topLevel.append(nested);
+    const unindexed = document.createElement("div");
+    main.append(topLevel, unindexed);
+
+    expect(collectLiveDocumentSectionElements(main)).toEqual([topLevel]);
+  });
+
+  it("ignores non-finite, negative, and unknown measured-height updates", () => {
+    const model = new DocumentWindowModel([
+      entry(0, 90, 100),
+      entry(1, 91, 120),
+    ]);
+
+    const update = model.updateMeasuredHeightsByBlockIndex([
+      { blockIndex: 999, measuredHeight: 300 },
+      { blockIndex: 90, measuredHeight: Number.NaN },
+      { blockIndex: 91, measuredHeight: -1 },
+    ]);
+
+    expect(update).toEqual({ maxAbsDelta: 0, totalDelta: 0, updatedCount: 0 });
+    expect(model.getTotalHeight()).toBe(220);
+  });
+});

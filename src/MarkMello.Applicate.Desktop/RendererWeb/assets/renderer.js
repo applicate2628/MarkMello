@@ -1270,7 +1270,7 @@
   // RendererWeb/src/topVisibleBlockIndex.ts
   var LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]";
   function collectLiveDocumentBlockElements(ownerDocument) {
-    return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR));
+    return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR)).filter(hasVisibleBlockBox);
   }
   function findTopVisibleBlockIndexFromBlocks(blocks, scrollTop) {
     if (blocks.length === 0) {
@@ -1278,37 +1278,1099 @@
     }
     let lo = 0;
     let hi = blocks.length - 1;
-    let firstAtOrBelowViewportTop = blocks.length;
+    let firstAtOrBelowViewportTop = -1;
     while (lo <= hi) {
       const mid = lo + (hi - lo >> 1);
-      const block = blocks[mid];
-      if (blockDocumentBottom(block) >= scrollTop) {
-        firstAtOrBelowViewportTop = mid;
-        hi = mid - 1;
+      const visibleMid = findNearestVisibleBlockBox(blocks, lo, mid, hi);
+      if (visibleMid === null) {
+        break;
+      }
+      if (visibleMid.top + visibleMid.height >= scrollTop) {
+        firstAtOrBelowViewportTop = visibleMid.index;
+        hi = visibleMid.index - 1;
       } else {
-        lo = mid + 1;
+        lo = visibleMid.index + 1;
       }
     }
-    const index = firstAtOrBelowViewportTop === blocks.length ? blocks.length - 1 : firstAtOrBelowViewportTop;
-    return readBlockIndex(blocks[index]);
+    const index = firstAtOrBelowViewportTop >= 0 ? firstAtOrBelowViewportTop : findLastVisibleBlockIndex(blocks);
+    return index < 0 ? null : readBlockIndex(blocks[index]);
   }
   function readBlockIndex(block) {
     const raw = block.dataset["mmBlockIndex"];
     const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
     return Number.isFinite(parsed) ? parsed : null;
   }
-  function blockDocumentBottom(block) {
-    return blockDocumentTop(block) + block.offsetHeight;
+  function findNearestVisibleBlockBox(blocks, lo, mid, hi) {
+    for (let index = mid; index >= lo; index--) {
+      const box = readVisibleBlockBox(blocks[index], index);
+      if (box !== null) {
+        return box;
+      }
+    }
+    for (let index = mid + 1; index <= hi; index++) {
+      const box = readVisibleBlockBox(blocks[index], index);
+      if (box !== null) {
+        return box;
+      }
+    }
+    return null;
+  }
+  function findLastVisibleBlockIndex(blocks) {
+    for (let index = blocks.length - 1; index >= 0; index--) {
+      if (hasVisibleBlockBox(blocks[index])) {
+        return index;
+      }
+    }
+    return -1;
+  }
+  function hasVisibleBlockBox(block) {
+    return readVisibleBlockBox(block, 0) !== null;
+  }
+  function readVisibleBlockBox(block, index) {
+    const height = block.offsetHeight;
+    const top = blockDocumentTop(block);
+    if (!Number.isFinite(height) || height < 0 || !Number.isFinite(top) || isDisplayNoneZeroBox(block, height)) {
+      return null;
+    }
+    return { height, index, top };
+  }
+  function isDisplayNoneZeroBox(block, height) {
+    if (height !== 0) {
+      return false;
+    }
+    if (block.style.display === "none") {
+      return true;
+    }
+    return getComputedStyle(block).display === "none";
   }
   function blockDocumentTop(block) {
     let top = 0;
     let current = block;
     while (current !== null) {
+      if (!Number.isFinite(current.offsetTop)) {
+        return Number.NaN;
+      }
       top += current.offsetTop;
       const nextOffsetParent = current.offsetParent;
       current = nextOffsetParent instanceof HTMLElement ? nextOffsetParent : null;
     }
     return top;
+  }
+
+  // RendererWeb/src/sectionIntrinsicSize.ts
+  var MODEL_GAP_PX = 44;
+  var DEFAULT_LINE_HEIGHT_PX = 30;
+  var DEFAULT_DISPLAY_MATH_CONTENT_PX = 120;
+  var HEADING_CONTENT_HEIGHT_BY_LEVEL = {
+    1: 56,
+    2: 35,
+    3: 32,
+    4: 30,
+    5: 28,
+    6: 26
+  };
+  var DEFAULT_MIN_SAMPLES_PER_BUCKET = 3;
+  function readIntrinsicSizeMetrics(main) {
+    const styles = getComputedStyle(main);
+    const fontSizePx = Number.parseFloat(styles.fontSize) || 18;
+    const lineHeightPx = readLineHeightPx(styles.lineHeight, fontSizePx);
+    const contentWidth = main.clientWidth || 820;
+    const charsPerLine = Math.max(8, Math.floor(contentWidth / (fontSizePx * 0.61)));
+    return { charsPerLine, lineHeightPx, fontSizePx };
+  }
+  function readLineHeightPx(lineHeight, fontSizePx) {
+    if (lineHeight.endsWith("px")) {
+      return Number.parseFloat(lineHeight) || fontSizePx * 1.6;
+    }
+    const ratio = Number.parseFloat(lineHeight);
+    return Number.isFinite(ratio) && ratio > 0 ? fontSizePx * ratio : fontSizePx * 1.6;
+  }
+  function normalizeSectionKind(raw) {
+    switch (raw) {
+      case "heading":
+      case "paragraph":
+      case "quote":
+      case "list":
+      case "rule":
+      case "code":
+      case "table":
+      case "image":
+      case "math":
+        return raw;
+      default:
+        return "unknown";
+    }
+  }
+  function readSectionIntrinsicInputs(element) {
+    const text = element.textContent ?? "";
+    return {
+      headingLevel: readHeadingLevel(element),
+      listItemCount: element.querySelectorAll("li").length,
+      newlineCount: countNewlines(text),
+      tableRowCount: element.querySelectorAll("tr").length,
+      textLength: text.length
+    };
+  }
+  function readHeadingLevel(element) {
+    const tag = element.tagName.toUpperCase();
+    return /^H[1-6]$/.test(tag) ? Number.parseInt(tag.slice(1), 10) : 0;
+  }
+  function countNewlines(text) {
+    let count = 0;
+    for (let index = 0; index < text.length; index++) {
+      if (text.charCodeAt(index) === 10) {
+        count++;
+      }
+    }
+    return count;
+  }
+  function readSectionIntrinsicCalibrationTarget(element, metrics) {
+    const kind = normalizeSectionKind(element.dataset["mmBlockKind"]);
+    const input = readSectionIntrinsicInputs(element);
+    const sourceText = element.textContent ?? "";
+    return {
+      defaultHeight: estimateSectionIntrinsicHeight(kind, input, metrics, sourceText),
+      input,
+      kind,
+      sourceText
+    };
+  }
+  function estimateSectionIntrinsicHeight(kind, input, metrics, sourceText = "") {
+    const wrappedLines = Math.max(1, Math.ceil(input.textLength / metrics.charsPerLine));
+    switch (kind) {
+      case "heading": {
+        const level = input.headingLevel >= 1 && input.headingLevel <= 6 ? input.headingLevel : 2;
+        const baseContentHeight = scaleDefaultPx(HEADING_CONTENT_HEIGHT_BY_LEVEL[level], metrics);
+        const wrapExtraHeight = Math.max(0, wrappedLines - 1) * metrics.lineHeightPx * 1.15;
+        return withModelGap(baseContentHeight + wrapExtraHeight);
+      }
+      case "paragraph":
+        return withModelGap((wrappedLines * metrics.lineHeightPx + metrics.lineHeightPx * 0.6) * 0.95);
+      case "code":
+        return withModelGap((input.newlineCount + 1) * metrics.lineHeightPx * 0.95 + metrics.lineHeightPx * 1.4);
+      case "quote":
+        return withModelGap(wrappedLines * metrics.lineHeightPx + metrics.lineHeightPx * 0.9);
+      case "list":
+        return withModelGap((input.listItemCount || 1) * metrics.lineHeightPx * 1.3 + metrics.lineHeightPx * 0.5);
+      case "table": {
+        const rows = input.tableRowCount || 2;
+        return withModelGap(rows * metrics.lineHeightPx * 1 + metrics.lineHeightPx * 0.8);
+      }
+      case "math": {
+        const rowCount = countMathRows(sourceText);
+        const baseContentHeight = scaleDefaultPx(DEFAULT_DISPLAY_MATH_CONTENT_PX, metrics);
+        return withModelGap(baseContentHeight + Math.max(0, rowCount - 1) * metrics.lineHeightPx * 1.35);
+      }
+      case "image":
+        return withModelGap(320);
+      case "rule":
+        return withModelGap(metrics.lineHeightPx);
+      default:
+        return withModelGap(Math.max(metrics.lineHeightPx, wrappedLines * metrics.lineHeightPx));
+    }
+  }
+  function withModelGap(contentBoxHeight) {
+    return contentBoxHeight + MODEL_GAP_PX;
+  }
+  function scaleDefaultPx(defaultPx, metrics) {
+    return defaultPx * (metrics.lineHeightPx / DEFAULT_LINE_HEIGHT_PX);
+  }
+  function countMathRows(sourceText) {
+    const rowSeparators = sourceText.match(/\\\\/g)?.length ?? 0;
+    return Math.max(1, rowSeparators + 1);
+  }
+  var SectionIntrinsicCalibrator = class {
+    constructor(options = {}) {
+      this.buckets = /* @__PURE__ */ new Map();
+      this.bucketKeyByBlockIndex = /* @__PURE__ */ new Map();
+      this.minSamplesPerBucket = Math.max(1, Math.floor(options.minSamplesPerBucket ?? DEFAULT_MIN_SAMPLES_PER_BUCKET));
+    }
+    reset() {
+      this.buckets.clear();
+      this.bucketKeyByBlockIndex.clear();
+    }
+    recordSample(sample) {
+      if (sample.measuredHeightPlaceholder === true || !Number.isFinite(sample.blockIndex) || !Number.isFinite(sample.measuredHeight) || sample.measuredHeight < 0 || !Number.isFinite(sample.defaultHeight) || sample.defaultHeight <= 0) {
+        return false;
+      }
+      const bucketKey = sectionIntrinsicCalibrationBucketKey(sample.kind, sample.input, sample.sourceText ?? "");
+      const previousBucketKey = this.bucketKeyByBlockIndex.get(sample.blockIndex);
+      if (previousBucketKey !== void 0 && previousBucketKey !== bucketKey) {
+        this.buckets.get(previousBucketKey)?.samplesByBlockIndex.delete(sample.blockIndex);
+      }
+      const bucket = this.readOrCreateBucket(bucketKey, sample.kind);
+      const hadSample = bucket.samplesByBlockIndex.has(sample.blockIndex);
+      bucket.samplesByBlockIndex.set(sample.blockIndex, sample.measuredHeight);
+      this.bucketKeyByBlockIndex.set(sample.blockIndex, bucketKey);
+      return !hadSample;
+    }
+    estimateHeight(kind, input, metrics, sourceText = "") {
+      return this.estimateTargetHeight({
+        defaultHeight: estimateSectionIntrinsicHeight(kind, input, metrics, sourceText),
+        input,
+        kind,
+        sourceText
+      });
+    }
+    estimateTargetHeight(target) {
+      const bucket = this.buckets.get(sectionIntrinsicCalibrationBucketKey(
+        target.kind,
+        target.input,
+        target.sourceText ?? ""
+      ));
+      if (bucket === void 0 || bucket.samplesByBlockIndex.size < this.minSamplesPerBucket) {
+        return target.defaultHeight;
+      }
+      return median(Array.from(bucket.samplesByBlockIndex.values()));
+    }
+    getSummary() {
+      const byKind = {};
+      let bucketCount = 0;
+      let calibratedBucketCount = 0;
+      let sampleCount = 0;
+      for (const bucket of this.buckets.values()) {
+        const kindSummary = byKind[bucket.kind] ?? {
+          calibratedBucketCount: 0,
+          sampleCount: 0
+        };
+        const bucketSampleCount = bucket.samplesByBlockIndex.size;
+        bucketCount++;
+        sampleCount += bucketSampleCount;
+        kindSummary.sampleCount += bucketSampleCount;
+        if (bucketSampleCount >= this.minSamplesPerBucket) {
+          calibratedBucketCount++;
+          kindSummary.calibratedBucketCount++;
+        }
+        byKind[bucket.kind] = kindSummary;
+      }
+      return { bucketCount, calibratedBucketCount, sampleCount, byKind };
+    }
+    readOrCreateBucket(bucketKey, kind) {
+      const existing = this.buckets.get(bucketKey);
+      if (existing !== void 0) {
+        return existing;
+      }
+      const created = {
+        kind,
+        samplesByBlockIndex: /* @__PURE__ */ new Map()
+      };
+      this.buckets.set(bucketKey, created);
+      return created;
+    }
+  };
+  function createSectionIntrinsicCalibrator(options = {}) {
+    return new SectionIntrinsicCalibrator(options);
+  }
+  function sectionIntrinsicCalibrationBucketKey(kind, input, sourceText) {
+    switch (kind) {
+      case "heading": {
+        const level = input.headingLevel >= 1 && input.headingLevel <= 6 ? input.headingLevel : 2;
+        return `${kind}:level:${level}`;
+      }
+      case "paragraph":
+      case "quote":
+        return `${kind}:text:${bucketByThreshold(input.textLength, [80, 160, 320, 640, 1280, 2560])}`;
+      case "math":
+        return `${kind}:rows:${bucketByThreshold(countMathRows(sourceText), [1, 2, 4, 8, 16])}`;
+      case "code":
+        return `${kind}:lines:${bucketByThreshold(input.newlineCount + 1, [1, 3, 8, 16, 32, 64])}`;
+      case "list":
+        return `${kind}:items:${bucketByThreshold(input.listItemCount || 1, [1, 3, 6, 12, 24, 48])}`;
+      case "table":
+        return `${kind}:rows:${bucketByThreshold(input.tableRowCount || 2, [2, 4, 8, 16, 32, 64])}`;
+      default:
+        return kind;
+    }
+  }
+  function bucketByThreshold(value, thresholds) {
+    for (const threshold of thresholds) {
+      if (value <= threshold) {
+        return `le-${threshold}`;
+      }
+    }
+    return `gt-${thresholds[thresholds.length - 1] ?? 0}`;
+  }
+  function median(values) {
+    if (values.length === 0) {
+      return 0;
+    }
+    const sorted = values.slice().sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 1) {
+      return sorted[middle];
+    }
+    return (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+
+  // RendererWeb/src/documentWindow.ts
+  var ESTIMATE_ERROR_KIND_ORDER = [
+    "heading",
+    "paragraph",
+    "math",
+    "code",
+    "table",
+    "list",
+    "quote",
+    "mermaid",
+    "rule",
+    "image",
+    "unknown"
+  ];
+  var ESTIMATE_ERROR_WORST_OFFENDER_LIMIT = 5;
+  var DEFAULT_RENDER_AHEAD = {
+    aboveViewports: 1.5,
+    belowViewports: 2,
+    minAbovePx: 2400,
+    minBelowPx: 3600
+  };
+  function effectiveHeight(entry) {
+    return entry.measuredHeight ?? entry.estimatedHeight;
+  }
+  var DocumentWindowModel = class {
+    constructor(entries, options = {}) {
+      this.sectionIndexByBlockIndex = /* @__PURE__ */ new Map();
+      this.totalHeight = 0;
+      this.leadingOffset = options.leadingOffset ?? 0;
+      this.sections = entries.slice().sort((a, b) => a.sectionIndex - b.sectionIndex).map((entry) => ({ ...entry }));
+      for (let index = 0; index < this.sections.length; index++) {
+        const entry = this.sections[index];
+        if (!this.sectionIndexByBlockIndex.has(entry.blockIndex)) {
+          this.sectionIndexByBlockIndex.set(entry.blockIndex, index);
+        }
+      }
+      this.refreshHeightModel();
+    }
+    getSectionCount() {
+      return this.sections.length;
+    }
+    getTotalHeight() {
+      return this.totalHeight;
+    }
+    sectionTop(sectionIndex) {
+      return this.sections[sectionIndex]?.cumulativeTop ?? this.leadingOffset;
+    }
+    sectionEffectiveHeight(sectionIndex) {
+      const entry = this.sections[sectionIndex];
+      return entry ? effectiveHeight(entry) : 0;
+    }
+    getEntryByBlockIndex(blockIndex) {
+      const sectionIndex = this.sectionIndexByBlockIndex.get(blockIndex);
+      return sectionIndex === void 0 ? void 0 : this.sections[sectionIndex];
+    }
+    refreshHeightModel() {
+      let cumulative = this.leadingOffset;
+      for (const entry of this.sections) {
+        entry.cumulativeTop = cumulative;
+        cumulative += effectiveHeight(entry);
+      }
+      this.totalHeight = cumulative;
+    }
+    updateMeasuredHeightsByBlockIndex(updates) {
+      let updatedCount = 0;
+      let maxAbsDelta = 0;
+      let totalDelta = 0;
+      for (const update of updates) {
+        const index = this.sectionIndexByBlockIndex.get(update.blockIndex);
+        if (index === void 0) {
+          continue;
+        }
+        const entry = this.sections[index];
+        if (!Number.isFinite(update.measuredHeight) || update.measuredHeight < 0) {
+          continue;
+        }
+        const previous = effectiveHeight(entry);
+        entry.measuredHeight = update.measuredHeight;
+        if (update.measuredHeightPlaceholder === true) {
+          entry.measuredHeightPlaceholder = true;
+        } else {
+          delete entry.measuredHeightPlaceholder;
+        }
+        const delta = update.measuredHeight - previous;
+        updatedCount++;
+        maxAbsDelta = Math.max(maxAbsDelta, Math.abs(delta));
+        totalDelta += delta;
+      }
+      if (updatedCount > 0) {
+        this.refreshHeightModel();
+      }
+      return { maxAbsDelta, totalDelta, updatedCount };
+    }
+    recordIntrinsicSizeCalibrationSamples(calibrator) {
+      let recordedCount = 0;
+      for (const entry of this.sections) {
+        if (entry.measuredHeight === void 0 || entry.intrinsicSize === void 0) {
+          continue;
+        }
+        const sample = {
+          ...entry.intrinsicSize,
+          blockIndex: entry.blockIndex,
+          measuredHeight: entry.measuredHeight
+        };
+        if (entry.measuredHeightPlaceholder === true) {
+          Object.assign(sample, { measuredHeightPlaceholder: true });
+        }
+        if (calibrator.recordSample(sample)) {
+          recordedCount++;
+        }
+      }
+      return recordedCount;
+    }
+    updateEstimatedHeightsFromCalibration(calibrator) {
+      let updatedCount = 0;
+      let maxAbsDelta = 0;
+      let totalDelta = 0;
+      for (const entry of this.sections) {
+        if (entry.intrinsicSize === void 0) {
+          continue;
+        }
+        const nextHeight = calibrator.estimateTargetHeight(entry.intrinsicSize);
+        if (!Number.isFinite(nextHeight) || nextHeight < 0) {
+          continue;
+        }
+        const previous = entry.estimatedHeight;
+        if (Object.is(previous, nextHeight)) {
+          continue;
+        }
+        entry.estimatedHeight = nextHeight;
+        const delta = nextHeight - previous;
+        updatedCount++;
+        maxAbsDelta = Math.max(maxAbsDelta, Math.abs(delta));
+        totalDelta += delta;
+      }
+      if (updatedCount > 0) {
+        this.refreshHeightModel();
+      }
+      return { maxAbsDelta, totalDelta, updatedCount };
+    }
+    sectionIndexAtDocumentY(y) {
+      const count = this.sections.length;
+      if (count === 0) {
+        return 0;
+      }
+      let lo = 0;
+      let hi = count - 1;
+      let result = 0;
+      while (lo <= hi) {
+        const mid = lo + (hi - lo >> 1);
+        const entry = this.sections[mid];
+        if (entry.cumulativeTop <= y) {
+          result = mid;
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      return result;
+    }
+    computeWindowRange(scrollTop, viewportHeight, config = DEFAULT_RENDER_AHEAD) {
+      if (this.sections.length === 0) {
+        return { start: 0, end: -1 };
+      }
+      const above = Math.max(config.minAbovePx, viewportHeight * config.aboveViewports);
+      const below = Math.max(config.minBelowPx, viewportHeight * config.belowViewports);
+      const topY = Math.max(0, scrollTop - above);
+      const bottomY = scrollTop + viewportHeight + below;
+      const start = this.sectionIndexAtDocumentY(topY);
+      const end = Math.max(start, this.sectionIndexAtDocumentY(bottomY));
+      return { start, end };
+    }
+    captureAnchor(scrollTop) {
+      const sectionIndex = this.sectionIndexAtDocumentY(scrollTop);
+      const entry = this.sections[sectionIndex];
+      const top = entry?.cumulativeTop ?? this.leadingOffset;
+      return {
+        blockIndex: entry?.blockIndex ?? -1,
+        intraOffset: Math.max(0, scrollTop - top),
+        sectionIndex
+      };
+    }
+    scrollTopForAnchor(anchor) {
+      const byBlock = anchor.blockIndex >= 0 ? this.getEntryByBlockIndex(anchor.blockIndex) : void 0;
+      const entry = byBlock ?? this.sections[anchor.sectionIndex];
+      return (entry?.cumulativeTop ?? this.leadingOffset) + anchor.intraOffset;
+    }
+    computeSpacerHeights(range) {
+      if (this.sections.length === 0 || range.end < range.start) {
+        return {
+          bottomSpacer: 0,
+          topSpacer: 0,
+          totalHeight: this.totalHeight,
+          windowHeight: 0
+        };
+      }
+      const start = Math.max(0, Math.min(range.start, this.sections.length - 1));
+      const end = Math.max(start, Math.min(range.end, this.sections.length - 1));
+      const topSpacer = this.sectionTop(start);
+      let windowHeight = 0;
+      for (let index = start; index <= end; index++) {
+        windowHeight += effectiveHeight(this.sections[index]);
+      }
+      return {
+        bottomSpacer: Math.max(0, this.totalHeight - topSpacer - windowHeight),
+        topSpacer,
+        totalHeight: this.totalHeight,
+        windowHeight
+      };
+    }
+  };
+  function buildDocumentWindowModelsFromLiveBlocks(blocks, metrics, documentScrollHeight, options = {}) {
+    const measuredEntries = readLiveSectionModelEntries(blocks, metrics, documentScrollHeight, true, options);
+    const estimateEntries = measuredEntries.map((entry) => {
+      const { measuredHeightPlaceholder: _placeholder, ...estimateEntry } = entry;
+      return {
+        ...estimateEntry,
+        measuredHeight: void 0
+      };
+    });
+    const leadingOffset = measuredEntries[0]?.cumulativeTop ?? 0;
+    const measuredModel = new DocumentWindowModel(measuredEntries, { leadingOffset });
+    const estimateOnlyModel = new DocumentWindowModel(estimateEntries, { leadingOffset });
+    return {
+      estimateHeightError: summarizeEstimateHeightErrors(estimateOnlyModel, measuredModel),
+      estimateOnlyModel,
+      measuredModel
+    };
+  }
+  function collectLiveDocumentSectionElements(main) {
+    return Array.from(main.children).filter((child) => child instanceof HTMLElement && child.hasAttribute("data-mm-block-index"));
+  }
+  function readLiveBlockMeasuredHeights(blocks, documentScrollHeight) {
+    return readLiveBlockMeasurements(blocks, documentScrollHeight).map((measurement) => {
+      const update = {
+        blockIndex: measurement.blockIndex,
+        measuredHeight: measurement.measuredHeight
+      };
+      if (measurement.measuredHeightPlaceholder) {
+        update.measuredHeightPlaceholder = true;
+      }
+      return update;
+    });
+  }
+  function computeLiveBlockWindowRange(blocks, scrollTop, viewportHeight, config = DEFAULT_RENDER_AHEAD) {
+    const visibleBlocks = readVisibleBlockGeometry(blocks);
+    if (visibleBlocks.length === 0) {
+      return { start: 0, end: -1 };
+    }
+    const above = Math.max(config.minAbovePx, viewportHeight * config.aboveViewports);
+    const below = Math.max(config.minBelowPx, viewportHeight * config.belowViewports);
+    const topY = Math.max(0, scrollTop - above);
+    const bottomY = scrollTop + viewportHeight + below;
+    let start = visibleBlocks.length - 1;
+    let end = 0;
+    let found = false;
+    for (let index = 0; index < visibleBlocks.length; index++) {
+      const block = visibleBlocks[index];
+      const top = block.top;
+      const bottom = top + block.height;
+      if (bottom > topY && top <= bottomY) {
+        if (!found) {
+          start = index;
+        }
+        end = index;
+        found = true;
+      }
+    }
+    return found ? { start, end } : { start: 0, end: -1 };
+  }
+  function elementDocumentTop(element) {
+    let top = 0;
+    let current = element;
+    while (current !== null) {
+      if (!Number.isFinite(current.offsetTop)) {
+        return Number.NaN;
+      }
+      top += current.offsetTop;
+      const parent = current.offsetParent;
+      current = parent instanceof HTMLElement ? parent : null;
+    }
+    return top;
+  }
+  function summarizeEstimateHeightErrors(estimateOnlyModel, measuredModel) {
+    const mutableBuckets = /* @__PURE__ */ new Map();
+    for (const kind of ESTIMATE_ERROR_KIND_ORDER) {
+      mutableBuckets.set(kind, {
+        count: 0,
+        kind,
+        maxAbsError: 0,
+        meanAbsError: 0,
+        placeholderCount: 0,
+        totalAbsError: 0,
+        worstOffenders: []
+      });
+    }
+    let count = 0;
+    let totalAbsError = 0;
+    let maxAbsError = 0;
+    let placeholderCount = 0;
+    const worstOffenders = [];
+    for (const measuredEntry of measuredModel.sections) {
+      if (measuredEntry.measuredHeight === void 0) {
+        continue;
+      }
+      const kind = estimateErrorKind(measuredEntry);
+      if (measuredEntry.measuredHeightPlaceholder === true) {
+        const bucket2 = mutableBuckets.get(kind) ?? {
+          count: 0,
+          kind,
+          maxAbsError: 0,
+          meanAbsError: 0,
+          placeholderCount: 0,
+          totalAbsError: 0,
+          worstOffenders: []
+        };
+        bucket2.placeholderCount++;
+        mutableBuckets.set(kind, bucket2);
+        placeholderCount++;
+        continue;
+      }
+      const estimateEntry = estimateOnlyModel.getEntryByBlockIndex(measuredEntry.blockIndex);
+      if (!estimateEntry) {
+        continue;
+      }
+      const signedError = estimateEntry.estimatedHeight - measuredEntry.measuredHeight;
+      const absError = Math.abs(signedError);
+      const offender = {
+        absError,
+        blockIndex: measuredEntry.blockIndex,
+        estimatedHeight: estimateEntry.estimatedHeight,
+        kind,
+        measuredHeight: measuredEntry.measuredHeight,
+        sectionIndex: measuredEntry.sectionIndex,
+        signedError
+      };
+      const bucket = mutableBuckets.get(kind) ?? {
+        count: 0,
+        kind,
+        maxAbsError: 0,
+        meanAbsError: 0,
+        placeholderCount: 0,
+        totalAbsError: 0,
+        worstOffenders: []
+      };
+      bucket.count++;
+      bucket.totalAbsError += absError;
+      bucket.maxAbsError = Math.max(bucket.maxAbsError, absError);
+      insertWorstOffender(bucket.worstOffenders, offender);
+      mutableBuckets.set(kind, bucket);
+      count++;
+      totalAbsError += absError;
+      maxAbsError = Math.max(maxAbsError, absError);
+      insertWorstOffender(worstOffenders, offender);
+    }
+    const byKind = {};
+    for (const [kind, bucket] of mutableBuckets) {
+      byKind[kind] = {
+        count: bucket.count,
+        kind,
+        maxAbsError: bucket.maxAbsError,
+        meanAbsError: bucket.count === 0 ? 0 : bucket.totalAbsError / bucket.count,
+        placeholderCount: bucket.placeholderCount,
+        worstOffenders: bucket.worstOffenders
+      };
+    }
+    return {
+      byKind,
+      count,
+      maxAbsError,
+      meanAbsError: count === 0 ? 0 : totalAbsError / count,
+      placeholderCount,
+      worstOffenders
+    };
+  }
+  function readLiveSectionModelEntries(blocks, metrics, documentScrollHeight, measured, options) {
+    return readLiveBlockMeasurements(blocks, documentScrollHeight).map((measurement, sectionIndex) => {
+      const intrinsicSize = readSectionIntrinsicCalibrationTarget(measurement.element, metrics);
+      const entry = {
+        blockIndex: measurement.blockIndex,
+        cumulativeTop: measurement.top,
+        estimatedHeight: options.intrinsicSizeCalibrator?.estimateTargetHeight(intrinsicSize) ?? intrinsicSize.defaultHeight,
+        hasMermaid: hasMermaidContent(measurement.element),
+        headingLevel: readHeadingLevel2(measurement.element),
+        intrinsicSize,
+        kind: normalizeSectionKind(measurement.element.dataset["mmBlockKind"]),
+        measuredHeight: measured ? measurement.measuredHeight : void 0,
+        sectionIndex
+      };
+      if (measured && measurement.measuredHeightPlaceholder) {
+        entry.measuredHeightPlaceholder = true;
+      }
+      return entry;
+    });
+  }
+  function readLiveBlockMeasurements(blocks, documentScrollHeight) {
+    const geometry = readVisibleBlockGeometry(blocks);
+    const safeDocumentScrollHeight = Number.isFinite(documentScrollHeight) ? documentScrollHeight : 0;
+    return geometry.map((item, index) => {
+      const nextTop = geometry[index + 1]?.top;
+      const measuredHeight = nextTop === void 0 ? Math.max(0, item.height, safeDocumentScrollHeight - item.top) : Math.max(0, nextTop - item.top);
+      return {
+        ...item,
+        blockIndex: readBlockIndex2(item.element, item.sourceIndex),
+        measuredHeight,
+        measuredHeightPlaceholder: isContentVisibilityPlaceholderMeasurement(item)
+      };
+    });
+  }
+  function readVisibleBlockGeometry(blocks) {
+    const geometry = [];
+    for (let sourceIndex = 0; sourceIndex < blocks.length; sourceIndex++) {
+      const element = blocks[sourceIndex];
+      const top = elementDocumentTop(element);
+      const height = element.offsetHeight;
+      if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) {
+        continue;
+      }
+      geometry.push({ element, height, sourceIndex, top });
+    }
+    return geometry;
+  }
+  var CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX = 1;
+  function isContentVisibilityPlaceholderMeasurement(item) {
+    if (readCssProperty(item.element, "content-visibility").trim() !== "auto") {
+      return false;
+    }
+    const intrinsicSize = readContainIntrinsicBlockSizePx(item.element);
+    if (intrinsicSize === null || Math.abs(item.height - intrinsicSize) > CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX) {
+      return false;
+    }
+    const viewport = readDocumentViewport(item.element);
+    if (viewport === null) {
+      return false;
+    }
+    const bottom = item.top + item.height;
+    return bottom < viewport.top - CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX || item.top > viewport.bottom + CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX;
+  }
+  function readContainIntrinsicBlockSizePx(element) {
+    const raw = readCssProperty(element, "contain-intrinsic-size");
+    const matches = Array.from(raw.matchAll(/(-?\d+(?:\.\d+)?)px/g));
+    const lastMatch = matches[matches.length - 1];
+    if (!lastMatch) {
+      return null;
+    }
+    const parsed = Number.parseFloat(lastMatch[1]);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+  function readCssProperty(element, propertyName) {
+    const inlineValue = element.style.getPropertyValue(propertyName);
+    if (inlineValue.trim().length > 0) {
+      return inlineValue;
+    }
+    const view = element.ownerDocument.defaultView;
+    return view?.getComputedStyle(element).getPropertyValue(propertyName) ?? "";
+  }
+  function readDocumentViewport(element) {
+    const doc = element.ownerDocument;
+    const view = doc.defaultView;
+    const root = doc.scrollingElement ?? doc.documentElement;
+    const top = Number.isFinite(root.scrollTop) ? root.scrollTop : view?.scrollY ?? 0;
+    const height = root.clientHeight || view?.innerHeight || doc.documentElement.clientHeight;
+    if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) {
+      return null;
+    }
+    return { bottom: top + height, top };
+  }
+  function estimateErrorKind(entry) {
+    return entry.hasMermaid ? "mermaid" : entry.kind;
+  }
+  function insertWorstOffender(offenders, offender) {
+    offenders.push(offender);
+    offenders.sort((a, b) => b.absError - a.absError);
+    if (offenders.length > ESTIMATE_ERROR_WORST_OFFENDER_LIMIT) {
+      offenders.length = ESTIMATE_ERROR_WORST_OFFENDER_LIMIT;
+    }
+  }
+  function hasMermaidContent(element) {
+    return element.classList.contains("mm-mermaid") || element.querySelector("[data-mm-mermaid]") !== null;
+  }
+  function readBlockIndex2(element, fallback) {
+    const raw = element.dataset["mmBlockIndex"];
+    const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  function readHeadingLevel2(element) {
+    const tag = element.tagName.toUpperCase();
+    return /^H[1-6]$/.test(tag) ? Number.parseInt(tag.slice(1), 10) : 0;
+  }
+
+  // RendererWeb/src/virtualizationShadow.ts
+  var SHADOW_FLAG_NAME = "MARKMELLO_VIRT_SHADOW";
+  function readVirtualizationShadowFlag(ownerWindow = window, ownerDocument = document) {
+    const shadowWindow = ownerWindow;
+    return isTrueFlagValue(shadowWindow.MARKMELLO_VIRT_SHADOW) || isTrueFlagValue(ownerDocument.documentElement.dataset["markmelloVirtShadow"]) || isTrueFlagValue(readLocalStorageFlag(ownerWindow));
+  }
+  function readLocalStorageFlag(ownerWindow) {
+    try {
+      return ownerWindow.localStorage.getItem(SHADOW_FLAG_NAME);
+    } catch {
+      return null;
+    }
+  }
+  function isTrueFlagValue(value) {
+    if (value === true) {
+      return true;
+    }
+    if (typeof value !== "string") {
+      return false;
+    }
+    switch (value.trim().toLowerCase()) {
+      case "1":
+      case "true":
+      case "yes":
+      case "on":
+        return true;
+      default:
+        return false;
+    }
+  }
+  function validateVirtualizationShadowGeometry(input) {
+    const estimateModel = input.estimateModel ?? input.model;
+    const predictedAnchor = input.model.captureAnchor(input.scrollTop);
+    const predictedRange = input.model.computeWindowRange(
+      input.scrollTop,
+      input.viewportHeight,
+      input.config ?? DEFAULT_RENDER_AHEAD
+    );
+    const actualRange = computeLiveBlockWindowRange(
+      input.blocks,
+      input.scrollTop,
+      input.viewportHeight,
+      input.config ?? DEFAULT_RENDER_AHEAD
+    );
+    const productionTopBlockIndex = input.productionTopBlockIndex ?? input.realTopBlockIndex;
+    const productionBlocks = input.productionBlocks ?? input.blocks;
+    const realTop = findBlockByIndex(input.blocks, input.realTopBlockIndex);
+    const realTopSectionIndex = input.realTopBlockIndex === null ? null : input.model.getEntryByBlockIndex(input.realTopBlockIndex)?.sectionIndex ?? null;
+    const productionTopSectionIndex = productionTopBlockIndex === null ? null : input.model.getEntryByBlockIndex(productionTopBlockIndex)?.sectionIndex ?? null;
+    const productionTop = findBlockByIndex(productionBlocks, productionTopBlockIndex);
+    const nestedTopVisibleAnchor = productionTopBlockIndex !== null && productionTop !== null && findBlockByIndex(input.blocks, productionTopBlockIndex) === null;
+    const realTopDocumentTop = realTop === null ? null : elementDocumentTop(realTop);
+    const realIntraOffset = realTop === null ? null : Math.max(0, input.scrollTop - realTopDocumentTop);
+    const anchorBlockIndexMatches = blockIndexMatchesExpectedTop({
+      model: input.model,
+      predictedSectionIndex: predictedAnchor.sectionIndex,
+      predictedTopBlockIndex: predictedAnchor.blockIndex >= 0 ? predictedAnchor.blockIndex : null,
+      realIntraOffset,
+      realTopBlockIndex: input.realTopBlockIndex
+    });
+    const intraOffsetDelta = realIntraOffset === null || predictedAnchor.blockIndex !== input.realTopBlockIndex ? null : predictedAnchor.intraOffset - realIntraOffset;
+    const topOffsetDelta = realTopDocumentTop === null || realTopSectionIndex === null ? null : input.model.sectionTop(realTopSectionIndex) - realTopDocumentTop;
+    const totalHeightDelta = input.model.getTotalHeight() - input.realScrollHeight;
+    const estimatedTotalHeightDelta = estimateModel.getTotalHeight() - input.realScrollHeight;
+    const windowStartDelta = predictedRange.start - actualRange.start;
+    const windowEndDelta = predictedRange.end - actualRange.end;
+    const maxAbsPxError = Math.max(
+      Math.abs(totalHeightDelta),
+      Math.abs(topOffsetDelta ?? 0),
+      Math.abs(intraOffsetDelta ?? 0)
+    );
+    const maxAbsIndexDelta = Math.max(
+      Math.abs(windowStartDelta),
+      Math.abs(windowEndDelta)
+    );
+    const estimateHeightError = summarizeEstimateHeightErrors(estimateModel, input.model);
+    return {
+      actualWindowEnd: actualRange.end,
+      actualWindowStart: actualRange.start,
+      anchorBlockIndexMatches,
+      elapsedMs: 0,
+      estimatedTotalHeight: estimateModel.getTotalHeight(),
+      estimatedTotalHeightDelta,
+      estimateCalibration: input.estimateCalibration ?? emptyEstimateCalibrationSummary(),
+      estimateHeightError,
+      intraOffsetDelta,
+      maxAbsError: maxAbsPxError,
+      maxAbsIndexDelta,
+      maxAbsPxError,
+      nestedTopVisibleAnchor,
+      predictedIntraOffset: predictedAnchor.intraOffset,
+      predictedTopBlockIndex: predictedAnchor.blockIndex >= 0 ? predictedAnchor.blockIndex : null,
+      predictedTopSectionIndex: predictedAnchor.sectionIndex,
+      predictedTotalHeight: input.model.getTotalHeight(),
+      predictedWindowEnd: predictedRange.end,
+      predictedWindowStart: predictedRange.start,
+      productionTopBlockIndex,
+      productionTopSectionIndex,
+      realIntraOffset,
+      realScrollHeight: input.realScrollHeight,
+      realTopBlockIndex: input.realTopBlockIndex,
+      realTopSectionIndex,
+      scrollHeightGrowth: 0,
+      sectionCount: input.model.getSectionCount(),
+      topOffsetDelta,
+      totalHeightDelta,
+      windowEndDelta,
+      windowStartDelta
+    };
+  }
+  function createVirtualizationShadowValidator(deps) {
+    let model = null;
+    let estimateModel = null;
+    let scheduled = false;
+    let validationCount = 0;
+    let nestedTopVisibleAnchorCount = 0;
+    let previousScrollHeight = null;
+    let scrollHeightGrowth = 0;
+    const intrinsicSizeCalibrator = createSectionIntrinsicCalibrator();
+    const validateNow = () => {
+      const startedAt = nowMs(deps.ownerWindow);
+      if (deps.isDocumentFinal?.() === false) {
+        deps.postPerfMark("mm-virt-shadow-validation-skipped", {
+          reason: "progressive-append-pending"
+        });
+        return null;
+      }
+      const main = deps.ownerDocument.querySelector("main.mm-document");
+      const root = deps.ownerDocument.scrollingElement ?? deps.ownerDocument.documentElement;
+      const realScrollHeight = root.scrollHeight;
+      if (previousScrollHeight !== null) {
+        scrollHeightGrowth += Math.max(0, realScrollHeight - previousScrollHeight);
+      }
+      previousScrollHeight = realScrollHeight;
+      const blocks = main ? collectLiveDocumentSectionElements(main) : [];
+      if (!main || blocks.length === 0) {
+        model = null;
+        estimateModel = null;
+        intrinsicSizeCalibrator.reset();
+        previousScrollHeight = null;
+        scrollHeightGrowth = 0;
+        return null;
+      }
+      if (model === null || estimateModel === null) {
+        const models = buildDocumentWindowModelsFromLiveBlocks(
+          blocks,
+          readIntrinsicSizeMetrics(main),
+          realScrollHeight,
+          { intrinsicSizeCalibrator }
+        );
+        model = models.measuredModel;
+        estimateModel = models.estimateOnlyModel;
+        if (model.getSectionCount() === 0) {
+          model = null;
+          estimateModel = null;
+          intrinsicSizeCalibrator.reset();
+          return null;
+        }
+        deps.postPerfMark("mm-virt-shadow-model-built", {
+          estimatedTotalHeight: estimateModel.getTotalHeight(),
+          estimateHeightError: models.estimateHeightError,
+          sectionCount: model.getSectionCount(),
+          totalHeight: model.getTotalHeight()
+        });
+      }
+      const productionBlocks = collectLiveDocumentBlockElements(deps.ownerDocument);
+      const validation = validateVirtualizationShadowGeometry({
+        blocks,
+        estimateModel,
+        model,
+        productionBlocks,
+        productionTopBlockIndex: findTopVisibleBlockIndexFromBlocks(productionBlocks, root.scrollTop),
+        realScrollHeight,
+        realTopBlockIndex: findTopVisibleBlockIndexFromBlocks(blocks, root.scrollTop),
+        scrollTop: root.scrollTop,
+        viewportHeight: root.clientHeight
+      });
+      const adopted = model.updateMeasuredHeightsByBlockIndex(
+        readLiveBlockMeasuredHeights(blocks, realScrollHeight)
+      );
+      const calibrationRecordedCount = model.recordIntrinsicSizeCalibrationSamples(intrinsicSizeCalibrator);
+      const calibratedEstimate = estimateModel.updateEstimatedHeightsFromCalibration(intrinsicSizeCalibrator);
+      const estimateCalibration = intrinsicSizeCalibrator.getSummary();
+      validationCount++;
+      if (validation.nestedTopVisibleAnchor) {
+        nestedTopVisibleAnchorCount++;
+      }
+      const elapsedMs = Math.max(0, nowMs(deps.ownerWindow) - startedAt);
+      const estimatedTotalHeight = estimateModel.getTotalHeight();
+      const measuredValidation = {
+        ...validation,
+        elapsedMs,
+        estimatedTotalHeight,
+        estimatedTotalHeightDelta: estimatedTotalHeight - realScrollHeight,
+        estimateCalibration,
+        estimateHeightError: summarizeEstimateHeightErrors(estimateModel, model),
+        scrollHeightGrowth
+      };
+      const detail = {
+        ...measuredValidation,
+        adoptedMaxAbsDelta: adopted.maxAbsDelta,
+        adoptedTotalDelta: adopted.totalDelta,
+        adoptedUpdatedCount: adopted.updatedCount,
+        calibratedEstimateMaxAbsDelta: calibratedEstimate.maxAbsDelta,
+        calibratedEstimateTotalDelta: calibratedEstimate.totalDelta,
+        calibratedEstimateUpdatedCount: calibratedEstimate.updatedCount,
+        calibrationRecordedCount,
+        nestedTopVisibleAnchorCount,
+        validationCount
+      };
+      deps.postPerfMark("mm-virt-shadow-validation", detail);
+      deps.postDebugLog(
+        `virt-shadow sections=${measuredValidation.sectionCount} totalDelta=${Math.round(measuredValidation.totalHeightDelta)} estimateDelta=${Math.round(measuredValidation.estimatedTotalHeightDelta)} topModel=${measuredValidation.predictedTopBlockIndex ?? "null"} topReal=${measuredValidation.realTopBlockIndex ?? "null"} topProd=${measuredValidation.productionTopBlockIndex ?? "null"} nested=${nestedTopVisibleAnchorCount}/${validationCount} topDelta=${measuredValidation.topOffsetDelta === null ? "null" : Math.round(measuredValidation.topOffsetDelta)} intraDelta=${measuredValidation.intraOffsetDelta === null ? "null" : Math.round(measuredValidation.intraOffsetDelta)} estimateMeanErr=${Math.round(measuredValidation.estimateHeightError.meanAbsError)} estimateMaxErr=${Math.round(measuredValidation.estimateHeightError.maxAbsError)} window=${measuredValidation.predictedWindowStart}..${measuredValidation.predictedWindowEnd}/${measuredValidation.actualWindowStart}..${measuredValidation.actualWindowEnd} maxPx=${Math.round(measuredValidation.maxAbsPxError)} maxIndex=${Math.round(measuredValidation.maxAbsIndexDelta)} scrollGrowth=${Math.round(measuredValidation.scrollHeightGrowth)} elapsedMs=${Math.round(elapsedMs)}`
+      );
+      return measuredValidation;
+    };
+    return {
+      invalidate: () => {
+        model = null;
+        estimateModel = null;
+        intrinsicSizeCalibrator.reset();
+        previousScrollHeight = null;
+        scrollHeightGrowth = 0;
+      },
+      schedule: () => {
+        if (scheduled) {
+          return;
+        }
+        scheduled = true;
+        scheduleIdle(deps.ownerWindow, () => {
+          scheduled = false;
+          validateNow();
+        });
+      },
+      validateNow
+    };
+  }
+  function scheduleIdle(ownerWindow, callback) {
+    const requestIdle = ownerWindow.requestIdleCallback;
+    if (requestIdle) {
+      requestIdle(callback, { timeout: 500 });
+      return;
+    }
+    ownerWindow.setTimeout(callback, 120);
+  }
+  function findBlockByIndex(blocks, blockIndex) {
+    if (blockIndex === null) {
+      return null;
+    }
+    for (const block of blocks) {
+      const raw = block.dataset["mmBlockIndex"];
+      const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
+      if (parsed === blockIndex) {
+        return block;
+      }
+    }
+    return null;
+  }
+  function blockIndexMatchesExpectedTop(input) {
+    if (input.predictedTopBlockIndex === input.realTopBlockIndex) {
+      return true;
+    }
+    if (input.realTopBlockIndex === null || input.realIntraOffset !== 0) {
+      return false;
+    }
+    const realTopEntry = input.model.getEntryByBlockIndex(input.realTopBlockIndex);
+    return realTopEntry !== void 0 && input.predictedSectionIndex === realTopEntry.sectionIndex - 1;
+  }
+  function nowMs(ownerWindow) {
+    const performanceNow = ownerWindow.performance?.now;
+    return typeof performanceNow === "function" ? performanceNow.call(ownerWindow.performance) : Date.now();
+  }
+  function emptyEstimateCalibrationSummary() {
+    return {
+      bucketCount: 0,
+      byKind: {},
+      calibratedBucketCount: 0,
+      sampleCount: 0
+    };
   }
 
   // RendererWeb/src/renderer.ts
@@ -1404,6 +2466,9 @@
   var lastPostedPreviewSourceLine = null;
   var liveDocumentBlockElements = [];
   var liveDocumentBlockElementsStale = true;
+  var virtualizationShadowEnabled = readVirtualizationShadowFlag(window, document);
+  var virtualizationShadowValidator = null;
+  var virtualizationShadowDocumentFinal = true;
   var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
   function cloneHeadingPayload(heading) {
     return {
@@ -2120,10 +3185,11 @@
     if (!main || message.html.length === 0) {
       return;
     }
+    const isFinal = message.isFinal !== false;
     postPerfMark("mm-progressive-append-start", {
       htmlLength: message.html.length,
       renderId: message.renderId ?? null,
-      isFinal: message.isFinal !== false
+      isFinal
     });
     const template = document.createElement("template");
     template.innerHTML = message.html;
@@ -2131,8 +3197,8 @@
       renderCodeBlocks(template.content);
     }
     main.append(template.content);
+    virtualizationShadowDocumentFinal = isFinal;
     invalidateTopVisibleBlockIndexCache();
-    const isFinal = message.isFinal !== false;
     if (!isFinal) {
       postPerfMark("mm-progressive-append-end", {
         htmlLength: message.html.length,
@@ -2189,6 +3255,7 @@
   function invalidateTopVisibleBlockIndexCache() {
     liveDocumentBlockElements = [];
     liveDocumentBlockElementsStale = true;
+    invalidateVirtualizationShadowModel();
   }
   function refreshTopVisibleBlockIndexCache() {
     liveDocumentBlockElements = collectLiveDocumentBlockElements(document);
@@ -2204,6 +3271,27 @@
     const root = document.scrollingElement ?? document.documentElement;
     return findTopVisibleBlockIndexFromBlocks(getLiveDocumentBlockElements(), root.scrollTop);
   }
+  function getVirtualizationShadowValidator() {
+    if (virtualizationShadowValidator === null) {
+      virtualizationShadowValidator = createVirtualizationShadowValidator({
+        ownerDocument: document,
+        ownerWindow: window,
+        isDocumentFinal: () => virtualizationShadowDocumentFinal,
+        postDebugLog,
+        postPerfMark
+      });
+    }
+    return virtualizationShadowValidator;
+  }
+  function invalidateVirtualizationShadowModel() {
+    virtualizationShadowValidator?.invalidate();
+  }
+  function scheduleVirtualizationShadowValidation() {
+    if (!virtualizationShadowEnabled) {
+      return;
+    }
+    getVirtualizationShadowValidator().schedule();
+  }
   function postScroll() {
     const scrollState = getScrollState();
     const topBlockIndex = findTopVisibleBlockIndex();
@@ -2214,6 +3302,7 @@
       ...scrollState,
       topBlockIndex
     });
+    scheduleVirtualizationShadowValidation();
   }
   function refreshSourceLineAnchors() {
     sourceLineAnchors = readSourceLineAnchors(document);
@@ -3616,6 +4705,7 @@
     lastAppliedReadingPreferences = next;
     const layoutAffectingChange = fontFamilyChanged || fontSizeChanged || lineHeightChanged || maxWidthChanged || minimapModeChanged || viewerChromeChanged;
     if (layoutAffectingChange) {
+      invalidateVirtualizationShadowModel();
       if (!minimapSourceReady && shouldBuildDetailedMinimapContent().allowed) {
         queueMinimapContentRefreshAfterLayoutSettles();
       } else {

@@ -34,6 +34,11 @@ import {
   collectLiveDocumentBlockElements,
   findTopVisibleBlockIndexFromBlocks
 } from "./topVisibleBlockIndex";
+import {
+  createVirtualizationShadowValidator,
+  readVirtualizationShadowFlag,
+  type VirtualizationShadowValidator
+} from "./virtualizationShadow";
 
 type KatexApi = {
   render: (
@@ -317,6 +322,9 @@ let suppressPreviewSourceLineSequence = 0;
 let lastPostedPreviewSourceLine: number | null = null;
 let liveDocumentBlockElements: HTMLElement[] = [];
 let liveDocumentBlockElementsStale = true;
+const virtualizationShadowEnabled = readVirtualizationShadowFlag(window, document);
+let virtualizationShadowValidator: VirtualizationShadowValidator | null = null;
+let virtualizationShadowDocumentFinal = true;
 const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
 type ProcessedDocumentCacheEntry = {
   fragment: DocumentFragment;
@@ -1264,10 +1272,11 @@ function appendProgressiveDocumentHtml(message: Extract<HostMessage, { type: "ap
     return;
   }
 
+  const isFinal = message.isFinal !== false;
   postPerfMark("mm-progressive-append-start", {
     htmlLength: message.html.length,
     renderId: message.renderId ?? null,
-    isFinal: message.isFinal !== false
+    isFinal
   });
   const template = document.createElement("template");
   template.innerHTML = message.html;
@@ -1276,9 +1285,9 @@ function appendProgressiveDocumentHtml(message: Extract<HostMessage, { type: "ap
   }
 
   main.append(template.content);
+  virtualizationShadowDocumentFinal = isFinal;
   invalidateTopVisibleBlockIndexCache();
 
-  const isFinal = message.isFinal !== false;
   if (!isFinal) {
     postPerfMark("mm-progressive-append-end", {
       htmlLength: message.html.length,
@@ -1346,6 +1355,7 @@ function getScrollState(): { scrollTop: number; scrollHeight: number; clientHeig
 function invalidateTopVisibleBlockIndexCache(): void {
   liveDocumentBlockElements = [];
   liveDocumentBlockElementsStale = true;
+  invalidateVirtualizationShadowModel();
 }
 
 function refreshTopVisibleBlockIndexCache(): void {
@@ -1368,6 +1378,30 @@ function findTopVisibleBlockIndex(): number | null {
   return findTopVisibleBlockIndexFromBlocks(getLiveDocumentBlockElements(), root.scrollTop);
 }
 
+function getVirtualizationShadowValidator(): VirtualizationShadowValidator {
+  if (virtualizationShadowValidator === null) {
+    virtualizationShadowValidator = createVirtualizationShadowValidator({
+      ownerDocument: document,
+      ownerWindow: window,
+      isDocumentFinal: () => virtualizationShadowDocumentFinal,
+      postDebugLog,
+      postPerfMark,
+    });
+  }
+  return virtualizationShadowValidator;
+}
+
+function invalidateVirtualizationShadowModel(): void {
+  virtualizationShadowValidator?.invalidate();
+}
+
+function scheduleVirtualizationShadowValidation(): void {
+  if (!virtualizationShadowEnabled) {
+    return;
+  }
+
+  getVirtualizationShadowValidator().schedule();
+}
 function postScroll(): void {
   const scrollState = getScrollState();
   const topBlockIndex = findTopVisibleBlockIndex();
@@ -1378,6 +1412,7 @@ function postScroll(): void {
     ...scrollState,
     topBlockIndex
   });
+  scheduleVirtualizationShadowValidation();
 }
 
 function refreshSourceLineAnchors(): void {
@@ -3311,6 +3346,7 @@ function flushPendingReadingPreferences(): void {
     || minimapModeChanged
     || viewerChromeChanged;
   if (layoutAffectingChange) {
+    invalidateVirtualizationShadowModel();
     if (!minimapSourceReady && shouldBuildDetailedMinimapContent().allowed) {
       queueMinimapContentRefreshAfterLayoutSettles();
     } else {
