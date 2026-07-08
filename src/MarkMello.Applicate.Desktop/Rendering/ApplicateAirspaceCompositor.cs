@@ -13,8 +13,8 @@ namespace MarkMello.Applicate.Desktop.Rendering;
 
 /// <summary>
 /// Single airspace-transition policy owner for Applicate's WebView-backed
-/// surfaces. Stage A owns only DOCUMENT reveal sessions; startup, theme, and
-/// mode sessions remain on their existing owners until their cutover slices.
+/// surfaces. Stage A owns DOCUMENT and STARTUP reveal sessions; theme and mode
+/// sessions remain on their existing owners until their cutover slices.
 /// </summary>
 internal sealed class ApplicateAirspaceCompositor : IDisposable
 {
@@ -22,6 +22,8 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
     private readonly IApplicateDocumentRevealState _documentState;
     private readonly Func<IApplicateAirspaceCoverPresenter> _coverFactory;
     private readonly IApplicateAirspacePaintGate _paintGate;
+    private readonly IApplicateAirspaceScheduler _scheduler;
+    private readonly List<IDisposable> _startupSessions = [];
     private readonly List<DocumentRevealSession> _documentSessions = [];
     private bool _disposed;
 
@@ -30,7 +32,8 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
             coverHost,
             new MainWindowDocumentRevealState(viewModel),
             static () => new ModeRevealCoverPresenter(new ApplicateModeRevealCoverWindow()),
-            new AvaloniaTwoFramePaintGate())
+            new AvaloniaTwoFramePaintGate(),
+            new DispatcherAirspaceScheduler())
     {
     }
 
@@ -38,12 +41,58 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         Control coverHost,
         IApplicateDocumentRevealState documentState,
         Func<IApplicateAirspaceCoverPresenter> coverFactory,
-        IApplicateAirspacePaintGate paintGate)
+        IApplicateAirspacePaintGate paintGate,
+        IApplicateAirspaceScheduler? scheduler = null)
     {
         _coverHost = coverHost ?? throw new ArgumentNullException(nameof(coverHost));
         _documentState = documentState ?? throw new ArgumentNullException(nameof(documentState));
         _coverFactory = coverFactory ?? throw new ArgumentNullException(nameof(coverFactory));
         _paintGate = paintGate ?? throw new ArgumentNullException(nameof(paintGate));
+        _scheduler = scheduler ?? new DispatcherAirspaceScheduler();
+    }
+
+    public IDisposable RegisterStartupSession(
+        Window window,
+        IApplicateSharedWebViewHost? host,
+        MainWindowViewModel viewModel)
+    {
+        ArgumentNullException.ThrowIfNull(window);
+        ArgumentNullException.ThrowIfNull(viewModel);
+
+        return RegisterStartupSession(
+            new WindowStartupRevealShell(window),
+            host is null ? null : new SharedWebViewStartupRevealSignals(host),
+            new MainWindowStartupRevealState(viewModel));
+    }
+
+    internal IDisposable RegisterStartupSession(
+        IApplicateStartupRevealShell shell,
+        IApplicateStartupRevealSignals? signals,
+        IApplicateStartupRevealState state)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(shell);
+        ArgumentNullException.ThrowIfNull(state);
+
+        if (signals is null)
+        {
+            shell.Opacity = 1;
+            ApplicateTrace.DiagMs(
+                "startup-applicate-window",
+                "startup-window-reveal-released",
+                "reason=no-viewer-host");
+            return EmptyDisposable.Instance;
+        }
+
+        var session = new StartupRevealSession(
+            shell,
+            signals,
+            state,
+            _coverFactory(),
+            _paintGate,
+            _scheduler);
+        _startupSessions.Add(session);
+        return session;
     }
 
     public IDisposable RegisterDocumentSession(
@@ -100,11 +149,333 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         }
         _disposed = true;
 
+        foreach (var session in _startupSessions)
+        {
+            session.Dispose();
+        }
+        _startupSessions.Clear();
+
         foreach (var session in _documentSessions)
         {
             session.Dispose();
         }
         _documentSessions.Clear();
+    }
+
+    private sealed class StartupRevealSession : IDisposable
+    {
+        private static readonly TimeSpan FallbackTimeout = TimeSpan.FromSeconds(15);
+        private static readonly TimeSpan PaintReleaseFallbackTimeout = TimeSpan.FromMilliseconds(250);
+
+        private readonly IApplicateStartupRevealShell _shell;
+        private readonly IApplicateStartupRevealSignals _signals;
+        private readonly IApplicateStartupRevealState _state;
+        private readonly IApplicateAirspaceCoverPresenter _cover;
+        private readonly IApplicateAirspacePaintGate _paintGate;
+        private readonly IApplicateAirspaceScheduler _scheduler;
+        private readonly IApplicateAirspaceTimer _fallbackTimer;
+        private readonly IApplicateAirspaceTimer _rendererSettleFallbackTimer;
+
+        private bool _released;
+        private bool _startupWindowOpened;
+        private bool _documentRevealReady;
+        private bool _waitForHeadings;
+        private bool _headingsReady;
+        private bool _rendererSettleArmed;
+        private bool _rendererSettleReady;
+        private string _rendererSettleReleaseReason = string.Empty;
+        private bool _disposed;
+
+        public StartupRevealSession(
+            IApplicateStartupRevealShell shell,
+            IApplicateStartupRevealSignals signals,
+            IApplicateStartupRevealState state,
+            IApplicateAirspaceCoverPresenter cover,
+            IApplicateAirspacePaintGate paintGate,
+            IApplicateAirspaceScheduler scheduler)
+        {
+            _shell = shell;
+            _signals = signals;
+            _state = state;
+            _cover = cover;
+            _paintGate = paintGate;
+            _scheduler = scheduler;
+            _waitForHeadings = state.IsTocPreferredVisible;
+            _headingsReady = !_waitForHeadings || state.HasDocumentHeadings;
+            _fallbackTimer = scheduler.CreateTimer(FallbackTimeout, OnFallbackTick);
+            _rendererSettleFallbackTimer = scheduler.CreateTimer(
+                ApplicateSharedWebViewHost.RendererSettleFallbackTimeout,
+                OnRendererSettleFallbackTick);
+
+            _shell.Opened += OnStartupWindowOpened;
+            _shell.SizeChanged += OnStartupWindowSizeChanged;
+            _shell.Closed += OnClosed;
+            _signals.DocumentRevealReady += OnDocumentRevealReady;
+            _signals.HeadingsChanged += OnHeadingsChanged;
+            _signals.RendererFailed += OnRendererFailed;
+            _state.PropertyChanged += OnStatePropertyChanged;
+            _fallbackTimer.Start();
+        }
+
+        private void OnStartupWindowOpened(object? sender, EventArgs e)
+        {
+            _startupWindowOpened = true;
+            QueueStartupCover("opened");
+            TryRelease("window-opened");
+        }
+
+        private void OnStartupWindowSizeChanged(object? sender, EventArgs e)
+        {
+            if (!_startupWindowOpened)
+            {
+                return;
+            }
+
+            QueueStartupCover("size-changed");
+        }
+
+        private void QueueStartupCover(string reason)
+            => _scheduler.Post(
+                () =>
+                {
+                    if (_released)
+                    {
+                        return;
+                    }
+
+                    var shown = _cover.ShowStartupSplash(_shell.CoverHost, _state.Document?.FileName);
+                    ApplicateTrace.DiagMs(
+                        "startup-applicate-window",
+                        "startup-window-cover-shown",
+                        $"reason={reason} shown={shown}");
+                },
+                DispatcherPriority.Render);
+
+        private void OnDocumentRevealReady(object? sender, EventArgs e)
+            => _scheduler.Post(
+                () =>
+                {
+                    _documentRevealReady = true;
+                    TryRelease("document-reveal-ready");
+                },
+                DispatcherPriority.Render);
+
+        private void OnHeadingsChanged(object? sender, IReadOnlyList<DocumentHeading> headings)
+            => _scheduler.Post(
+                () =>
+                {
+                    _waitForHeadings = _state.IsTocPreferredVisible && headings.Count > 0;
+                    _headingsReady = !_waitForHeadings || headings.Count > 0;
+                    TryRelease("headings-reported");
+                },
+                DispatcherPriority.Background);
+
+        private void OnStatePropertyChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName is not nameof(MainWindowViewModel.DocumentHeadings)
+                and not nameof(MainWindowViewModel.IsTocVisible)
+                and not nameof(MainWindowViewModel.HasDocumentHeadings))
+            {
+                return;
+            }
+
+            if (!_waitForHeadings)
+            {
+                return;
+            }
+
+            _headingsReady = _state.HasDocumentHeadings || !_state.IsTocPreferredVisible;
+            TryRelease("headings-applied");
+        }
+
+        private void OnRendererFailed(object? sender, ApplicateRendererFailureEvent e)
+            => _scheduler.Post(
+                () => Release("renderer-failed"),
+                DispatcherPriority.Render);
+
+        private void OnFallbackTick(object? sender, EventArgs e)
+            => Release("fallback");
+
+        private void TryRelease(string reason)
+        {
+            if (!_startupWindowOpened
+                || !_documentRevealReady
+                || (_waitForHeadings && !_headingsReady))
+            {
+                return;
+            }
+
+            if (ShouldWaitForRendererSettle())
+            {
+                ArmRendererSettle(reason);
+                return;
+            }
+
+            ReleaseAfterPaint(reason);
+        }
+
+        private bool ShouldWaitForRendererSettle()
+            => !_rendererSettleReady
+               && ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait(
+                   _state.Document,
+                   transactionGeneration: 0);
+
+        private void ArmRendererSettle(string reason)
+        {
+            if (_rendererSettleArmed)
+            {
+                return;
+            }
+
+            _rendererSettleArmed = true;
+            _rendererSettleReleaseReason = reason;
+            _signals.RendererSettled += OnRendererSettled;
+            _rendererSettleFallbackTimer.Start();
+            ApplicateTrace.DiagMs(
+                "startup-applicate-window",
+                "startup-window-renderer-settle-armed",
+                $"reason={reason}");
+            _signals.RequestRendererSettleProbe();
+        }
+
+        private void OnRendererSettled(object? sender, EventArgs e)
+            => _scheduler.Post(
+                () => CompleteRendererSettle("ipc-ack"),
+                DispatcherPriority.Render);
+
+        private void OnRendererSettleFallbackTick(object? sender, EventArgs e)
+            => CompleteRendererSettle("fallback-timer");
+
+        private void CompleteRendererSettle(string path)
+        {
+            if (_released || !_rendererSettleArmed)
+            {
+                return;
+            }
+
+            _rendererSettleReady = true;
+            ReleaseRendererSettleWait();
+            ApplicateTrace.DiagMs(
+                "startup-applicate-window",
+                "startup-window-renderer-settle-complete",
+                $"path={path}");
+            var reason = string.IsNullOrWhiteSpace(_rendererSettleReleaseReason)
+                ? path
+                : _rendererSettleReleaseReason + "-" + path;
+            ReleaseAfterPaint(reason);
+        }
+
+        private void ReleaseRendererSettleWait()
+        {
+            if (_rendererSettleArmed)
+            {
+                _signals.RendererSettled -= OnRendererSettled;
+            }
+
+            _rendererSettleArmed = false;
+            _rendererSettleFallbackTimer.Stop();
+        }
+
+        private void Release(string reason)
+        {
+            if (_released)
+            {
+                return;
+            }
+
+            _released = true;
+            Cleanup();
+            _shell.Opacity = 1;
+            _scheduler.Post(
+                () => HideStartupCover(reason),
+                DispatcherPriority.Render);
+        }
+
+        private void ReleaseAfterPaint(string reason)
+        {
+            if (_released)
+            {
+                return;
+            }
+
+            _released = true;
+            Cleanup();
+            _shell.Opacity = 1;
+
+            var hidden = false;
+            IApplicateAirspaceTimer? fallbackTimer = null;
+            void HideOnce(string releaseReason)
+            {
+                if (hidden)
+                {
+                    return;
+                }
+
+                hidden = true;
+                fallbackTimer?.Stop();
+                fallbackTimer?.Dispose();
+                HideStartupCover(releaseReason);
+            }
+
+            void OnReleaseFallbackTick(object? sender, EventArgs e)
+                => HideOnce(reason + "-fallback");
+
+            fallbackTimer = _scheduler.CreateTimer(PaintReleaseFallbackTimeout, OnReleaseFallbackTick);
+            fallbackTimer.Start();
+
+            _paintGate.AfterTwoFrames(
+                _shell.CoverHost,
+                () => _scheduler.Post(
+                    () => HideOnce(reason),
+                    DispatcherPriority.Render));
+        }
+
+        private void HideStartupCover(string reason)
+        {
+            // Perf B1 (audit 2026-06-04): the startup cover is already paint-gated
+            // (DocumentRevealReady + double-RAF before HideStartupCover fires), so
+            // the fade-out is dead cosmetic time on every startup, not a mask over
+            // unpainted first paint. Zero it for the startup reveal. Scoped to THIS
+            // call site only - ApplicateMotion.ModeSwitchDuration still drives the
+            // in-session mode-toggle and tab/document-switch covers.
+            var duration = TimeSpan.Zero;
+            _cover.Hide(duration);
+            ApplicateTrace.DiagMs(
+                "startup-applicate-window",
+                "startup-window-reveal-released",
+                $"reason={reason} durationMs={duration.TotalMilliseconds:F0}");
+        }
+
+        private void OnClosed(object? sender, EventArgs e)
+            => Dispose();
+
+        private void Cleanup()
+        {
+            _fallbackTimer.Stop();
+            ReleaseRendererSettleWait();
+            _rendererSettleFallbackTimer.Stop();
+            _shell.Opened -= OnStartupWindowOpened;
+            _shell.SizeChanged -= OnStartupWindowSizeChanged;
+            _shell.Closed -= OnClosed;
+            _signals.DocumentRevealReady -= OnDocumentRevealReady;
+            _signals.HeadingsChanged -= OnHeadingsChanged;
+            _signals.RendererFailed -= OnRendererFailed;
+            _state.PropertyChanged -= OnStatePropertyChanged;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+
+            Cleanup();
+            _fallbackTimer.Dispose();
+            _rendererSettleFallbackTimer.Dispose();
+            _cover.Dispose();
+        }
     }
 
     private sealed class DocumentRevealSession : IDisposable
@@ -528,6 +899,23 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
             => _viewModel.UpdateDocumentHeadings(Array.Empty<DocumentHeading>());
     }
 
+    private sealed class MainWindowStartupRevealState(MainWindowViewModel viewModel) : IApplicateStartupRevealState
+    {
+        private readonly MainWindowViewModel _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
+
+        public event PropertyChangedEventHandler? PropertyChanged
+        {
+            add => _viewModel.PropertyChanged += value;
+            remove => _viewModel.PropertyChanged -= value;
+        }
+
+        public MarkdownSource? Document => _viewModel.Document;
+
+        public bool IsTocPreferredVisible => _viewModel.IsTocPreferredVisible;
+
+        public bool HasDocumentHeadings => _viewModel.HasDocumentHeadings;
+    }
+
     private sealed class SharedWebViewDocumentRevealSignals(IApplicateSharedWebViewHost host)
         : IApplicateDocumentRevealSignals
     {
@@ -552,6 +940,111 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         }
     }
 
+    private sealed class SharedWebViewStartupRevealSignals(IApplicateSharedWebViewHost host)
+        : IApplicateStartupRevealSignals
+    {
+        private readonly IApplicateSharedWebViewHost _host = host ?? throw new ArgumentNullException(nameof(host));
+
+        public event EventHandler? DocumentRevealReady
+        {
+            add => _host.View.DocumentRevealReady += value;
+            remove => _host.View.DocumentRevealReady -= value;
+        }
+
+        public event EventHandler<IReadOnlyList<DocumentHeading>>? HeadingsChanged
+        {
+            add => _host.View.HeadingsChanged += value;
+            remove => _host.View.HeadingsChanged -= value;
+        }
+
+        public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed
+        {
+            add => _host.RendererFailed += value;
+            remove => _host.RendererFailed -= value;
+        }
+
+        public event EventHandler? RendererSettled
+        {
+            add => _host.View.ModeToggleSettled += value;
+            remove => _host.View.ModeToggleSettled -= value;
+        }
+
+        public void RequestRendererSettleProbe()
+            => _host.View.RequestModeToggleSettleProbe();
+    }
+
+    private sealed class WindowStartupRevealShell(Window window) : IApplicateStartupRevealShell
+    {
+        private readonly Window _window = window ?? throw new ArgumentNullException(nameof(window));
+        private readonly Dictionary<EventHandler, EventHandler<SizeChangedEventArgs>> _sizeChangedHandlers = [];
+
+        public Control CoverHost => _window;
+
+        public double Opacity
+        {
+            get => _window.Opacity;
+            set => _window.Opacity = value;
+        }
+
+        public event EventHandler? Opened
+        {
+            add
+            {
+                if (value is not null)
+                {
+                    _window.Opened += value;
+                }
+            }
+            remove
+            {
+                if (value is not null)
+                {
+                    _window.Opened -= value;
+                }
+            }
+        }
+
+        public event EventHandler? SizeChanged
+        {
+            add
+            {
+                if (value is null)
+                {
+                    return;
+                }
+
+                EventHandler<SizeChangedEventArgs> handler = (sender, _) => value(sender, EventArgs.Empty);
+                _sizeChangedHandlers[value] = handler;
+                _window.SizeChanged += handler;
+            }
+            remove
+            {
+                if (value is not null && _sizeChangedHandlers.Remove(value, out var handler))
+                {
+                    _window.SizeChanged -= handler;
+                }
+            }
+        }
+
+        public event EventHandler? Closed
+        {
+            add
+            {
+                if (value is not null)
+                {
+                    _window.Closed += value;
+                }
+            }
+            remove
+            {
+                if (value is not null)
+                {
+                    _window.Closed -= value;
+                }
+            }
+        }
+    }
+
     private sealed class ModeRevealCoverPresenter(ApplicateModeRevealCoverWindow cover)
         : IApplicateAirspaceCoverPresenter
     {
@@ -559,6 +1052,9 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
 
         public bool Show(Control host)
             => _cover.Show(host);
+
+        public bool ShowStartupSplash(Control host, string? documentName)
+            => _cover.ShowStartupSplash(host, documentName);
 
         public void Hide()
             => _cover.Hide();
@@ -590,6 +1086,60 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
             });
         }
     }
+
+    private sealed class DispatcherAirspaceScheduler : IApplicateAirspaceScheduler
+    {
+        public void Post(Action action, DispatcherPriority priority)
+            => Dispatcher.UIThread.Post(action, priority);
+
+        public IApplicateAirspaceTimer CreateTimer(TimeSpan interval, EventHandler tick)
+            => new DispatcherAirspaceTimer(interval, tick);
+    }
+
+    private sealed class DispatcherAirspaceTimer : IApplicateAirspaceTimer
+    {
+        private readonly DispatcherTimer _timer;
+        private readonly EventHandler _tick;
+        private bool _disposed;
+
+        public DispatcherAirspaceTimer(TimeSpan interval, EventHandler tick)
+        {
+            _tick = tick ?? throw new ArgumentNullException(nameof(tick));
+            _timer = new DispatcherTimer { Interval = interval };
+            _timer.Tick += _tick;
+        }
+
+        public void Start()
+            => _timer.Start();
+
+        public void Stop()
+            => _timer.Stop();
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+
+            _timer.Stop();
+            _timer.Tick -= _tick;
+        }
+    }
+
+    private sealed class EmptyDisposable : IDisposable
+    {
+        public static readonly EmptyDisposable Instance = new();
+
+        private EmptyDisposable()
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
 }
 
 internal interface IApplicateDocumentRevealState : INotifyPropertyChanged
@@ -614,9 +1164,46 @@ internal interface IApplicateDocumentRevealSignals
     event EventHandler? DocumentRevealReady;
 }
 
+internal interface IApplicateStartupRevealState : INotifyPropertyChanged
+{
+    MarkdownSource? Document { get; }
+
+    bool IsTocPreferredVisible { get; }
+
+    bool HasDocumentHeadings { get; }
+}
+
+internal interface IApplicateStartupRevealSignals
+{
+    event EventHandler? DocumentRevealReady;
+
+    event EventHandler<IReadOnlyList<DocumentHeading>>? HeadingsChanged;
+
+    event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
+
+    event EventHandler? RendererSettled;
+
+    void RequestRendererSettleProbe();
+}
+
+internal interface IApplicateStartupRevealShell
+{
+    Control CoverHost { get; }
+
+    double Opacity { get; set; }
+
+    event EventHandler? Opened;
+
+    event EventHandler? SizeChanged;
+
+    event EventHandler? Closed;
+}
+
 internal interface IApplicateAirspaceCoverPresenter : IDisposable
 {
     bool Show(Control host);
+
+    bool ShowStartupSplash(Control host, string? documentName);
 
     void Hide();
 
@@ -626,4 +1213,18 @@ internal interface IApplicateAirspaceCoverPresenter : IDisposable
 internal interface IApplicateAirspacePaintGate
 {
     void AfterTwoFrames(Control anchor, Action action);
+}
+
+internal interface IApplicateAirspaceScheduler
+{
+    void Post(Action action, DispatcherPriority priority);
+
+    IApplicateAirspaceTimer CreateTimer(TimeSpan interval, EventHandler tick);
+}
+
+internal interface IApplicateAirspaceTimer : IDisposable
+{
+    void Start();
+
+    void Stop();
 }

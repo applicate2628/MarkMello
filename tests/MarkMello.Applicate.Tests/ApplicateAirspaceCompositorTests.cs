@@ -1,8 +1,10 @@
 using System.ComponentModel;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Threading;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Domain;
+using MarkMello.Presentation.ViewModels;
 using Xunit;
 
 namespace MarkMello.Applicate.Tests;
@@ -171,10 +173,144 @@ public sealed class ApplicateAirspaceCompositorTests
         Assert.Equal(0, editState.ClearHeadingsCount);
     }
 
-    private static MarkdownSource Source(string path)
-        => new(path, System.IO.Path.GetFileName(path), $"# {path}");
+    [Fact]
+    public void StartupSessionWaitsForWindowRevealReadyHeadingsRendererSettleAndPaint()
+    {
+        var state = new FakeDocumentRevealState
+        {
+            Document = Source("heavy.md", new string('x', 1024 * 1024 + 1)),
+            IsTocPreferredVisible = true,
+            HasDocumentHeadings = false
+        };
+        var startupSignals = new FakeStartupSignals();
+        var startupShell = new FakeStartupShell();
+        var covers = new FakeCoverFactory();
+        var paintGate = new FakePaintGate();
+        var scheduler = new FakeAirspaceScheduler();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            paintGate,
+            scheduler);
+        compositor.RegisterStartupSession(startupShell, startupSignals, state);
+        var cover = Assert.Single(covers.Created);
 
-    private sealed class FakeDocumentRevealState : IApplicateDocumentRevealState
+        startupSignals.RaiseDocumentRevealReady();
+        scheduler.Flush();
+        Assert.Equal(0, cover.HideImmediateCount);
+
+        startupShell.RaiseOpened();
+        scheduler.Flush();
+        Assert.Equal(1, cover.StartupSplashShowCount);
+        Assert.Equal("heavy.md", cover.StartupSplashDocumentName);
+
+        startupSignals.RaiseHeadingsChanged([new DocumentHeading("intro", 1, "Intro", 0)]);
+        scheduler.Flush();
+        Assert.Equal(1, startupSignals.SettleProbeRequestCount);
+        Assert.Equal(0, paintGate.PendingCount);
+
+        startupSignals.RaiseRendererSettled();
+        scheduler.Flush();
+        Assert.Equal(1, paintGate.PendingCount);
+        Assert.Equal(0, cover.HideImmediateCount);
+
+        paintGate.Flush();
+        Assert.Equal(1, scheduler.PendingCount);
+        scheduler.Flush();
+
+        Assert.Equal(1, cover.HideImmediateCount);
+        Assert.Equal(TimeSpan.Zero, cover.LastHideDuration);
+        Assert.Equal(1.0, Assert.Single(startupShell.OpacityAssignments));
+    }
+
+    [Fact]
+    public void StartupSessionFallbacksAndRendererFailureReleaseWithoutPaintGate()
+    {
+        var state = new FakeDocumentRevealState { Document = Source("doc.md") };
+        var startupSignals = new FakeStartupSignals();
+        var startupShell = new FakeStartupShell();
+        var covers = new FakeCoverFactory();
+        var paintGate = new FakePaintGate();
+        var scheduler = new FakeAirspaceScheduler();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            paintGate,
+            scheduler);
+        compositor.RegisterStartupSession(startupShell, startupSignals, state);
+        var cover = Assert.Single(covers.Created);
+
+        startupShell.RaiseOpened();
+        scheduler.Flush();
+        scheduler.FireTimer(TimeSpan.FromSeconds(15));
+        scheduler.Flush();
+
+        Assert.Equal(1, cover.HideImmediateCount);
+        Assert.Equal(0, paintGate.PendingCount);
+        Assert.Equal(1.0, Assert.Single(startupShell.OpacityAssignments));
+
+        var failureState = new FakeDocumentRevealState { Document = Source("failure.md") };
+        var failureSignals = new FakeStartupSignals();
+        var failureShell = new FakeStartupShell();
+        var failureCovers = new FakeCoverFactory();
+        var failureScheduler = new FakeAirspaceScheduler();
+        using var failureCompositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            failureState,
+            failureCovers.Create,
+            new FakePaintGate(),
+            failureScheduler);
+        failureCompositor.RegisterStartupSession(failureShell, failureSignals, failureState);
+        var failureCover = Assert.Single(failureCovers.Created);
+
+        failureShell.RaiseOpened();
+        failureScheduler.Flush();
+        failureSignals.RaiseRendererFailed();
+        failureScheduler.Flush();
+        failureScheduler.Flush();
+
+        Assert.Equal(1, failureCover.HideImmediateCount);
+        Assert.Equal(1.0, Assert.Single(failureShell.OpacityAssignments));
+    }
+
+    [Fact]
+    public void StartupSessionPaintFallbackHidesIfFrameGateDoesNotComplete()
+    {
+        var state = new FakeDocumentRevealState { Document = Source("doc.md") };
+        var startupSignals = new FakeStartupSignals();
+        var startupShell = new FakeStartupShell();
+        var covers = new FakeCoverFactory();
+        var scheduler = new FakeAirspaceScheduler();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            new FakePaintGate(),
+            scheduler);
+        compositor.RegisterStartupSession(startupShell, startupSignals, state);
+        var cover = Assert.Single(covers.Created);
+
+        startupShell.RaiseOpened();
+        scheduler.Flush();
+        startupSignals.RaiseDocumentRevealReady();
+        scheduler.Flush();
+
+        scheduler.FireTimer(TimeSpan.FromMilliseconds(250));
+
+        Assert.Equal(1, cover.HideImmediateCount);
+        Assert.Equal(TimeSpan.Zero, cover.LastHideDuration);
+        Assert.Equal(1.0, Assert.Single(startupShell.OpacityAssignments));
+    }
+
+    private static MarkdownSource Source(string path)
+        => Source(path, $"# {path}");
+
+    private static MarkdownSource Source(string path, string content)
+        => new(path, System.IO.Path.GetFileName(path), content);
+
+    private sealed class FakeDocumentRevealState : IApplicateDocumentRevealState, IApplicateStartupRevealState
     {
         private MarkdownSource? _document;
 
@@ -185,6 +321,10 @@ public sealed class ApplicateAirspaceCompositorTests
         }
 
         public ReadingPreferences ReadingPreferences { get; set; } = ReadingPreferences.Default;
+
+        public bool IsTocPreferredVisible { get; set; }
+
+        public bool HasDocumentHeadings { get; set; }
 
         public int ClearHeadingsCount { get; private set; }
 
@@ -208,6 +348,67 @@ public sealed class ApplicateAirspaceCompositorTests
 
         public void ClearDocumentHeadings()
             => ClearHeadingsCount++;
+    }
+
+    private sealed class FakeStartupShell : IApplicateStartupRevealShell
+    {
+        public Control CoverHost { get; } = new Panel();
+
+        public List<double> OpacityAssignments { get; } = [];
+
+        public double Opacity
+        {
+            get => OpacityAssignments.Count == 0 ? 0 : OpacityAssignments[^1];
+            set => OpacityAssignments.Add(value);
+        }
+
+        public event EventHandler? Opened;
+
+        public event EventHandler? SizeChanged;
+
+        public event EventHandler? Closed;
+
+        public void RaiseOpened()
+            => Opened?.Invoke(this, EventArgs.Empty);
+
+        public void RaiseSizeChanged()
+            => SizeChanged?.Invoke(this, EventArgs.Empty);
+
+        public void RaiseClosed()
+            => Closed?.Invoke(this, EventArgs.Empty);
+    }
+
+    private sealed class FakeStartupSignals : IApplicateStartupRevealSignals
+    {
+        public int SettleProbeRequestCount { get; private set; }
+
+        public event EventHandler? DocumentRevealReady;
+
+        public event EventHandler<IReadOnlyList<DocumentHeading>>? HeadingsChanged;
+
+        public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
+
+        public event EventHandler? RendererSettled;
+
+        public void RequestRendererSettleProbe()
+            => SettleProbeRequestCount++;
+
+        public void RaiseDocumentRevealReady()
+            => DocumentRevealReady?.Invoke(this, EventArgs.Empty);
+
+        public void RaiseHeadingsChanged(IReadOnlyList<DocumentHeading> headings)
+            => HeadingsChanged?.Invoke(this, headings);
+
+        public void RaiseRendererFailed()
+            => RendererFailed?.Invoke(
+                this,
+                new ApplicateRendererFailureEvent(
+                    ApplicateRendererFailureKind.DocumentRenderFailed,
+                    "document.md",
+                    DateTime.UtcNow));
+
+        public void RaiseRendererSettled()
+            => RendererSettled?.Invoke(this, EventArgs.Empty);
     }
 
     private sealed class FakeDocumentSignals : IApplicateDocumentRevealSignals
@@ -254,13 +455,26 @@ public sealed class ApplicateAirspaceCompositorTests
     {
         public int ShowCount { get; private set; }
 
+        public int StartupSplashShowCount { get; private set; }
+
+        public string? StartupSplashDocumentName { get; private set; }
+
         public int HideImmediateCount { get; private set; }
 
         public int HideAnimatedCount { get; private set; }
 
+        public TimeSpan? LastHideDuration { get; private set; }
+
         public bool Show(Control host)
         {
             ShowCount++;
+            return true;
+        }
+
+        public bool ShowStartupSplash(Control host, string? documentName)
+        {
+            StartupSplashShowCount++;
+            StartupSplashDocumentName = documentName;
             return true;
         }
 
@@ -269,6 +483,7 @@ public sealed class ApplicateAirspaceCompositorTests
 
         public void Hide(TimeSpan duration)
         {
+            LastHideDuration = duration;
             if (duration <= TimeSpan.Zero)
             {
                 HideImmediateCount++;
@@ -299,6 +514,68 @@ public sealed class ApplicateAirspaceCompositorTests
             foreach (var action in pending)
             {
                 action();
+            }
+        }
+    }
+
+    private sealed class FakeAirspaceScheduler : IApplicateAirspaceScheduler
+    {
+        private readonly Queue<Action> _posted = [];
+        private readonly List<FakeAirspaceTimer> _timers = [];
+
+        public int PendingCount => _posted.Count;
+
+        public void Post(Action action, DispatcherPriority priority)
+            => _posted.Enqueue(action);
+
+        public IApplicateAirspaceTimer CreateTimer(TimeSpan interval, EventHandler tick)
+        {
+            var timer = new FakeAirspaceTimer(interval, tick);
+            _timers.Add(timer);
+            return timer;
+        }
+
+        public void Flush()
+        {
+            var pending = _posted.ToArray();
+            _posted.Clear();
+            foreach (var action in pending)
+            {
+                action();
+            }
+        }
+
+        public void FireTimer(TimeSpan interval)
+        {
+            var timer = Assert.Single(
+                _timers,
+                candidate => candidate.Interval == interval && candidate.IsStarted);
+            timer.Fire();
+        }
+    }
+
+    private sealed class FakeAirspaceTimer(TimeSpan interval, EventHandler tick) : IApplicateAirspaceTimer
+    {
+        private readonly EventHandler _tick = tick;
+
+        public TimeSpan Interval { get; } = interval;
+
+        public bool IsStarted { get; private set; }
+
+        public void Start()
+            => IsStarted = true;
+
+        public void Stop()
+            => IsStarted = false;
+
+        public void Dispose()
+            => Stop();
+
+        public void Fire()
+        {
+            if (IsStarted)
+            {
+                _tick(this, EventArgs.Empty);
             }
         }
     }
