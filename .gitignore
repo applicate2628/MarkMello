@@ -55,3 +55,4 @@ docs/superpowers/
 
 # Skaro
 .skaro/
+/packaging/dist/

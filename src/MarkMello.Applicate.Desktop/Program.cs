@@ -39,6 +39,12 @@ internal static class Program
             return ApplicateSingleInstanceService.ForwardActivation(args) ? 0 : 1;
         }
 
+        if (ApplicateActivationArguments.IsShutdownRequest(args))
+        {
+            singleInstance!.Dispose();
+            return 0;
+        }
+
         var metrics = new StopwatchStartupMetrics();
         metrics.Mark(StartupStage.AppBootstrap);
 

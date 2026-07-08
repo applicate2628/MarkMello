@@ -1978,6 +1978,12 @@ public sealed class ApplicateMainWindow : MainWindow
             {
                 ApplicateForegroundWindowActivator.ActivateExternalRequest(this);
 
+                if (args.ShutdownRequested)
+                {
+                    Close();
+                    return;
+                }
+
                 if (args.FilePaths.Count == 0)
                 {
                     return;

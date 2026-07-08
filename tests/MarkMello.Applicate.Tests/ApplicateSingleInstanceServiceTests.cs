@@ -36,8 +36,29 @@ public sealed class ApplicateSingleInstanceServiceTests : IDisposable
 
         Assert.True(forwarded);
         Assert.Equal(["foreground", "forward"], calls);
-        Assert.True(ApplicateActivationArguments.TryParsePayload(forwarder.Payload, out var filePaths));
-        Assert.Equal([Path.GetFullPath(path)], filePaths);
+        Assert.True(ApplicateActivationArguments.TryParsePayload(forwarder.Payload, out var request));
+        Assert.False(request.ShutdownRequested);
+        Assert.Equal([Path.GetFullPath(path)], request.FilePaths);
+    }
+
+    [Fact]
+    public void ForwardActivationSendsShutdownRequestWithoutOpeningPaths()
+    {
+        var calls = new List<string>();
+        var foreground = new RecordingForegroundActivationPermission(calls);
+        var forwarder = new RecordingActivationForwarder(calls);
+        var path = WriteTemp("open.md", "# Open");
+
+        var forwarded = ApplicateSingleInstanceService.ForwardActivation(
+            ["--shutdown", path],
+            forwarder,
+            foreground);
+
+        Assert.True(forwarded);
+        Assert.Equal(["foreground", "forward"], calls);
+        Assert.True(ApplicateActivationArguments.TryParsePayload(forwarder.Payload, out var request));
+        Assert.True(request.ShutdownRequested);
+        Assert.Empty(request.FilePaths);
     }
 
     private string WriteTemp(string fileName, string contents)

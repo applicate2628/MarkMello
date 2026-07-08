@@ -42,10 +42,23 @@ public sealed class ApplicateActivationArgumentsTests : IDisposable
         var paths = new[] { Path.GetFullPath(first), Path.GetFullPath(second) };
 
         var payload = ApplicateActivationArguments.CreatePayload(paths);
-        var parsed = ApplicateActivationArguments.TryParsePayload(payload, out var parsedPaths);
+        var parsed = ApplicateActivationArguments.TryParsePayload(payload, out var request);
 
         Assert.True(parsed);
-        Assert.Equal(paths, parsedPaths);
+        Assert.False(request.ShutdownRequested);
+        Assert.Equal(paths, request.FilePaths);
+    }
+
+    [Fact]
+    public void CreateRequestTreatsShutdownAsCommandInsteadOfPathActivation()
+    {
+        var path = WriteTemp("first.md", "# First");
+
+        var request = ApplicateActivationArguments.CreateRequest(
+            [path, ApplicateActivationArguments.ShutdownArgument]);
+
+        Assert.True(request.ShutdownRequested);
+        Assert.Empty(request.FilePaths);
     }
 
     private string WriteTemp(string fileName, string contents)

@@ -11,7 +11,7 @@ public sealed class ApplicateSingleInstanceService : IDisposable
 
     private readonly Mutex _mutex;
     private readonly object _gate = new();
-    private readonly Queue<IReadOnlyList<string>> _pendingActivations = new();
+    private readonly Queue<ApplicateActivationRequest> _pendingActivations = new();
     private CancellationTokenSource? _listenCancellation;
     private Task? _listenTask;
     private EventHandler<ApplicateActivationRequestedEventArgs>? _activationRequested;
@@ -30,7 +30,7 @@ public sealed class ApplicateSingleInstanceService : IDisposable
                 return;
             }
 
-            IReadOnlyList<IReadOnlyList<string>> pending;
+            IReadOnlyList<ApplicateActivationRequest> pending;
             lock (_gate)
             {
                 _activationRequested += value;
@@ -38,9 +38,9 @@ public sealed class ApplicateSingleInstanceService : IDisposable
                 _pendingActivations.Clear();
             }
 
-            foreach (var filePaths in pending)
+            foreach (var request in pending)
             {
-                value(this, new ApplicateActivationRequestedEventArgs(filePaths));
+                value(this, CreateEventArgs(request));
             }
         }
         remove
@@ -81,8 +81,8 @@ public sealed class ApplicateSingleInstanceService : IDisposable
         ArgumentNullException.ThrowIfNull(forwarder);
         ArgumentNullException.ThrowIfNull(foregroundPermission);
 
-        var filePaths = ApplicateActivationArguments.GetSupportedFilePaths(args);
-        var payload = ApplicateActivationArguments.CreatePayload(filePaths);
+        var request = ApplicateActivationArguments.CreateRequest(args);
+        var payload = ApplicateActivationArguments.CreatePayload(request);
 
         foregroundPermission.PermitPrimaryForegroundActivation();
         return forwarder.Forward(payload);
@@ -134,9 +134,9 @@ public sealed class ApplicateSingleInstanceService : IDisposable
                 await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
                 using var reader = new StreamReader(pipe, Encoding.UTF8);
                 var payload = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-                if (ApplicateActivationArguments.TryParsePayload(payload, out var filePaths))
+                if (ApplicateActivationArguments.TryParsePayload(payload, out var request))
                 {
-                    Dispatch(filePaths);
+                    Dispatch(request);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -154,7 +154,7 @@ public sealed class ApplicateSingleInstanceService : IDisposable
         }
     }
 
-    private void Dispatch(IReadOnlyList<string> filePaths)
+    private void Dispatch(ApplicateActivationRequest request)
     {
         EventHandler<ApplicateActivationRequestedEventArgs>? handler;
         lock (_gate)
@@ -162,13 +162,16 @@ public sealed class ApplicateSingleInstanceService : IDisposable
             handler = _activationRequested;
             if (handler is null)
             {
-                _pendingActivations.Enqueue(filePaths);
+                _pendingActivations.Enqueue(request);
                 return;
             }
         }
 
-        handler(this, new ApplicateActivationRequestedEventArgs(filePaths));
+        handler(this, CreateEventArgs(request));
     }
+
+    private static ApplicateActivationRequestedEventArgs CreateEventArgs(ApplicateActivationRequest request)
+        => new(request.FilePaths, request.ShutdownRequested);
 
     private sealed class NamedPipeApplicateActivationForwarder(string pipeName) : IApplicateActivationForwarder
     {
