@@ -566,6 +566,57 @@ public sealed class ApplicateAirspaceCompositorTests
     }
 
     [Fact]
+    public void ModeSessionRestoresOutgoingBeforeCoverHideEvenWhenSlotRollbackThrows()
+    {
+        // A slot-rollback failure (ResetDisplayedMode / ApplyCommittedModeState throwing)
+        // must NOT be able to skip the outgoing-native restore and hide the cover over a
+        // still-suppressed renderer (stuck blank). The invariant "restore outgoing native
+        // before cover hide" holds on ALL paths, including when slot rollback throws.
+        var state = new FakeDocumentRevealState();
+        var events = new List<string>();
+        var slotAdapter = new FakeModeSlotAdapter(events);
+        var host = new FakeModeHostRevealIntents(slotAdapter.RevealSnapshot, events)
+        {
+            RejectReveals = true
+        };
+        var covers = new FakeCoverFactory(events);
+        var scheduler = new FakeAirspaceScheduler();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            new FakePaintGate(),
+            scheduler);
+        using var modeSession = compositor.RegisterModeSession(
+            host,
+            slotAdapter,
+            () => ReadingPreferences.Default);
+
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        scheduler.Flush();
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        var generation = slotAdapter.EditGeneration;
+
+        host.RaiseCommitCompleted(generation, ApplicateMode.Edit);
+        host.RaiseMinimapSettledNotApplicable(generation);
+        // Arm the slot-rollback failure on the OUTGOING mode only: the commit path
+        // applies the target (Edit) before the reveal; the rollback applies the
+        // outgoing (Viewer) — that is the call this test forces to throw.
+        slotAdapter.ThrowApplyCommittedModeStateForMode = ApplicateMode.Viewer;
+        host.RaiseRendererSettled(generation);
+        scheduler.Flush();
+
+        // The slot rollback threw...
+        Assert.Contains("slot-committed-throw:Viewer", events);
+        // ...but the outgoing native was still restored, and BEFORE the cover hid.
+        Assert.Equal(new[] { ApplicateMode.Viewer }, host.RestoredModes);
+        var restore = events.LastIndexOf("restore:Viewer");
+        var hide = events.LastIndexOf("cover-hide:immediate");
+        Assert.True(restore >= 0);
+        Assert.True(hide > restore);
+    }
+
+    [Fact]
     public void ModePolicyLivesInCompositorAndBridgeIsOnlySlotAdapter()
     {
         var compositor = File.ReadAllText(AirspaceCompositorSourcePath);
@@ -818,8 +869,18 @@ public sealed class ApplicateAirspaceCompositorTests
             _events?.Add($"slot-transaction:{requestedMode}");
         }
 
+        // Set to the outgoing/rollback mode to simulate a slot-rollback failure on
+        // exactly that call (the commit path applies the TARGET mode first).
+        public ApplicateMode? ThrowApplyCommittedModeStateForMode { get; set; }
+
         public void ApplyCommittedModeState(ApplicateMode mode, bool applySlotState)
         {
+            if (ThrowApplyCommittedModeStateForMode == mode)
+            {
+                _events?.Add($"slot-committed-throw:{mode}");
+                throw new InvalidOperationException("slot rollback failure (test)");
+            }
+
             CommittedMode = mode;
             if (applySlotState)
             {

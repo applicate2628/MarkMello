@@ -1792,8 +1792,26 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
                 var rollbackMode = committedRollbackMode ?? outgoingMode;
                 if (rollbackMode is not null)
                 {
-                    _modeTransitionController.ResetDisplayedMode(rollbackMode.Value);
-                    _slotAdapter.ApplyCommittedModeState(rollbackMode.Value, applyOutgoingSlotState);
+                    // Slot/displayed-mode rollback must never be able to skip the
+                    // outgoing-native restore below: if either call threw, control
+                    // would jump to the finally and hide the cover while the
+                    // outgoing renderer is still suppressed (a stuck blank — the
+                    // exact bug class this compositor exists to kill). The
+                    // "restore outgoing native before cover hide" invariant holds on
+                    // ALL paths, so a slot-rollback failure is logged loudly but is
+                    // never allowed to block the native restore.
+                    try
+                    {
+                        _modeTransitionController.ResetDisplayedMode(rollbackMode.Value);
+                        _slotAdapter.ApplyCommittedModeState(rollbackMode.Value, applyOutgoingSlotState);
+                    }
+                    catch (Exception slotRollbackEx)
+                    {
+                        ApplicateTrace.DiagMs(
+                            "pane-seq",
+                            "bridge-transaction-rollback-slot-restore-failed",
+                            $"generation={generation} outgoing={outgoingMode?.ToString() ?? "(null)"} target={targetMode?.ToString() ?? "(null)"} reason={reason} exceptionType={slotRollbackEx.GetType().Name}");
+                    }
                 }
 
                 if (outgoingMode is null)
