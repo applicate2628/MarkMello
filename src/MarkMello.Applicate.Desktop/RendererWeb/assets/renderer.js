@@ -1267,6 +1267,50 @@
     };
   }
 
+  // RendererWeb/src/topVisibleBlockIndex.ts
+  var LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]";
+  function collectLiveDocumentBlockElements(ownerDocument) {
+    return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR));
+  }
+  function findTopVisibleBlockIndexFromBlocks(blocks, scrollTop) {
+    if (blocks.length === 0) {
+      return null;
+    }
+    let lo = 0;
+    let hi = blocks.length - 1;
+    let firstAtOrBelowViewportTop = blocks.length;
+    while (lo <= hi) {
+      const mid = lo + (hi - lo >> 1);
+      const block = blocks[mid];
+      if (blockDocumentBottom(block) >= scrollTop) {
+        firstAtOrBelowViewportTop = mid;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    const index = firstAtOrBelowViewportTop === blocks.length ? blocks.length - 1 : firstAtOrBelowViewportTop;
+    return readBlockIndex(blocks[index]);
+  }
+  function readBlockIndex(block) {
+    const raw = block.dataset["mmBlockIndex"];
+    const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  function blockDocumentBottom(block) {
+    return blockDocumentTop(block) + block.offsetHeight;
+  }
+  function blockDocumentTop(block) {
+    let top = 0;
+    let current = block;
+    while (current !== null) {
+      top += current.offsetTop;
+      const nextOffsetParent = current.offsetParent;
+      current = nextOffsetParent instanceof HTMLElement ? nextOffsetParent : null;
+    }
+    return top;
+  }
+
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -1358,6 +1402,8 @@
   var suppressPreviewSourceLineEmit = false;
   var suppressPreviewSourceLineSequence = 0;
   var lastPostedPreviewSourceLine = null;
+  var liveDocumentBlockElements = [];
+  var liveDocumentBlockElementsStale = true;
   var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
   function cloneHeadingPayload(heading) {
     return {
@@ -2085,6 +2131,7 @@
       renderCodeBlocks(template.content);
     }
     main.append(template.content);
+    invalidateTopVisibleBlockIndexCache();
     const isFinal = message.isFinal !== false;
     if (!isFinal) {
       postPerfMark("mm-progressive-append-end", {
@@ -2139,21 +2186,23 @@
       clientHeight: root.clientHeight
     };
   }
-  function findTopVisibleBlockIndex() {
-    const elements = document.querySelectorAll("[data-mm-block-index]");
-    if (elements.length === 0) return null;
-    const viewportTop = 0;
-    for (const el of Array.from(elements)) {
-      const rect = el.getBoundingClientRect();
-      if (rect.bottom >= viewportTop) {
-        const raw = el.dataset["mmBlockIndex"];
-        const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
-        return Number.isFinite(parsed) ? parsed : null;
-      }
+  function invalidateTopVisibleBlockIndexCache() {
+    liveDocumentBlockElements = [];
+    liveDocumentBlockElementsStale = true;
+  }
+  function refreshTopVisibleBlockIndexCache() {
+    liveDocumentBlockElements = collectLiveDocumentBlockElements(document);
+    liveDocumentBlockElementsStale = false;
+  }
+  function getLiveDocumentBlockElements() {
+    if (liveDocumentBlockElementsStale) {
+      refreshTopVisibleBlockIndexCache();
     }
-    const lastRaw = elements[elements.length - 1].dataset["mmBlockIndex"];
-    const lastParsed = lastRaw === void 0 ? Number.NaN : Number.parseInt(lastRaw, 10);
-    return Number.isFinite(lastParsed) ? lastParsed : null;
+    return liveDocumentBlockElements;
+  }
+  function findTopVisibleBlockIndex() {
+    const root = document.scrollingElement ?? document.documentElement;
+    return findTopVisibleBlockIndexFromBlocks(getLiveDocumentBlockElements(), root.scrollTop);
   }
   function postScroll() {
     const scrollState = getScrollState();
@@ -3969,6 +4018,7 @@
     }
     lastPostedActiveHeadingId = null;
     sourceLineAnchors = [];
+    invalidateTopVisibleBlockIndexCache();
     previewSourceLineFrameRequested = false;
     suppressPreviewSourceLineEmit = false;
     lastPostedPreviewSourceLine = null;
@@ -3978,6 +4028,7 @@
     ensureMinimap();
     ensureWidthHandle();
     ensureDropOverlay();
+    refreshTopVisibleBlockIndexCache();
     updateWidthHandlePositionForCurrentLayout();
     if (options.refreshMinimap === false) {
       updateMinimapVisibility(true);

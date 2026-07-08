@@ -30,6 +30,10 @@ import {
   restoreMinimapSnapshot,
   type CachedMinimapSnapshot
 } from "./minimapCache";
+import {
+  collectLiveDocumentBlockElements,
+  findTopVisibleBlockIndexFromBlocks
+} from "./topVisibleBlockIndex";
 
 type KatexApi = {
   render: (
@@ -311,6 +315,8 @@ let previewSourceLineFrameRequested = false;
 let suppressPreviewSourceLineEmit = false;
 let suppressPreviewSourceLineSequence = 0;
 let lastPostedPreviewSourceLine: number | null = null;
+let liveDocumentBlockElements: HTMLElement[] = [];
+let liveDocumentBlockElementsStale = true;
 const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
 type ProcessedDocumentCacheEntry = {
   fragment: DocumentFragment;
@@ -1270,6 +1276,7 @@ function appendProgressiveDocumentHtml(message: Extract<HostMessage, { type: "ap
   }
 
   main.append(template.content);
+  invalidateTopVisibleBlockIndexCache();
 
   const isFinal = message.isFinal !== false;
   if (!isFinal) {
@@ -1336,25 +1343,29 @@ function getScrollState(): { scrollTop: number; scrollHeight: number; clientHeig
   };
 }
 
+function invalidateTopVisibleBlockIndexCache(): void {
+  liveDocumentBlockElements = [];
+  liveDocumentBlockElementsStale = true;
+}
+
+function refreshTopVisibleBlockIndexCache(): void {
+  liveDocumentBlockElements = collectLiveDocumentBlockElements(document);
+  liveDocumentBlockElementsStale = false;
+}
+
+function getLiveDocumentBlockElements(): readonly HTMLElement[] {
+  if (liveDocumentBlockElementsStale) {
+    refreshTopVisibleBlockIndexCache();
+  }
+  return liveDocumentBlockElements;
+}
+
 // The top visible block: the first element with data-mm-block-index whose
 // bottom edge is below the viewport's top. Returns null if no annotated
 // block exists yet (before first render, or document without blocks).
 function findTopVisibleBlockIndex(): number | null {
-  const elements = document.querySelectorAll<HTMLElement>("[data-mm-block-index]");
-  if (elements.length === 0) return null;
-  const viewportTop = 0;
-  for (const el of Array.from(elements)) {
-    const rect = el.getBoundingClientRect();
-    if (rect.bottom >= viewportTop) {
-      const raw = el.dataset["mmBlockIndex"];
-      const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
-      return Number.isFinite(parsed) ? parsed : null;
-    }
-  }
-  // All blocks above viewport — return the last one.
-  const lastRaw = elements[elements.length - 1]!.dataset["mmBlockIndex"];
-  const lastParsed = lastRaw === undefined ? Number.NaN : Number.parseInt(lastRaw, 10);
-  return Number.isFinite(lastParsed) ? lastParsed : null;
+  const root = document.scrollingElement ?? document.documentElement;
+  return findTopVisibleBlockIndexFromBlocks(getLiveDocumentBlockElements(), root.scrollTop);
 }
 
 function postScroll(): void {
@@ -3828,6 +3839,7 @@ function resetModuleGlobalsForLoadDocument(): void {
   }
   lastPostedActiveHeadingId = null;
   sourceLineAnchors = [];
+  invalidateTopVisibleBlockIndexCache();
   previewSourceLineFrameRequested = false;
   suppressPreviewSourceLineEmit = false;
   lastPostedPreviewSourceLine = null;
@@ -3842,6 +3854,7 @@ function ensureChromeNodes(useCachedDocumentState = false, options: EnsureChrome
   ensureMinimap();
   ensureWidthHandle();
   ensureDropOverlay();
+  refreshTopVisibleBlockIndexCache();
   // Width-handle X depends on the new .mm-document bounding rect after innerHTML
   // swap; ensureWidthHandle only ensures the node exists.
   updateWidthHandlePositionForCurrentLayout();
