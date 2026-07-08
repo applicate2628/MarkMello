@@ -108,6 +108,7 @@ public sealed class ApplicateWebHostMessagingTests
     public void TransactionalSettleProbeFastPathKeepsRendererAckBoundary()
     {
         var source = File.ReadAllText(SharedWebViewHostSourcePath);
+        var compositorSource = File.ReadAllText(AirspaceCompositorSourcePath);
         var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
         var rendererSource = File.ReadAllText(RendererSourcePath);
         var requestRender = source[
@@ -120,7 +121,10 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("View.UpdateInputs(", requestRender, StringComparison.Ordinal);
         Assert.Contains("ShouldSkipRendererFrameSettleForTransaction(transactionGeneration)", requestRender, StringComparison.Ordinal);
         Assert.Contains("=> transactionGeneration > 0", source, StringComparison.Ordinal);
-        Assert.Contains("skipFrameWait: _activeTransactionSkipsRendererFrameSettle", commit, StringComparison.Ordinal);
+        Assert.Contains("TransactionRendererSettleProbeReady?.Invoke", commit, StringComparison.Ordinal);
+        Assert.Contains("_activeTransactionSkipsRendererFrameSettle", commit, StringComparison.Ordinal);
+        Assert.Contains("_hostRevealIntents.RequestTransactionRendererSettleProbe", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("e.SkipFrameWait", compositorSource, StringComparison.Ordinal);
         Assert.Contains("skipFrameWait={skipFrameWait}", viewSource, StringComparison.Ordinal);
         Assert.Contains("skipFrameWait", rendererSource, StringComparison.Ordinal);
         Assert.Contains("mm-mode-settle-frame-wait-skipped", rendererSource, StringComparison.Ordinal);
@@ -157,14 +161,17 @@ public sealed class ApplicateWebHostMessagingTests
     public void TransactionalAttachLeavesRendererRevealToBridgeCover()
     {
         var source = File.ReadAllText(SharedWebViewHostSourcePath);
+        var compositorSource = File.ReadAllText(AirspaceCompositorSourcePath);
 
         var attach = source[
             source.IndexOf("public void AttachTo(", StringComparison.Ordinal)..
             source.IndexOf("private void RequestRender(", StringComparison.Ordinal)];
+        var onAttachStarting = ExtractMethodBody(compositorSource, "private void OnAttachStarting(");
 
         Assert.Contains("var transactionalAttach", attach, StringComparison.Ordinal);
         Assert.DoesNotContain("View.PrepareNativeRendererForReveal", attach, StringComparison.Ordinal);
-        Assert.Contains("View.ParkNativeWebViewForReparent();", attach, StringComparison.Ordinal);
+        Assert.Contains("HostAttachStarting?.Invoke", attach, StringComparison.Ordinal);
+        Assert.Contains("_hostRevealIntents.ParkNativeWebViewForReparent();", onAttachStarting, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -388,7 +395,7 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.DoesNotContain("RevealNativeDocument(TimeSpan.Zero);", completeLayoutReady, StringComparison.Ordinal);
         Assert.DoesNotContain("DocumentRendered?.Invoke", completeLayoutReady, StringComparison.Ordinal);
         Assert.Contains("_postReadyEnhancementsComplete", completeDocumentRenderVisualReady, StringComparison.Ordinal);
-        Assert.Contains("RevealNativeDocument(TimeSpan.Zero);", completeDocumentRenderVisualReady, StringComparison.Ordinal);
+        Assert.Contains("DocumentRenderVisualReady?.Invoke", completeDocumentRenderVisualReady, StringComparison.Ordinal);
         Assert.Contains("DocumentRendered?.Invoke", completeDocumentRenderVisualReady, StringComparison.Ordinal);
 
         Assert.Contains("_host.View.DocumentRevealReady += value;", compositorHostAdaptersSource, StringComparison.Ordinal);
@@ -412,6 +419,36 @@ public sealed class ApplicateWebHostMessagingTests
 
         Assert.Contains("postReadyEnhancementsCompleted", rendererSource, StringComparison.Ordinal);
         Assert.Contains("post-ready-enhancements-complete", rendererSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RendererRevealShieldMessagesAreCompositorOwned()
+    {
+        var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
+        var compositorSource = File.ReadAllText(AirspaceCompositorSourcePath);
+        var hostIntentsSource = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..", "..", "..", "..", "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Rendering",
+            "IApplicateHostRevealIntents.cs"));
+
+        Assert.DoesNotContain("mode-reveal-prepare", viewSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("mode-reveal-start", viewSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("document-reveal-prepare", viewSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("document-reveal-start", viewSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("PrepareNativeDocumentReveal(TimeSpan.Zero);", viewSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("RevealNativeDocument(TimeSpan.Zero);", viewSource, StringComparison.Ordinal);
+
+        Assert.Contains("PrepareModeRendererReveal", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("StartModeRendererReveal", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("PrepareDocumentRendererReveal", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("StartDocumentRendererReveal", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("mode-reveal-prepare", hostIntentsSource, StringComparison.Ordinal);
+        Assert.Contains("mode-reveal-start", hostIntentsSource, StringComparison.Ordinal);
+        Assert.Contains("document-reveal-prepare", hostIntentsSource, StringComparison.Ordinal);
+        Assert.Contains("document-reveal-start", hostIntentsSource, StringComparison.Ordinal);
     }
 
     [Fact]

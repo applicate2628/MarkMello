@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Threading;
+using Avalonia;
+using Avalonia.Animation;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Styling;
@@ -25,11 +27,14 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
     private readonly Func<IApplicateAirspaceCoverPresenter> _coverFactory;
     private readonly IApplicateAirspacePaintGate _paintGate;
     private readonly IApplicateAirspaceScheduler _scheduler;
+    private readonly List<IDisposable> _hostRevealSessions = [];
     private readonly List<IDisposable> _startupSessions = [];
     private readonly List<DocumentRevealSession> _documentSessions = [];
     private readonly List<IDisposable> _themeSessions = [];
     private readonly List<IApplicateModeRevealSession> _modeSessions = [];
     private bool _disposed;
+
+    internal static readonly TimeSpan HostRendererSettleFallbackTimeout = TimeSpan.FromMilliseconds(500);
 
     public ApplicateAirspaceCompositor(Control coverHost, MainWindowViewModel viewModel)
         : this(
@@ -82,6 +87,17 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             _paintGate,
             _scheduler);
         _startupSessions.Add(session);
+        return session;
+    }
+
+    internal IDisposable RegisterHostRevealSession(
+        IApplicateHostRevealIntents hostRevealIntents)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(hostRevealIntents);
+
+        var session = new HostRevealSession(hostRevealIntents, _scheduler);
+        _hostRevealSessions.Add(session);
         return session;
     }
 
@@ -161,6 +177,12 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
         }
         _disposed = true;
 
+        foreach (var session in _hostRevealSessions)
+        {
+            session.Dispose();
+        }
+        _hostRevealSessions.Clear();
+
         foreach (var session in _startupSessions)
         {
             session.Dispose();
@@ -184,6 +206,282 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             session.Dispose();
         }
         _modeSessions.Clear();
+    }
+
+    private sealed class HostRevealSession : IDisposable
+    {
+        private readonly IApplicateHostRevealIntents _hostRevealIntents;
+        private readonly IApplicateAirspaceTimer _rendererSettleFallbackTimer;
+        private bool _reparentedThisCycle;
+        private bool _rendererSettleArmed;
+        private bool _documentRevealPending;
+        private TimeSpan _pendingRevealDuration;
+        private Panel? _pendingRevealParent;
+        private Panel? _pendingRevealWarmupParent;
+        private bool _disposed;
+
+        public HostRevealSession(
+            IApplicateHostRevealIntents hostRevealIntents,
+            IApplicateAirspaceScheduler scheduler)
+        {
+            _hostRevealIntents = hostRevealIntents;
+            _rendererSettleFallbackTimer = scheduler.CreateTimer(
+                hostRevealIntents.RendererSettleFallbackTimeout,
+                OnRendererSettleFallbackTick);
+
+            _hostRevealIntents.AttachStarting += OnAttachStarting;
+            _hostRevealIntents.AttachCompleted += OnAttachCompleted;
+            _hostRevealIntents.RenderStarting += OnRenderStarting;
+            _hostRevealIntents.CommitPreparing += OnCommitPreparing;
+            _hostRevealIntents.DocumentRenderVisualReady += OnDocumentRenderVisualReady;
+            _hostRevealIntents.RendererRevealSettled += OnRendererRevealSettled;
+        }
+
+        private void OnAttachStarting(object? sender, ApplicateHostAttachStartingEventArgs e)
+        {
+            if (!e.IsTransactional)
+            {
+                PrepareTargetForReveal(e.Target);
+            }
+
+            ReleaseRendererSettleWait();
+            _hostRevealIntents.ParkNativeWebViewForReparent();
+        }
+
+        private void OnAttachCompleted(object? sender, ApplicateHostAttachCompletedEventArgs e)
+        {
+            _reparentedThisCycle = true;
+            if (!e.IsTransactional)
+            {
+                e.Target.IsVisible = e.HasEverCommitted;
+                if (e.HasEverCommitted)
+                {
+                    _hostRevealIntents.SetNativeWebViewVisibility(false);
+                }
+                return;
+            }
+
+            _hostRevealIntents.SetNativeWebViewVisibility(false);
+        }
+
+        private void OnRenderStarting(object? sender, ApplicateHostRenderStartingEventArgs e)
+        {
+            if (ShouldPrepareDocumentReveal(
+                    !Equals(e.CurrentSource, e.NextSource),
+                    e.HasLoadedDocument,
+                    e.NextSource,
+                    e.CurrentSource))
+            {
+                _documentRevealPending = true;
+                _hostRevealIntents.PrepareDocumentRendererReveal(TimeSpan.Zero);
+            }
+            else if (e.NextSource is null && _documentRevealPending)
+            {
+                _documentRevealPending = false;
+                _hostRevealIntents.StartDocumentRendererReveal(TimeSpan.Zero);
+            }
+
+            if (!e.IsTransactional
+                && !e.KeepColdParentVisibleForInactivePrime
+                && !e.HasEverCommitted
+                && e.CurrentParent is not null
+                && !ReferenceEquals(e.CurrentParent, e.WarmupParent))
+            {
+                e.CurrentParent.IsVisible = false;
+            }
+
+            if (e.IsTransactional)
+            {
+                _hostRevealIntents.SetNativeWebViewVisibility(false);
+            }
+        }
+
+        private void OnCommitPreparing(object? sender, ApplicateHostCommitPreparingEventArgs e)
+        {
+            var armRevealGate = !e.IsTransactional && _reparentedThisCycle && e.HasEverCommitted;
+            _reparentedThisCycle = false;
+
+            if (e.CurrentParent is not null && !ReferenceEquals(e.CurrentParent, e.WarmupParent))
+            {
+                if (!e.IsTransactional)
+                {
+                    e.CurrentParent.IsVisible = true;
+                }
+
+                e.CurrentParent.UpdateLayout();
+
+                if (e.IsTransactional || armRevealGate)
+                {
+                    _hostRevealIntents.SetNativeWebViewVisibility(false);
+                }
+            }
+
+            if (e.IsTransactional)
+            {
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "host-commit-waiting-bridge-native-reveal",
+                    $"transactionGeneration={e.TransactionGeneration}");
+                return;
+            }
+
+            if (armRevealGate)
+            {
+                ApplicateTrace.DiagMs("pane-seq", "host-commit-armed-revealgate");
+                _pendingRevealDuration = e.RevealDuration;
+                _pendingRevealParent = e.CurrentParent;
+                _pendingRevealWarmupParent = e.WarmupParent;
+                _hostRevealIntents.PrepareModeRendererReveal(e.RevealDuration);
+                _hostRevealIntents.PrepareNativeWebViewHiddenPaint();
+                BeginRevealAfterSettle();
+                return;
+            }
+
+            ApplicateTrace.DiagMs("pane-seq", "host-commit-immediate-hwnd-show");
+            _hostRevealIntents.SetNativeWebViewVisibility(true);
+            _hostRevealIntents.StartModeRendererReveal(TimeSpan.Zero);
+            RevealCurrentParent(e.CurrentParent, e.WarmupParent, e.RevealDuration);
+            ApplicateTrace.DiagMs("pane-seq", "host-hwnd-shown", "path=immediate");
+        }
+
+        private void OnDocumentRenderVisualReady(object? sender, EventArgs e)
+        {
+            if (!_documentRevealPending)
+            {
+                return;
+            }
+
+            _documentRevealPending = false;
+            _hostRevealIntents.StartDocumentRendererReveal(TimeSpan.Zero);
+        }
+
+        private void BeginRevealAfterSettle()
+        {
+            ReleaseRendererSettleWait();
+            _rendererSettleArmed = true;
+            _rendererSettleFallbackTimer.Start();
+            _hostRevealIntents.RequestRendererSettleProbe();
+            ApplicateTrace.ModeToggle("SharedHost.RevealGate armed");
+        }
+
+        private void OnRendererRevealSettled(object? sender, EventArgs e)
+        {
+            if (!_rendererSettleArmed)
+            {
+                return;
+            }
+
+            ApplicateTrace.ModeToggle("SharedHost.RevealGate ack");
+            ApplicateTrace.DiagMs("pane-seq", "host-revealgate-completed", "path=ipc-ack");
+            CompleteReveal("deferred-after-settle");
+        }
+
+        private void OnRendererSettleFallbackTick(object? sender, EventArgs e)
+        {
+            if (!_rendererSettleArmed)
+            {
+                return;
+            }
+
+            ApplicateTrace.ModeToggle("SharedHost.RevealGate fallback");
+            ApplicateTrace.DiagMs("pane-seq", "host-revealgate-completed", "path=fallback-timer");
+            CompleteReveal("deferred-after-settle");
+        }
+
+        private void CompleteReveal(string path)
+        {
+            if (!_rendererSettleArmed)
+            {
+                return;
+            }
+
+            var duration = _pendingRevealDuration;
+            _pendingRevealDuration = TimeSpan.Zero;
+            ReleaseRendererSettleWait();
+            _hostRevealIntents.CompleteNativeWebViewHiddenPaint();
+            _hostRevealIntents.StartModeRendererReveal(duration);
+            RevealCurrentParent(_pendingRevealParent, _pendingRevealWarmupParent, duration);
+            _pendingRevealParent = null;
+            _pendingRevealWarmupParent = null;
+            ApplicateTrace.DiagMs("pane-seq", "host-hwnd-shown", $"path={path}");
+        }
+
+        private void ReleaseRendererSettleWait()
+        {
+            if (_rendererSettleArmed)
+            {
+                _rendererSettleFallbackTimer.Stop();
+            }
+
+            _rendererSettleArmed = false;
+        }
+
+        private static void PrepareTargetForReveal(Panel target)
+        {
+            target.Transitions = null;
+            target.Opacity = 0.0;
+        }
+
+        private static void RevealCurrentParent(Panel? currentParent, Panel? warmupParent, TimeSpan duration)
+        {
+            if (currentParent is null || ReferenceEquals(currentParent, warmupParent))
+            {
+                return;
+            }
+
+            if (duration == TimeSpan.Zero)
+            {
+                currentParent.Transitions = null;
+            }
+            else
+            {
+                currentParent.Transitions =
+                [
+                    new DoubleTransition
+                    {
+                        Property = Visual.OpacityProperty,
+                        Duration = duration,
+                        Easing = ApplicateMotion.Easing
+                    }
+                ];
+            }
+
+            currentParent.Opacity = 1.0;
+        }
+
+        private static bool ShouldPrepareDocumentReveal(
+            bool sourceChanged,
+            bool hasLoadedDocument,
+            MarkdownSource? nextSource,
+            MarkdownSource? currentSource)
+            => sourceChanged
+               && hasLoadedDocument
+               && nextSource is not null
+               && !IsSameDocumentContentUpdate(currentSource, nextSource);
+
+        private static bool IsSameDocumentContentUpdate(MarkdownSource? current, MarkdownSource? next)
+            => current is not null
+               && next is not null
+               && !string.IsNullOrEmpty(current.Path)
+               && string.Equals(current.Path, next.Path, StringComparison.OrdinalIgnoreCase);
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+
+            _hostRevealIntents.AttachStarting -= OnAttachStarting;
+            _hostRevealIntents.AttachCompleted -= OnAttachCompleted;
+            _hostRevealIntents.RenderStarting -= OnRenderStarting;
+            _hostRevealIntents.CommitPreparing -= OnCommitPreparing;
+            _hostRevealIntents.DocumentRenderVisualReady -= OnDocumentRenderVisualReady;
+            _hostRevealIntents.RendererRevealSettled -= OnRendererRevealSettled;
+            _rendererSettleFallbackTimer.Stop();
+            _rendererSettleFallbackTimer.Dispose();
+        }
     }
 
     private sealed class StartupRevealSession : IDisposable
@@ -1213,6 +1511,7 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             _hostRevealIntents.CommitCompleted += OnTransactionCommitCompleted;
             _hostRevealIntents.MinimapSettled += OnTransactionMinimapSettled;
             _hostRevealIntents.RendererSettled += OnTransactionRendererSettled;
+            _hostRevealIntents.TransactionRendererSettleProbeReady += OnTransactionRendererSettleProbeReady;
             _hostRevealIntents.RendererFailed += OnTransactionRendererFailed;
         }
 
@@ -1373,6 +1672,20 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             {
                 QueueModeTransactionCommit(e.TransactionGeneration, snapshot.RequestedMode);
             }
+        }
+
+        private void OnTransactionRendererSettleProbeReady(
+            object? sender,
+            ApplicateTransactionRendererSettleProbeEventArgs e)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _hostRevealIntents.RequestTransactionRendererSettleProbe(
+                e.TransactionGeneration,
+                e.SkipFrameWait);
         }
 
         private void OnTransactionRendererFailed(object? sender, ApplicateRendererFailureEvent e)
@@ -1623,6 +1936,10 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
                 return;
             }
 
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "host-hwnd-shown",
+                $"path=bridge-transaction transactionGeneration={generation}");
             _modeTransitionController.ResetDisplayedMode(mode);
             _activeModeTransactionGeneration = 0;
             _activeModeTransactionTarget = null;
@@ -1735,6 +2052,7 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             _hostRevealIntents.CommitCompleted -= OnTransactionCommitCompleted;
             _hostRevealIntents.MinimapSettled -= OnTransactionMinimapSettled;
             _hostRevealIntents.RendererSettled -= OnTransactionRendererSettled;
+            _hostRevealIntents.TransactionRendererSettleProbeReady -= OnTransactionRendererSettleProbeReady;
             _hostRevealIntents.RendererFailed -= OnTransactionRendererFailed;
             HideModeRevealCover();
             _cover.Dispose();

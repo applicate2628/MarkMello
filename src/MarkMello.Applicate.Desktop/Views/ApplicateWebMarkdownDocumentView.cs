@@ -125,7 +125,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _isWebWidthDragging;
     private long _renderSequence;
     private NativeWindowPlacement? _pendingNativeHiddenPaintPlacement;
-    private bool _documentRevealPending;
     private readonly HashSet<string> _postedRendererDocumentCacheKeys = new(StringComparer.Ordinal);
     private readonly Dictionary<long, object> _pendingRendererCacheFallbackLoads = new();
 
@@ -234,6 +233,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     public event EventHandler? DocumentRendered;
 
+    internal event EventHandler? DocumentRenderVisualReady;
+
     public event EventHandler? DocumentRevealReady;
 
     public event EventHandler? ProgressiveAppendCompleted;
@@ -323,6 +324,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     internal bool LastLayoutReadyWasCached => _lastLayoutReadyWasCached;
 
+    internal bool HasLoadedDocumentForReveal => _hasLoadedDocument;
+
     internal ApplicateWebInputUpdateAction UpdateInputs(
         MarkdownSource? source,
         ReadingPreferences readingPreferences,
@@ -335,20 +338,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         bool skipFrameWaitUntilRenderReady = false)
     {
         var sourceChanged = !Equals(Source, source);
-        var shouldPrepareDocumentReveal = ShouldPrepareDocumentReveal(
-            sourceChanged,
-            _hasLoadedDocument,
-            source,
-            Source);
-        if (shouldPrepareDocumentReveal)
-        {
-            PrepareNativeDocumentReveal(TimeSpan.Zero);
-        }
-        else if (source is null && _documentRevealPending)
-        {
-            RevealNativeDocument(TimeSpan.Zero);
-        }
-
         var action = DetermineInputUpdateAction(
             sourceChanged: sourceChanged,
             imageSourceResolverChanged: !ReferenceEquals(ImageSourceResolver, imageSourceResolver),
@@ -941,55 +930,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         return virtualLeft - parentRect.Left - width - NativeOffscreenMargin;
     }
 
-    internal void PrepareNativeRendererForReveal(TimeSpan duration)
-    {
-        PostRendererMessage(new
-        {
-            type = "mode-reveal-prepare",
-            durationMs = ToRendererDurationMs(duration)
-        });
-    }
+    internal string RendererThemeName => GetThemeName();
 
-    internal void RevealNativeRenderer(TimeSpan duration)
-    {
-        PostRendererMessage(new
-        {
-            type = "mode-reveal-start",
-            durationMs = ToRendererDurationMs(duration)
-        });
-    }
-
-    private void PrepareNativeDocumentReveal(TimeSpan duration)
-    {
-        _documentRevealPending = true;
-        PostRendererMessage(new
-        {
-            type = "document-reveal-prepare",
-            durationMs = ToRendererDurationMs(duration),
-            theme = GetThemeName()
-        });
-    }
-
-    private void RevealNativeDocument(TimeSpan duration)
-    {
-        if (!_documentRevealPending)
-        {
-            return;
-        }
-
-        _documentRevealPending = false;
-        PostRendererMessage(new
-        {
-            type = "document-reveal-start",
-            durationMs = ToRendererDurationMs(duration)
-        });
-    }
-
-    private static int ToRendererDurationMs(TimeSpan duration)
-        => (int)SysMath.Clamp(
-            SysMath.Round(duration.TotalMilliseconds, MidpointRounding.AwayFromZero),
-            ReadingPreferences.MinModeSwitchSmoothDurationMs,
-            ReadingPreferences.MaxModeSwitchSmoothDurationMs);
+    internal void PostRendererRevealMessage(object message)
+        => PostRendererMessage(message);
 
     private sealed class ReparentScope : IDisposable
     {
@@ -2660,7 +2604,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         _documentRenderedRaised = true;
-        RevealNativeDocument(TimeSpan.Zero);
+        DocumentRenderVisualReady?.Invoke(this, EventArgs.Empty);
         DocumentRendered?.Invoke(this, EventArgs.Empty);
     }
 

@@ -1184,6 +1184,25 @@ public sealed class ApplicateMainWindow : MainWindow
         var viewerHostForMode = hostProvider?.ViewerHost ?? App.Services?.GetService<IApplicateSharedWebViewHost>();
         var editHost = hostProvider?.EditPreviewHost ?? viewerHostForMode;
 
+        // Atomic reveal for DOCUMENT/THEME/MODE/HOST switches: the airspace
+        // compositor holds the solid cover and owns native-HWND reveal intent.
+        // Register host reveal sessions before the bridge constructs viewer
+        // and edit-preview visuals, because those constructors can synchronously
+        // attach the shared WebView host.
+        _airspaceCompositor?.Dispose();
+        var airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel);
+        _airspaceCompositor = airspaceCompositor;
+        if (viewerHostForMode is not null)
+        {
+            airspaceCompositor.RegisterHostRevealSession(
+                new SharedWebViewHostRevealIntents(viewerHostForMode));
+        }
+        if (editHost is not null && !ReferenceEquals(editHost, viewerHostForMode))
+        {
+            airspaceCompositor.RegisterHostRevealSession(
+                new SharedWebViewHostRevealIntents(editHost));
+        }
+
         // GFM task-list checkbox clicks: the renderer posts task-toggle, the view
         // re-raises it, and the VM flips [ ]/[x] on the source line. Each host
         // stamps its own surface as the toggle's origin — the VM selects the
@@ -1277,13 +1296,6 @@ public sealed class ApplicateMainWindow : MainWindow
         var hostRevealIntents = _modeTransactionHostRouter is null
             ? null
             : new SharedWebViewHostRevealIntents(_modeTransactionHostRouter);
-
-        // Atomic reveal for DOCUMENT/THEME/MODE switches: the airspace
-        // compositor holds the solid cover and owns native-HWND reveal intent.
-        // The TOC column stays visible and swaps its row model in place.
-        _airspaceCompositor?.Dispose();
-        var airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel);
-        _airspaceCompositor = airspaceCompositor;
 
         _siblingMountBridge = new ApplicateSiblingMountBridge(
             viewModel,

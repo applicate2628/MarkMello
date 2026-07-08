@@ -116,6 +116,19 @@ public sealed class ApplicateRendererSettledEventArgs(long transactionGeneration
 }
 
 /// <summary>
+/// Raised after a transaction commit has reached the point where the renderer
+/// settle probe should be sent for the same generation.
+/// </summary>
+public sealed class ApplicateTransactionRendererSettleProbeEventArgs(
+    long transactionGeneration,
+    bool skipFrameWait) : EventArgs
+{
+    public long TransactionGeneration { get; } = transactionGeneration;
+
+    public bool SkipFrameWait { get; } = skipFrameWait;
+}
+
+/// <summary>
 /// Failure context emitted by <see cref="IApplicateSharedWebViewHost.RendererFailed"/>.
 /// Carries the failure class plus enough provenance to drive the failure
 /// view and the diagnostics-copy payload.
@@ -193,6 +206,12 @@ public interface IApplicateModeTransactionHost
     /// applied settle-probe preferences and passed its post-paint ack point.
     /// </summary>
     event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled;
+
+    /// <summary>
+    /// Raised once the host has finished commit-local physical work and the
+    /// compositor should request the transaction-scoped renderer settle ack.
+    /// </summary>
+    event EventHandler<ApplicateTransactionRendererSettleProbeEventArgs>? TransactionRendererSettleProbeReady;
 
     /// <summary>
     /// Reveal the native WebView HWND for a committed bridge-owned mode

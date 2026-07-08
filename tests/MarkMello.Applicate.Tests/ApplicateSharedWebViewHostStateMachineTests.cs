@@ -24,6 +24,14 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
         "Rendering",
         "ApplicateSharedWebViewHost.cs");
 
+    private static readonly string AirspaceCompositorSourcePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..",
+        "src",
+        "MarkMello.Applicate.Desktop",
+        "Rendering",
+        "ApplicateAirspaceCompositor.cs");
+
     [Fact]
     public void NewMachineStartsParked()
     {
@@ -230,10 +238,17 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     [Fact]
     public void HostRevealIntentsInterfaceExposesTransactionalNativeRevealSurface()
     {
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("AttachStarting"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("AttachCompleted"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("RenderStarting"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("CommitPreparing"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("RendererRevealSettled"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("TransactionRendererSettleProbeReady"));
         Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("RendererFailed"));
         Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("MinimapSettled"));
         Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("CommitCompleted"));
         Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("RendererSettled"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetProperty("RendererSettleFallbackTimeout"));
 
         var method = typeof(IApplicateHostRevealIntents)
             .GetMethod("RevealNativeRendererForCommittedTransaction");
@@ -256,6 +271,17 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
         Assert.Equal(typeof(void), restoreMethod.ReturnType);
         var restoreParameter = Assert.Single(restoreMethod.GetParameters());
         Assert.Equal(typeof(ApplicateMode), restoreParameter.ParameterType);
+
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetMethod("ParkNativeWebViewForReparent"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetMethod("SetNativeWebViewVisibility"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetMethod("PrepareNativeWebViewHiddenPaint"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetMethod("CompleteNativeWebViewHiddenPaint"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetMethod("PrepareModeRendererReveal"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetMethod("StartModeRendererReveal"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetMethod("PrepareDocumentRendererReveal"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetMethod("StartDocumentRendererReveal"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetMethod("RequestRendererSettleProbe"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetMethod("RequestTransactionRendererSettleProbe"));
     }
 
     [Fact]
@@ -315,14 +341,15 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     public void SharedHostInactivePrimeRenderKeepsColdParentVisible()
     {
         var source = File.ReadAllText(HostSourcePath);
+        var compositor = File.ReadAllText(AirspaceCompositorSourcePath);
 
         Assert.Contains(
             "keepColdParentVisibleForInactivePrime: true",
             source,
             StringComparison.Ordinal);
         Assert.Contains(
-            "&& !keepColdParentVisibleForInactivePrime",
-            source,
+            "&& !e.KeepColdParentVisibleForInactivePrime",
+            compositor,
             StringComparison.Ordinal);
     }
 
@@ -559,49 +586,56 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void SharedHostOwnsRevealFadeAfterRendererSettle()
+    public void CompositorOwnsRevealFadeAfterRendererSettle()
     {
         var source = File.ReadAllText(HostSourcePath);
-        var completeReveal = ExtractMethodBody(
-            source,
-            source.IndexOf("private void CompleteReveal()", StringComparison.Ordinal));
+        var compositor = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..", "..", "..", "..", "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Rendering",
+            "ApplicateAirspaceCompositor.cs"));
 
-        Assert.Contains("PrepareTargetForReveal", source, StringComparison.Ordinal);
-        Assert.Contains("RevealCurrentParent", source, StringComparison.Ordinal);
-        Assert.Contains("ApplicateMotion.ModeSwitchDuration", source, StringComparison.Ordinal);
-        Assert.Contains("CompleteNativeWebViewHiddenPaint", completeReveal, StringComparison.Ordinal);
-        Assert.True(
-            completeReveal.IndexOf("RevealCurrentParent", StringComparison.Ordinal)
-            > completeReveal.IndexOf("View.CompleteNativeWebViewHiddenPaint", StringComparison.Ordinal));
+        Assert.DoesNotContain("private void CompleteReveal()", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("BeginRevealAfterSettle", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("_settleFallbackTimer", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("_pendingRevealDuration", source, StringComparison.Ordinal);
+
+        Assert.Contains("HostRevealSession", compositor, StringComparison.Ordinal);
+        Assert.Contains("RevealCurrentParent", compositor, StringComparison.Ordinal);
+        Assert.Contains("CompleteNativeWebViewHiddenPaint", compositor, StringComparison.Ordinal);
+        Assert.Contains("host-revealgate-completed", compositor, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void SharedHostFadesRendererDocumentInsideNativeWebView()
+    public void CompositorOwnsRendererDocumentFadeInsideNativeWebView()
     {
         var source = File.ReadAllText(HostSourcePath);
-        var completeReveal = ExtractMethodBody(
-            source,
-            source.IndexOf("private void CompleteReveal()", StringComparison.Ordinal));
+        var compositor = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..", "..", "..", "..", "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Rendering",
+            "ApplicateAirspaceCompositor.cs"));
 
-        Assert.Contains("PrepareNativeRendererForReveal", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("View.PrepareNativeRendererForReveal", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("View.RevealNativeRenderer", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("host-hwnd-shown", source, StringComparison.Ordinal);
         Assert.Contains("PrepareNativeWebViewForHiddenPaint", source, StringComparison.Ordinal);
         Assert.Contains("CompleteNativeWebViewHiddenPaint", source, StringComparison.Ordinal);
-        Assert.Contains("RevealNativeRenderer", source, StringComparison.Ordinal);
-        Assert.True(
-            source.IndexOf("View.PrepareNativeRendererForReveal", StringComparison.Ordinal)
-            < source.IndexOf("View.PrepareNativeWebViewForHiddenPaint", StringComparison.Ordinal));
-        Assert.True(
-            source.IndexOf("View.PrepareNativeWebViewForHiddenPaint", StringComparison.Ordinal)
-            < source.IndexOf("BeginRevealAfterSettle", StringComparison.Ordinal));
-        Assert.True(
-            completeReveal.IndexOf("View.RevealNativeRenderer", StringComparison.Ordinal)
-            > completeReveal.IndexOf("View.CompleteNativeWebViewHiddenPaint", StringComparison.Ordinal));
+
+        Assert.Contains("PrepareModeRendererReveal", compositor, StringComparison.Ordinal);
+        Assert.Contains("StartModeRendererReveal", compositor, StringComparison.Ordinal);
+        Assert.Contains("host-hwnd-shown", compositor, StringComparison.Ordinal);
     }
 
     [Fact]
     public void TransactionRevealIsShieldedByBridgeCoverOnly()
     {
         var source = File.ReadAllText(HostSourcePath);
+        var compositor = File.ReadAllText(AirspaceCompositorSourcePath);
         var commit = ExtractMethodBody(
             source,
             source.IndexOf("private void Commit()", StringComparison.Ordinal));
@@ -610,32 +644,34 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
             source.IndexOf("public bool RevealNativeWebViewForCommittedTransaction", StringComparison.Ordinal));
         var transactionalCommit = commit[
             commit.IndexOf("if (transactionalCommit)", StringComparison.Ordinal)..
-            commit.IndexOf("else if (armRevealGate)", StringComparison.Ordinal)];
+            commit.IndexOf("_state = HostState.Committed;", StringComparison.Ordinal)];
 
         Assert.DoesNotContain("_pendingTransactionRevealDuration", source, StringComparison.Ordinal);
+        Assert.Contains("HostCommitPreparing?.Invoke", commit, StringComparison.Ordinal);
         Assert.DoesNotContain("View.PrepareNativeRendererForReveal(modeSwitchDuration)", transactionalCommit, StringComparison.Ordinal);
         Assert.DoesNotContain("View.PrepareNativeWebViewForHiddenPaint();", transactionalCommit, StringComparison.Ordinal);
         Assert.Contains("View.CompleteNativeWebViewHiddenPaint();", transactionalReveal, StringComparison.Ordinal);
         Assert.DoesNotContain("View.SetNativeWebViewVisibility(true)", transactionalReveal, StringComparison.Ordinal);
         Assert.DoesNotContain("View.RevealNativeRenderer(TimeSpan.Zero)", transactionalReveal, StringComparison.Ordinal);
         Assert.DoesNotContain("View.RevealNativeRenderer(", transactionalReveal, StringComparison.Ordinal);
+        Assert.Contains("path=bridge-transaction", compositor, StringComparison.Ordinal);
     }
 
     [Fact]
     public void RevealGateRehidesNativeWindowAfterLayoutBeforeOffscreenPrepaint()
     {
-        var source = File.ReadAllText(HostSourcePath);
+        var source = File.ReadAllText(AirspaceCompositorSourcePath);
         var commit = ExtractMethodBody(
             source,
-            source.IndexOf("private void Commit()", StringComparison.Ordinal));
+            source.IndexOf("private void OnCommitPreparing(", StringComparison.Ordinal));
 
-        Assert.Contains("View.SetNativeWebViewVisibility(false);", commit, StringComparison.Ordinal);
+        Assert.Contains("_hostRevealIntents.SetNativeWebViewVisibility(false);", commit, StringComparison.Ordinal);
         Assert.True(
-            commit.IndexOf("_currentParent.UpdateLayout();", StringComparison.Ordinal)
-            < commit.IndexOf("View.SetNativeWebViewVisibility(false);", StringComparison.Ordinal));
+            commit.IndexOf("e.CurrentParent.UpdateLayout();", StringComparison.Ordinal)
+            < commit.IndexOf("_hostRevealIntents.SetNativeWebViewVisibility(false);", StringComparison.Ordinal));
         Assert.True(
-            commit.IndexOf("View.SetNativeWebViewVisibility(false);", StringComparison.Ordinal)
-            < commit.IndexOf("View.PrepareNativeWebViewForHiddenPaint();", StringComparison.Ordinal));
+            commit.IndexOf("_hostRevealIntents.SetNativeWebViewVisibility(false);", StringComparison.Ordinal)
+            < commit.IndexOf("_hostRevealIntents.PrepareNativeWebViewHiddenPaint();", StringComparison.Ordinal));
     }
 
     [Theory]
@@ -683,25 +719,30 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     public void AttachToParksNativeWindowOffscreenBeforeReparent()
     {
         var source = File.ReadAllText(HostSourcePath);
+        var compositor = File.ReadAllText(AirspaceCompositorSourcePath);
         var attachTo = ExtractMethodBody(
             source,
             source.IndexOf("public void AttachTo(Panel target, ApplicateWebMountIntent intent)", StringComparison.Ordinal));
+        var onAttachStarting = ExtractMethodBody(
+            compositor,
+            compositor.IndexOf("private void OnAttachStarting(", StringComparison.Ordinal));
 
-        Assert.Contains("View.ParkNativeWebViewForReparent();", attachTo, StringComparison.Ordinal);
+        Assert.Contains("HostAttachStarting?.Invoke", attachTo, StringComparison.Ordinal);
+        Assert.Contains("_hostRevealIntents.ParkNativeWebViewForReparent();", onAttachStarting, StringComparison.Ordinal);
         Assert.True(
-            attachTo.IndexOf("View.ParkNativeWebViewForReparent();", StringComparison.Ordinal)
+            attachTo.IndexOf("HostAttachStarting?.Invoke", StringComparison.Ordinal)
             < attachTo.IndexOf("using (View.BeginIntentionalReparent())", StringComparison.Ordinal));
     }
 
     [Fact]
     public void AttachToRehidesNativeWindowAfterTargetVisibilityReturns()
     {
-        var source = File.ReadAllText(HostSourcePath);
+        var source = File.ReadAllText(AirspaceCompositorSourcePath);
         var attachTo = ExtractMethodBody(
             source,
-            source.IndexOf("public void AttachTo(Panel target, ApplicateWebMountIntent intent)", StringComparison.Ordinal));
-        var visibilityRestore = attachTo.IndexOf("target.IsVisible = _hasEverCommitted;", StringComparison.Ordinal);
-        var postRestoreHide = attachTo.IndexOf("View.SetNativeWebViewVisibility(false);", visibilityRestore, StringComparison.Ordinal);
+            source.IndexOf("private void OnAttachCompleted(", StringComparison.Ordinal));
+        var visibilityRestore = attachTo.IndexOf("e.Target.IsVisible = e.HasEverCommitted;", StringComparison.Ordinal);
+        var postRestoreHide = attachTo.IndexOf("_hostRevealIntents.SetNativeWebViewVisibility(false);", visibilityRestore, StringComparison.Ordinal);
 
         Assert.True(visibilityRestore >= 0);
         Assert.True(postRestoreHide > visibilityRestore);
@@ -710,10 +751,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     [Fact]
     public void RevealGateFallbackStaysBehindRendererPostChromeSettleBudget()
     {
-        var source = File.ReadAllText(HostSourcePath);
+        var source = File.ReadAllText(AirspaceCompositorSourcePath);
 
-        Assert.Contains("TimeSpan.FromMilliseconds(500)", source, StringComparison.Ordinal);
-        Assert.Contains("post-chrome", source, StringComparison.Ordinal);
+        Assert.Contains("HostRendererSettleFallbackTimeout = TimeSpan.FromMilliseconds(500)", source, StringComparison.Ordinal);
+        Assert.Contains("host-revealgate-completed", source, StringComparison.Ordinal);
     }
 
     private sealed class FakeModeTransactionHost : IApplicateModeTransactionHost
@@ -788,6 +829,12 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
             {
                 RendererSettledRemoveCount++;
             }
+        }
+
+        public event EventHandler<ApplicateTransactionRendererSettleProbeEventArgs>? TransactionRendererSettleProbeReady
+        {
+            add { }
+            remove { }
         }
 
         public void SuppressNativeRendererForModeSwitch(ApplicateMode displayedMode)

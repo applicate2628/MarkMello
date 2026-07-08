@@ -204,7 +204,7 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("ShowStartupSplash", compositor, StringComparison.Ordinal);
         Assert.DoesNotContain("ApplicateSharedWebViewHost.", compositor, StringComparison.Ordinal);
         Assert.Contains("ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait(", hostAdapters, StringComparison.Ordinal);
-        Assert.Contains("ApplicateSharedWebViewHost.RendererSettleFallbackTimeout", hostAdapters, StringComparison.Ordinal);
+        Assert.Contains("HostRendererSettleFallbackTimeout", hostAdapters, StringComparison.Ordinal);
         Assert.Contains("\"startup-window-cover-shown\"", compositor, StringComparison.Ordinal);
         Assert.Contains("\"startup-window-renderer-settle-armed\"", compositor, StringComparison.Ordinal);
         Assert.Contains("\"startup-window-renderer-settle-complete\"", compositor, StringComparison.Ordinal);

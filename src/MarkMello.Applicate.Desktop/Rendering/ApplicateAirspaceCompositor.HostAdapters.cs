@@ -82,7 +82,7 @@ internal sealed partial class ApplicateAirspaceCompositor
     {
         private readonly IApplicateSharedWebViewHost _host = host ?? throw new ArgumentNullException(nameof(host));
 
-        public TimeSpan RendererSettleFallbackTimeout => ApplicateSharedWebViewHost.RendererSettleFallbackTimeout;
+        public TimeSpan RendererSettleFallbackTimeout => HostRendererSettleFallbackTimeout;
 
         public event EventHandler? DocumentRevealReady
         {

@@ -3,7 +3,10 @@ using System.Collections.Generic;
 
 namespace MarkMello.Applicate.Desktop.Rendering;
 
-internal sealed class ApplicateModeTransactionHostRouter : IApplicateModeTransactionHost, IDisposable
+internal sealed class ApplicateModeTransactionHostRouter :
+    IApplicateModeTransactionHost,
+    IApplicateTransactionRendererSettleProbeRequester,
+    IDisposable
 {
     private readonly IApplicateSharedWebViewHost _viewerHost;
     private readonly IApplicateSharedWebViewHost _editPreviewHost;
@@ -30,6 +33,8 @@ internal sealed class ApplicateModeTransactionHostRouter : IApplicateModeTransac
     public event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted;
 
     public event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled;
+
+    public event EventHandler<ApplicateTransactionRendererSettleProbeEventArgs>? TransactionRendererSettleProbeReady;
 
     public bool RevealNativeWebViewForCommittedTransaction(long transactionGeneration)
     {
@@ -63,6 +68,15 @@ internal sealed class ApplicateModeTransactionHostRouter : IApplicateModeTransac
         host.RestoreNativeRendererAfterModeSwitchSuppression(displayedMode);
     }
 
+    public void RequestTransactionRendererSettleProbe(long transactionGeneration, bool skipFrameWait)
+    {
+        if (_hostsByGeneration.TryGetValue(transactionGeneration, out var host)
+            && host is IApplicateTransactionRendererSettleProbeRequester requester)
+        {
+            requester.RequestTransactionRendererSettleProbe(transactionGeneration, skipFrameWait);
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -86,6 +100,7 @@ internal sealed class ApplicateModeTransactionHostRouter : IApplicateModeTransac
         host.MinimapSettled += OnMinimapSettled;
         host.CommitCompleted += OnCommitCompleted;
         host.RendererSettled += OnRendererSettled;
+        host.TransactionRendererSettleProbeReady += OnTransactionRendererSettleProbeReady;
     }
 
     private void Unwire(IApplicateSharedWebViewHost host)
@@ -94,6 +109,7 @@ internal sealed class ApplicateModeTransactionHostRouter : IApplicateModeTransac
         host.MinimapSettled -= OnMinimapSettled;
         host.CommitCompleted -= OnCommitCompleted;
         host.RendererSettled -= OnRendererSettled;
+        host.TransactionRendererSettleProbeReady -= OnTransactionRendererSettleProbeReady;
     }
 
     private void OnRendererFailed(object? sender, ApplicateRendererFailureEvent e)
@@ -114,4 +130,9 @@ internal sealed class ApplicateModeTransactionHostRouter : IApplicateModeTransac
 
     private void OnRendererSettled(object? sender, ApplicateRendererSettledEventArgs e)
         => RendererSettled?.Invoke(this, e);
+
+    private void OnTransactionRendererSettleProbeReady(
+        object? sender,
+        ApplicateTransactionRendererSettleProbeEventArgs e)
+        => TransactionRendererSettleProbeReady?.Invoke(this, e);
 }

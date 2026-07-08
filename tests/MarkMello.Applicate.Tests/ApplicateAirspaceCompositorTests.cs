@@ -708,7 +708,7 @@ public sealed class ApplicateAirspaceCompositorTests
     {
         public int SettleProbeRequestCount { get; private set; }
 
-        public TimeSpan RendererSettleFallbackTimeout => ApplicateSharedWebViewHost.RendererSettleFallbackTimeout;
+        public TimeSpan RendererSettleFallbackTimeout => ApplicateAirspaceCompositor.HostRendererSettleFallbackTimeout;
 
         public event EventHandler? DocumentRevealReady;
 
@@ -866,13 +866,96 @@ public sealed class ApplicateAirspaceCompositorTests
 
         public bool ThrowOnRestore { get; set; }
 
+        public TimeSpan RendererSettleFallbackTimeout => ApplicateAirspaceCompositor.HostRendererSettleFallbackTimeout;
+
+        public event EventHandler<ApplicateHostAttachStartingEventArgs>? AttachStarting
+        {
+            add { }
+            remove { }
+        }
+
+        public event EventHandler<ApplicateHostAttachCompletedEventArgs>? AttachCompleted
+        {
+            add { }
+            remove { }
+        }
+
+        public event EventHandler<ApplicateHostRenderStartingEventArgs>? RenderStarting
+        {
+            add { }
+            remove { }
+        }
+
+        public event EventHandler<ApplicateHostCommitPreparingEventArgs>? CommitPreparing
+        {
+            add { }
+            remove { }
+        }
+
+        public event EventHandler? DocumentRenderVisualReady
+        {
+            add { }
+            remove { }
+        }
+
         public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
 
         public event EventHandler<ApplicateMinimapSettledEventArgs>? MinimapSettled;
 
         public event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted;
 
+        public event EventHandler? RendererRevealSettled
+        {
+            add { }
+            remove { }
+        }
+
         public event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled;
+
+        public event EventHandler<ApplicateTransactionRendererSettleProbeEventArgs>? TransactionRendererSettleProbeReady
+        {
+            add { }
+            remove { }
+        }
+
+        public void ParkNativeWebViewForReparent()
+        {
+        }
+
+        public void SetNativeWebViewVisibility(bool isVisible)
+        {
+        }
+
+        public void PrepareNativeWebViewHiddenPaint()
+        {
+        }
+
+        public void CompleteNativeWebViewHiddenPaint()
+        {
+        }
+
+        public void PrepareModeRendererReveal(TimeSpan duration)
+        {
+        }
+
+        public void StartModeRendererReveal(TimeSpan duration)
+        {
+        }
+
+        public void PrepareDocumentRendererReveal(TimeSpan duration)
+        {
+        }
+
+        public void StartDocumentRendererReveal(TimeSpan duration)
+        {
+        }
+
+        public void RequestRendererSettleProbe()
+        {
+        }
+
+        public void RequestTransactionRendererSettleProbe(long transactionGeneration, bool skipFrameWait)
+            => _events?.Add($"transaction-settle-probe:{transactionGeneration}:skip={skipFrameWait}");
 
         public void SuppressOutgoingNativeRenderer(ApplicateMode displayedMode)
         {
