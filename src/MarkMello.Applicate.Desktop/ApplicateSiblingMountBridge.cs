@@ -25,7 +25,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
     private readonly Func<object?> _getEditorSession;
     private readonly Func<object?> _getDocument;
     private readonly Func<ReadingPreferences> _getReadingPreferences;
-    private readonly IApplicateModeTransactionHost? _transactionHost;
+    private readonly IApplicateHostRevealIntents? _hostRevealIntents;
     private readonly Panel? _modeRevealCoverHost;
     private readonly ApplicateModeRevealCoverWindow? _modeRevealCoverWindow;
     private volatile bool _disposed;
@@ -60,7 +60,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         Func<object?> getDocument,
         Func<ReadingPreferences> getReadingPreferences,
         object viewerContent,
-        IApplicateModeTransactionHost? transactionHost = null,
+        IApplicateHostRevealIntents? hostRevealIntents = null,
         Panel? modeRevealCoverHost = null)
     {
         _vm = vm;
@@ -72,7 +72,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         _getEditorSession = getEditorSession;
         _getDocument = getDocument;
         _getReadingPreferences = getReadingPreferences;
-        _transactionHost = transactionHost;
+        _hostRevealIntents = hostRevealIntents;
         _modeRevealCoverHost = modeRevealCoverHost;
         _viewerSlot.Content = viewerContent;
         if (_modeRevealCoverHost is not null)
@@ -93,12 +93,12 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
 
         _viewerSlot.PropertyChanged += OnSlotPropertyChanged;
         _editSlot.PropertyChanged += OnSlotPropertyChanged;
-        if (_transactionHost is not null)
+        if (_hostRevealIntents is not null)
         {
-            _transactionHost.CommitCompleted += OnTransactionCommitCompleted;
-            _transactionHost.MinimapSettled += OnTransactionMinimapSettled;
-            _transactionHost.RendererSettled += OnTransactionRendererSettled;
-            _transactionHost.RendererFailed += OnTransactionRendererFailed;
+            _hostRevealIntents.CommitCompleted += OnTransactionCommitCompleted;
+            _hostRevealIntents.MinimapSettled += OnTransactionMinimapSettled;
+            _hostRevealIntents.RendererSettled += OnTransactionRendererSettled;
+            _hostRevealIntents.RendererFailed += OnTransactionRendererFailed;
         }
         _vm.PropertyChanged += OnVmPropertyChanged;
         Reconcile();
@@ -342,7 +342,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         bool modeSlotSwitch,
         object? session)
     {
-        if (_transactionHost is null)
+        if (_hostRevealIntents is null)
         {
             return false;
         }
@@ -470,7 +470,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         ApplicateMode outgoingMode,
         ApplicateMode requestedMode)
     {
-        if (_transactionHost is null
+        if (_hostRevealIntents is null
             || generation <= 0
             || outgoingMode == requestedMode
             || _suppressedOutgoingModeTransactionGeneration == generation)
@@ -478,7 +478,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
             return;
         }
 
-        _transactionHost.SuppressNativeRendererForModeSwitch(outgoingMode);
+        _hostRevealIntents.SuppressOutgoingNativeRenderer(outgoingMode);
         _suppressedOutgoingMode = outgoingMode;
         _suppressedOutgoingModeTransactionGeneration = generation;
         ApplicateTrace.DiagMs(
@@ -564,7 +564,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
                 }
             }
 
-            if (_transactionHost is null || outgoingMode is null)
+            if (_hostRevealIntents is null || outgoingMode is null)
             {
                 ApplicateTrace.DiagMs(
                     "pane-seq",
@@ -575,7 +575,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
 
             try
             {
-                _transactionHost.RestoreNativeRendererAfterModeSwitchSuppression(outgoingMode.Value);
+                _hostRevealIntents.RestoreOutgoingNativeRenderer(outgoingMode.Value);
                 restoreSucceeded = true;
                 ApplicateTrace.DiagMs(
                     "pane-seq",
@@ -626,7 +626,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
 
     private void TryApplyLayoutSettledForActiveTransaction()
     {
-        if (_transactionHost is null)
+        if (_hostRevealIntents is null)
         {
             return;
         }
@@ -671,7 +671,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
     private void CommitQueuedModeTransaction()
     {
         Interlocked.Exchange(ref _modeTransactionCommitPending, 0);
-        if (_disposed || _transactionHost is null)
+        if (_disposed || _hostRevealIntents is null)
         {
             return;
         }
@@ -695,7 +695,7 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         }
 
         ApplyCommittedModeSlotStates(mode);
-        if (!_transactionHost.RevealNativeWebViewForCommittedTransaction(generation))
+        if (!_hostRevealIntents.RevealNativeRendererForCommittedTransaction(generation))
         {
             ApplicateTrace.DiagMs(
                 "pane-seq",
@@ -936,12 +936,12 @@ internal sealed class ApplicateSiblingMountBridge : IDisposable
         _disposed = true;
         _viewerSlot.PropertyChanged -= OnSlotPropertyChanged;
         _editSlot.PropertyChanged -= OnSlotPropertyChanged;
-        if (_transactionHost is not null)
+        if (_hostRevealIntents is not null)
         {
-            _transactionHost.CommitCompleted -= OnTransactionCommitCompleted;
-            _transactionHost.MinimapSettled -= OnTransactionMinimapSettled;
-            _transactionHost.RendererSettled -= OnTransactionRendererSettled;
-            _transactionHost.RendererFailed -= OnTransactionRendererFailed;
+            _hostRevealIntents.CommitCompleted -= OnTransactionCommitCompleted;
+            _hostRevealIntents.MinimapSettled -= OnTransactionMinimapSettled;
+            _hostRevealIntents.RendererSettled -= OnTransactionRendererSettled;
+            _hostRevealIntents.RendererFailed -= OnTransactionRendererFailed;
         }
         HideModeRevealCover();
         _modeRevealCoverWindow?.Dispose();

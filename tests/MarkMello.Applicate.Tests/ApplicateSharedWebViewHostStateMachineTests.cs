@@ -228,29 +228,74 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void SharedHostInterfaceExposesTransactionalNativeRevealSurface()
+    public void HostRevealIntentsInterfaceExposesTransactionalNativeRevealSurface()
     {
-        var method = typeof(IApplicateModeTransactionHost)
-            .GetMethod("RevealNativeWebViewForCommittedTransaction");
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("RendererFailed"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("MinimapSettled"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("CommitCompleted"));
+        Assert.NotNull(typeof(IApplicateHostRevealIntents).GetEvent("RendererSettled"));
+
+        var method = typeof(IApplicateHostRevealIntents)
+            .GetMethod("RevealNativeRendererForCommittedTransaction");
 
         Assert.NotNull(method);
         Assert.Equal(typeof(bool), method.ReturnType);
         var parameter = Assert.Single(method.GetParameters());
         Assert.Equal(typeof(long), parameter.ParameterType);
 
-        var suppressMethod = typeof(IApplicateModeTransactionHost)
-            .GetMethod("SuppressNativeRendererForModeSwitch");
+        var suppressMethod = typeof(IApplicateHostRevealIntents)
+            .GetMethod("SuppressOutgoingNativeRenderer");
         Assert.NotNull(suppressMethod);
         Assert.Equal(typeof(void), suppressMethod.ReturnType);
         var suppressParameter = Assert.Single(suppressMethod.GetParameters());
         Assert.Equal(typeof(ApplicateMode), suppressParameter.ParameterType);
 
-        var restoreMethod = typeof(IApplicateModeTransactionHost)
-            .GetMethod("RestoreNativeRendererAfterModeSwitchSuppression");
+        var restoreMethod = typeof(IApplicateHostRevealIntents)
+            .GetMethod("RestoreOutgoingNativeRenderer");
         Assert.NotNull(restoreMethod);
         Assert.Equal(typeof(void), restoreMethod.ReturnType);
         var restoreParameter = Assert.Single(restoreMethod.GetParameters());
         Assert.Equal(typeof(ApplicateMode), restoreParameter.ParameterType);
+    }
+
+    [Fact]
+    public void SharedWebViewHostRevealIntentsDelegatesEventsAndMethodsToTransactionHost()
+    {
+        var host = new FakeModeTransactionHost { RevealResult = true };
+        var intents = new SharedWebViewHostRevealIntents(host);
+
+        EventHandler<ApplicateRendererFailureEvent> rendererFailed = (_, _) => { };
+        EventHandler<ApplicateMinimapSettledEventArgs> minimapSettled = (_, _) => { };
+        EventHandler<ApplicateCommitCompletedEventArgs> commitCompleted = (_, _) => { };
+        EventHandler<ApplicateRendererSettledEventArgs> rendererSettled = (_, _) => { };
+
+        intents.RendererFailed += rendererFailed;
+        intents.MinimapSettled += minimapSettled;
+        intents.CommitCompleted += commitCompleted;
+        intents.RendererSettled += rendererSettled;
+        intents.RendererFailed -= rendererFailed;
+        intents.MinimapSettled -= minimapSettled;
+        intents.CommitCompleted -= commitCompleted;
+        intents.RendererSettled -= rendererSettled;
+
+        Assert.Equal(1, host.RendererFailedAddCount);
+        Assert.Equal(1, host.RendererFailedRemoveCount);
+        Assert.Equal(1, host.MinimapSettledAddCount);
+        Assert.Equal(1, host.MinimapSettledRemoveCount);
+        Assert.Equal(1, host.CommitCompletedAddCount);
+        Assert.Equal(1, host.CommitCompletedRemoveCount);
+        Assert.Equal(1, host.RendererSettledAddCount);
+        Assert.Equal(1, host.RendererSettledRemoveCount);
+
+        intents.SuppressOutgoingNativeRenderer(ApplicateMode.Viewer);
+        intents.RestoreOutgoingNativeRenderer(ApplicateMode.Edit);
+        Assert.True(intents.RevealNativeRendererForCommittedTransaction(42));
+        host.RevealResult = false;
+        Assert.False(intents.RevealNativeRendererForCommittedTransaction(43));
+
+        Assert.Equal(new[] { ApplicateMode.Viewer }, host.SuppressedModes);
+        Assert.Equal(new[] { ApplicateMode.Edit }, host.RestoredModes);
+        Assert.Equal(new long[] { 42, 43 }, host.RevealedGenerations);
     }
 
     [Fact]
@@ -669,6 +714,93 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
 
         Assert.Contains("TimeSpan.FromMilliseconds(500)", source, StringComparison.Ordinal);
         Assert.Contains("post-chrome", source, StringComparison.Ordinal);
+    }
+
+    private sealed class FakeModeTransactionHost : IApplicateModeTransactionHost
+    {
+        public List<ApplicateMode> SuppressedModes { get; } = [];
+
+        public List<ApplicateMode> RestoredModes { get; } = [];
+
+        public List<long> RevealedGenerations { get; } = [];
+
+        public bool RevealResult { get; set; }
+
+        public int RendererFailedAddCount { get; private set; }
+
+        public int RendererFailedRemoveCount { get; private set; }
+
+        public int MinimapSettledAddCount { get; private set; }
+
+        public int MinimapSettledRemoveCount { get; private set; }
+
+        public int CommitCompletedAddCount { get; private set; }
+
+        public int CommitCompletedRemoveCount { get; private set; }
+
+        public int RendererSettledAddCount { get; private set; }
+
+        public int RendererSettledRemoveCount { get; private set; }
+
+        public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed
+        {
+            add
+            {
+                RendererFailedAddCount++;
+            }
+            remove
+            {
+                RendererFailedRemoveCount++;
+            }
+        }
+
+        public event EventHandler<ApplicateMinimapSettledEventArgs>? MinimapSettled
+        {
+            add
+            {
+                MinimapSettledAddCount++;
+            }
+            remove
+            {
+                MinimapSettledRemoveCount++;
+            }
+        }
+
+        public event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted
+        {
+            add
+            {
+                CommitCompletedAddCount++;
+            }
+            remove
+            {
+                CommitCompletedRemoveCount++;
+            }
+        }
+
+        public event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled
+        {
+            add
+            {
+                RendererSettledAddCount++;
+            }
+            remove
+            {
+                RendererSettledRemoveCount++;
+            }
+        }
+
+        public void SuppressNativeRendererForModeSwitch(ApplicateMode displayedMode)
+            => SuppressedModes.Add(displayedMode);
+
+        public void RestoreNativeRendererAfterModeSwitchSuppression(ApplicateMode displayedMode)
+            => RestoredModes.Add(displayedMode);
+
+        public bool RevealNativeWebViewForCommittedTransaction(long transactionGeneration)
+        {
+            RevealedGenerations.Add(transactionGeneration);
+            return RevealResult;
+        }
     }
 
     private static string ExtractMethodBody(string source, int methodStart)

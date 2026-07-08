@@ -1286,7 +1286,9 @@ public sealed class ApplicateMainWindow : MainWindow
             () => viewModel.Document,
             () => viewModel.ReadingPreferences,
             viewerContent: viewModel,
-            transactionHost: _modeTransactionHostRouter,
+            hostRevealIntents: _modeTransactionHostRouter is null
+                ? null
+                : new SharedWebViewHostRevealIntents(_modeTransactionHostRouter),
             modeRevealCoverHost: siblingPanel);
 
         // Atomic reveal for DOCUMENT switches (tab change, startup, reload):

@@ -46,13 +46,13 @@ public sealed class ApplicateSiblingMountTests
         ContentControl viewer,
         Panel edit,
         Control editContent,
-        FakeTransactionHost? transactionHost = null) =>
+        IApplicateHostRevealIntents? hostRevealIntents = null) =>
         new(vm, viewer, edit, editContent,
             () => vm.IsViewer, () => vm.IsEditMode,
             () => vm.EditorSession, () => vm.Document,
             () => vm.ReadingPreferences,
             viewerContent: vm,
-            transactionHost: transactionHost);
+            hostRevealIntents: hostRevealIntents);
 
     [Fact]
     public void OpeningDocumentInReaderModeShowsViewerSlot()
@@ -264,7 +264,7 @@ public sealed class ApplicateSiblingMountTests
             source,
             source.IndexOf("private void CommitQueuedModeTransaction()", StringComparison.Ordinal));
         var rejectedBranch = commit[
-            commit.IndexOf("if (!_transactionHost.RevealNativeWebViewForCommittedTransaction(generation))", StringComparison.Ordinal)..];
+            commit.IndexOf("if (!_hostRevealIntents.RevealNativeRendererForCommittedTransaction(generation))", StringComparison.Ordinal)..];
 
         var rejectedLog = rejectedBranch.IndexOf("bridge-transaction-native-reveal-rejected", StringComparison.Ordinal);
         var rollback = rejectedBranch.IndexOf(
@@ -345,18 +345,26 @@ public sealed class ApplicateSiblingMountTests
             StringComparison.Ordinal);
         var applySlots = reconcile.IndexOf("ApplyTransactionalSlotStates();", StringComparison.Ordinal);
         var restore = reconcile.IndexOf(
-            "RestoreNativeRendererAfterModeSwitchSuppression(",
+            "RestoreOutgoingNativeRenderer(",
             StringComparison.Ordinal);
 
         Assert.True(suppress >= 0);
         Assert.True(applySlots > suppress);
         Assert.Equal(-1, restore);
         Assert.Contains(
-            "_transactionHost.SuppressNativeRendererForModeSwitch(outgoingMode);",
+            "_hostRevealIntents.SuppressOutgoingNativeRenderer(outgoingMode);",
             source,
             StringComparison.Ordinal);
         Assert.Contains(
-            "_transactionHost.RestoreNativeRendererAfterModeSwitchSuppression(outgoingMode.Value);",
+            "_hostRevealIntents.RestoreOutgoingNativeRenderer(outgoingMode.Value);",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "_transactionHost.SuppressNativeRendererForModeSwitch",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "_transactionHost.RestoreNativeRendererAfterModeSwitchSuppression",
             source,
             StringComparison.Ordinal);
     }
@@ -370,7 +378,7 @@ public sealed class ApplicateSiblingMountTests
             source.IndexOf("private void RollbackActiveModeTransaction(", StringComparison.Ordinal));
 
         var restore = rollback.IndexOf(
-            "RestoreNativeRendererAfterModeSwitchSuppression(outgoingMode.Value)",
+            "RestoreOutgoingNativeRenderer(outgoingMode.Value)",
             StringComparison.Ordinal);
         var hideCover = rollback.LastIndexOf("HideModeRevealCover();", StringComparison.Ordinal);
 
@@ -392,6 +400,108 @@ public sealed class ApplicateSiblingMountTests
             source,
             source.IndexOf("public void Dispose()", StringComparison.Ordinal)),
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BridgeConsumesHostRevealIntentSeamWithoutTransactionHostInternals()
+    {
+        var source = File.ReadAllText(BridgeSourcePath);
+
+        Assert.Contains("IApplicateHostRevealIntents? hostRevealIntents", source, StringComparison.Ordinal);
+        Assert.Contains("_hostRevealIntents.CommitCompleted += OnTransactionCommitCompleted;", source, StringComparison.Ordinal);
+        Assert.Contains("_hostRevealIntents.MinimapSettled += OnTransactionMinimapSettled;", source, StringComparison.Ordinal);
+        Assert.Contains("_hostRevealIntents.RendererSettled += OnTransactionRendererSettled;", source, StringComparison.Ordinal);
+        Assert.Contains("_hostRevealIntents.RendererFailed += OnTransactionRendererFailed;", source, StringComparison.Ordinal);
+        Assert.Contains("_hostRevealIntents.RevealNativeRendererForCommittedTransaction(generation)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("IApplicateModeTransactionHost", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("IApplicateSharedWebViewHost", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateSharedWebViewHost", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateModeTransactionHostRouter", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateWebMarkdownDocumentView", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("_transactionHost.RevealNativeWebViewForCommittedTransaction", source, StringComparison.Ordinal);
+    }
+
+    private sealed class FakeHostRevealIntents(
+        Func<(double ViewerOpacity, double EditOpacity)> slotSnapshot) : IApplicateHostRevealIntents
+    {
+        public readonly record struct RevealSnapshot(
+            long Generation,
+            double ViewerOpacity,
+            double EditOpacity);
+
+        public List<RevealSnapshot> RevealedGenerations { get; } = [];
+
+        public List<ApplicateMode> SuppressedModes { get; } = [];
+
+        public List<ApplicateMode> RestoredModes { get; } = [];
+
+        public bool RejectReveals { get; set; }
+
+        public bool ThrowOnRestore { get; set; }
+
+        public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
+
+        public event EventHandler<ApplicateMinimapSettledEventArgs>? MinimapSettled;
+
+        public event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted;
+
+        public event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled;
+
+        public void SuppressOutgoingNativeRenderer(ApplicateMode displayedMode)
+            => SuppressedModes.Add(displayedMode);
+
+        public void RestoreOutgoingNativeRenderer(ApplicateMode displayedMode)
+        {
+            RestoredModes.Add(displayedMode);
+            if (ThrowOnRestore)
+            {
+                throw new InvalidOperationException("restore failed");
+            }
+        }
+
+        public bool RevealNativeRendererForCommittedTransaction(long transactionGeneration)
+        {
+            var snapshot = slotSnapshot();
+            RevealedGenerations.Add(
+                new RevealSnapshot(
+                    transactionGeneration,
+                    snapshot.ViewerOpacity,
+                    snapshot.EditOpacity));
+            return !RejectReveals;
+        }
+
+        public void RaiseCommitCompleted(long generation, ApplicateMode mode)
+            => CommitCompleted?.Invoke(
+                this,
+                new ApplicateCommitCompletedEventArgs(
+                    mode,
+                    new Rect(0, 0, 800, 600),
+                    generation));
+
+        public void RaiseMinimapSettledNotApplicable(long generation)
+            => MinimapSettled?.Invoke(
+                this,
+                ApplicateMinimapSettledEventArgs.NotApplicable(generation));
+
+        public void RaiseMinimapSettled(long generation, bool visible = true, double reservedWidth = 168)
+            => MinimapSettled?.Invoke(
+                this,
+                new ApplicateMinimapSettledEventArgs(
+                    generation,
+                    new ApplicateWebMinimapStateEventArgs(visible, reservedWidth)));
+
+        public void RaiseRendererSettled(long generation)
+            => RendererSettled?.Invoke(
+                this,
+                new ApplicateRendererSettledEventArgs(generation));
+
+        public void RaiseRendererFailed()
+            => RendererFailed?.Invoke(
+                this,
+                new ApplicateRendererFailureEvent(
+                    ApplicateRendererFailureKind.DocumentRenderFailed,
+                    DocumentPath: null,
+                    DateTime.UtcNow));
     }
 
     private sealed class FakeTransactionHost(
@@ -967,14 +1077,14 @@ public sealed class ApplicateSiblingMountTests
             editSlot.Children.Add(editContent);
             ArrangeForLayout(viewerSlot, editSlot);
 
-            var host = new FakeTransactionHost(
+            var host = new FakeHostRevealIntents(
                 () => (viewerSlot.Opacity, editSlot.Opacity));
             using var bridge = MakeBridge(
                 vm,
                 viewerSlot,
                 editSlot,
                 editContent,
-                transactionHost: host);
+                hostRevealIntents: host);
 
             vm.EditorSession = sessionRef;
             vm.IsEditMode = true;
@@ -1045,14 +1155,14 @@ public sealed class ApplicateSiblingMountTests
             editSlot.Children.Add(editContent);
             ArrangeForLayout(viewerSlot, editSlot);
 
-            var host = new FakeTransactionHost(
+            var host = new FakeHostRevealIntents(
                 () => (viewerSlot.Opacity, editSlot.Opacity));
             using var bridge = MakeBridge(
                 vm,
                 viewerSlot,
                 editSlot,
                 editContent,
-                transactionHost: host);
+                hostRevealIntents: host);
 
             vm.EditorSession = sessionRef;
             vm.IsEditMode = true;
@@ -1104,14 +1214,14 @@ public sealed class ApplicateSiblingMountTests
             editSlot.Children.Add(editContent);
             ArrangeForLayout(viewerSlot, editSlot);
 
-            var host = new FakeTransactionHost(
+            var host = new FakeHostRevealIntents(
                 () => (viewerSlot.Opacity, editSlot.Opacity));
             using var bridge = MakeBridge(
                 vm,
                 viewerSlot,
                 editSlot,
                 editContent,
-                transactionHost: host);
+                hostRevealIntents: host);
 
             vm.EditorSession = new object();
             vm.IsEditMode = true;
@@ -1147,14 +1257,14 @@ public sealed class ApplicateSiblingMountTests
             editSlot.Children.Add(editContent);
             ArrangeForLayout(viewerSlot, editSlot);
 
-            var host = new FakeTransactionHost(
+            var host = new FakeHostRevealIntents(
                 () => (viewerSlot.Opacity, editSlot.Opacity));
             using var bridge = MakeBridge(
                 vm,
                 viewerSlot,
                 editSlot,
                 editContent,
-                transactionHost: host);
+                hostRevealIntents: host);
 
             vm.EditorSession = sessionRef;
             vm.IsEditMode = true;
@@ -1198,7 +1308,7 @@ public sealed class ApplicateSiblingMountTests
             editSlot.Children.Add(editContent);
             ArrangeForLayout(viewerSlot, editSlot);
 
-            var host = new FakeTransactionHost(
+            var host = new FakeHostRevealIntents(
                 () => (viewerSlot.Opacity, editSlot.Opacity))
             {
                 RejectReveals = true
@@ -1208,7 +1318,7 @@ public sealed class ApplicateSiblingMountTests
                 viewerSlot,
                 editSlot,
                 editContent,
-                transactionHost: host);
+                hostRevealIntents: host);
 
             vm.EditorSession = sessionRef;
             vm.IsEditMode = true;
@@ -1251,7 +1361,7 @@ public sealed class ApplicateSiblingMountTests
             editSlot.Children.Add(editContent);
             ArrangeForLayout(viewerSlot, editSlot);
 
-            var host = new FakeTransactionHost(
+            var host = new FakeHostRevealIntents(
                 () => (viewerSlot.Opacity, editSlot.Opacity))
             {
                 ThrowOnRestore = true
@@ -1261,7 +1371,7 @@ public sealed class ApplicateSiblingMountTests
                 viewerSlot,
                 editSlot,
                 editContent,
-                transactionHost: host);
+                hostRevealIntents: host);
 
             vm.EditorSession = new object();
             vm.IsEditMode = true;
