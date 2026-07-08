@@ -166,7 +166,11 @@ public sealed class ApplicateTocPanel : UserControl
     }
 
     private void OnThemeVariantChanged(object? sender, EventArgs e)
-        => Dispatcher.UIThread.Post(ApplyThemeBrushes, DispatcherPriority.Background);
+        // Bare Post (foreground) matches the tab strip's ApplyThemeColours schedule
+        // (ApplicateTabsView) so the TOC re-tints together with the rest of the shell
+        // chrome. The old DispatcherPriority.Background demoted this below the chrome
+        // re-tint, so the TOC visibly lagged the theme switch.
+        => Dispatcher.UIThread.Post(ApplyThemeBrushes);
 
     private void ApplyThemeBrushes()
     {
