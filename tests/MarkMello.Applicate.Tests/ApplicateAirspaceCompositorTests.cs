@@ -1,9 +1,12 @@
 using System.ComponentModel;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Styling;
 using Avalonia.Threading;
 using MarkMello.Applicate.Desktop.Rendering;
+using MarkMello.Applicate.Desktop.Views;
 using MarkMello.Domain;
+using MarkMello.Presentation.Services;
 using MarkMello.Presentation.ViewModels;
 using Xunit;
 
@@ -304,6 +307,144 @@ public sealed class ApplicateAirspaceCompositorTests
         Assert.Equal(1.0, Assert.Single(startupShell.OpacityAssignments));
     }
 
+    [Fact]
+    public void ThemeSessionWaitsForMatchingRendererPaintAck()
+    {
+        var source = Source("theme.md");
+        var state = new FakeDocumentRevealState { Document = source };
+        var signals = new FakeThemeSignals { HasLoadedDocument = true };
+        var covers = new FakeCoverFactory();
+        var paintGate = new FakePaintGate();
+        var scheduler = new FakeAirspaceScheduler();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            paintGate,
+            scheduler);
+        compositor.RegisterThemeSession(signals, isActiveSurface: () => true);
+
+        state.RaiseThemeTransitionStarting(ThemeMode.Dark);
+
+        var cover = Assert.Single(covers.Created);
+        Assert.Equal(1, cover.ShowCount);
+        Assert.Same(ThemeVariant.Dark, cover.LastShowThemeVariant);
+        Assert.Same(source, signals.LastLoadedSource);
+
+        signals.RaiseThemeChangeSent("dark", requestId: 41);
+        signals.RaiseThemeApplied("light", requestId: 41);
+        signals.RaiseThemeApplied("dark", requestId: 42);
+        paintGate.Flush();
+
+        Assert.Equal(0, cover.HideAnimatedCount);
+        Assert.Equal(0, cover.HideImmediateCount);
+
+        signals.RaiseThemeApplied("dark", requestId: 41);
+
+        Assert.Equal(1, paintGate.PendingCount);
+
+        paintGate.Flush();
+
+        Assert.Equal(1, cover.HideAnimatedCount);
+        Assert.Equal(0, cover.HideImmediateCount);
+    }
+
+    [Fact]
+    public void ThemeSessionFallbackFailureAndInactiveSurfaceReleaseWithoutPaintGate()
+    {
+        var fallbackState = new FakeDocumentRevealState { Document = Source("fallback.md") };
+        var fallbackSignals = new FakeThemeSignals { HasLoadedDocument = true };
+        var fallbackCovers = new FakeCoverFactory();
+        var fallbackPaintGate = new FakePaintGate();
+        var fallbackScheduler = new FakeAirspaceScheduler();
+        using var fallbackCompositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            fallbackState,
+            fallbackCovers.Create,
+            fallbackPaintGate,
+            fallbackScheduler);
+        fallbackCompositor.RegisterThemeSession(fallbackSignals, isActiveSurface: () => true);
+        fallbackState.RaiseThemeTransitionStarting(ThemeMode.Dark);
+
+        fallbackScheduler.FireTimer(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(1, Assert.Single(fallbackCovers.Created).HideImmediateCount);
+        Assert.Equal(0, fallbackPaintGate.PendingCount);
+
+        var failureState = new FakeDocumentRevealState { Document = Source("failure.md") };
+        var failureSignals = new FakeThemeSignals { HasLoadedDocument = true };
+        var failureCovers = new FakeCoverFactory();
+        using var failureCompositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            failureState,
+            failureCovers.Create,
+            new FakePaintGate(),
+            new FakeAirspaceScheduler());
+        failureCompositor.RegisterThemeSession(failureSignals, isActiveSurface: () => true);
+        failureState.RaiseThemeTransitionStarting(ThemeMode.Dark);
+
+        failureSignals.RaiseRendererFailed();
+
+        Assert.Equal(1, Assert.Single(failureCovers.Created).HideImmediateCount);
+
+        var active = true;
+        var inactiveState = new FakeDocumentRevealState { Document = Source("inactive.md") };
+        var inactiveSignals = new FakeThemeSignals { HasLoadedDocument = true };
+        var inactiveCovers = new FakeCoverFactory();
+        using var inactiveCompositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            inactiveState,
+            inactiveCovers.Create,
+            new FakePaintGate(),
+            new FakeAirspaceScheduler());
+        inactiveCompositor.RegisterThemeSession(inactiveSignals, isActiveSurface: () => active);
+        inactiveState.RaiseThemeTransitionStarting(ThemeMode.Dark);
+
+        active = false;
+        inactiveState.RaisePropertyChanged(nameof(MainWindowViewModel.IsEditMode));
+
+        Assert.Equal(1, Assert.Single(inactiveCovers.Created).HideImmediateCount);
+    }
+
+    [Fact]
+    public void ThemeSessionRetargetsCoveredSessionAndIgnoresPriorAck()
+    {
+        var state = new FakeDocumentRevealState { Document = Source("retarget.md") };
+        var signals = new FakeThemeSignals { HasLoadedDocument = true };
+        var covers = new FakeCoverFactory();
+        var paintGate = new FakePaintGate();
+        var scheduler = new FakeAirspaceScheduler();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            paintGate,
+            scheduler);
+        compositor.RegisterThemeSession(signals, isActiveSurface: () => true);
+
+        state.RaiseThemeTransitionStarting(ThemeMode.Dark);
+        signals.RaiseThemeChangeSent("dark", requestId: 7);
+        state.RaiseThemeTransitionStarting(ThemeMode.ClassicWhite);
+
+        var cover = Assert.Single(covers.Created);
+        Assert.Equal(1, cover.ShowCount);
+        Assert.Equal(1, cover.UpdateBrushCount);
+        Assert.Same(AvaloniaThemeService.ClassicWhiteThemeVariant, cover.LastUpdateThemeVariant);
+        Assert.Equal(1, scheduler.ActiveTimerCount(TimeSpan.FromSeconds(2)));
+
+        signals.RaiseThemeApplied("dark", requestId: 7);
+        paintGate.Flush();
+
+        Assert.Equal(0, cover.HideAnimatedCount);
+        Assert.Equal(0, cover.HideImmediateCount);
+
+        signals.RaiseThemeChangeSent("classic-white", requestId: 8);
+        signals.RaiseThemeApplied("classic-white", requestId: 8);
+        paintGate.Flush();
+
+        Assert.Equal(1, cover.HideAnimatedCount);
+    }
+
     private static MarkdownSource Source(string path)
         => Source(path, $"# {path}");
 
@@ -334,6 +475,8 @@ public sealed class ApplicateAirspaceCompositorTests
 
         public event EventHandler? SuppressNextDocumentReveal;
 
+        public event EventHandler<ThemeTransitionStartingEventArgs>? ThemeTransitionStarting;
+
         public void SetDocument(MarkdownSource? document)
         {
             _document = document;
@@ -346,8 +489,47 @@ public sealed class ApplicateAirspaceCompositorTests
         public void RaiseSuppressNextDocumentReveal()
             => SuppressNextDocumentReveal?.Invoke(this, EventArgs.Empty);
 
+        public void RaiseThemeTransitionStarting(ThemeMode theme)
+            => ThemeTransitionStarting?.Invoke(this, new ThemeTransitionStartingEventArgs(theme));
+
+        public void RaisePropertyChanged(string propertyName)
+            => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+
         public void ClearDocumentHeadings()
             => ClearHeadingsCount++;
+    }
+
+    private sealed class FakeThemeSignals : IApplicateThemeRevealSignals
+    {
+        public bool HasLoadedDocument { get; set; }
+
+        public MarkdownSource? LastLoadedSource { get; private set; }
+
+        public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
+
+        public event EventHandler<ApplicateWebThemeChangeSentEventArgs>? ThemeChangeSent;
+
+        public event EventHandler<ApplicateWebThemeAppliedEventArgs>? ThemeApplied;
+
+        public bool HasLoadedDocumentForSource(MarkdownSource? source)
+        {
+            LastLoadedSource = source;
+            return HasLoadedDocument;
+        }
+
+        public void RaiseRendererFailed()
+            => RendererFailed?.Invoke(
+                this,
+                new ApplicateRendererFailureEvent(
+                    ApplicateRendererFailureKind.DocumentRenderFailed,
+                    "document.md",
+                    DateTime.UtcNow));
+
+        public void RaiseThemeChangeSent(string theme, long requestId)
+            => ThemeChangeSent?.Invoke(this, new ApplicateWebThemeChangeSentEventArgs(theme, requestId));
+
+        public void RaiseThemeApplied(string theme, long requestId)
+            => ThemeApplied?.Invoke(this, new ApplicateWebThemeAppliedEventArgs(theme, requestId));
     }
 
     private sealed class FakeStartupShell : IApplicateStartupRevealShell
@@ -459,6 +641,12 @@ public sealed class ApplicateAirspaceCompositorTests
 
         public string? StartupSplashDocumentName { get; private set; }
 
+        public ThemeVariant? LastShowThemeVariant { get; private set; }
+
+        public int UpdateBrushCount { get; private set; }
+
+        public ThemeVariant? LastUpdateThemeVariant { get; private set; }
+
         public int HideImmediateCount { get; private set; }
 
         public int HideAnimatedCount { get; private set; }
@@ -471,10 +659,24 @@ public sealed class ApplicateAirspaceCompositorTests
             return true;
         }
 
+        public bool Show(Control host, ThemeVariant? themeVariant)
+        {
+            ShowCount++;
+            LastShowThemeVariant = themeVariant;
+            return true;
+        }
+
         public bool ShowStartupSplash(Control host, string? documentName)
         {
             StartupSplashShowCount++;
             StartupSplashDocumentName = documentName;
+            return true;
+        }
+
+        public bool UpdateBrush(Control host, ThemeVariant? themeVariant)
+        {
+            UpdateBrushCount++;
+            LastUpdateThemeVariant = themeVariant;
             return true;
         }
 
@@ -552,6 +754,9 @@ public sealed class ApplicateAirspaceCompositorTests
                 candidate => candidate.Interval == interval && candidate.IsStarted);
             timer.Fire();
         }
+
+        public int ActiveTimerCount(TimeSpan interval)
+            => _timers.Count(candidate => candidate.Interval == interval && candidate.IsStarted);
     }
 
     private sealed class FakeAirspaceTimer(TimeSpan interval, EventHandler tick) : IApplicateAirspaceTimer

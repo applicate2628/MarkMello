@@ -247,6 +247,9 @@ public sealed class ApplicateMainWindowBridgeTests
         var codeBehind = ReadMainWindowCodeBehind();
         var installSiblingViews = ExtractMethodBody(codeBehind, "private void InstallSiblingMountedViews(");
         var disposeHandler = ExtractMethodBody(codeBehind, "private void OnApplicateMainWindowClosed(object? sender, EventArgs e)");
+        var removedReaderField = "_viewerThemeSwitchReveal" + "Coordinator";
+        var removedEditField = "_editThemeSwitchReveal" + "Coordinator";
+        var removedType = "ApplicateThemeSwitchReveal" + "Coordinator";
 
         Assert.Contains("bool skipInitialViewerDocumentSwitchCover = false", codeBehind, StringComparison.Ordinal);
         Assert.Contains("_airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel);", installSiblingViews, StringComparison.Ordinal);
@@ -261,12 +264,15 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("() => viewModel.IsViewer && viewModel.IsEditMode", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("clearHeadingsOnRendererFailure: false", installSiblingViews, StringComparison.Ordinal);
 
-        Assert.Contains("_viewerThemeSwitchRevealCoordinator = new ApplicateThemeSwitchRevealCoordinator(", installSiblingViews, StringComparison.Ordinal);
-        Assert.Contains("_editThemeSwitchRevealCoordinator = new ApplicateThemeSwitchRevealCoordinator(", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("_airspaceCompositor.RegisterThemeSession(", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("viewerHostForMode,", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("editHost,", installSiblingViews, StringComparison.Ordinal);
+        Assert.DoesNotContain(removedReaderField, codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain(removedEditField, codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain("new " + removedType + "(", codeBehind, StringComparison.Ordinal);
 
         Assert.Contains("_airspaceCompositor?.Dispose();", disposeHandler, StringComparison.Ordinal);
-        Assert.Contains("_viewerThemeSwitchRevealCoordinator?.Dispose();", disposeHandler, StringComparison.Ordinal);
-        Assert.Contains("_editThemeSwitchRevealCoordinator?.Dispose();", disposeHandler, StringComparison.Ordinal);
+        Assert.DoesNotContain("ThemeSwitchReveal" + "Coordinator?.Dispose();", disposeHandler, StringComparison.Ordinal);
     }
 
     [Fact]

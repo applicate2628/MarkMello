@@ -3,18 +3,20 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Styling;
 using Avalonia.Threading;
 using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Views;
 using MarkMello.Domain;
+using MarkMello.Presentation.Services;
 using MarkMello.Presentation.ViewModels;
 
 namespace MarkMello.Applicate.Desktop.Rendering;
 
 /// <summary>
 /// Single airspace-transition policy owner for Applicate's WebView-backed
-/// surfaces. Stage A owns DOCUMENT and STARTUP reveal sessions; theme and mode
-/// sessions remain on their existing owners until their cutover slices.
+/// surfaces. Stage A owns DOCUMENT, STARTUP, and THEME reveal sessions; mode
+/// sessions remain on their existing owner until their cutover slice.
 /// </summary>
 internal sealed class ApplicateAirspaceCompositor : IDisposable
 {
@@ -25,6 +27,7 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
     private readonly IApplicateAirspaceScheduler _scheduler;
     private readonly List<IDisposable> _startupSessions = [];
     private readonly List<DocumentRevealSession> _documentSessions = [];
+    private readonly List<IDisposable> _themeSessions = [];
     private bool _disposed;
 
     public ApplicateAirspaceCompositor(Control coverHost, MainWindowViewModel viewModel)
@@ -141,6 +144,37 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         return session;
     }
 
+    public IDisposable RegisterThemeSession(
+        IApplicateSharedWebViewHost host,
+        Func<bool> isActiveSurface)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+
+        return RegisterThemeSession(
+            new SharedWebViewThemeRevealSignals(host),
+            isActiveSurface);
+    }
+
+    internal IDisposable RegisterThemeSession(
+        IApplicateThemeRevealSignals signals,
+        Func<bool> isActiveSurface)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(signals);
+        ArgumentNullException.ThrowIfNull(isActiveSurface);
+
+        var session = new ThemeRevealSession(
+            _coverHost,
+            signals,
+            _documentState,
+            _coverFactory(),
+            _paintGate,
+            _scheduler,
+            isActiveSurface);
+        _themeSessions.Add(session);
+        return session;
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -160,6 +194,12 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
             session.Dispose();
         }
         _documentSessions.Clear();
+
+        foreach (var session in _themeSessions)
+        {
+            session.Dispose();
+        }
+        _themeSessions.Clear();
     }
 
     private sealed class StartupRevealSession : IDisposable
@@ -869,6 +909,287 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         }
     }
 
+    private sealed class ThemeRevealSession : IDisposable
+    {
+        private static readonly TimeSpan FallbackTimeout = TimeSpan.FromSeconds(2);
+
+        private readonly Control _coverHost;
+        private readonly IApplicateThemeRevealSignals _signals;
+        private readonly IApplicateDocumentRevealState _documentState;
+        private readonly IApplicateAirspaceCoverPresenter _cover;
+        private readonly IApplicateAirspacePaintGate _paintGate;
+        private readonly IApplicateAirspaceScheduler _scheduler;
+        private readonly Func<bool> _isActiveSurface;
+
+        private string? _targetTheme;
+        private ThemeVariant? _targetThemeVariant;
+        private long _targetRequestId;
+        private long _coverGeneration;
+        private bool _covered;
+        private bool _pendingShowOnBounds;
+        private IApplicateAirspaceTimer? _fallbackTimer;
+        private bool _disposed;
+
+        public ThemeRevealSession(
+            Control coverHost,
+            IApplicateThemeRevealSignals signals,
+            IApplicateDocumentRevealState documentState,
+            IApplicateAirspaceCoverPresenter cover,
+            IApplicateAirspacePaintGate paintGate,
+            IApplicateAirspaceScheduler scheduler,
+            Func<bool> isActiveSurface)
+        {
+            _coverHost = coverHost;
+            _signals = signals;
+            _documentState = documentState;
+            _cover = cover;
+            _paintGate = paintGate;
+            _scheduler = scheduler;
+            _isActiveSurface = isActiveSurface;
+
+            _documentState.PropertyChanged += OnDocumentStatePropertyChanged;
+            _documentState.ThemeTransitionStarting += OnThemeTransitionStarting;
+            _signals.RendererFailed += OnRendererFailed;
+            _signals.ThemeChangeSent += OnThemeChangeSent;
+            _signals.ThemeApplied += OnThemeApplied;
+        }
+
+        private void OnThemeTransitionStarting(object? sender, ThemeTransitionStartingEventArgs e)
+        {
+            if (_disposed
+                || _documentState.Document is null
+                || !_isActiveSurface()
+                || !_signals.HasLoadedDocumentForSource(_documentState.Document))
+            {
+                return;
+            }
+
+            BeginCoverSession(ToRendererTheme(e.TargetEffectiveTheme), ToThemeVariant(e.TargetEffectiveTheme));
+            ShowCover();
+        }
+
+        private void OnDocumentStatePropertyChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            if (!_covered && !_pendingShowOnBounds)
+            {
+                return;
+            }
+
+            if (!_isActiveSurface())
+            {
+                HideCover();
+            }
+        }
+
+        private void OnThemeChangeSent(object? sender, ApplicateWebThemeChangeSentEventArgs e)
+        {
+            if ((_covered || _pendingShowOnBounds)
+                && string.Equals(e.Theme, _targetTheme, StringComparison.Ordinal))
+            {
+                _targetRequestId = e.RequestId;
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "theme-cover-awaiting-renderer",
+                    $"theme={e.Theme} requestId={e.RequestId}");
+            }
+        }
+
+        private void OnThemeApplied(object? sender, ApplicateWebThemeAppliedEventArgs e)
+        {
+            if (!_covered && !_pendingShowOnBounds)
+            {
+                return;
+            }
+
+            if (e.RequestId != _targetRequestId
+                || !string.Equals(e.Theme, _targetTheme, StringComparison.Ordinal))
+            {
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "theme-cover-stale-ack",
+                    $"theme={e.Theme} requestId={e.RequestId} targetTheme={_targetTheme ?? "(null)"} targetRequestId={_targetRequestId}");
+                return;
+            }
+
+            HideCoverAfterPaint();
+        }
+
+        private void OnRendererFailed(object? sender, ApplicateRendererFailureEvent e)
+            => HideCover();
+
+        private void BeginCoverSession(string targetTheme, ThemeVariant targetThemeVariant)
+        {
+            _coverGeneration++;
+            _targetTheme = targetTheme;
+            _targetThemeVariant = targetThemeVariant;
+            _targetRequestId = 0;
+        }
+
+        private void ShowCover()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            if (_covered && _cover.UpdateBrush(_coverHost, _targetThemeVariant))
+            {
+                RestartFallback();
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "theme-cover-retargeted",
+                    $"theme={_targetTheme ?? "(null)"}");
+                return;
+            }
+
+            if (_cover.Show(_coverHost, _targetThemeVariant))
+            {
+                _covered = true;
+                _pendingShowOnBounds = false;
+                RestartFallback();
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "theme-cover-shown",
+                    $"theme={_targetTheme ?? "(null)"}");
+                return;
+            }
+
+            if (!_pendingShowOnBounds)
+            {
+                _pendingShowOnBounds = true;
+                _coverHost.LayoutUpdated += OnCoverHostLayoutUpdated;
+                ApplicateTrace.DiagMs("pane-seq", "theme-cover-deferred", "reason=no-bounds");
+            }
+        }
+
+        private void OnCoverHostLayoutUpdated(object? sender, EventArgs e)
+        {
+            if (_disposed || !_pendingShowOnBounds)
+            {
+                _coverHost.LayoutUpdated -= OnCoverHostLayoutUpdated;
+                return;
+            }
+
+            if (_coverHost.Bounds.Width <= 1 || _coverHost.Bounds.Height <= 1)
+            {
+                return;
+            }
+
+            _coverHost.LayoutUpdated -= OnCoverHostLayoutUpdated;
+            _pendingShowOnBounds = false;
+            ShowCover();
+        }
+
+        private void HideCoverAfterPaint()
+        {
+            if (_disposed || !_covered)
+            {
+                return;
+            }
+
+            var generation = _coverGeneration;
+            _paintGate.AfterTwoFrames(
+                _coverHost,
+                () => HideCoverForGeneration(generation));
+        }
+
+        private void HideCoverForGeneration(long generation)
+        {
+            if (_disposed || generation != _coverGeneration)
+            {
+                return;
+            }
+
+            HideCover(animated: true);
+        }
+
+        private void HideCover(bool animated = false)
+        {
+            ReleaseFallback();
+            if (_pendingShowOnBounds)
+            {
+                _pendingShowOnBounds = false;
+                _coverHost.LayoutUpdated -= OnCoverHostLayoutUpdated;
+            }
+            if (!_covered)
+            {
+                return;
+            }
+
+            _covered = false;
+            _targetTheme = null;
+            _targetThemeVariant = null;
+            _targetRequestId = 0;
+            var duration = animated
+                ? ApplicateMotion.ModeSwitchDuration(_documentState.ReadingPreferences)
+                : TimeSpan.Zero;
+            _cover.Hide(duration);
+            ApplicateTrace.DiagMs("pane-seq", "theme-cover-hidden");
+        }
+
+        private void RestartFallback()
+        {
+            ReleaseFallback();
+            _fallbackTimer = _scheduler.CreateTimer(FallbackTimeout, OnFallbackTick);
+            _fallbackTimer.Start();
+        }
+
+        private void OnFallbackTick(object? sender, EventArgs e)
+        {
+            ApplicateTrace.DiagMs("pane-seq", "theme-cover-fallback");
+            HideCover();
+        }
+
+        private void ReleaseFallback()
+        {
+            if (_fallbackTimer is null)
+            {
+                return;
+            }
+
+            _fallbackTimer.Stop();
+            _fallbackTimer.Dispose();
+            _fallbackTimer = null;
+        }
+
+        private static ThemeVariant ToThemeVariant(ThemeMode theme)
+            => theme switch
+            {
+                ThemeMode.Dark => ThemeVariant.Dark,
+                ThemeMode.ClassicWhite => AvaloniaThemeService.ClassicWhiteThemeVariant,
+                _ => ThemeVariant.Light
+            };
+
+        private static string ToRendererTheme(ThemeMode theme)
+            => theme switch
+            {
+                ThemeMode.Dark => "dark",
+                ThemeMode.ClassicWhite => "classic-white",
+                _ => "light"
+            };
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+
+            _documentState.PropertyChanged -= OnDocumentStatePropertyChanged;
+            _documentState.ThemeTransitionStarting -= OnThemeTransitionStarting;
+            _signals.RendererFailed -= OnRendererFailed;
+            _signals.ThemeChangeSent -= OnThemeChangeSent;
+            _signals.ThemeApplied -= OnThemeApplied;
+            if (_pendingShowOnBounds)
+            {
+                _coverHost.LayoutUpdated -= OnCoverHostLayoutUpdated;
+            }
+            ReleaseFallback();
+            _cover.Dispose();
+        }
+    }
+
     private sealed class MainWindowDocumentRevealState(MainWindowViewModel viewModel) : IApplicateDocumentRevealState
     {
         private readonly MainWindowViewModel _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
@@ -889,6 +1210,12 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         {
             add => _viewModel.SuppressNextDocumentReveal += value;
             remove => _viewModel.SuppressNextDocumentReveal -= value;
+        }
+
+        public event EventHandler<ThemeTransitionStartingEventArgs>? ThemeTransitionStarting
+        {
+            add => _viewModel.ThemeTransitionStarting += value;
+            remove => _viewModel.ThemeTransitionStarting -= value;
         }
 
         public MarkdownSource? Document => _viewModel.Document;
@@ -973,6 +1300,33 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
             => _host.View.RequestModeToggleSettleProbe();
     }
 
+    private sealed class SharedWebViewThemeRevealSignals(IApplicateSharedWebViewHost host)
+        : IApplicateThemeRevealSignals
+    {
+        private readonly IApplicateSharedWebViewHost _host = host ?? throw new ArgumentNullException(nameof(host));
+
+        public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed
+        {
+            add => _host.RendererFailed += value;
+            remove => _host.RendererFailed -= value;
+        }
+
+        public event EventHandler<ApplicateWebThemeChangeSentEventArgs>? ThemeChangeSent
+        {
+            add => _host.View.ThemeChangeSent += value;
+            remove => _host.View.ThemeChangeSent -= value;
+        }
+
+        public event EventHandler<ApplicateWebThemeAppliedEventArgs>? ThemeApplied
+        {
+            add => _host.View.ThemeApplied += value;
+            remove => _host.View.ThemeApplied -= value;
+        }
+
+        public bool HasLoadedDocumentForSource(MarkdownSource? source)
+            => _host.View.HasLoadedDocumentForSource(source);
+    }
+
     private sealed class WindowStartupRevealShell(Window window) : IApplicateStartupRevealShell
     {
         private readonly Window _window = window ?? throw new ArgumentNullException(nameof(window));
@@ -1053,8 +1407,14 @@ internal sealed class ApplicateAirspaceCompositor : IDisposable
         public bool Show(Control host)
             => _cover.Show(host);
 
+        public bool Show(Control host, ThemeVariant? themeVariant)
+            => _cover.Show(host, themeVariant);
+
         public bool ShowStartupSplash(Control host, string? documentName)
             => _cover.ShowStartupSplash(host, documentName);
+
+        public bool UpdateBrush(Control host, ThemeVariant? themeVariant)
+            => _cover.UpdateBrush(host, themeVariant);
 
         public void Hide()
             => _cover.Hide();
@@ -1148,6 +1508,8 @@ internal interface IApplicateDocumentRevealState : INotifyPropertyChanged
 
     event EventHandler? SuppressNextDocumentReveal;
 
+    event EventHandler<ThemeTransitionStartingEventArgs>? ThemeTransitionStarting;
+
     MarkdownSource? Document { get; }
 
     ReadingPreferences ReadingPreferences { get; }
@@ -1186,6 +1548,17 @@ internal interface IApplicateStartupRevealSignals
     void RequestRendererSettleProbe();
 }
 
+internal interface IApplicateThemeRevealSignals
+{
+    event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
+
+    event EventHandler<ApplicateWebThemeChangeSentEventArgs>? ThemeChangeSent;
+
+    event EventHandler<ApplicateWebThemeAppliedEventArgs>? ThemeApplied;
+
+    bool HasLoadedDocumentForSource(MarkdownSource? source);
+}
+
 internal interface IApplicateStartupRevealShell
 {
     Control CoverHost { get; }
@@ -1203,7 +1576,11 @@ internal interface IApplicateAirspaceCoverPresenter : IDisposable
 {
     bool Show(Control host);
 
+    bool Show(Control host, ThemeVariant? themeVariant);
+
     bool ShowStartupSplash(Control host, string? documentName);
+
+    bool UpdateBrush(Control host, ThemeVariant? themeVariant);
 
     void Hide();
 

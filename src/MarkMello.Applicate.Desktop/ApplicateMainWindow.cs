@@ -77,8 +77,6 @@ public sealed class ApplicateMainWindow : MainWindow
     private ApplicateSiblingMountBridge? _siblingMountBridge;
     private ApplicateModeTransactionHostRouter? _modeTransactionHostRouter;
     private ApplicateAirspaceCompositor? _airspaceCompositor;
-    private ApplicateThemeSwitchRevealCoordinator? _viewerThemeSwitchRevealCoordinator;
-    private ApplicateThemeSwitchRevealCoordinator? _editThemeSwitchRevealCoordinator;
     private readonly ApplicateMountPoints _mountPoints;
     private bool _editModeHotkeyDown;
 
@@ -1306,10 +1304,8 @@ public sealed class ApplicateMainWindow : MainWindow
                 // also true in edit mode (edit is a sub-mode of Viewing).
                 () => viewModel.IsViewer && !viewModel.IsEditMode,
                 skipInitialCoverSession: skipInitialViewerDocumentSwitchCover);
-            _viewerThemeSwitchRevealCoordinator = new ApplicateThemeSwitchRevealCoordinator(
-                siblingPanel,
+            _airspaceCompositor.RegisterThemeSession(
                 viewerHostForMode,
-                viewModel,
                 () => viewModel.IsViewer && !viewModel.IsEditMode);
         }
         if (editHost is not null)
@@ -1324,10 +1320,8 @@ public sealed class ApplicateMainWindow : MainWindow
                 // WebView reveal to resolve a doc-switch cover — skip it instead
                 // of stalling on the 8s fallback. A real switch still covers.
                 suppressSamePathReloadCover: true);
-            _editThemeSwitchRevealCoordinator = new ApplicateThemeSwitchRevealCoordinator(
-                siblingPanel,
+            _airspaceCompositor.RegisterThemeSession(
                 editHost,
-                viewModel,
                 () => viewModel.IsViewer && viewModel.IsEditMode);
         }
 
@@ -1896,10 +1890,6 @@ public sealed class ApplicateMainWindow : MainWindow
     {
         _airspaceCompositor?.Dispose();
         _airspaceCompositor = null;
-        _viewerThemeSwitchRevealCoordinator?.Dispose();
-        _viewerThemeSwitchRevealCoordinator = null;
-        _editThemeSwitchRevealCoordinator?.Dispose();
-        _editThemeSwitchRevealCoordinator = null;
         _siblingMountBridge?.Dispose();
         _siblingMountBridge = null;
         _modeTransactionHostRouter?.Dispose();

@@ -40,13 +40,20 @@ public sealed class ApplicateWebHostMessagingTests
         "Rendering",
         "ApplicateAirspaceCompositor.cs");
 
-    private static readonly string ThemeSwitchRevealCoordinatorSourcePath = Path.Combine(
+    private static readonly string MainWindowSourcePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..",
+        "src",
+        "MarkMello.Applicate.Desktop",
+        "ApplicateMainWindow.cs");
+
+    private static readonly string DeletedThemeRevealSourcePath = Path.Combine(
         AppContext.BaseDirectory,
         "..", "..", "..", "..", "..",
         "src",
         "MarkMello.Applicate.Desktop",
         "Rendering",
-        "ApplicateThemeSwitchRevealCoordinator.cs");
+        "ApplicateThemeSwitchReveal" + "Coordinator.cs");
 
     [Fact]
     public void HostMessagesPreferNativeWebView2ChannelBeforeInvokeScriptFallback()
@@ -421,8 +428,8 @@ public sealed class ApplicateWebHostMessagingTests
     public void ThemeSwitchCoverWaitsForMatchingRendererPaintAck()
     {
         var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
-        var coordinatorSource = File.ReadAllText(ThemeSwitchRevealCoordinatorSourcePath);
         var rendererSource = File.ReadAllText(RendererSourcePath);
+        var removedType = "ApplicateThemeSwitchReveal" + "Coordinator";
 
         Assert.Contains("public event EventHandler<ApplicateWebThemeChangeSentEventArgs>? ThemeChangeSent;", viewSource, StringComparison.Ordinal);
         Assert.Contains("public event EventHandler<ApplicateWebThemeAppliedEventArgs>? ThemeApplied;", viewSource, StringComparison.Ordinal);
@@ -434,11 +441,19 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("postHostMessage({ type: \"theme-applied\", theme, requestId });", rendererSource, StringComparison.Ordinal);
         Assert.Contains("themeAppliedAckGeneration", rendererSource, StringComparison.Ordinal);
 
-        Assert.Contains("_viewModel.ThemeTransitionStarting += OnThemeTransitionStarting;", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("_host.View.ThemeChangeSent += OnThemeChangeSent;", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("_host.View.ThemeApplied += OnThemeApplied;", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("e.RequestId != _targetRequestId", coordinatorSource, StringComparison.Ordinal);
-        Assert.Contains("HideCoverAfterPaint()", coordinatorSource, StringComparison.Ordinal);
+        var compositorSource = File.ReadAllText(AirspaceCompositorSourcePath);
+        var mainWindowSource = File.ReadAllText(MainWindowSourcePath);
+
+        Assert.False(File.Exists(DeletedThemeRevealSourcePath));
+        Assert.Contains("RegisterThemeSession", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("ThemeRevealSession", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_documentState.ThemeTransitionStarting += OnThemeTransitionStarting;", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_signals.ThemeChangeSent += OnThemeChangeSent;", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_signals.ThemeApplied += OnThemeApplied;", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("e.RequestId != _targetRequestId", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_paintGate.AfterTwoFrames", compositorSource, StringComparison.Ordinal);
+        Assert.DoesNotContain(removedType, compositorSource, StringComparison.Ordinal);
+        Assert.DoesNotContain(removedType, mainWindowSource, StringComparison.Ordinal);
     }
 
     private static string ExtractFromMarker(string source, string marker)
