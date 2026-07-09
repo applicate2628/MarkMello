@@ -63,6 +63,9 @@ import {
 } from "./virtualizationShadow";
 import {
   renderWindowTargetThenAct,
+  resolveWindowTarget,
+  readWindowTargetContext,
+  type WindowTargetContext,
   type WindowTargetDescriptor,
 } from "./windowTargetResolver";
 
@@ -367,7 +370,7 @@ let virtualizedProgrammaticNavigationInProgress = false;
 let virtualizedProgrammaticNavigationGeneration = 0;
 let virtualizedProgrammaticNavigationPostSettleTarget: {
   descriptor: WindowTargetDescriptor;
-  finalAlign?: () => void;
+  viewportOffsetY: number;
 } | null = null;
 let virtualizedWindowMathController: MathReadinessController | null = null;
 const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
@@ -1537,9 +1540,111 @@ function forceRenderVirtualizedNavigationTarget(descriptor: WindowTargetDescript
   });
 }
 
+function readVirtualizedProgrammaticNavigationTargetContext(
+  descriptor: WindowTargetDescriptor
+): WindowTargetContext | null {
+  const model = virtualizedDocumentWindowModel;
+  const controller = virtualizedDocumentWindowController;
+  const main = document.querySelector<HTMLElement>("main.mm-document");
+  if (model === null || controller === null || main === null) {
+    return null;
+  }
+
+  const resolution = resolveWindowTarget(model, descriptor);
+  if (resolution === null) {
+    return null;
+  }
+
+  return readWindowTargetContext({
+    controller,
+    main,
+    model,
+    ownerWindow: window,
+  }, resolution);
+}
+
+function readElementDocumentTop(element: HTMLElement): number {
+  return element.getBoundingClientRect().top + getDocumentScrollRoot().scrollTop;
+}
+
+function readVirtualizedTargetLocalOffset(
+  context: WindowTargetContext,
+  descriptor: WindowTargetDescriptor
+): number {
+  const sectionElement = context.element;
+  if (sectionElement === null) {
+    return 0;
+  }
+
+  if (descriptor.kind === "source-line") {
+    refreshSourceLineAnchors();
+    const sourceLineTop = findScrollTopForSourceLine(sourceLineAnchors, descriptor.sourceLine);
+    if (sourceLineTop !== null) {
+      return Math.max(0, sourceLineTop - readElementDocumentTop(sectionElement));
+    }
+  }
+
+  const targetElement = context.targetElement ?? sectionElement;
+  return Math.max(
+    0,
+    targetElement.getBoundingClientRect().top - sectionElement.getBoundingClientRect().top
+  );
+}
+
+function computeVirtualizedProgrammaticNavigationScrollTop(
+  context: WindowTargetContext,
+  descriptor: WindowTargetDescriptor,
+  viewportOffsetY: number
+): number {
+  const targetLocalOffset = readVirtualizedTargetLocalOffset(context, descriptor);
+  const normalizedViewportOffset = Number.isFinite(viewportOffsetY) ? Math.max(0, viewportOffsetY) : 0;
+  return Math.max(0, context.sectionTop + targetLocalOffset - normalizedViewportOffset);
+}
+
+function applyVirtualizedProgrammaticNavigationContext(
+  context: WindowTargetContext,
+  descriptor: WindowTargetDescriptor,
+  viewportOffsetY: number
+): boolean {
+  if (descriptor.kind === "source-line") {
+    pendingSourceLineTarget = descriptor.sourceLine;
+    suppressPreviewSourceLinePost();
+  }
+  getDocumentScrollRoot().scrollTop = computeVirtualizedProgrammaticNavigationScrollTop(
+    context,
+    descriptor,
+    viewportOffsetY
+  );
+  return true;
+}
+
+function applyVirtualizedProgrammaticNavigationTarget(input: {
+  descriptor: WindowTargetDescriptor;
+  viewportOffsetY: number;
+}): boolean {
+  const context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
+  if (context === null) {
+    return false;
+  }
+
+  return applyVirtualizedProgrammaticNavigationContext(context, input.descriptor, input.viewportOffsetY);
+}
+
+function landVirtualizedProgrammaticNavigation(input: {
+  context: WindowTargetContext;
+  descriptor: WindowTargetDescriptor;
+  viewportOffsetY: number;
+}): void {
+  startVirtualizedProgrammaticNavigationSettle({
+    descriptor: input.descriptor,
+    initialContext: input.context,
+    viewportOffsetY: input.viewportOffsetY,
+  });
+}
+
 function rememberVirtualizedProgrammaticNavigationPostSettleTarget(input: {
   descriptor: WindowTargetDescriptor;
-  finalAlign?: () => void;
+  viewportOffsetY: number;
 }): void {
   virtualizedProgrammaticNavigationPostSettleTarget = input;
 }
@@ -1555,11 +1660,14 @@ function reassertVirtualizedProgrammaticNavigationPostSettleTarget(): void {
   }
 
   forceRenderVirtualizedNavigationTarget(target.descriptor);
-  target.finalAlign?.();
+  applyVirtualizedProgrammaticNavigationTarget(target);
 }
 
 function alignVirtualizedProgrammaticNavigationPostSettleTarget(): void {
-  virtualizedProgrammaticNavigationPostSettleTarget?.finalAlign?.();
+  const target = virtualizedProgrammaticNavigationPostSettleTarget;
+  if (target !== null) {
+    applyVirtualizedProgrammaticNavigationTarget(target);
+  }
 }
 
 function getVirtualizedProgrammaticNavigationPostSettleSectionIndex(): number | null {
@@ -1569,7 +1677,8 @@ function getVirtualizedProgrammaticNavigationPostSettleSectionIndex(): number | 
 
 function startVirtualizedProgrammaticNavigationSettle(input: {
   descriptor: WindowTargetDescriptor;
-  finalAlign?: () => void;
+  initialContext?: WindowTargetContext;
+  viewportOffsetY: number;
 }): void {
   if (!virtualizationEnabled || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
     return;
@@ -1578,6 +1687,9 @@ function startVirtualizedProgrammaticNavigationSettle(input: {
   const generation = ++virtualizedProgrammaticNavigationGeneration;
   virtualizedProgrammaticNavigationInProgress = true;
   const root = getDocumentScrollRoot();
+  if (input.initialContext !== undefined) {
+    applyVirtualizedProgrammaticNavigationContext(input.initialContext, input.descriptor, input.viewportOffsetY);
+  }
   let lastScrollTop = root.scrollTop;
   let stableFrames = 0;
   let frameCount = 0;
@@ -1587,7 +1699,6 @@ function startVirtualizedProgrammaticNavigationSettle(input: {
       return;
     }
 
-    virtualizedProgrammaticNavigationInProgress = false;
     const model = virtualizedDocumentWindowModel;
     const controller = virtualizedDocumentWindowController;
     if (model === null || controller === null) {
@@ -1595,11 +1706,18 @@ function startVirtualizedProgrammaticNavigationSettle(input: {
     }
 
     rememberVirtualizedProgrammaticNavigationPostSettleTarget(input);
-    reassertVirtualizedProgrammaticNavigationPostSettleTarget();
     updateVirtualizedWindowForScroll({ force: true });
-    reassertVirtualizedProgrammaticNavigationPostSettleTarget();
+    if (!applyVirtualizedProgrammaticNavigationTarget(input)) {
+      virtualizedProgrammaticNavigationInProgress = false;
+      return;
+    }
     updateMinimapViewport({ skipVisibilityUpdate: true });
     postScroll();
+    window.requestAnimationFrame(() => {
+      if (generation === virtualizedProgrammaticNavigationGeneration) {
+        virtualizedProgrammaticNavigationInProgress = false;
+      }
+    });
   };
 
   const tick = (): void => {
@@ -1941,9 +2059,14 @@ function scrollToSourceLine(sourceLine: number): void {
   }
 
   void renderWindowTargetThenAct({
-    action: () => {
-      refreshSourceLineAnchors();
-      scrollToSourceLineInCurrentWindow(sourceLine);
+    action: (context) => {
+      pendingSourceLineTarget = sourceLine;
+      suppressPreviewSourceLinePost();
+      landVirtualizedProgrammaticNavigation({
+        context,
+        descriptor: { kind: "source-line", sourceLine },
+        viewportOffsetY: getViewportAnchorY(),
+      });
     },
     actionKind: "navigate",
     controller: virtualizedDocumentWindowController,
@@ -1970,6 +2093,18 @@ function invalidateSourceLineAnchors(): void {
   // re-suppresses its own echo; a real user scroll cleared the target).
   if (pendingSourceLineTarget !== null) {
     const target = pendingSourceLineTarget;
+    if (virtualizationEnabled) {
+      if (isVirtualizedProgrammaticNavigationInProgress()) {
+        return;
+      }
+      window.requestAnimationFrame(() => {
+        if (pendingSourceLineTarget === target) {
+          alignVirtualizedProgrammaticNavigationPostSettleTarget();
+        }
+      });
+      return;
+    }
+
     window.requestAnimationFrame(() => {
       if (pendingSourceLineTarget === target) {
         scrollToSourceLine(target);
@@ -4116,8 +4251,12 @@ function handleHostMessage(raw: unknown): void {
     }
 
     void renderWindowTargetThenAct({
-      action: ({ targetElement }) => {
-        targetElement?.scrollIntoView({ block: "start" });
+      action: (context) => {
+        landVirtualizedProgrammaticNavigation({
+          context,
+          descriptor: { anchor: message.anchor, kind: "heading-anchor" },
+          viewportOffsetY: 0,
+        });
       },
       actionKind: "navigate",
       controller: virtualizedDocumentWindowController,
@@ -4158,16 +4297,12 @@ function handleHostMessage(raw: unknown): void {
 
     const descriptor: WindowTargetDescriptor = { anchor: message.id, kind: "heading-anchor" };
     void renderWindowTargetThenAct({
-      action: ({ targetElement }) => {
-        if (targetElement) {
-          startVirtualizedProgrammaticNavigationSettle({
-            descriptor,
-            finalAlign: () => {
-              document.getElementById(message.id)?.scrollIntoView({ behavior: "instant" as ScrollBehavior, block: "start" });
-            },
-          });
-          targetElement.scrollIntoView({ behavior: "smooth", block: "start" });
-        }
+      action: (context) => {
+        landVirtualizedProgrammaticNavigation({
+          context,
+          descriptor,
+          viewportOffsetY: 0,
+        });
       },
       actionKind: "navigate",
       controller: virtualizedDocumentWindowController,
@@ -4248,19 +4383,12 @@ function handleHostMessage(raw: unknown): void {
 
     const descriptor: WindowTargetDescriptor = { blockIndex: message.blockIndex, kind: "block" };
     void renderWindowTargetThenAct({
-      action: ({ element, targetElement }) => {
-        const target = targetElement ?? element;
-        if (target) {
-          startVirtualizedProgrammaticNavigationSettle({
-            descriptor,
-            finalAlign: () => {
-              document.querySelector<HTMLElement>(
-                `[data-mm-block-index="${message.blockIndex}"]`
-              )?.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
-            },
-          });
-          target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
-        }
+      action: (context) => {
+        landVirtualizedProgrammaticNavigation({
+          context,
+          descriptor,
+          viewportOffsetY: 0,
+        });
       },
       actionKind: "navigate",
       controller: virtualizedDocumentWindowController,

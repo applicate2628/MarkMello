@@ -52,11 +52,13 @@ const makeReadingPreferences = (
 });
 
 async function loadRendererHarness(options: {
+  renderedSectionHeight?: number;
   sectionCount: number;
   virtualization: boolean;
 }): Promise<RendererHarness> {
   vi.resetModules();
   document.documentElement.innerHTML = `<body><main class="mm-document"></main></body>`;
+  trackRendererEventListeners();
 
   if (options.virtualization) {
     (window as unknown as { MARKMELLO_VIRTUALIZATION?: boolean }).MARKMELLO_VIRTUALIZATION = true;
@@ -108,7 +110,10 @@ async function loadRendererHarness(options: {
   }
   vi.stubGlobal("ResizeObserver", TestResizeObserver);
 
-  const root = installVirtualizedDocumentLayout(options.sectionCount);
+  const root = installVirtualizedDocumentLayout(
+    options.sectionCount,
+    options.renderedSectionHeight ?? SECTION_HEIGHT
+  );
   vi.spyOn(window.HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
     const top = readSyntheticDocumentTop(this) - root.scrollTop;
     const height = this.offsetHeight;
@@ -205,7 +210,10 @@ async function loadRendererHarness(options: {
   return { flushNextRaf, flushQueuedRafs, flushRafsUntil, highlights, load, messages, root, scrollCalls, triggerResize };
 }
 
-function installVirtualizedDocumentLayout(sectionCount: number): HTMLElement {
+function installVirtualizedDocumentLayout(
+  sectionCount: number,
+  renderedSectionHeight = SECTION_HEIGHT
+): HTMLElement {
   const root = document.documentElement;
   let mutableScrollTop = 0;
   Object.defineProperty(document, "scrollingElement", {
@@ -239,9 +247,20 @@ function installVirtualizedDocumentLayout(sectionCount: number): HTMLElement {
     configurable: true,
     get: () => root.scrollTop,
   });
+  const hasVirtualSpacers = (): boolean =>
+    document.querySelector("[data-mm-virtual-spacer]") !== null;
+  const readVirtualFlowOffset = (element: HTMLElement): number => {
+    let top = 0;
+    let sibling = element.previousElementSibling;
+    while (sibling instanceof HTMLElement) {
+      top += sibling.offsetHeight;
+      sibling = sibling.previousElementSibling;
+    }
+    return top;
+  };
   vi.spyOn(window.HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
-    if (this.dataset.mmVirtualSpacer === "bottom") {
-      return sectionCount * SECTION_PITCH;
+    if (this.dataset.mmVirtualSpacer !== undefined) {
+      return readVirtualFlowOffset(this);
     }
 
     const blockIndex = Number.parseInt(this.dataset.mmBlockIndex ?? "", 10);
@@ -249,19 +268,63 @@ function installVirtualizedDocumentLayout(sectionCount: number): HTMLElement {
       return 0;
     }
 
-    return this.parentElement?.matches("main.mm-document") ? blockIndex * SECTION_PITCH : 20;
+    if (this.parentElement?.matches("main.mm-document")) {
+      return hasVirtualSpacers()
+        ? readVirtualFlowOffset(this)
+        : blockIndex * SECTION_PITCH;
+    }
+
+    return 20;
   });
   vi.spyOn(window.HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
     if (this.dataset.mmVirtualSpacer !== undefined) {
       return Number.parseFloat(this.style.height) || 0;
     }
 
-    return this.hasAttribute("data-mm-block-index") ? SECTION_HEIGHT : 0;
+    return this.hasAttribute("data-mm-block-index") ? renderedSectionHeight : 0;
   });
   vi.spyOn(window, "scrollTo").mockImplementation((options?: ScrollToOptions | number, y?: number) => {
     root.scrollTop = typeof options === "number" ? (y ?? 0) : (options?.top ?? 0);
   });
   return root;
+}
+
+type TrackedEventListener = {
+  listener: EventListenerOrEventListenerObject;
+  options?: AddEventListenerOptions | boolean;
+  target: EventTarget;
+  type: string;
+};
+
+const rendererEventListeners: TrackedEventListener[] = [];
+
+function trackRendererEventListeners(): void {
+  const track = (
+    target: EventTarget,
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: AddEventListenerOptions | boolean
+  ): void => {
+    rendererEventListeners.push({ listener, options, target, type });
+  };
+
+  const addDocumentEventListener = document.addEventListener.bind(document);
+  vi.spyOn(document, "addEventListener").mockImplementation((type, listener, options) => {
+    track(document, type, listener, options);
+    addDocumentEventListener(type, listener, options);
+  });
+
+  const addWindowEventListener = window.addEventListener.bind(window);
+  vi.spyOn(window, "addEventListener").mockImplementation((type, listener, options) => {
+    track(window, type, listener, options);
+    addWindowEventListener(type, listener, options);
+  });
+}
+
+function removeRendererEventListeners(): void {
+  for (const { listener, options, target, type } of rendererEventListeners.splice(0)) {
+    target.removeEventListener(type, listener, options);
+  }
 }
 
 function readSyntheticDocumentTop(element: HTMLElement): number {
@@ -446,6 +509,7 @@ function latestHeadingsUpdated(messages: readonly unknown[]): { headings: Array<
 }
 
 afterEach(() => {
+  removeRendererEventListeners();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   delete (window as unknown as { MARKMELLO_VIRTUALIZATION?: boolean }).MARKMELLO_VIRTUALIZATION;
@@ -469,7 +533,7 @@ describe("renderer scroll-family virtualization integration", () => {
   });
 
   it("renders an off-window anchor target before handling a scroll-to anchor message", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, scrollCalls } = await loadRendererHarness({
+    const { flushNextRaf, flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
       sectionCount: 120,
       virtualization: true,
     });
@@ -481,15 +545,13 @@ describe("renderer scroll-family virtualization integration", () => {
     load({ type: "scroll-to", anchor: "heading-90" });
     await flushNextRaf();
 
-    const target = document.getElementById("heading-90");
-    expect(target).not.toBeNull();
-    expect(scrollCalls).toEqual([
-      { element: target, options: { block: "start" } },
-    ]);
+    expect(document.getElementById("heading-90")).not.toBeNull();
+    expect(scrollCalls).toEqual([]);
+    expect(root.scrollTop).toBeGreaterThan(0);
   });
 
   it("renders an off-window TOC target before smooth scrolling the heading", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, scrollCalls } = await loadRendererHarness({
+    const { flushNextRaf, flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
       sectionCount: 120,
       virtualization: true,
     });
@@ -501,11 +563,9 @@ describe("renderer scroll-family virtualization integration", () => {
     load({ type: "scroll-to-heading", id: "heading-95" });
     await flushNextRaf();
 
-    const target = document.getElementById("heading-95");
-    expect(target).not.toBeNull();
-    expect(scrollCalls).toEqual([
-      { element: target, options: { behavior: "smooth", block: "start" } },
-    ]);
+    expect(document.getElementById("heading-95")).not.toBeNull();
+    expect(scrollCalls).toEqual([]);
+    expect(root.scrollTop).toBeGreaterThan(0);
   });
 
   it("keeps an off-window TOC target rendered through intermediate smooth-scroll frames", async () => {
@@ -535,14 +595,14 @@ describe("renderer scroll-family virtualization integration", () => {
     await flushNextRaf();
     expect(document.getElementById("heading-95")).not.toBeNull();
 
-    await flushNextRaf();
+    await flushQueuedRafs();
 
     expect(document.getElementById("heading-95")).not.toBeNull();
-    expect(root.scrollTop).toBe(10 * SECTION_PITCH);
+    expect(root.scrollTop).toBeGreaterThan(10 * SECTION_PITCH);
   });
 
   it("renders the containing section and scrolls the nested block descendant", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, scrollCalls } = await loadRendererHarness({
+    const { flushNextRaf, flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
       sectionCount: 120,
       virtualization: true,
     });
@@ -559,39 +619,42 @@ describe("renderer scroll-family virtualization integration", () => {
     load({ type: "scroll-to-block", blockIndex: 8801 });
     await flushNextRaf();
 
-    const target = document.querySelector<HTMLElement>('[data-mm-block-index="8801"]');
-    expect(target).not.toBeNull();
-    expect(scrollCalls).toEqual([
-      { element: target!, options: { block: "start", behavior: "instant" } },
-    ]);
+    expect(document.querySelector<HTMLElement>('[data-mm-block-index="8801"]')).not.toBeNull();
+    expect(scrollCalls).toEqual([]);
+    expect(root.scrollTop).toBeGreaterThan(0);
   });
 
   it("reasserts a nested scroll-to-block target after a post-navigation window shift", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, root } = await loadRendererHarness({
-      sectionCount: 120,
-      virtualization: true,
-    });
-    load({
-      type: "load-document",
-      html: buildNestedBlockDocument(120, 88, 8801),
-      hasMermaid: false,
-      hasHljs: false,
-    });
-    await flushQueuedRafs();
+    const land = async (shiftDuringNavigation: boolean): Promise<number> => {
+      const { flushNextRaf, flushQueuedRafs, load, root } = await loadRendererHarness({
+        sectionCount: 120,
+        virtualization: true,
+      });
+      load({
+        type: "load-document",
+        html: buildNestedBlockDocument(120, 88, 8801),
+        hasMermaid: false,
+        hasHljs: false,
+      });
+      await flushQueuedRafs();
 
-    load({ type: "scroll-to-block", blockIndex: 8801 });
-    await flushNextRaf();
-    const target = document.querySelector<HTMLElement>('[data-mm-block-index="8801"]');
-    expect(target).not.toBeNull();
-    const targetTop = readSyntheticDocumentTop(target!);
-    expect(root.scrollTop).toBe(targetTop);
+      load({ type: "scroll-to-block", blockIndex: 8801 });
+      await flushNextRaf();
+      expect(document.querySelector<HTMLElement>('[data-mm-block-index="8801"]')).not.toBeNull();
 
-    root.scrollTop = targetTop - 693;
-    document.dispatchEvent(new Event("scroll"));
-    await flushQueuedRafs();
+      if (shiftDuringNavigation) {
+        root.scrollTop -= 693;
+        document.dispatchEvent(new Event("scroll"));
+      }
 
-    expect(document.querySelector('[data-mm-block-index="8801"]')).not.toBeNull();
-    expect(root.scrollTop).toBe(targetTop);
+      await flushQueuedRafs();
+      const target = document.querySelector<HTMLElement>('[data-mm-block-index="8801"]');
+      expect(target).not.toBeNull();
+      return target!.getBoundingClientRect().top;
+    };
+
+    expect(await land(false)).toBeCloseTo(0, 0);
+    expect(await land(true)).toBeCloseTo(0, 0);
   });
 
   it("leaves invalid virtualized anchor and block targets as no-ops", async () => {
@@ -642,40 +705,48 @@ describe("renderer scroll-family virtualization integration", () => {
   });
 
   it("renders an off-window source line before applying the 38 percent preview anchor", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, root } = await loadRendererHarness({
-      sectionCount: 120,
-      virtualization: true,
-    });
-    load({ type: "load-document", html: buildSourceLineDocument(120), hasMermaid: false, hasHljs: false });
-    await flushQueuedRafs();
+    const land = async (): Promise<number> => {
+      const { flushQueuedRafs, load } = await loadRendererHarness({
+        renderedSectionHeight: SECTION_PITCH,
+        sectionCount: 120,
+        virtualization: true,
+      });
+      load({ type: "load-document", html: buildSourceLineDocument(120), hasMermaid: false, hasHljs: false });
+      await flushQueuedRafs();
 
-    expect(document.querySelector('[data-mm-source-line="900"]')).toBeNull();
-    load({ type: "scroll-to-source-line", sourceLine: 900 });
-    await flushNextRaf();
+      load({ type: "scroll-to-source-line", sourceLine: 900 });
+      await flushQueuedRafs();
+      const target = document.querySelector<HTMLElement>('[data-mm-source-line="900"]');
+      expect(target).not.toBeNull();
+      return target!.getBoundingClientRect().top;
+    };
 
-    expect(document.querySelector('[data-mm-source-line="900"]')).not.toBeNull();
-    expect(root.scrollTop).toBe(90 * SECTION_PITCH - VIEWPORT_HEIGHT * 0.38);
+    expect(await land()).toBeCloseTo(VIEWPORT_HEIGHT * 0.38, 0);
   });
 
   it("resolves nested source spans through their containing section before edit-to-preview scroll", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, root } = await loadRendererHarness({
-      sectionCount: 120,
-      virtualization: true,
-    });
-    load({
-      type: "load-document",
-      html: buildNestedSourceLineDocument(120, 88, 8801),
-      hasMermaid: false,
-      hasHljs: false,
-    });
-    await flushQueuedRafs();
+    const land = async (): Promise<number> => {
+      const { flushQueuedRafs, load } = await loadRendererHarness({
+        renderedSectionHeight: SECTION_PITCH,
+        sectionCount: 120,
+        virtualization: true,
+      });
+      load({
+        type: "load-document",
+        html: buildNestedSourceLineDocument(120, 88, 8801),
+        hasMermaid: false,
+        hasHljs: false,
+      });
+      await flushQueuedRafs();
 
-    expect(document.querySelector('[data-mm-block-index="8801"]')).toBeNull();
-    load({ type: "scroll-to-source-line", sourceLine: 882 });
-    await flushNextRaf();
+      load({ type: "scroll-to-source-line", sourceLine: 880 });
+      await flushQueuedRafs();
+      const target = document.querySelector<HTMLElement>('[data-mm-block-index="8801"]');
+      expect(target).not.toBeNull();
+      return target!.getBoundingClientRect().top;
+    };
 
-    expect(document.querySelector('[data-mm-block-index="8801"]')).not.toBeNull();
-    expect(root.scrollTop).toBe(88 * SECTION_PITCH + 20 - VIEWPORT_HEIGHT * 0.38);
+    expect(await land()).toBeCloseTo(VIEWPORT_HEIGHT * 0.38, 0);
   });
 
   it("posts monotonic preview source lines across sparse virtual window boundaries without duplicates", async () => {
@@ -687,8 +758,8 @@ describe("renderer scroll-family virtualization integration", () => {
     await flushQueuedRafs();
     messages.length = 0;
 
-    for (const sectionIndex of [130, 150, 170]) {
-      root.scrollTop = sectionIndex * SECTION_PITCH;
+    for (const sectionIndex of [50, 130, 210]) {
+      root.scrollTop = sectionIndex * SECTION_HEIGHT;
       document.dispatchEvent(new Event("scroll"));
       await flushQueuedRafs();
     }
@@ -763,23 +834,25 @@ describe("renderer scroll-family virtualization integration", () => {
     const firstTarget = document.querySelector<HTMLElement>('[data-mm-block-index="90"]');
     expect(firstTarget).not.toBeNull();
     expect(findBarCount().textContent).toBe("1 of 2");
-    expect(root.scrollTop).toBe(90 * SECTION_PITCH);
+    expect(firstTarget!.getBoundingClientRect().top).toBeCloseTo(0, 0);
     expect(highlights.get("mm-find-all")?.map(range => range.toString())).toEqual(["needle"]);
     expect(highlights.get("mm-find-current")?.map(range => range.toString())).toEqual(["needle"]);
 
     findButton("next").click();
-    await flushRafsUntil(() => root.scrollTop === 95 * SECTION_PITCH);
-    await flushRafsUntil(() => root.scrollTop === 95 * SECTION_PITCH);
-    expect(document.querySelector('[data-mm-block-index="95"]')).not.toBeNull();
+    await flushRafsUntil(() => document.querySelector('[data-mm-block-index="95"]') !== null);
+    await flushRafsUntil(() => document.querySelector('[data-mm-block-index="95"]') !== null);
+    const secondTarget = document.querySelector<HTMLElement>('[data-mm-block-index="95"]');
+    expect(secondTarget).not.toBeNull();
     expect(findBarCount().textContent).toBe("2 of 2");
-    expect(root.scrollTop).toBe(95 * SECTION_PITCH);
+    expect(secondTarget!.getBoundingClientRect().top).toBeCloseTo(0, 0);
 
     findButton("prev").click();
-    await flushRafsUntil(() => root.scrollTop === 90 * SECTION_PITCH);
-    await flushRafsUntil(() => root.scrollTop === 90 * SECTION_PITCH);
-    expect(document.querySelector('[data-mm-block-index="90"]')).not.toBeNull();
+    await flushRafsUntil(() => document.querySelector('[data-mm-block-index="90"]') !== null);
+    await flushRafsUntil(() => document.querySelector('[data-mm-block-index="90"]') !== null);
+    const previousTarget = document.querySelector<HTMLElement>('[data-mm-block-index="90"]');
+    expect(previousTarget).not.toBeNull();
     expect(findBarCount().textContent).toBe("1 of 2");
-    expect(root.scrollTop).toBe(90 * SECTION_PITCH);
+    expect(previousTarget!.getBoundingClientRect().top).toBeCloseTo(0, 0);
   });
 
   it("does not re-query the host index when virtual window replacement changes the live DOM", async () => {

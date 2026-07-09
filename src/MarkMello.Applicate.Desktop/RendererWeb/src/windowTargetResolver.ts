@@ -51,6 +51,13 @@ export type RenderWindowTargetThenActInput<T> = {
   layoutTicks?: 1 | 2;
 };
 
+export type ReadWindowTargetContextInput = {
+  controller: WindowTargetController | null;
+  main: HTMLElement;
+  model: DocumentWindowModel | null;
+  ownerWindow: Window & typeof globalThis;
+};
+
 type WindowTargetResolution = {
   entry: SectionModelEntry;
   sectionIndex: number;
@@ -78,7 +85,7 @@ export async function renderWindowTargetThenAct<T>(input: RenderWindowTargetThen
   }
 
   try {
-    return await input.action(readLiveTargetContext(input, resolution));
+    return await input.action(readWindowTargetContext(input, resolution));
   } finally {
     if (input.actionKind === "query" && didRender && originalAnchor !== null) {
       restoreReadingAnchor({
@@ -212,8 +219,8 @@ function ensureResolutionRendered(
     : controller.ensureSectionRangeRendered(resolution.range.start, resolution.range.end, options);
 }
 
-function readLiveTargetContext<T>(
-  input: RenderWindowTargetThenActInput<T>,
+export function readWindowTargetContext(
+  input: ReadWindowTargetContextInput,
   resolution: WindowTargetResolution
 ): WindowTargetContext {
   const sectionElement = findSectionElement(input.main, resolution.entry);
