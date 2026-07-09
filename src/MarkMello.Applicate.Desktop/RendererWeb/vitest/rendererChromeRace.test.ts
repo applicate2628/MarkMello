@@ -95,6 +95,10 @@ describe("renderer chrome race handling", () => {
   });
 
   afterEach(() => {
+    (window as unknown as { __mmRendererLoad?: HostBridge }).__mmRendererLoad?.({ type: "clear-document" });
+    if (vi.isFakeTimers()) {
+      vi.clearAllTimers();
+    }
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -316,7 +320,6 @@ describe("renderer chrome race handling", () => {
   });
 
   it("keeps auto-hidden heavy minimap empty until explicit on mode requests detail", async () => {
-    vi.useFakeTimers();
     const messages: unknown[] = [];
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
       webview: { postMessage: (message: unknown) => messages.push(message) }
@@ -342,11 +345,26 @@ describe("renderer chrome race handling", () => {
       && typeof (message as { detail?: unknown }).detail === "string");
     expect(skippedRefreshMark?.detail).toContain('"reason":"auto-heavy"');
 
+    messages.length = 0;
     load({ type: "reading-preferences", ...makePreferences(true, "on") });
     flushQueuedRafs();
-    await vi.advanceTimersByTimeAsync(100);
+    load({ type: "minimap-settle-probe", transactionGeneration: 1 });
     flushQueuedRafs();
 
+    const settled = messages.find((message): message is {
+      type: string;
+      transactionGeneration: number;
+      visible: boolean;
+      reservedWidth: number;
+    } => typeof message === "object"
+      && message !== null
+      && (message as { type?: string }).type === "minimap-settled");
+    expect(settled).toEqual({
+      type: "minimap-settled",
+      transactionGeneration: 1,
+      visible: true,
+      reservedWidth: 168,
+    });
     expect(document.body.classList.contains("mm-has-minimap")).toBe(true);
     expect(document.querySelector(".mm-minimap-content .mm-document")).not.toBeNull();
     expect(document.querySelector(".mm-minimap-content svg")).toBeNull();
