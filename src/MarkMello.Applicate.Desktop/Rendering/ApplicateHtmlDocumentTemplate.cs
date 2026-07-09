@@ -53,12 +53,23 @@ public static class ApplicateHtmlDocumentTemplate
         ApplicateWebBaseAssets baseAssets,
         ApplicateWebMermaidAssets? mermaidAssets,
         ApplicateWebHighlightAssets? hljsAssets)
+        => BuildShell(preferences, baseAssets, mermaidAssets, hljsAssets, ApplicateVirtualizationMode.IsEnabled);
+
+    internal static string BuildShell(
+        ReadingPreferences preferences,
+        ApplicateWebBaseAssets baseAssets,
+        ApplicateWebMermaidAssets? mermaidAssets,
+        ApplicateWebHighlightAssets? hljsAssets,
+        bool virtualizationEnabled)
     {
         var head = BuildHeadComponents("MarkMello", baseAssets, mermaidAssets, hljsAssets);
         var nonce = head.Nonce;
         var encodedTitle = head.EncodedTitle;
         var style = head.Style;
         var script = head.Script;
+        var virtualizationAttribute = virtualizationEnabled
+            ? " data-markmello-virtualization=\"true\""
+            : string.Empty;
 
         // Empty <main class="mm-document"> — content is delivered per-document via
         // window.postMessage({ type: "load-document", html, ... }). The shell stays
@@ -66,7 +77,7 @@ public static class ApplicateHtmlDocumentTemplate
         // is swapped on each document change.
         return $$"""
             <!doctype html>
-            <html data-mm-chrome="off">
+            <html data-mm-chrome="off"{{virtualizationAttribute}}>
             <head>
               <meta charset="utf-8">
               <meta name="viewport" content="width=device-width, initial-scale=1">

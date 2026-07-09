@@ -67,4 +67,37 @@ public sealed class ApplicateHtmlShellTemplateTests
 
         Assert.Contains("<title>MarkMello</title>", html, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void BuildShellOmitsVirtualizationDatasetWhenDisabled()
+    {
+        var html = ApplicateHtmlDocumentTemplate.BuildShell(
+            ReadingPreferences.Default,
+            MinimalBase,
+            mermaidAssets: null,
+            hljsAssets: null,
+            virtualizationEnabled: false);
+
+        Assert.Contains("<html data-mm-chrome=\"off\">", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("data-markmello-virtualization", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildShellSetsVirtualizationDatasetBeforeRendererScriptWhenEnabled()
+    {
+        var html = ApplicateHtmlDocumentTemplate.BuildShell(
+            ReadingPreferences.Default,
+            MinimalBase,
+            mermaidAssets: null,
+            hljsAssets: null,
+            virtualizationEnabled: true);
+
+        Assert.Contains(
+            "<html data-mm-chrome=\"off\" data-markmello-virtualization=\"true\">",
+            html,
+            StringComparison.Ordinal);
+        Assert.True(
+            html.IndexOf("data-markmello-virtualization=\"true\"", StringComparison.Ordinal)
+            < html.IndexOf("// renderer-js", StringComparison.Ordinal));
+    }
 }
