@@ -54,6 +54,7 @@ import {
   readVirtualizationShadowFlag,
   type VirtualizationShadowValidator
 } from "./virtualizationShadow";
+import { renderWindowTargetThenAct } from "./windowTargetResolver";
 
 type KatexApi = {
   render: (
@@ -359,6 +360,8 @@ type ProcessedDocumentCacheEntry = {
 type HeadingPayload = {
   id: string;
   level: number;
+  blockIndex?: number;
+  sectionIndex?: number;
   text: string;
   segments: HeadingSegmentPayload[];
 };
@@ -2633,9 +2636,91 @@ function extractHeadingSegments(root: HTMLElement): HeadingSegmentPayload[] {
   return segments;
 }
 
+function readHeadingPayload(
+  node: HTMLHeadingElement,
+  metadata: { blockIndex?: number; sectionIndex?: number } = {}
+): HeadingPayload | null {
+  const id = node.id;
+  if (!id) {
+    return null;
+  }
+
+  const tag = node.tagName.toUpperCase();
+  const level = Number.parseInt(tag.slice(1), 10);
+  if (!Number.isFinite(level) || level < 1 || level > 6) {
+    return null;
+  }
+
+  const segments = extractHeadingSegments(node);
+  const text = segments.length > 0
+    ? segments.map(segment => segment.text).join("").trim()
+    : (node.textContent ?? "").trim();
+  const heading: HeadingPayload = { id, level, text, segments };
+  const includeModelMetadata = metadata.blockIndex !== undefined || metadata.sectionIndex !== undefined;
+  const blockIndex = includeModelMetadata ? readClosestBlockIndex(node) ?? metadata.blockIndex : undefined;
+  if (blockIndex !== undefined) {
+    heading.blockIndex = blockIndex;
+  }
+  if (metadata.sectionIndex !== undefined) {
+    heading.sectionIndex = metadata.sectionIndex;
+  }
+  return heading;
+}
+
+function readLiveHeadingNodes(main: HTMLElement): HTMLHeadingElement[] {
+  return Array.from(
+    main.querySelectorAll<HTMLHeadingElement>("h1, h2, h3, h4, h5, h6")
+  );
+}
+
+function readLiveHeadingPayloads(main: HTMLElement): { headings: HeadingPayload[]; nodes: HTMLHeadingElement[] } {
+  const nodes = readLiveHeadingNodes(main);
+  return {
+    headings: nodes
+      .map(node => readHeadingPayload(node))
+      .filter((heading): heading is HeadingPayload => heading !== null),
+    nodes,
+  };
+}
+
+function readModelHeadingPayloads(model: DocumentWindowModel): HeadingPayload[] {
+  const headings: HeadingPayload[] = [];
+  for (const entry of model.sections) {
+    if (!entry.html) {
+      continue;
+    }
+
+    const template = document.createElement("template");
+    template.innerHTML = entry.html;
+    const nodes = Array.from(
+      template.content.querySelectorAll<HTMLHeadingElement>("h1, h2, h3, h4, h5, h6")
+    );
+    for (const node of nodes) {
+      const heading = readHeadingPayload(node, {
+        blockIndex: entry.blockIndex,
+        sectionIndex: entry.sectionIndex,
+      });
+      if (heading !== null) {
+        headings.push(heading);
+      }
+    }
+  }
+
+  return headings;
+}
+
+function readClosestBlockIndex(node: HTMLElement): number | undefined {
+  const block = node.closest<HTMLElement>("[data-mm-block-index]");
+  const raw = block?.dataset["mmBlockIndex"];
+  if (raw === undefined || raw.trim() === "") {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function extractAndPostHeadings(): void {
-  // VIRT-TODO(integration): TOC scans only live virtualized headings; off-window
-  // headings need a model/full-heading index.
   const main = document.querySelector<HTMLElement>("main.mm-document");
   if (!main) {
     postHostMessage({ type: "headings-updated", headings: [] });
@@ -2644,31 +2729,14 @@ function extractAndPostHeadings(): void {
     return;
   }
 
-  const nodes = Array.from(
-    main.querySelectorAll<HTMLHeadingElement>("h1, h2, h3, h4, h5, h6")
-  );
-  const headings = nodes
-    .map((node) => {
-      const id = node.id;
-      if (!id) {
-        return null;
-      }
-      const tag = node.tagName.toUpperCase();
-      const level = Number.parseInt(tag.slice(1), 10);
-      if (!Number.isFinite(level) || level < 1 || level > 6) {
-        return null;
-      }
-      const segments = extractHeadingSegments(node);
-      const text = segments.length > 0
-        ? segments.map(segment => segment.text).join("").trim()
-        : (node.textContent ?? "").trim();
-      return { id, level, text, segments };
-    })
-    .filter((h): h is HeadingPayload => h !== null);
+  const live = readLiveHeadingPayloads(main);
+  const headings = virtualizationEnabled && virtualizedDocumentWindowModel !== null
+    ? readModelHeadingPayloads(virtualizedDocumentWindowModel)
+    : live.headings;
 
   lastExtractedHeadings = headings.map(cloneHeadingPayload);
   postHostMessage({ type: "headings-updated", headings });
-  rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
+  rebuildActiveHeadingObserver(live.nodes.filter((n) => !!n.id));
 }
 
 function postCachedHeadings(): void {
@@ -3680,21 +3748,79 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "scroll-to") {
-    // VIRT-TODO(integration): anchor-link scroll-to resolves only live window DOM.
-    document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
+    if (!virtualizationEnabled) {
+      document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
+      return;
+    }
+
+    const main = document.querySelector<HTMLElement>("main.mm-document");
+    if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+      document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
+      return;
+    }
+
+    void renderWindowTargetThenAct({
+      action: ({ targetElement }) => {
+        targetElement?.scrollIntoView({ block: "start" });
+      },
+      actionKind: "navigate",
+      controller: virtualizedDocumentWindowController,
+      descriptor: { anchor: message.anchor, kind: "heading-anchor" },
+      legacyAction: () => {
+        document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
+      },
+      main,
+      model: virtualizedDocumentWindowModel,
+      ownerWindow: window,
+      root: getDocumentScrollRoot(),
+      virtualizationEnabled: true,
+    });
     return;
   }
 
   if (message.type === "scroll-to-heading") {
-    // VIRT-TODO(integration): scroll-to-heading resolves only live window headings.
     // Avalonia-side TOC click handler. The heading id matches the slug
     // used by MarkdownHeadingAnchorSlugger when generating <h1..h6 id="...">
     // in ApplicateHtmlMarkdownRenderer, so getElementById resolves the
     // exact heading the user clicked in the host-side TOC panel.
-    const target = document.getElementById(message.id);
-    if (target) {
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!virtualizationEnabled) {
+      const target = document.getElementById(message.id);
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      return;
     }
+
+    const main = document.querySelector<HTMLElement>("main.mm-document");
+    if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+      const target = document.getElementById(message.id);
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      return;
+    }
+
+    void renderWindowTargetThenAct({
+      action: ({ targetElement }) => {
+        if (targetElement) {
+          targetElement.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      },
+      actionKind: "navigate",
+      controller: virtualizedDocumentWindowController,
+      descriptor: { anchor: message.id, kind: "heading-anchor" },
+      legacyAction: () => {
+        const target = document.getElementById(message.id);
+        if (target) {
+          target.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      },
+      main,
+      model: virtualizedDocumentWindowModel,
+      ownerWindow: window,
+      root: getDocumentScrollRoot(),
+      virtualizationEnabled: true,
+    });
     return;
   }
 
@@ -3731,13 +3857,51 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "scroll-to-block") {
-    // VIRT-TODO(integration): scroll-to-block resolves only live window blocks.
-    const target = document.querySelector<HTMLElement>(
-      `[data-mm-block-index="${message.blockIndex}"]`
-    );
-    if (target) {
-      target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
+    if (!virtualizationEnabled) {
+      const target = document.querySelector<HTMLElement>(
+        `[data-mm-block-index="${message.blockIndex}"]`
+      );
+      if (target) {
+        target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
+      }
+      return;
     }
+
+    const main = document.querySelector<HTMLElement>("main.mm-document");
+    if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+      const target = document.querySelector<HTMLElement>(
+        `[data-mm-block-index="${message.blockIndex}"]`
+      );
+      if (target) {
+        target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
+      }
+      return;
+    }
+
+    void renderWindowTargetThenAct({
+      action: ({ element, targetElement }) => {
+        const target = targetElement ?? element;
+        if (target) {
+          target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
+        }
+      },
+      actionKind: "navigate",
+      controller: virtualizedDocumentWindowController,
+      descriptor: { blockIndex: message.blockIndex, kind: "block" },
+      legacyAction: () => {
+        const target = document.querySelector<HTMLElement>(
+          `[data-mm-block-index="${message.blockIndex}"]`
+        );
+        if (target) {
+          target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
+        }
+      },
+      main,
+      model: virtualizedDocumentWindowModel,
+      ownerWindow: window,
+      root: getDocumentScrollRoot(),
+      virtualizationEnabled: true,
+    });
     return;
   }
 

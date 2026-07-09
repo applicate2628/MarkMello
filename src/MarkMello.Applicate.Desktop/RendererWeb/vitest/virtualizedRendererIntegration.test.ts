@@ -37,14 +37,18 @@ describe("renderer virtualization wiring", () => {
 
     for (const expected of [
       "VIRT-TODO(integration): find-in-page",
-      "VIRT-TODO(integration): TOC",
-      "VIRT-TODO(integration): scroll-to-heading",
-      "VIRT-TODO(integration): anchor-link scroll-to",
-      "VIRT-TODO(integration): scroll-to-block",
       "VIRT-TODO(integration): source-line sync",
       "VIRT-TODO(integration): minimap",
     ]) {
       expect(combined).toContain(expected);
+    }
+    for (const resolved of [
+      "VIRT-TODO(integration): TOC",
+      "VIRT-TODO(integration): scroll-to-heading",
+      "VIRT-TODO(integration): anchor-link scroll-to",
+      "VIRT-TODO(integration): scroll-to-block",
+    ]) {
+      expect(combined).not.toContain(resolved);
     }
   });
 });

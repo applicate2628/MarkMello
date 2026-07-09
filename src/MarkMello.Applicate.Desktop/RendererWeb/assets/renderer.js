@@ -2770,6 +2770,234 @@
     };
   }
 
+  // RendererWeb/src/windowTargetResolver.ts
+  async function renderWindowTargetThenAct(input) {
+    const model = input.model;
+    const controller = input.controller;
+    if (!input.virtualizationEnabled || model === null || controller === null) {
+      return input.legacyAction();
+    }
+    const resolution = resolveWindowTarget(model, input.descriptor);
+    if (resolution === null) {
+      return input.legacyAction();
+    }
+    const originalAnchor = input.actionKind === "query" ? model.captureAnchor(input.root.scrollTop) : null;
+    const originalRange = input.actionKind === "query" ? controller.getCurrentRange() : null;
+    const didRender = ensureResolutionRendered(controller, resolution);
+    if (didRender) {
+      await waitForLayoutTicks(input.ownerWindow, input.layoutTicks ?? 1);
+    }
+    try {
+      return await input.action(readLiveTargetContext(input, resolution));
+    } finally {
+      if (input.actionKind === "query" && didRender && originalAnchor !== null) {
+        restoreReadingAnchor({
+          controller,
+          model,
+          originalAnchor,
+          originalRange,
+          root: input.root
+        });
+      }
+    }
+  }
+  function resolveWindowTarget(model, descriptor) {
+    switch (descriptor.kind) {
+      case "section":
+        return resolveSectionIndex(model, descriptor.sectionIndex, descriptor);
+      case "block": {
+        const entry = model.getEntryContainingBlockIndex(descriptor.blockIndex);
+        return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
+      }
+      case "heading-anchor": {
+        const entry = model.getEntryByHeadingAnchor(descriptor.anchor);
+        return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
+      }
+      case "source-line": {
+        const entry = model.getEntryBySourceLine(descriptor.sourceLine);
+        return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
+      }
+      case "document-y":
+        return resolveSectionIndex(model, model.sectionIndexAtDocumentY(descriptor.documentY), descriptor);
+      case "find-match":
+        return resolveFindMatch(model, descriptor);
+    }
+  }
+  function resolveFindMatch(model, descriptor) {
+    if (descriptor.blockIndex !== void 0) {
+      const entry = model.getEntryContainingBlockIndex(descriptor.blockIndex);
+      return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
+    }
+    if (descriptor.startBlockIndex === void 0 || descriptor.endBlockIndex === void 0) {
+      return null;
+    }
+    const start = model.getEntryContainingBlockIndex(descriptor.startBlockIndex);
+    const end = model.getEntryContainingBlockIndex(descriptor.endBlockIndex);
+    if (start === void 0 || end === void 0) {
+      return null;
+    }
+    const startSection = findSectionArrayIndex(model, start);
+    const endSection = findSectionArrayIndex(model, end);
+    if (startSection < 0 || endSection < 0) {
+      return null;
+    }
+    return {
+      descriptor,
+      entry: start,
+      range: {
+        end: Math.max(startSection, endSection),
+        start: Math.min(startSection, endSection)
+      },
+      sectionIndex: startSection
+    };
+  }
+  function resolveSectionIndex(model, sectionIndex, descriptor) {
+    if (!Number.isFinite(sectionIndex)) {
+      return null;
+    }
+    const normalized = Math.floor(sectionIndex);
+    const entry = model.sections[normalized];
+    if (entry === void 0) {
+      return null;
+    }
+    return {
+      descriptor,
+      entry,
+      range: { end: normalized, start: normalized },
+      sectionIndex: normalized
+    };
+  }
+  function resolutionForEntry(model, entry, descriptor) {
+    const sectionIndex = findSectionArrayIndex(model, entry);
+    if (sectionIndex < 0) {
+      return null;
+    }
+    return {
+      descriptor,
+      entry,
+      range: { end: sectionIndex, start: sectionIndex },
+      sectionIndex
+    };
+  }
+  function ensureResolutionRendered(controller, resolution) {
+    if (resolution.range.start === resolution.range.end && controller.isSectionRendered(resolution.range.start)) {
+      return false;
+    }
+    const options = { preserveAnchor: true };
+    return resolution.range.start === resolution.range.end ? controller.ensureSectionRendered(resolution.range.start, options) : controller.ensureSectionRangeRendered(resolution.range.start, resolution.range.end, options);
+  }
+  function readLiveTargetContext(input, resolution) {
+    const sectionElement = findSectionElement(input.main, resolution.entry);
+    return {
+      element: sectionElement,
+      entry: resolution.entry,
+      range: input.controller?.getCurrentRange() ?? null,
+      sectionHeight: input.model?.sectionEffectiveHeight(resolution.sectionIndex) ?? 0,
+      sectionIndex: resolution.sectionIndex,
+      sectionTop: input.model?.sectionTop(resolution.sectionIndex) ?? 0,
+      targetElement: findTargetElement(input.ownerWindow, sectionElement, resolution.descriptor)
+    };
+  }
+  function findTargetElement(ownerWindow, sectionElement, descriptor) {
+    if (sectionElement === null) {
+      return null;
+    }
+    switch (descriptor.kind) {
+      case "block":
+        return findBlockElement(sectionElement, descriptor.blockIndex);
+      case "heading-anchor": {
+        const anchor = descriptor.anchor.startsWith("#") ? descriptor.anchor.slice(1) : descriptor.anchor;
+        const element = sectionElement.ownerDocument.getElementById(anchor);
+        return element instanceof ownerWindow.HTMLElement && sectionElement.contains(element) ? element : null;
+      }
+      case "source-line":
+        return findSourceLineElement(sectionElement, descriptor.sourceLine);
+      case "find-match":
+        return descriptor.blockIndex === void 0 ? sectionElement : findBlockElement(sectionElement, descriptor.blockIndex);
+      case "document-y":
+      case "section":
+        return sectionElement;
+    }
+  }
+  function findSectionElement(main, entry) {
+    for (const child of Array.from(main.children)) {
+      if (child instanceof main.ownerDocument.defaultView.HTMLElement && readElementBlockIndex(child) === entry.blockIndex) {
+        return child;
+      }
+    }
+    return null;
+  }
+  function findBlockElement(sectionElement, blockIndex) {
+    if (readElementBlockIndex(sectionElement) === blockIndex) {
+      return sectionElement;
+    }
+    for (const element of Array.from(sectionElement.querySelectorAll("[data-mm-block-index]"))) {
+      if (readElementBlockIndex(element) === blockIndex) {
+        return element;
+      }
+    }
+    return null;
+  }
+  function findSourceLineElement(sectionElement, sourceLine) {
+    if (!Number.isFinite(sourceLine)) {
+      return null;
+    }
+    const normalizedLine = Math.max(0, Math.floor(sourceLine));
+    for (const element of Array.from(sectionElement.querySelectorAll("[data-mm-source-line]"))) {
+      const start = parseNonNegativeInt3(element.dataset["mmSourceLine"]);
+      if (start === null) {
+        continue;
+      }
+      const end = Math.max(start, parseNonNegativeInt3(element.dataset["mmSourceEndLine"]) ?? start);
+      if (normalizedLine >= start && normalizedLine <= end) {
+        return element;
+      }
+    }
+    return null;
+  }
+  function restoreReadingAnchor(input) {
+    if (input.originalRange !== null) {
+      input.controller.ensureSectionRangeRendered(input.originalRange.start, input.originalRange.end, {
+        force: true,
+        preserveAnchor: false
+      });
+    } else if (input.originalAnchor.sectionIndex >= 0) {
+      input.controller.ensureSectionRendered(input.originalAnchor.sectionIndex, {
+        force: true,
+        preserveAnchor: false
+      });
+    }
+    input.root.scrollTop = input.model.scrollTopForAnchor(input.originalAnchor);
+  }
+  function waitForLayoutTicks(ownerWindow, count) {
+    const tick = () => new Promise((resolve) => {
+      if (typeof ownerWindow.requestAnimationFrame === "function") {
+        ownerWindow.requestAnimationFrame(() => resolve());
+        return;
+      }
+      ownerWindow.setTimeout(() => resolve(), 0);
+    });
+    return count === 1 ? tick() : tick().then(tick);
+  }
+  function findSectionArrayIndex(model, entry) {
+    return model.sections.findIndex((candidate) => candidate.blockIndex === entry.blockIndex);
+  }
+  function readElementBlockIndex(element) {
+    const raw = element instanceof HTMLElement ? element.dataset["mmBlockIndex"] : void 0;
+    if (raw === void 0 || raw.trim() === "") {
+      return null;
+    }
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  function parseNonNegativeInt3(value) {
+    if (value === void 0 || value.trim() === "") {
+      return null;
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -4646,6 +4874,73 @@
     root.childNodes.forEach(visit);
     return segments;
   }
+  function readHeadingPayload(node, metadata = {}) {
+    const id = node.id;
+    if (!id) {
+      return null;
+    }
+    const tag = node.tagName.toUpperCase();
+    const level = Number.parseInt(tag.slice(1), 10);
+    if (!Number.isFinite(level) || level < 1 || level > 6) {
+      return null;
+    }
+    const segments = extractHeadingSegments(node);
+    const text = segments.length > 0 ? segments.map((segment) => segment.text).join("").trim() : (node.textContent ?? "").trim();
+    const heading = { id, level, text, segments };
+    const includeModelMetadata = metadata.blockIndex !== void 0 || metadata.sectionIndex !== void 0;
+    const blockIndex = includeModelMetadata ? readClosestBlockIndex(node) ?? metadata.blockIndex : void 0;
+    if (blockIndex !== void 0) {
+      heading.blockIndex = blockIndex;
+    }
+    if (metadata.sectionIndex !== void 0) {
+      heading.sectionIndex = metadata.sectionIndex;
+    }
+    return heading;
+  }
+  function readLiveHeadingNodes(main) {
+    return Array.from(
+      main.querySelectorAll("h1, h2, h3, h4, h5, h6")
+    );
+  }
+  function readLiveHeadingPayloads(main) {
+    const nodes = readLiveHeadingNodes(main);
+    return {
+      headings: nodes.map((node) => readHeadingPayload(node)).filter((heading) => heading !== null),
+      nodes
+    };
+  }
+  function readModelHeadingPayloads(model) {
+    const headings = [];
+    for (const entry of model.sections) {
+      if (!entry.html) {
+        continue;
+      }
+      const template = document.createElement("template");
+      template.innerHTML = entry.html;
+      const nodes = Array.from(
+        template.content.querySelectorAll("h1, h2, h3, h4, h5, h6")
+      );
+      for (const node of nodes) {
+        const heading = readHeadingPayload(node, {
+          blockIndex: entry.blockIndex,
+          sectionIndex: entry.sectionIndex
+        });
+        if (heading !== null) {
+          headings.push(heading);
+        }
+      }
+    }
+    return headings;
+  }
+  function readClosestBlockIndex(node) {
+    const block = node.closest("[data-mm-block-index]");
+    const raw = block?.dataset["mmBlockIndex"];
+    if (raw === void 0 || raw.trim() === "") {
+      return void 0;
+    }
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : void 0;
+  }
   function extractAndPostHeadings() {
     const main = document.querySelector("main.mm-document");
     if (!main) {
@@ -4654,26 +4949,11 @@
       lastPostedActiveHeadingId = null;
       return;
     }
-    const nodes = Array.from(
-      main.querySelectorAll("h1, h2, h3, h4, h5, h6")
-    );
-    const headings = nodes.map((node) => {
-      const id = node.id;
-      if (!id) {
-        return null;
-      }
-      const tag = node.tagName.toUpperCase();
-      const level = Number.parseInt(tag.slice(1), 10);
-      if (!Number.isFinite(level) || level < 1 || level > 6) {
-        return null;
-      }
-      const segments = extractHeadingSegments(node);
-      const text = segments.length > 0 ? segments.map((segment) => segment.text).join("").trim() : (node.textContent ?? "").trim();
-      return { id, level, text, segments };
-    }).filter((h) => h !== null);
+    const live = readLiveHeadingPayloads(main);
+    const headings = virtualizationEnabled && virtualizedDocumentWindowModel !== null ? readModelHeadingPayloads(virtualizedDocumentWindowModel) : live.headings;
     lastExtractedHeadings = headings.map(cloneHeadingPayload);
     postHostMessage({ type: "headings-updated", headings });
-    rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
+    rebuildActiveHeadingObserver(live.nodes.filter((n) => !!n.id));
   }
   function postCachedHeadings() {
     const cachedHeadings = restoredCachedHeadings;
@@ -5353,14 +5633,70 @@
       return;
     }
     if (message.type === "scroll-to") {
-      document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
+      if (!virtualizationEnabled) {
+        document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
+        return;
+      }
+      const main = document.querySelector("main.mm-document");
+      if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+        document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
+        return;
+      }
+      void renderWindowTargetThenAct({
+        action: ({ targetElement }) => {
+          targetElement?.scrollIntoView({ block: "start" });
+        },
+        actionKind: "navigate",
+        controller: virtualizedDocumentWindowController,
+        descriptor: { anchor: message.anchor, kind: "heading-anchor" },
+        legacyAction: () => {
+          document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
+        },
+        main,
+        model: virtualizedDocumentWindowModel,
+        ownerWindow: window,
+        root: getDocumentScrollRoot(),
+        virtualizationEnabled: true
+      });
       return;
     }
     if (message.type === "scroll-to-heading") {
-      const target = document.getElementById(message.id);
-      if (target) {
-        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (!virtualizationEnabled) {
+        const target = document.getElementById(message.id);
+        if (target) {
+          target.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        return;
       }
+      const main = document.querySelector("main.mm-document");
+      if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+        const target = document.getElementById(message.id);
+        if (target) {
+          target.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        return;
+      }
+      void renderWindowTargetThenAct({
+        action: ({ targetElement }) => {
+          if (targetElement) {
+            targetElement.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        },
+        actionKind: "navigate",
+        controller: virtualizedDocumentWindowController,
+        descriptor: { anchor: message.id, kind: "heading-anchor" },
+        legacyAction: () => {
+          const target = document.getElementById(message.id);
+          if (target) {
+            target.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        },
+        main,
+        model: virtualizedDocumentWindowModel,
+        ownerWindow: window,
+        root: getDocumentScrollRoot(),
+        virtualizationEnabled: true
+      });
       return;
     }
     if (message.type === "scroll-to-source-line") {
@@ -5384,12 +5720,49 @@
       return;
     }
     if (message.type === "scroll-to-block") {
-      const target = document.querySelector(
-        `[data-mm-block-index="${message.blockIndex}"]`
-      );
-      if (target) {
-        target.scrollIntoView({ block: "start", behavior: "instant" });
+      if (!virtualizationEnabled) {
+        const target = document.querySelector(
+          `[data-mm-block-index="${message.blockIndex}"]`
+        );
+        if (target) {
+          target.scrollIntoView({ block: "start", behavior: "instant" });
+        }
+        return;
       }
+      const main = document.querySelector("main.mm-document");
+      if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+        const target = document.querySelector(
+          `[data-mm-block-index="${message.blockIndex}"]`
+        );
+        if (target) {
+          target.scrollIntoView({ block: "start", behavior: "instant" });
+        }
+        return;
+      }
+      void renderWindowTargetThenAct({
+        action: ({ element, targetElement }) => {
+          const target = targetElement ?? element;
+          if (target) {
+            target.scrollIntoView({ block: "start", behavior: "instant" });
+          }
+        },
+        actionKind: "navigate",
+        controller: virtualizedDocumentWindowController,
+        descriptor: { blockIndex: message.blockIndex, kind: "block" },
+        legacyAction: () => {
+          const target = document.querySelector(
+            `[data-mm-block-index="${message.blockIndex}"]`
+          );
+          if (target) {
+            target.scrollIntoView({ block: "start", behavior: "instant" });
+          }
+        },
+        main,
+        model: virtualizedDocumentWindowModel,
+        ownerWindow: window,
+        root: getDocumentScrollRoot(),
+        virtualizationEnabled: true
+      });
       return;
     }
     if (message.type === "load-document") {
