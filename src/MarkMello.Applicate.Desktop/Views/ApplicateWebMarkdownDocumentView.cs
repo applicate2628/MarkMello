@@ -127,6 +127,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private NativeWindowPlacement? _pendingNativeHiddenPaintPlacement;
     private readonly HashSet<string> _postedRendererDocumentCacheKeys = new(StringComparer.Ordinal);
     private readonly Dictionary<long, object> _pendingRendererCacheFallbackLoads = new();
+    private ApplicateBlockTextIndex? _currentFindTextIndex;
+    private long _currentFindTextIndexRenderId;
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -1100,13 +1102,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         if (source is null)
         {
+            ClearCurrentFindTextIndex();
             DeleteCurrentGeneratedDocument();
             _webView.Navigate(new Uri("about:blank"));
             return;
         }
 
         _renderCancellation = new CancellationTokenSource();
-        _ = RenderAsync(source, _renderCancellation.Token);
+        _ = RenderAsync(source, renderId, _renderCancellation.Token);
     }
 
     private async Task QueueRenderShellAsync(
@@ -1157,6 +1160,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
             if (source is null)
             {
+                ClearCurrentFindTextIndex();
                 ApplicateTrace.ModeToggle($"Web.RenderShell post-clear id={renderId}");
                 PostRendererMessage(new { type = "clear-document" });
                 return;
@@ -1190,6 +1194,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                     $"Web.RenderShell render-body-cache-hit id={renderId} source={source.Path} htmlLength={body.BodyHtml.Length} theme={GetThemeName()}");
             }
 
+            SetCurrentFindTextIndex(renderId, body.Blocks);
             ConfigureDocumentRevealGate(
                 renderId,
                 requiresPostReadyEnhancements: body.HasMermaidBlock || body.HasCodeBlockWithSyntax);
@@ -1607,13 +1612,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
     }
 
-    private async Task RenderAsync(MarkdownSource source, CancellationToken cancellationToken)
+    private async Task RenderAsync(MarkdownSource source, long renderId, CancellationToken cancellationToken)
     {
         try
         {
             var document = await _renderer
                 .RenderAsync(source, ReadingPreferences, ImageSourceResolver, cancellationToken)
                 .ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            SetCurrentFindTextIndex(renderId, document.Blocks);
 
             string? generatedDocumentPath = null;
             try
@@ -1916,6 +1923,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (type == "document-cache-miss")
             {
                 HandleDocumentCacheMissMessage(document.RootElement);
+                return;
+            }
+
+            if (type == "find-query")
+            {
+                HandleFindQueryMessage(document.RootElement);
                 return;
             }
 
@@ -2353,6 +2366,78 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     public void OpenFindBar()
     {
         PostRendererMessage(new { type = "open-find-bar" });
+    }
+
+    private void SetCurrentFindTextIndex(long renderId, IReadOnlyList<ApplicateHtmlBlockMarker> blocks)
+    {
+        _currentFindTextIndex = ApplicateBlockTextIndex.Create(blocks);
+        _currentFindTextIndexRenderId = renderId;
+    }
+
+    private void ClearCurrentFindTextIndex()
+    {
+        _currentFindTextIndex = null;
+        _currentFindTextIndexRenderId = 0;
+    }
+
+    private void HandleFindQueryMessage(JsonElement root)
+    {
+        if (!root.TryGetProperty("requestId", out var requestIdProperty)
+            || requestIdProperty.ValueKind != JsonValueKind.Number
+            || !requestIdProperty.TryGetInt64(out var requestId)
+            || requestId <= 0)
+        {
+            return;
+        }
+
+        var query = root.TryGetProperty("query", out var queryProperty)
+            ? SafeGetString(queryProperty) ?? string.Empty
+            : string.Empty;
+        long? requestedRenderId = null;
+        if (root.TryGetProperty("renderId", out var renderIdProperty)
+            && renderIdProperty.ValueKind == JsonValueKind.Number
+            && renderIdProperty.TryGetInt64(out var parsedRenderId)
+            && parsedRenderId > 0)
+        {
+            requestedRenderId = parsedRenderId;
+        }
+
+        if (_currentFindTextIndex is null
+            || (requestedRenderId is long renderId && renderId != _currentFindTextIndexRenderId))
+        {
+            PostRendererMessage(new
+            {
+                type = "find-results",
+                requestId,
+                query,
+                renderId = requestedRenderId,
+                totalCount = 0,
+                matches = Array.Empty<object>(),
+                stale = _currentFindTextIndex is not null
+            });
+            return;
+        }
+
+        var result = _currentFindTextIndex.Search(query);
+        PostRendererMessage(new
+        {
+            type = "find-results",
+            requestId,
+            query,
+            renderId = _currentFindTextIndexRenderId,
+            totalCount = result.TotalCount,
+            matches = result.Matches.Select(static match => new
+            {
+                matchId = match.MatchId,
+                blockIndex = match.BlockIndex,
+                startBlockIndex = match.StartBlockIndex,
+                endBlockIndex = match.EndBlockIndex,
+                blockLocalOffset = match.BlockLocalOffset,
+                length = match.Length,
+                normalizedText = match.NormalizedText,
+                ordinal = match.Ordinal
+            }).ToArray()
+        });
     }
 
     private void HandleMinimapStateMessage(JsonElement root)

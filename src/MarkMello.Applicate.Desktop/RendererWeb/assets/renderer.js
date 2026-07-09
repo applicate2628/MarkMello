@@ -837,20 +837,22 @@
     return out;
   }
   function applyHighlights(s) {
+    applyFindHighlights(s.matches, s.matches[s.currentIndex]);
+  }
+  function applyFindHighlights(ranges, currentRange) {
     const reg = getHighlightRegistry();
     if (reg === null) {
       return;
     }
-    if (s.matches.length === 0) {
+    if (ranges.length === 0) {
       reg.delete(HIGHLIGHT_ALL);
       reg.delete(HIGHLIGHT_CURRENT);
       return;
     }
-    const all = makeHighlight(s.matches);
+    const all = makeHighlight(ranges);
     if (all !== null) {
       reg.set(HIGHLIGHT_ALL, all);
     }
-    const currentRange = s.matches[s.currentIndex];
     if (currentRange !== void 0) {
       const current = makeHighlight([currentRange]);
       if (current !== null) {
@@ -860,12 +862,15 @@
       reg.delete(HIGHLIGHT_CURRENT);
     }
   }
-  function clearHighlights() {
+  function clearFindHighlights() {
     const reg = getHighlightRegistry();
     if (reg !== null) {
       reg.delete(HIGHLIGHT_ALL);
       reg.delete(HIGHLIGHT_CURRENT);
     }
+  }
+  function clearHighlights() {
+    clearFindHighlights();
   }
   function rebuildMatches(s) {
     s.matches = buildMatches(document.body, s.lastSearched);
@@ -922,6 +927,20 @@
     s.bar.classList.remove("mm-find-no-match");
     s.count.textContent = `${s.currentIndex + 1} of ${s.matches.length}`;
   }
+  function updateProviderCountDisplay(s, status) {
+    if (s.input.value.length === 0 || status.query.length === 0) {
+      s.count.textContent = "";
+      s.bar.classList.remove("mm-find-no-match");
+      return;
+    }
+    if (status.totalCount === 0) {
+      s.count.textContent = "0 of 0";
+      s.bar.classList.add("mm-find-no-match");
+      return;
+    }
+    s.bar.classList.remove("mm-find-no-match");
+    s.count.textContent = `${status.currentIndex >= 0 ? status.currentIndex + 1 : 0} of ${status.totalCount}`;
+  }
   function runSearch(s, query) {
     s.lastSearched = query;
     if (query.length === 0) {
@@ -958,7 +977,7 @@
     scrollToCurrent(s);
     updateCountDisplay(s);
   }
-  function createFindBar() {
+  function createFindBar(provider) {
     let state2 = null;
     function buildDom() {
       const bar = document.createElement("div");
@@ -1028,6 +1047,9 @@
       s.observer.observe(main, { childList: true, subtree: true });
     }
     function attachListeners(s) {
+      provider?.setView({
+        updateStatus: (status) => updateProviderCountDisplay(s, status)
+      });
       s.input.addEventListener("input", () => {
         const query = s.input.value;
         if (s.debounceTimer !== null) {
@@ -1035,7 +1057,11 @@
         }
         s.debounceTimer = window.setTimeout(() => {
           s.debounceTimer = null;
-          runSearch(s, query);
+          if (provider) {
+            provider.search(query);
+          } else {
+            runSearch(s, query);
+          }
         }, FIND_DEBOUNCE_MS);
       });
       s.input.addEventListener("keydown", (event) => {
@@ -1044,10 +1070,18 @@
           if (s.debounceTimer !== null) {
             window.clearTimeout(s.debounceTimer);
             s.debounceTimer = null;
-            runSearch(s, s.input.value);
+            if (provider) {
+              provider.search(s.input.value);
+            } else {
+              runSearch(s, s.input.value);
+            }
             return;
           }
-          navigate(s, event.shiftKey ? "prev" : "next");
+          if (provider) {
+            provider.navigate(event.shiftKey ? "prev" : "next");
+          } else {
+            navigate(s, event.shiftKey ? "prev" : "next");
+          }
         } else if (event.key === "Escape") {
           event.preventDefault();
           event.stopPropagation();
@@ -1055,11 +1089,19 @@
         }
       });
       s.prevBtn.addEventListener("click", () => {
-        navigate(s, "prev");
+        if (provider) {
+          provider.navigate("prev");
+        } else {
+          navigate(s, "prev");
+        }
         s.input.focus();
       });
       s.nextBtn.addEventListener("click", () => {
-        navigate(s, "next");
+        if (provider) {
+          provider.navigate("next");
+        } else {
+          navigate(s, "next");
+        }
         s.input.focus();
       });
       s.closeBtn.addEventListener("click", () => {
@@ -1075,7 +1117,9 @@
         document.body.appendChild(state2.bar);
       }
       state2.bar.classList.add("mm-find-bar-open");
-      connectObserver(state2);
+      if (!provider) {
+        connectObserver(state2);
+      }
       state2.input.focus();
       state2.input.select();
     }
@@ -1099,6 +1143,7 @@
       state2.matchesDirty = false;
       state2.count.textContent = "";
       state2.bar.classList.remove("mm-find-no-match");
+      provider?.close();
       clearHighlights();
     }
     function toggle() {
@@ -1118,16 +1163,508 @@
     };
   }
 
+  // RendererWeb/src/windowTargetResolver.ts
+  async function renderWindowTargetThenAct(input) {
+    const model = input.model;
+    const controller = input.controller;
+    if (!input.virtualizationEnabled || model === null || controller === null) {
+      return input.legacyAction();
+    }
+    const resolution = resolveWindowTarget(model, input.descriptor);
+    if (resolution === null) {
+      return input.legacyAction();
+    }
+    const originalAnchor = input.actionKind === "query" ? model.captureAnchor(input.root.scrollTop) : null;
+    const originalRange = input.actionKind === "query" ? controller.getCurrentRange() : null;
+    const didRender = ensureResolutionRendered(controller, resolution);
+    if (didRender) {
+      await waitForLayoutTicks(input.ownerWindow, input.layoutTicks ?? 1);
+    }
+    try {
+      return await input.action(readLiveTargetContext(input, resolution));
+    } finally {
+      if (input.actionKind === "query" && didRender && originalAnchor !== null) {
+        restoreReadingAnchor({
+          controller,
+          model,
+          originalAnchor,
+          originalRange,
+          root: input.root
+        });
+      }
+    }
+  }
+  function resolveWindowTarget(model, descriptor) {
+    switch (descriptor.kind) {
+      case "section":
+        return resolveSectionIndex(model, descriptor.sectionIndex, descriptor);
+      case "block": {
+        const entry = model.getEntryContainingBlockIndex(descriptor.blockIndex);
+        return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
+      }
+      case "heading-anchor": {
+        const entry = model.getEntryByHeadingAnchor(descriptor.anchor);
+        return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
+      }
+      case "source-line": {
+        const entry = model.getEntryBySourceLine(descriptor.sourceLine);
+        return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
+      }
+      case "document-y":
+        return resolveSectionIndex(model, model.sectionIndexAtDocumentY(descriptor.documentY), descriptor);
+      case "find-match":
+        return resolveFindMatch(model, descriptor);
+    }
+  }
+  function resolveFindMatch(model, descriptor) {
+    if (descriptor.blockIndex !== void 0) {
+      const entry = model.getEntryContainingBlockIndex(descriptor.blockIndex);
+      return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
+    }
+    if (descriptor.startBlockIndex === void 0 || descriptor.endBlockIndex === void 0) {
+      return null;
+    }
+    const start = model.getEntryContainingBlockIndex(descriptor.startBlockIndex);
+    const end = model.getEntryContainingBlockIndex(descriptor.endBlockIndex);
+    if (start === void 0 || end === void 0) {
+      return null;
+    }
+    const startSection = findSectionArrayIndex(model, start);
+    const endSection = findSectionArrayIndex(model, end);
+    if (startSection < 0 || endSection < 0) {
+      return null;
+    }
+    return {
+      descriptor,
+      entry: start,
+      range: {
+        end: Math.max(startSection, endSection),
+        start: Math.min(startSection, endSection)
+      },
+      sectionIndex: startSection
+    };
+  }
+  function resolveSectionIndex(model, sectionIndex, descriptor) {
+    if (!Number.isFinite(sectionIndex)) {
+      return null;
+    }
+    const normalized = Math.floor(sectionIndex);
+    const entry = model.sections[normalized];
+    if (entry === void 0) {
+      return null;
+    }
+    return {
+      descriptor,
+      entry,
+      range: { end: normalized, start: normalized },
+      sectionIndex: normalized
+    };
+  }
+  function resolutionForEntry(model, entry, descriptor) {
+    const sectionIndex = findSectionArrayIndex(model, entry);
+    if (sectionIndex < 0) {
+      return null;
+    }
+    return {
+      descriptor,
+      entry,
+      range: { end: sectionIndex, start: sectionIndex },
+      sectionIndex
+    };
+  }
+  function ensureResolutionRendered(controller, resolution) {
+    if (resolution.range.start === resolution.range.end && controller.isSectionRendered(resolution.range.start)) {
+      return false;
+    }
+    const options = { preserveAnchor: true };
+    return resolution.range.start === resolution.range.end ? controller.ensureSectionRendered(resolution.range.start, options) : controller.ensureSectionRangeRendered(resolution.range.start, resolution.range.end, options);
+  }
+  function readLiveTargetContext(input, resolution) {
+    const sectionElement = findSectionElement(input.main, resolution.entry);
+    return {
+      element: sectionElement,
+      entry: resolution.entry,
+      range: input.controller?.getCurrentRange() ?? null,
+      sectionHeight: input.model?.sectionEffectiveHeight(resolution.sectionIndex) ?? 0,
+      sectionIndex: resolution.sectionIndex,
+      sectionTop: input.model?.sectionTop(resolution.sectionIndex) ?? 0,
+      targetElement: findTargetElement(input.ownerWindow, sectionElement, resolution.descriptor)
+    };
+  }
+  function findTargetElement(ownerWindow, sectionElement, descriptor) {
+    if (sectionElement === null) {
+      return null;
+    }
+    switch (descriptor.kind) {
+      case "block":
+        return findBlockElement(sectionElement, descriptor.blockIndex);
+      case "heading-anchor": {
+        const anchor = descriptor.anchor.startsWith("#") ? descriptor.anchor.slice(1) : descriptor.anchor;
+        const element = sectionElement.ownerDocument.getElementById(anchor);
+        return element instanceof ownerWindow.HTMLElement && sectionElement.contains(element) ? element : null;
+      }
+      case "source-line":
+        return findSourceLineElement(sectionElement, descriptor.sourceLine);
+      case "find-match":
+        return descriptor.blockIndex === void 0 ? sectionElement : findBlockElement(sectionElement, descriptor.blockIndex);
+      case "document-y":
+      case "section":
+        return sectionElement;
+    }
+  }
+  function findSectionElement(main, entry) {
+    for (const child of Array.from(main.children)) {
+      if (child instanceof main.ownerDocument.defaultView.HTMLElement && readElementBlockIndex(child) === entry.blockIndex) {
+        return child;
+      }
+    }
+    return null;
+  }
+  function findBlockElement(sectionElement, blockIndex) {
+    if (readElementBlockIndex(sectionElement) === blockIndex) {
+      return sectionElement;
+    }
+    for (const element of Array.from(sectionElement.querySelectorAll("[data-mm-block-index]"))) {
+      if (readElementBlockIndex(element) === blockIndex) {
+        return element;
+      }
+    }
+    return null;
+  }
+  function findSourceLineElement(sectionElement, sourceLine) {
+    if (!Number.isFinite(sourceLine)) {
+      return null;
+    }
+    const normalizedLine = Math.max(0, Math.floor(sourceLine));
+    for (const element of Array.from(sectionElement.querySelectorAll("[data-mm-source-line]"))) {
+      const start = parseNonNegativeInt(element.dataset["mmSourceLine"]);
+      if (start === null) {
+        continue;
+      }
+      const end = Math.max(start, parseNonNegativeInt(element.dataset["mmSourceEndLine"]) ?? start);
+      if (normalizedLine >= start && normalizedLine <= end) {
+        return element;
+      }
+    }
+    return null;
+  }
+  function restoreReadingAnchor(input) {
+    if (input.originalRange !== null) {
+      input.controller.ensureSectionRangeRendered(input.originalRange.start, input.originalRange.end, {
+        force: true,
+        preserveAnchor: false
+      });
+    } else if (input.originalAnchor.sectionIndex >= 0) {
+      input.controller.ensureSectionRendered(input.originalAnchor.sectionIndex, {
+        force: true,
+        preserveAnchor: false
+      });
+    }
+    input.root.scrollTop = input.model.scrollTopForAnchor(input.originalAnchor);
+  }
+  function waitForLayoutTicks(ownerWindow, count) {
+    const tick = () => new Promise((resolve) => {
+      if (typeof ownerWindow.requestAnimationFrame === "function") {
+        ownerWindow.requestAnimationFrame(() => resolve());
+        return;
+      }
+      ownerWindow.setTimeout(() => resolve(), 0);
+    });
+    return count === 1 ? tick() : tick().then(tick);
+  }
+  function findSectionArrayIndex(model, entry) {
+    return model.sections.findIndex((candidate) => candidate.blockIndex === entry.blockIndex);
+  }
+  function readElementBlockIndex(element) {
+    const raw = element instanceof HTMLElement ? element.dataset["mmBlockIndex"] : void 0;
+    if (raw === void 0 || raw.trim() === "") {
+      return null;
+    }
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  function parseNonNegativeInt(value) {
+    if (value === void 0 || value.trim() === "") {
+      return null;
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+
+  // RendererWeb/src/virtualizedFindProvider.ts
+  var FIND_VISIBLE_SKIP_SELECTOR = [
+    "aside",
+    ".mm-minimap",
+    ".mm-minimap-viewport",
+    ".mm-width-handle",
+    ".mm-drop-overlay",
+    ".katex-mathml",
+    "pre.mm-mermaid.is-rendered",
+    ".mm-find-bar"
+  ].join(",");
+  function createVirtualizedFindProvider(deps) {
+    let view = null;
+    let requestSequence = 0;
+    let latestRequestId = 0;
+    let currentQuery = "";
+    let matches = [];
+    let totalCount = 0;
+    let currentIndex = -1;
+    let navigationSequence = 0;
+    const updateStatus = () => {
+      const status = {
+        currentIndex,
+        query: currentQuery,
+        totalCount
+      };
+      view?.updateStatus(status);
+    };
+    const resetResults = (query = "") => {
+      currentQuery = query;
+      matches = [];
+      totalCount = 0;
+      currentIndex = -1;
+      clearFindHighlights();
+      updateStatus();
+    };
+    const paintVisibleHighlights = () => {
+      const allRanges = [];
+      let currentRange = null;
+      const currentMatch = currentIndex >= 0 ? matches[currentIndex] : void 0;
+      for (const match of matches) {
+        const range = resolveLiveRangeForMatch(match);
+        if (range === null) {
+          continue;
+        }
+        allRanges.push(range);
+        if (currentMatch !== void 0 && match.matchId === currentMatch.matchId) {
+          currentRange = range;
+        }
+      }
+      applyFindHighlights(allRanges, currentRange ?? void 0);
+      return currentRange;
+    };
+    const search = (query) => {
+      currentQuery = query;
+      navigationSequence++;
+      currentIndex = -1;
+      totalCount = 0;
+      matches = [];
+      clearFindHighlights();
+      updateStatus();
+      if (query.length === 0) {
+        return;
+      }
+      const context = deps.readContext();
+      const request = {
+        query,
+        requestId: ++requestSequence,
+        type: "find-query"
+      };
+      if (context.renderId !== null) {
+        request.renderId = context.renderId;
+      }
+      latestRequestId = request.requestId;
+      deps.postHostMessage(request);
+    };
+    const handleFindResults = (message) => {
+      if (message.stale === true || message.requestId !== latestRequestId || message.query !== currentQuery) {
+        return;
+      }
+      const context = deps.readContext();
+      if (context.renderId !== null && message.renderId !== void 0 && message.renderId !== null && message.renderId !== context.renderId) {
+        return;
+      }
+      matches = message.matches.filter(isUsableDescriptor).slice().sort((left, right) => left.ordinal - right.ordinal);
+      totalCount = Math.max(0, Math.floor(message.totalCount));
+      currentIndex = -1;
+      paintVisibleHighlights();
+      updateStatus();
+    };
+    const navigate2 = (direction) => {
+      if (matches.length === 0) {
+        paintVisibleHighlights();
+        updateStatus();
+        return;
+      }
+      if (currentIndex < 0) {
+        currentIndex = direction === "next" ? 0 : matches.length - 1;
+      } else {
+        currentIndex = (currentIndex + (direction === "next" ? 1 : -1) + matches.length) % matches.length;
+      }
+      const match = matches[currentIndex];
+      const sequence = ++navigationSequence;
+      void renderMatchThenAct(match, sequence);
+      updateStatus();
+    };
+    const renderMatchThenAct = async (match, sequence) => {
+      const context = deps.readContext();
+      if (!context.virtualizationEnabled || context.model === null || context.controller === null || context.main === null) {
+        if (sequence !== navigationSequence) {
+          return;
+        }
+        const currentRange = paintVisibleHighlights();
+        scrollRangeIntoView(currentRange, null);
+        updateStatus();
+        return;
+      }
+      const descriptor = {
+        blockIndex: match.blockIndex,
+        kind: "find-match",
+        matchId: match.matchId
+      };
+      if (match.startBlockIndex !== void 0) {
+        descriptor.startBlockIndex = match.startBlockIndex;
+      }
+      if (match.endBlockIndex !== void 0) {
+        descriptor.endBlockIndex = match.endBlockIndex;
+      }
+      const pendingRender = renderWindowTargetThenAct({
+        action: ({ element, targetElement }) => {
+          if (sequence !== navigationSequence) {
+            return;
+          }
+          const currentRange = paintVisibleHighlights();
+          scrollRangeIntoView(currentRange, targetElement ?? element);
+        },
+        actionKind: "navigate",
+        controller: context.controller,
+        descriptor,
+        legacyAction: () => {
+          if (sequence !== navigationSequence) {
+            return;
+          }
+          const currentRange = paintVisibleHighlights();
+          scrollRangeIntoView(currentRange, null);
+        },
+        main: context.main,
+        model: context.model,
+        ownerWindow: context.ownerWindow,
+        root: context.root,
+        virtualizationEnabled: context.virtualizationEnabled
+      });
+      if (sequence === navigationSequence) {
+        const currentRange = paintVisibleHighlights();
+        scrollRangeIntoView(currentRange, findLiveBlockElement(match.blockIndex));
+        updateStatus();
+      }
+      await pendingRender;
+      if (sequence === navigationSequence) {
+        const currentRange = paintVisibleHighlights();
+        scrollRangeIntoView(currentRange, findLiveBlockElement(match.blockIndex));
+        updateStatus();
+      }
+    };
+    return {
+      close: () => {
+        latestRequestId = ++requestSequence;
+        navigationSequence++;
+        resetResults("");
+      },
+      handleFindResults,
+      navigate: navigate2,
+      refreshVisibleHighlights: () => {
+        paintVisibleHighlights();
+      },
+      search,
+      setView: (nextView) => {
+        view = nextView;
+        updateStatus();
+      }
+    };
+  }
+  function isUsableDescriptor(match) {
+    return typeof match.matchId === "string" && Number.isFinite(match.blockIndex) && Number.isFinite(match.blockLocalOffset) && match.blockLocalOffset >= 0 && Number.isFinite(match.length) && match.length > 0 && typeof match.normalizedText === "string" && Number.isFinite(match.ordinal) && match.ordinal > 0;
+  }
+  function resolveLiveRangeForMatch(match) {
+    const block = findLiveBlockElement(match.blockIndex);
+    if (block === null) {
+      return null;
+    }
+    return rangeFromBlockLocalOffset(block, match.blockLocalOffset, match.length) ?? rangeFromNormalizedText(block, match.normalizedText);
+  }
+  function findLiveBlockElement(blockIndex) {
+    return document.querySelector(`[data-mm-block-index="${blockIndex}"]`);
+  }
+  function rangeFromBlockLocalOffset(block, offset, length) {
+    const endOffset = offset + length;
+    if (!Number.isFinite(offset) || !Number.isFinite(length) || offset < 0 || length <= 0) {
+      return null;
+    }
+    let cursor = 0;
+    let startNode = null;
+    let startInNode = 0;
+    let endNode = null;
+    let endInNode = 0;
+    for (const node of visibleTextNodes(block)) {
+      const textLength = node.nodeValue?.length ?? 0;
+      const nextCursor = cursor + textLength;
+      if (startNode === null && offset >= cursor && offset <= nextCursor) {
+        startNode = node;
+        startInNode = offset - cursor;
+      }
+      if (startNode !== null && endOffset >= cursor && endOffset <= nextCursor) {
+        endNode = node;
+        endInNode = endOffset - cursor;
+        break;
+      }
+      cursor = nextCursor;
+    }
+    if (startNode === null || endNode === null) {
+      return null;
+    }
+    const range = document.createRange();
+    range.setStart(startNode, startInNode);
+    range.setEnd(endNode, endInNode);
+    return range.toString().length === length ? range : null;
+  }
+  function rangeFromNormalizedText(block, normalizedText) {
+    if (normalizedText.length === 0) {
+      return null;
+    }
+    for (const node of visibleTextNodes(block)) {
+      for (const [start, end] of findCaseInsensitiveMatchOffsets(node.nodeValue ?? "", normalizedText)) {
+        const range = document.createRange();
+        range.setStart(node, start);
+        range.setEnd(node, end);
+        return range;
+      }
+    }
+    return null;
+  }
+  function visibleTextNodes(root) {
+    const out = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const parent = node.parentElement;
+        if (parent === null || parent.closest(FIND_VISIBLE_SKIP_SELECTOR) !== null) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    for (let current = walker.nextNode(); current !== null; current = walker.nextNode()) {
+      if (current.nodeType === Node.TEXT_NODE) {
+        out.push(current);
+      }
+    }
+    return out;
+  }
+  function scrollRangeIntoView(range, fallback) {
+    const host = range?.startContainer.parentElement?.closest("[data-mm-block-index]") ?? fallback;
+    host?.scrollIntoView({ block: "center", behavior: "instant" });
+  }
+
   // RendererWeb/src/sourceLineSync.ts
   var SOURCE_LINE_ANCHOR_SELECTOR = "[data-mm-source-line]";
   function readSourceLineAnchors(root = document, scrollY = window.scrollY) {
     const anchors = [];
     for (const element of Array.from(root.querySelectorAll(SOURCE_LINE_ANCHOR_SELECTOR))) {
-      const sourceLine = parseNonNegativeInt(element.dataset["mmSourceLine"]);
+      const sourceLine = parseNonNegativeInt2(element.dataset["mmSourceLine"]);
       if (sourceLine === null) {
         continue;
       }
-      const endLine = parseNonNegativeInt(element.dataset["mmSourceEndLine"]) ?? sourceLine;
+      const endLine = parseNonNegativeInt2(element.dataset["mmSourceEndLine"]) ?? sourceLine;
       anchors.push({
         sourceLine,
         endLine: Math.max(sourceLine, endLine),
@@ -1242,7 +1779,7 @@
     const next = anchors[selectedIndex + 1] ?? null;
     return next === null && normalizedY > selected.top;
   }
-  function parseNonNegativeInt(value) {
+  function parseNonNegativeInt2(value) {
     if (value === void 0 || value.trim() === "") {
       return null;
     }
@@ -2276,9 +2813,9 @@
       if (/^H[1-6]$/i.test(element.tagName) && element.id.trim().length > 0) {
         headingAnchors.push(element.id);
       }
-      const sourceLine = parseNonNegativeInt2(element.dataset["mmSourceLine"]);
+      const sourceLine = parseNonNegativeInt3(element.dataset["mmSourceLine"]);
       if (sourceLine !== null) {
-        const rawEndLine = parseNonNegativeInt2(element.dataset["mmSourceEndLine"]);
+        const rawEndLine = parseNonNegativeInt3(element.dataset["mmSourceEndLine"]);
         sourceLineSpans.push({
           endLine: Math.max(sourceLine, rawEndLine ?? sourceLine),
           sourceLine
@@ -2343,7 +2880,7 @@
     const parsed = Number.parseInt(value, 10);
     return Number.isFinite(parsed) ? parsed : null;
   }
-  function parseNonNegativeInt2(value) {
+  function parseNonNegativeInt3(value) {
     const parsed = parseFiniteInt(value);
     return parsed !== null && parsed >= 0 ? parsed : null;
   }
@@ -2797,234 +3334,6 @@
     };
   }
 
-  // RendererWeb/src/windowTargetResolver.ts
-  async function renderWindowTargetThenAct(input) {
-    const model = input.model;
-    const controller = input.controller;
-    if (!input.virtualizationEnabled || model === null || controller === null) {
-      return input.legacyAction();
-    }
-    const resolution = resolveWindowTarget(model, input.descriptor);
-    if (resolution === null) {
-      return input.legacyAction();
-    }
-    const originalAnchor = input.actionKind === "query" ? model.captureAnchor(input.root.scrollTop) : null;
-    const originalRange = input.actionKind === "query" ? controller.getCurrentRange() : null;
-    const didRender = ensureResolutionRendered(controller, resolution);
-    if (didRender) {
-      await waitForLayoutTicks(input.ownerWindow, input.layoutTicks ?? 1);
-    }
-    try {
-      return await input.action(readLiveTargetContext(input, resolution));
-    } finally {
-      if (input.actionKind === "query" && didRender && originalAnchor !== null) {
-        restoreReadingAnchor({
-          controller,
-          model,
-          originalAnchor,
-          originalRange,
-          root: input.root
-        });
-      }
-    }
-  }
-  function resolveWindowTarget(model, descriptor) {
-    switch (descriptor.kind) {
-      case "section":
-        return resolveSectionIndex(model, descriptor.sectionIndex, descriptor);
-      case "block": {
-        const entry = model.getEntryContainingBlockIndex(descriptor.blockIndex);
-        return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
-      }
-      case "heading-anchor": {
-        const entry = model.getEntryByHeadingAnchor(descriptor.anchor);
-        return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
-      }
-      case "source-line": {
-        const entry = model.getEntryBySourceLine(descriptor.sourceLine);
-        return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
-      }
-      case "document-y":
-        return resolveSectionIndex(model, model.sectionIndexAtDocumentY(descriptor.documentY), descriptor);
-      case "find-match":
-        return resolveFindMatch(model, descriptor);
-    }
-  }
-  function resolveFindMatch(model, descriptor) {
-    if (descriptor.blockIndex !== void 0) {
-      const entry = model.getEntryContainingBlockIndex(descriptor.blockIndex);
-      return entry === void 0 ? null : resolutionForEntry(model, entry, descriptor);
-    }
-    if (descriptor.startBlockIndex === void 0 || descriptor.endBlockIndex === void 0) {
-      return null;
-    }
-    const start = model.getEntryContainingBlockIndex(descriptor.startBlockIndex);
-    const end = model.getEntryContainingBlockIndex(descriptor.endBlockIndex);
-    if (start === void 0 || end === void 0) {
-      return null;
-    }
-    const startSection = findSectionArrayIndex(model, start);
-    const endSection = findSectionArrayIndex(model, end);
-    if (startSection < 0 || endSection < 0) {
-      return null;
-    }
-    return {
-      descriptor,
-      entry: start,
-      range: {
-        end: Math.max(startSection, endSection),
-        start: Math.min(startSection, endSection)
-      },
-      sectionIndex: startSection
-    };
-  }
-  function resolveSectionIndex(model, sectionIndex, descriptor) {
-    if (!Number.isFinite(sectionIndex)) {
-      return null;
-    }
-    const normalized = Math.floor(sectionIndex);
-    const entry = model.sections[normalized];
-    if (entry === void 0) {
-      return null;
-    }
-    return {
-      descriptor,
-      entry,
-      range: { end: normalized, start: normalized },
-      sectionIndex: normalized
-    };
-  }
-  function resolutionForEntry(model, entry, descriptor) {
-    const sectionIndex = findSectionArrayIndex(model, entry);
-    if (sectionIndex < 0) {
-      return null;
-    }
-    return {
-      descriptor,
-      entry,
-      range: { end: sectionIndex, start: sectionIndex },
-      sectionIndex
-    };
-  }
-  function ensureResolutionRendered(controller, resolution) {
-    if (resolution.range.start === resolution.range.end && controller.isSectionRendered(resolution.range.start)) {
-      return false;
-    }
-    const options = { preserveAnchor: true };
-    return resolution.range.start === resolution.range.end ? controller.ensureSectionRendered(resolution.range.start, options) : controller.ensureSectionRangeRendered(resolution.range.start, resolution.range.end, options);
-  }
-  function readLiveTargetContext(input, resolution) {
-    const sectionElement = findSectionElement(input.main, resolution.entry);
-    return {
-      element: sectionElement,
-      entry: resolution.entry,
-      range: input.controller?.getCurrentRange() ?? null,
-      sectionHeight: input.model?.sectionEffectiveHeight(resolution.sectionIndex) ?? 0,
-      sectionIndex: resolution.sectionIndex,
-      sectionTop: input.model?.sectionTop(resolution.sectionIndex) ?? 0,
-      targetElement: findTargetElement(input.ownerWindow, sectionElement, resolution.descriptor)
-    };
-  }
-  function findTargetElement(ownerWindow, sectionElement, descriptor) {
-    if (sectionElement === null) {
-      return null;
-    }
-    switch (descriptor.kind) {
-      case "block":
-        return findBlockElement(sectionElement, descriptor.blockIndex);
-      case "heading-anchor": {
-        const anchor = descriptor.anchor.startsWith("#") ? descriptor.anchor.slice(1) : descriptor.anchor;
-        const element = sectionElement.ownerDocument.getElementById(anchor);
-        return element instanceof ownerWindow.HTMLElement && sectionElement.contains(element) ? element : null;
-      }
-      case "source-line":
-        return findSourceLineElement(sectionElement, descriptor.sourceLine);
-      case "find-match":
-        return descriptor.blockIndex === void 0 ? sectionElement : findBlockElement(sectionElement, descriptor.blockIndex);
-      case "document-y":
-      case "section":
-        return sectionElement;
-    }
-  }
-  function findSectionElement(main, entry) {
-    for (const child of Array.from(main.children)) {
-      if (child instanceof main.ownerDocument.defaultView.HTMLElement && readElementBlockIndex(child) === entry.blockIndex) {
-        return child;
-      }
-    }
-    return null;
-  }
-  function findBlockElement(sectionElement, blockIndex) {
-    if (readElementBlockIndex(sectionElement) === blockIndex) {
-      return sectionElement;
-    }
-    for (const element of Array.from(sectionElement.querySelectorAll("[data-mm-block-index]"))) {
-      if (readElementBlockIndex(element) === blockIndex) {
-        return element;
-      }
-    }
-    return null;
-  }
-  function findSourceLineElement(sectionElement, sourceLine) {
-    if (!Number.isFinite(sourceLine)) {
-      return null;
-    }
-    const normalizedLine = Math.max(0, Math.floor(sourceLine));
-    for (const element of Array.from(sectionElement.querySelectorAll("[data-mm-source-line]"))) {
-      const start = parseNonNegativeInt3(element.dataset["mmSourceLine"]);
-      if (start === null) {
-        continue;
-      }
-      const end = Math.max(start, parseNonNegativeInt3(element.dataset["mmSourceEndLine"]) ?? start);
-      if (normalizedLine >= start && normalizedLine <= end) {
-        return element;
-      }
-    }
-    return null;
-  }
-  function restoreReadingAnchor(input) {
-    if (input.originalRange !== null) {
-      input.controller.ensureSectionRangeRendered(input.originalRange.start, input.originalRange.end, {
-        force: true,
-        preserveAnchor: false
-      });
-    } else if (input.originalAnchor.sectionIndex >= 0) {
-      input.controller.ensureSectionRendered(input.originalAnchor.sectionIndex, {
-        force: true,
-        preserveAnchor: false
-      });
-    }
-    input.root.scrollTop = input.model.scrollTopForAnchor(input.originalAnchor);
-  }
-  function waitForLayoutTicks(ownerWindow, count) {
-    const tick = () => new Promise((resolve) => {
-      if (typeof ownerWindow.requestAnimationFrame === "function") {
-        ownerWindow.requestAnimationFrame(() => resolve());
-        return;
-      }
-      ownerWindow.setTimeout(() => resolve(), 0);
-    });
-    return count === 1 ? tick() : tick().then(tick);
-  }
-  function findSectionArrayIndex(model, entry) {
-    return model.sections.findIndex((candidate) => candidate.blockIndex === entry.blockIndex);
-  }
-  function readElementBlockIndex(element) {
-    const raw = element instanceof HTMLElement ? element.dataset["mmBlockIndex"] : void 0;
-    if (raw === void 0 || raw.trim() === "") {
-      return null;
-    }
-    const parsed = Number.parseInt(raw, 10);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  function parseNonNegativeInt3(value) {
-    if (value === void 0 || value.trim() === "") {
-      return null;
-    }
-    const parsed = Number.parseInt(value, 10);
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-  }
-
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -3124,6 +3433,7 @@
   var virtualizationShadowDocumentFinal = true;
   var virtualizedDocumentWindowController = null;
   var virtualizedDocumentWindowModel = null;
+  var virtualizedFindProvider = null;
   var virtualizedIntrinsicCalibrator = createSectionIntrinsicCalibrator();
   var virtualizedMeasureFrameRequested = false;
   var virtualizedCalibrationHandle = null;
@@ -3955,6 +4265,17 @@
   function getDocumentScrollRoot() {
     return document.scrollingElement ?? document.documentElement;
   }
+  function readVirtualizedFindContext() {
+    return {
+      controller: virtualizedDocumentWindowController,
+      main: document.querySelector("main.mm-document"),
+      model: virtualizedDocumentWindowModel,
+      ownerWindow: window,
+      renderId: currentDocumentRenderId,
+      root: getDocumentScrollRoot(),
+      virtualizationEnabled
+    };
+  }
   function cancelVirtualizedCalibration() {
     if (virtualizedCalibrationHandle === null) {
       return;
@@ -3977,6 +4298,9 @@
       virtualizedIntrinsicCalibrator.reset();
     }
   }
+  function refreshVirtualizedFindHighlights() {
+    virtualizedFindProvider?.refreshVisibleHighlights();
+  }
   function prepareVirtualizedInsertedContent(root) {
     renderCodeBlocks(root);
     virtualizedWindowMathController?.cancel();
@@ -3990,6 +4314,7 @@
         return;
       }
       invalidateSourceLineAnchors();
+      refreshVirtualizedFindHighlights();
       scheduleVirtualizedMeasuredHeightAdoption();
     };
     mathController.initialVisibleReady.then(scheduleAfterRichContent, scheduleAfterRichContent);
@@ -4035,6 +4360,7 @@
       root
     });
     virtualizedDocumentWindowController.updateWindowForScroll();
+    refreshVirtualizedFindHighlights();
     invalidateTopVisibleBlockIndexCache();
     postPerfMark("mm-virt-window-built", {
       estimateMeanAbsError: models.estimateHeightError.meanAbsError,
@@ -4050,6 +4376,7 @@
     if (virtualizedDocumentWindowController.updateWindowForScroll(options)) {
       invalidateTopVisibleBlockIndexCache();
       invalidateSourceLineAnchors();
+      refreshVirtualizedFindHighlights();
       scheduleVirtualizedMeasuredHeightAdoption();
     }
   }
@@ -4073,6 +4400,7 @@
     }
     invalidateTopVisibleBlockIndexCache();
     invalidateSourceLineAnchors();
+    refreshVirtualizedFindHighlights();
     scheduleVirtualizedCalibration();
     postPerfMark("mm-virt-window-height-adopted", {
       maxAbsDelta: result.maxAbsDelta,
@@ -5773,6 +6101,10 @@
       scrollToSourceLine(message.sourceLine);
       return;
     }
+    if (message.type === "find-results") {
+      virtualizedFindProvider?.handleFindResults(message);
+      return;
+    }
     if (message.type === "open-find-bar") {
       findBarController?.toggle();
       return;
@@ -6472,7 +6804,11 @@
     });
   }
   function wireFindBar() {
-    findBarController = createFindBar();
+    virtualizedFindProvider = virtualizationEnabled ? createVirtualizedFindProvider({
+      postHostMessage,
+      readContext: readVirtualizedFindContext
+    }) : null;
+    findBarController = createFindBar(virtualizedFindProvider ?? void 0);
     window.addEventListener(
       "keydown",
       (event) => {

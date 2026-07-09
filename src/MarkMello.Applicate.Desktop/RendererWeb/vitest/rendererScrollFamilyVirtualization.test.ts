@@ -11,6 +11,7 @@ type RendererHarness = {
   flushNextRaf: () => Promise<void>;
   flushQueuedRafs: () => Promise<void>;
   flushRafsUntil: (predicate: () => boolean, maxFrames?: number) => Promise<void>;
+  highlights: Map<string, Range[]>;
   load: HostBridge;
   messages: unknown[];
   root: HTMLElement;
@@ -41,9 +42,14 @@ async function loadRendererHarness(options: {
   };
 
   const rafCallbacks: FrameRequestCallback[] = [];
-  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+  const requestAnimationFrameStub = (callback: FrameRequestCallback) => {
     rafCallbacks.push(callback);
     return rafCallbacks.length;
+  };
+  vi.stubGlobal("requestAnimationFrame", requestAnimationFrameStub);
+  Object.defineProperty(window, "requestAnimationFrame", {
+    configurable: true,
+    value: requestAnimationFrameStub,
   });
 
   class TestIntersectionObserver implements IntersectionObserver {
@@ -102,6 +108,32 @@ async function loadRendererHarness(options: {
     },
   });
 
+  const highlights = new Map<string, Range[]>();
+  class TestHighlight {
+    readonly ranges: Range[];
+
+    constructor(...ranges: Range[]) {
+      this.ranges = ranges;
+    }
+  }
+  Object.defineProperty(window, "Highlight", {
+    configurable: true,
+    value: TestHighlight,
+  });
+  Object.defineProperty(window, "CSS", {
+    configurable: true,
+    value: {
+      highlights: {
+        delete(name: string): void {
+          highlights.delete(name);
+        },
+        set(name: string, highlight: TestHighlight): void {
+          highlights.set(name, [...highlight.ranges]);
+        },
+      },
+    },
+  });
+
   await import("../src/renderer");
   const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
 
@@ -142,7 +174,7 @@ async function loadRendererHarness(options: {
     }
   };
 
-  return { flushNextRaf, flushQueuedRafs, flushRafsUntil, load, messages, root, scrollCalls, triggerResize };
+  return { flushNextRaf, flushQueuedRafs, flushRafsUntil, highlights, load, messages, root, scrollCalls, triggerResize };
 }
 
 function installVirtualizedDocumentLayout(sectionCount: number): HTMLElement {
@@ -249,6 +281,79 @@ function buildSparseSourceLineDocument(count: number, anchorEvery: number): stri
       : "";
     return `<p data-mm-block-index="${index}" data-mm-block-kind="paragraph"${sourceLineAttributes}>Block ${index}</p>`;
   }).join("");
+}
+
+function buildFindDocument(count: number, matchIndexes: readonly number[]): string {
+  const matches = new Set(matchIndexes);
+  return Array.from({ length: count }, (_, index) => {
+    const text = matches.has(index) ? `Block ${index} needle tail` : `Block ${index} filler`;
+    return `<p data-mm-block-index="${index}" data-mm-block-kind="paragraph">${text}</p>`;
+  }).join("");
+}
+
+type FindQueryMessage = {
+  type: "find-query";
+  requestId: number;
+  query: string;
+  renderId?: number | null;
+};
+
+type FindMatchDescriptor = {
+  matchId: string;
+  blockIndex: number;
+  blockLocalOffset: number;
+  length: number;
+  normalizedText: string;
+  ordinal: number;
+};
+
+function findQueryMessages(messages: readonly unknown[]): FindQueryMessage[] {
+  return messages.filter((message): message is FindQueryMessage =>
+    typeof message === "object"
+    && message !== null
+    && (message as { type?: unknown }).type === "find-query");
+}
+
+function findBarInput(): HTMLInputElement {
+  const input = document.querySelector<HTMLInputElement>(".mm-find-input");
+  if (input === null) {
+    throw new Error("find input was not rendered");
+  }
+  return input;
+}
+
+function findBarCount(): HTMLElement {
+  const count = document.querySelector<HTMLElement>(".mm-find-count");
+  if (count === null) {
+    throw new Error("find count was not rendered");
+  }
+  return count;
+}
+
+function submitFindQuery(query: string): void {
+  const input = findBarInput();
+  input.value = query;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+}
+
+function findButton(kind: "next" | "prev"): HTMLButtonElement {
+  const button = document.querySelector<HTMLButtonElement>(`.mm-find-btn-${kind}`);
+  if (button === null) {
+    throw new Error(`find ${kind} button was not rendered`);
+  }
+  return button;
+}
+
+function descriptorForBlock(blockIndex: number, ordinal: number): FindMatchDescriptor {
+  return {
+    blockIndex,
+    blockLocalOffset: `Block ${blockIndex} `.length,
+    length: "needle".length,
+    matchId: `b${blockIndex}-o${`Block ${blockIndex} `.length}-l6-n${ordinal}`,
+    normalizedText: "needle",
+    ordinal,
+  };
 }
 
 function latestHeadingsUpdated(messages: readonly unknown[]): { headings: Array<{ id: string }> } | undefined {
@@ -477,5 +582,94 @@ describe("renderer scroll-family virtualization integration", () => {
     await flushRafsUntil(() => root.scrollTop === anchoredScrollTop);
 
     expect(root.scrollTop).toBe(anchoredScrollTop);
+  });
+
+  it("uses host find results for a global count and navigates off-window matches through the window target seam", async () => {
+    const { flushNextRaf, flushQueuedRafs, flushRafsUntil, highlights, load, messages, root } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    messages.length = 0;
+    load({ type: "load-document", html: buildFindDocument(120, [90, 95]), hasMermaid: false, hasHljs: false, renderId: 7 });
+    await flushQueuedRafs();
+    messages.length = 0;
+    root.scrollTop = 0;
+
+    load({ type: "open-find-bar" });
+    submitFindQuery("needle");
+
+    const request = findQueryMessages(messages).at(-1);
+    expect(request).toMatchObject({ query: "needle", renderId: 7 });
+    expect(root.scrollTop).toBe(0);
+
+    load({
+      type: "find-results",
+      requestId: request!.requestId,
+      query: "needle",
+      renderId: 7,
+      totalCount: 2,
+      matches: [descriptorForBlock(90, 1), descriptorForBlock(95, 2)],
+    });
+
+    expect(findBarCount().textContent).toBe("0 of 2");
+    expect(root.scrollTop).toBe(0);
+    expect(highlights.get("mm-find-all") ?? []).toHaveLength(0);
+
+    findButton("next").click();
+    await flushNextRaf();
+
+    const firstTarget = document.querySelector<HTMLElement>('[data-mm-block-index="90"]');
+    expect(firstTarget).not.toBeNull();
+    expect(findBarCount().textContent).toBe("1 of 2");
+    expect(root.scrollTop).toBe(90 * SECTION_PITCH);
+    expect(highlights.get("mm-find-all")?.map(range => range.toString())).toEqual(["needle"]);
+    expect(highlights.get("mm-find-current")?.map(range => range.toString())).toEqual(["needle"]);
+
+    findButton("next").click();
+    await flushRafsUntil(() => root.scrollTop === 95 * SECTION_PITCH);
+    await flushRafsUntil(() => root.scrollTop === 95 * SECTION_PITCH);
+    expect(document.querySelector('[data-mm-block-index="95"]')).not.toBeNull();
+    expect(findBarCount().textContent).toBe("2 of 2");
+    expect(root.scrollTop).toBe(95 * SECTION_PITCH);
+
+    findButton("prev").click();
+    await flushRafsUntil(() => root.scrollTop === 90 * SECTION_PITCH);
+    await flushRafsUntil(() => root.scrollTop === 90 * SECTION_PITCH);
+    expect(document.querySelector('[data-mm-block-index="90"]')).not.toBeNull();
+    expect(findBarCount().textContent).toBe("1 of 2");
+    expect(root.scrollTop).toBe(90 * SECTION_PITCH);
+  });
+
+  it("does not re-query the host index when virtual window replacement changes the live DOM", async () => {
+    const { flushNextRaf, flushQueuedRafs, load, messages, root } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    messages.length = 0;
+    load({ type: "load-document", html: buildFindDocument(120, [90]), hasMermaid: false, hasHljs: false, renderId: 8 });
+    await flushQueuedRafs();
+
+    load({ type: "open-find-bar" });
+    submitFindQuery("needle");
+    const request = findQueryMessages(messages).at(-1);
+    load({
+      type: "find-results",
+      requestId: request!.requestId,
+      query: "needle",
+      renderId: 8,
+      totalCount: 1,
+      matches: [descriptorForBlock(90, 1)],
+    });
+    findButton("next").click();
+    await flushNextRaf();
+    messages.length = 0;
+
+    root.scrollTop = 10 * SECTION_PITCH;
+    document.dispatchEvent(new Event("scroll"));
+    await flushQueuedRafs();
+
+    expect(findQueryMessages(messages)).toEqual([]);
   });
 });

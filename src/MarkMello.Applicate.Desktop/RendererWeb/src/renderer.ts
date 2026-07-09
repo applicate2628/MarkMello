@@ -20,6 +20,12 @@ import { createScrollCoalescer } from "./scrollCoalescer";
 import { calculateWidthHandleLeft, clampWidthHandleLeft } from "./widthHandleLayout";
 import { createFindBar, type FindBarController } from "./findBar";
 import {
+  createVirtualizedFindProvider,
+  type FindQueryMessage,
+  type FindResultsMessage,
+  type VirtualizedFindProvider,
+} from "./virtualizedFindProvider";
+import {
   findScrollTopForSourceLine,
   findSourceLineAtDocumentY,
   findSourceLineAtDocumentYWithFallback,
@@ -121,6 +127,7 @@ type RendererMessage =
   | { type: "preview-source-line"; sourceLine: number }
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number }
   | { type: "document-cache-miss"; renderId?: number; cacheKey?: string }
+  | FindQueryMessage
   // Mode-toggle reveal gate (2026-05-20). Posted in response to a host-sent
   // `mode-settle-probe` message after the renderer has applied pending reading
   // preferences and let layout chrome such as the minimap paint at the new slot
@@ -169,6 +176,7 @@ type HostMessage =
   | { type: "set-task-checkbox"; line: number; checked: boolean }
   | { type: "scroll-to-heading"; id: string }
   | { type: "scroll-to-source-line"; sourceLine: number }
+  | FindResultsMessage
   | { type: "open-find-bar" }
   | { type: "host-scrollbar"; active: boolean }
   // Host-sent probe (2026-05-20). The host sends this after Avalonia
@@ -345,6 +353,7 @@ let virtualizationShadowValidator: VirtualizationShadowValidator | null = null;
 let virtualizationShadowDocumentFinal = true;
 let virtualizedDocumentWindowController: VirtualizedDocumentWindowController | null = null;
 let virtualizedDocumentWindowModel: DocumentWindowModel | null = null;
+let virtualizedFindProvider: VirtualizedFindProvider | null = null;
 const virtualizedIntrinsicCalibrator = createSectionIntrinsicCalibrator();
 let virtualizedMeasureFrameRequested = false;
 let virtualizedCalibrationHandle: { kind: "idle" | "timeout"; id: number } | null = null;
@@ -1440,6 +1449,18 @@ function getDocumentScrollRoot(): Element & { scrollTop: number; scrollHeight: n
   };
 }
 
+function readVirtualizedFindContext(): import("./virtualizedFindProvider").VirtualizedFindContext {
+  return {
+    controller: virtualizedDocumentWindowController,
+    main: document.querySelector<HTMLElement>("main.mm-document"),
+    model: virtualizedDocumentWindowModel,
+    ownerWindow: window,
+    renderId: currentDocumentRenderId,
+    root: getDocumentScrollRoot(),
+    virtualizationEnabled,
+  };
+}
+
 function cancelVirtualizedCalibration(): void {
   if (virtualizedCalibrationHandle === null) {
     return;
@@ -1465,6 +1486,10 @@ function resetVirtualizedDocumentWindow(resetCalibrator = true): void {
   }
 }
 
+function refreshVirtualizedFindHighlights(): void {
+  virtualizedFindProvider?.refreshVisibleHighlights();
+}
+
 function prepareVirtualizedInsertedContent(root: ParentNode): void {
   renderCodeBlocks(root);
 
@@ -1481,6 +1506,7 @@ function prepareVirtualizedInsertedContent(root: ParentNode): void {
     }
 
     invalidateSourceLineAnchors();
+    refreshVirtualizedFindHighlights();
     scheduleVirtualizedMeasuredHeightAdoption();
   };
   mathController.initialVisibleReady.then(scheduleAfterRichContent, scheduleAfterRichContent);
@@ -1534,6 +1560,7 @@ function initializeVirtualizedDocumentWindow(): void {
   });
 
   virtualizedDocumentWindowController.updateWindowForScroll();
+  refreshVirtualizedFindHighlights();
   invalidateTopVisibleBlockIndexCache();
   postPerfMark("mm-virt-window-built", {
     estimateMeanAbsError: models.estimateHeightError.meanAbsError,
@@ -1551,6 +1578,7 @@ function updateVirtualizedWindowForScroll(options: { force?: boolean } = {}): vo
   if (virtualizedDocumentWindowController.updateWindowForScroll(options)) {
     invalidateTopVisibleBlockIndexCache();
     invalidateSourceLineAnchors();
+    refreshVirtualizedFindHighlights();
     scheduleVirtualizedMeasuredHeightAdoption();
   }
 }
@@ -1579,6 +1607,7 @@ function adoptVirtualizedRenderedHeights(): void {
 
   invalidateTopVisibleBlockIndexCache();
   invalidateSourceLineAnchors();
+  refreshVirtualizedFindHighlights();
   scheduleVirtualizedCalibration();
   postPerfMark("mm-virt-window-height-adopted", {
     maxAbsDelta: result.maxAbsDelta,
@@ -3881,6 +3910,11 @@ function handleHostMessage(raw: unknown): void {
     return;
   }
 
+  if (message.type === "find-results") {
+    virtualizedFindProvider?.handleFindResults(message);
+    return;
+  }
+
   if (message.type === "open-find-bar") {
     // Magnifier toolbar button — open the same find bar the Ctrl+F
     // keystroke would open. Toggle, so a second magnifier click closes it.
@@ -4775,8 +4809,10 @@ function wireFileDrop(): void {
   });
 }
 
-// Ctrl+F → in-document find bar. Renderer-side MVP: pure DOM, no host
-// involvement. Limitation: the keystroke only fires when WebView2 has
+// Ctrl+F → in-document find bar. The default path is the original pure-DOM
+// search; MARKMELLO_VIRTUALIZATION injects a host-backed provider so counts
+// come from full-document block plaintext while live highlights stay windowed.
+// Limitation: the keystroke only fires when WebView2 has
 // keyboard focus; if focus is on the Avalonia chrome (title bar, tab
 // strip, etc.) the OS routes WM_KEYDOWN to Avalonia and this handler
 // never sees it. Host-level Ctrl+F forwarding is a v0.3.1 backlog
@@ -4791,7 +4827,13 @@ function wireFileDrop(): void {
 // escape action). Ctrl+F is not in the host-shortcuts set, so the
 // forwarder ignores it regardless.
 function wireFindBar(): void {
-  findBarController = createFindBar();
+  virtualizedFindProvider = virtualizationEnabled
+    ? createVirtualizedFindProvider({
+      postHostMessage,
+      readContext: readVirtualizedFindContext,
+    })
+    : null;
+  findBarController = createFindBar(virtualizedFindProvider ?? undefined);
   window.addEventListener(
     "keydown",
     (event) => {

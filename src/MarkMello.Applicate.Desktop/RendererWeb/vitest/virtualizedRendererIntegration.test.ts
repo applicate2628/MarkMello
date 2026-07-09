@@ -36,12 +36,12 @@ describe("renderer virtualization wiring", () => {
     const combined = `${renderer}\n${findBar}\n${sourceLineSync}`;
 
     for (const expected of [
-      "VIRT-TODO(integration): find-in-page",
       "VIRT-TODO(integration): minimap",
     ]) {
       expect(combined).toContain(expected);
     }
     for (const resolved of [
+      "VIRT-TODO(integration): find-in-page",
       "VIRT-TODO(integration): TOC",
       "VIRT-TODO(integration): scroll-to-heading",
       "VIRT-TODO(integration): anchor-link scroll-to",

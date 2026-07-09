@@ -82,6 +82,25 @@ export type FindBarController = {
   readonly isOpen: boolean;
 };
 
+export type FindNavigationDirection = "next" | "prev";
+
+export type FindProviderStatus = {
+  query: string;
+  totalCount: number;
+  currentIndex: number;
+};
+
+export type FindProviderView = {
+  updateStatus: (status: FindProviderStatus) => void;
+};
+
+export type FindProvider = {
+  setView: (view: FindProviderView) => void;
+  search: (query: string) => void;
+  navigate: (direction: FindNavigationDirection) => void;
+  close: () => void;
+};
+
 type State = {
   bar: HTMLDivElement;
   input: HTMLInputElement;
@@ -175,8 +194,6 @@ export function findCaseInsensitiveMatchOffsets(
  * order, case-insensitive, per-text-node (a match spanning a text-node boundary
  * — e.g. a word split by an inline element — is not found; pre-existing
  * limitation). Skips decorative and hidden-source subtrees.
- * VIRT-TODO(integration): find-in-page scans only the live virtualized window;
- * off-window matches need a model/full-text-backed search path.
  */
 export function buildMatches(root: Node, needle: string): Range[] {
   const out: Range[] = [];
@@ -225,20 +242,23 @@ export function buildMatches(root: Node, needle: string): Range[] {
 }
 
 function applyHighlights(s: State): void {
+  applyFindHighlights(s.matches, s.matches[s.currentIndex]);
+}
+
+export function applyFindHighlights(ranges: Range[], currentRange?: Range): void {
   const reg = getHighlightRegistry();
   if (reg === null) {
     return;
   }
-  if (s.matches.length === 0) {
+  if (ranges.length === 0) {
     reg.delete(HIGHLIGHT_ALL);
     reg.delete(HIGHLIGHT_CURRENT);
     return;
   }
-  const all = makeHighlight(s.matches);
+  const all = makeHighlight(ranges);
   if (all !== null) {
     reg.set(HIGHLIGHT_ALL, all);
   }
-  const currentRange = s.matches[s.currentIndex];
   if (currentRange !== undefined) {
     const current = makeHighlight([currentRange]);
     if (current !== null) {
@@ -249,12 +269,16 @@ function applyHighlights(s: State): void {
   }
 }
 
-function clearHighlights(): void {
+export function clearFindHighlights(): void {
   const reg = getHighlightRegistry();
   if (reg !== null) {
     reg.delete(HIGHLIGHT_ALL);
     reg.delete(HIGHLIGHT_CURRENT);
   }
+}
+
+function clearHighlights(): void {
+  clearFindHighlights();
 }
 
 function rebuildMatches(s: State): void {
@@ -332,6 +356,21 @@ function updateCountDisplay(s: State): void {
   s.count.textContent = `${s.currentIndex + 1} of ${s.matches.length}`;
 }
 
+function updateProviderCountDisplay(s: State, status: FindProviderStatus): void {
+  if (s.input.value.length === 0 || status.query.length === 0) {
+    s.count.textContent = "";
+    s.bar.classList.remove("mm-find-no-match");
+    return;
+  }
+  if (status.totalCount === 0) {
+    s.count.textContent = "0 of 0";
+    s.bar.classList.add("mm-find-no-match");
+    return;
+  }
+  s.bar.classList.remove("mm-find-no-match");
+  s.count.textContent = `${status.currentIndex >= 0 ? status.currentIndex + 1 : 0} of ${status.totalCount}`;
+}
+
 function runSearch(s: State, query: string): void {
   s.lastSearched = query;
   if (query.length === 0) {
@@ -376,7 +415,7 @@ function navigate(s: State, direction: "next" | "prev"): void {
  * survives the load-document innerHTML swap on <main>, though we still call
  * `close()` on doc-swap to reset state).
  */
-export function createFindBar(): FindBarController {
+export function createFindBar(provider?: FindProvider): FindBarController {
   let state: State | null = null;
 
   function buildDom(): State {
@@ -461,6 +500,10 @@ export function createFindBar(): FindBarController {
   }
 
   function attachListeners(s: State): void {
+    provider?.setView({
+      updateStatus: status => updateProviderCountDisplay(s, status),
+    });
+
     s.input.addEventListener("input", () => {
       const query = s.input.value;
       if (s.debounceTimer !== null) {
@@ -468,7 +511,11 @@ export function createFindBar(): FindBarController {
       }
       s.debounceTimer = window.setTimeout(() => {
         s.debounceTimer = null;
-        runSearch(s, query);
+        if (provider) {
+          provider.search(query);
+        } else {
+          runSearch(s, query);
+        }
       }, FIND_DEBOUNCE_MS);
     });
 
@@ -479,10 +526,18 @@ export function createFindBar(): FindBarController {
         if (s.debounceTimer !== null) {
           window.clearTimeout(s.debounceTimer);
           s.debounceTimer = null;
-          runSearch(s, s.input.value);
+          if (provider) {
+            provider.search(s.input.value);
+          } else {
+            runSearch(s, s.input.value);
+          }
           return;
         }
-        navigate(s, event.shiftKey ? "prev" : "next");
+        if (provider) {
+          provider.navigate(event.shiftKey ? "prev" : "next");
+        } else {
+          navigate(s, event.shiftKey ? "prev" : "next");
+        }
       } else if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -494,11 +549,19 @@ export function createFindBar(): FindBarController {
     // registry entry, not the document Selection, so focusing the input does not
     // disturb it. Keeping focus in the input lets the user keep typing.
     s.prevBtn.addEventListener("click", () => {
-      navigate(s, "prev");
+      if (provider) {
+        provider.navigate("prev");
+      } else {
+        navigate(s, "prev");
+      }
       s.input.focus();
     });
     s.nextBtn.addEventListener("click", () => {
-      navigate(s, "next");
+      if (provider) {
+        provider.navigate("next");
+      } else {
+        navigate(s, "next");
+      }
       s.input.focus();
     });
     s.closeBtn.addEventListener("click", () => {
@@ -515,7 +578,9 @@ export function createFindBar(): FindBarController {
       document.body.appendChild(state.bar);
     }
     state.bar.classList.add("mm-find-bar-open");
-    connectObserver(state);
+    if (!provider) {
+      connectObserver(state);
+    }
     state.input.focus();
     state.input.select();
   }
@@ -540,6 +605,7 @@ export function createFindBar(): FindBarController {
     state.matchesDirty = false;
     state.count.textContent = "";
     state.bar.classList.remove("mm-find-no-match");
+    provider?.close();
     clearHighlights();
     // Keep the node in the DOM for fast reopen; only re-build on first open.
   }
