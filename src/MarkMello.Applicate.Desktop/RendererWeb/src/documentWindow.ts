@@ -38,6 +38,7 @@ export type SourceLineModelAnchor = SourceLineModelSpan & {
 
 export type ModelMinimapBlockProjection = {
   kind: SectionKind;
+  headingLevel: number;
   top: number;
   height: number;
 };
@@ -267,6 +268,7 @@ export class DocumentWindowModel {
   getMinimapBlockProjection(): ModelMinimapBlockProjection[] {
     return this.sections.map(entry => ({
       height: effectiveHeight(entry),
+      headingLevel: entry.headingLevel,
       kind: entry.kind,
       top: entry.cumulativeTop,
     }));

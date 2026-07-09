@@ -29,18 +29,15 @@ describe("renderer virtualization wiring", () => {
     expect(updateIndex).toBeLessThan(postIndex);
   });
 
-  it("documents every known off-window integration that remains deferred under the flag", () => {
+  it("keeps the C2 integration surface free of deferred VIRT-TODO markers", () => {
     const renderer = readRendererSource();
     const findBar = readFileSync("RendererWeb/src/findBar.ts", "utf8");
     const sourceLineSync = readFileSync("RendererWeb/src/sourceLineSync.ts", "utf8");
     const combined = `${renderer}\n${findBar}\n${sourceLineSync}`;
+    const minimapMarker = ["VIRT-TODO(integration)", "minimap"].join(": ");
 
-    for (const expected of [
-      "VIRT-TODO(integration): minimap",
-    ]) {
-      expect(combined).toContain(expected);
-    }
     for (const resolved of [
+      minimapMarker,
       "VIRT-TODO(integration): find-in-page",
       "VIRT-TODO(integration): TOC",
       "VIRT-TODO(integration): scroll-to-heading",

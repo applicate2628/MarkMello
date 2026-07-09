@@ -48,6 +48,108 @@
     };
   }
 
+  // RendererWeb/src/modelMinimap.ts
+  var DEFAULT_MINIMUM_THUMB_HEIGHT2 = 22;
+  var MAX_CANVAS_PIXEL_RATIO = 2;
+  var KIND_FILL = {
+    code: "rgba(76, 90, 115, 0.72)",
+    heading: "rgba(212, 109, 61, 0.88)",
+    image: "rgba(90, 112, 129, 0.62)",
+    list: "rgba(76, 83, 91, 0.72)",
+    math: "rgba(121, 91, 154, 0.72)",
+    paragraph: "rgba(63, 63, 63, 0.68)",
+    quote: "rgba(86, 99, 92, 0.68)",
+    rule: "rgba(96, 96, 96, 0.56)",
+    table: "rgba(94, 105, 122, 0.72)",
+    unknown: "rgba(68, 68, 68, 0.62)"
+  };
+  function renderModelMinimapCanvas(input) {
+    const canvas = input.ownerDocument.createElement("canvas");
+    const width = Math.max(1, Math.round(input.width));
+    const height = Math.max(1, Math.round(input.height));
+    const pixelRatio = normalizePixelRatio(input.pixelRatio);
+    canvas.width = Math.max(1, Math.round(width * pixelRatio));
+    canvas.height = Math.max(1, Math.round(height * pixelRatio));
+    canvas.style.display = "block";
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    canvas.dataset["mmModelMinimap"] = "true";
+    canvas.dataset["mmModelMinimapSectionCount"] = String(input.bands.length);
+    canvas.dataset["mmModelMinimapTotalHeight"] = String(input.documentHeight);
+    canvas.dataset["mmModelMinimapWidth"] = String(width);
+    canvas.dataset["mmModelMinimapHeight"] = String(height);
+    const context = canvas.getContext("2d");
+    if (context === null || input.documentHeight <= 0) {
+      return canvas;
+    }
+    context.resetTransform?.();
+    context.scale(pixelRatio, pixelRatio);
+    context.clearRect(0, 0, width, height);
+    const scaleY = height / input.documentHeight;
+    for (const band of input.bands) {
+      if (!Number.isFinite(band.top) || !Number.isFinite(band.height) || band.height <= 0) {
+        continue;
+      }
+      const y = clamp(band.top * scaleY, 0, height);
+      const scaledHeight = Math.max(0.5, band.height * scaleY);
+      const bandHeight = Math.min(height - y, scaledHeight);
+      if (bandHeight <= 0) {
+        continue;
+      }
+      context.fillStyle = fillForBand(band);
+      context.fillRect(0, y, width, bandHeight);
+    }
+    return canvas;
+  }
+  function calculateModelMinimapLayout(input) {
+    if (input.documentHeight <= 0 || input.width <= 0 || input.height <= 0 || input.viewportHeight <= 0) {
+      return null;
+    }
+    const minimumThumbHeight = input.minimumThumbHeight ?? DEFAULT_MINIMUM_THUMB_HEIGHT2;
+    const maximumScrollTop = Math.max(0, input.documentHeight - input.viewportHeight);
+    const thumbHeight = maximumScrollTop <= 0 ? input.height : Math.min(input.height, Math.max(minimumThumbHeight, input.height * (input.viewportHeight / input.documentHeight)));
+    const thumbTravel = Math.max(0, input.height - thumbHeight);
+    const scrollTop = clamp(input.scrollTop, 0, maximumScrollTop);
+    const scrollProgress = maximumScrollTop > 0 ? scrollTop / maximumScrollTop : 0;
+    return {
+      documentHeight: input.documentHeight,
+      height: input.height,
+      maximumScrollTop,
+      scrollTop,
+      thumbHeight,
+      thumbTop: thumbTravel * scrollProgress,
+      thumbTravel,
+      viewportHeight: input.viewportHeight,
+      width: input.width
+    };
+  }
+  function scrollTopForModelMinimapY(layout, minimapY) {
+    const documentY = clamp(minimapY, 0, layout.height) / layout.height * layout.documentHeight;
+    return clamp(documentY, 0, layout.maximumScrollTop);
+  }
+  function scrollTopForModelMinimapThumbTop(layout, thumbTop) {
+    if (layout.thumbTravel <= 0 || layout.maximumScrollTop <= 0) {
+      return 0;
+    }
+    return clamp(thumbTop, 0, layout.thumbTravel) / layout.thumbTravel * layout.maximumScrollTop;
+  }
+  function fillForBand(band) {
+    if (band.kind === "heading") {
+      const opacity = band.headingLevel <= 1 ? 0.94 : band.headingLevel <= 3 ? 0.86 : 0.76;
+      return `rgba(212, 109, 61, ${opacity})`;
+    }
+    return KIND_FILL[band.kind] ?? "rgba(68, 68, 68, 0.62)";
+  }
+  function normalizePixelRatio(pixelRatio) {
+    if (pixelRatio === void 0 || !Number.isFinite(pixelRatio) || pixelRatio <= 0) {
+      return 1;
+    }
+    return Math.max(1, Math.min(MAX_CANVAS_PIXEL_RATIO, pixelRatio));
+  }
+  function clamp(value, minimum, maximum) {
+    return Math.max(minimum, Math.min(maximum, value));
+  }
+
   // RendererWeb/src/widthResizerVisibility.ts
   function normalizeWidthResizerVisibility(raw) {
     return raw === "always" ? "always" : "on-hover";
@@ -2292,6 +2394,7 @@
     getMinimapBlockProjection() {
       return this.sections.map((entry) => ({
         height: effectiveHeight(entry),
+        headingLevel: entry.headingLevel,
         kind: entry.kind,
         top: entry.cumulativeTop
       }));
@@ -3367,6 +3470,7 @@
   var minimapContent = null;
   var minimapViewport = null;
   var currentMinimapLayout = null;
+  var currentModelMinimapLayout = null;
   var minimapDragging = false;
   var minimapDragStartClientY = null;
   var minimapDragStartScrollTop = 0;
@@ -3873,7 +3977,15 @@
     const katex = hostWindow.katex ?? void 0;
     const controller = renderMath({ katex, documentRoot: document });
     const phaseBDocumentCacheKey = currentDocumentCacheKey;
-    const initialVisualSettleReady = schedulePhaseBRebuild({
+    const initialVisualSettleReady = virtualizationEnabled ? controller.allMathRendered.then(() => {
+      if (phaseBDocumentCacheKey !== currentDocumentCacheKey || controller.isCancelled()) {
+        return;
+      }
+      if (getModelMinimapSource() !== null && minimapSourceReady) {
+        renderCurrentModelMinimapContent();
+        updateMinimapViewport({ skipVisibilityUpdate: true });
+      }
+    }) : schedulePhaseBRebuild({
       allMathRendered: controller.allMathRendered,
       getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
       getCachedDocumentHeight: () => minimapDocumentHeight,
@@ -4294,6 +4406,7 @@
     virtualizedDocumentWindowController = null;
     virtualizedDocumentWindowModel = null;
     virtualizedMeasureFrameRequested = false;
+    currentModelMinimapLayout = null;
     if (resetCalibrator) {
       virtualizedIntrinsicCalibrator.reset();
     }
@@ -4401,9 +4514,14 @@
     invalidateTopVisibleBlockIndexCache();
     invalidateSourceLineAnchors();
     refreshVirtualizedFindHighlights();
+    if (getModelMinimapSource() !== null && minimapSourceReady) {
+      renderCurrentModelMinimapContent();
+      updateMinimapViewport({ skipVisibilityUpdate: true });
+    }
     scheduleVirtualizedCalibration();
     postPerfMark("mm-virt-window-height-adopted", {
       maxAbsDelta: result.maxAbsDelta,
+      totalHeight: virtualizedDocumentWindowModel?.getTotalHeight() ?? null,
       totalDelta: result.totalDelta,
       updatedCount: result.updatedCount
     });
@@ -5060,9 +5178,27 @@
       viewportHeight: root.clientHeight
     };
   }
+  function getModelMinimapSource() {
+    return virtualizationEnabled ? virtualizedDocumentWindowModel : null;
+  }
+  function getCurrentMinimapDocumentHeight() {
+    return getModelMinimapSource()?.getTotalHeight() ?? getDocumentScrollMetrics().documentHeight;
+  }
+  function readModelMinimapPaintSize() {
+    const configuredWidth = readRootPixelVariable("--mm-minimap-width", 136);
+    const width = minimapRoot?.clientWidth && minimapRoot.clientWidth > 0 ? minimapRoot.clientWidth : configuredWidth;
+    const cssViewportHeight = Math.max(0, window.innerHeight - 128);
+    const height = minimapRoot?.clientHeight && minimapRoot.clientHeight > 0 ? minimapRoot.clientHeight : cssViewportHeight;
+    return {
+      height: Math.max(1, height),
+      width: Math.max(1, width)
+    };
+  }
   function shouldBuildDetailedMinimapContent() {
     const source = document.querySelector(".mm-document");
-    const { documentHeight, viewportHeight } = getDocumentScrollMetrics();
+    const metrics = getDocumentScrollMetrics();
+    const documentHeight = getModelMinimapSource()?.getTotalHeight() ?? metrics.documentHeight;
+    const viewportHeight = metrics.viewportHeight;
     if (!source) {
       return { allowed: false, reason: "no-source", documentHeight };
     }
@@ -5119,6 +5255,51 @@
     sanitizeMinimapCloneTree(clone);
     return clone;
   }
+  function renderCurrentModelMinimapContent() {
+    const model = getModelMinimapSource();
+    if (model === null || minimapContent === null) {
+      currentModelMinimapLayout = null;
+      return false;
+    }
+    const documentHeight = model.getTotalHeight();
+    if (!Number.isFinite(documentHeight) || documentHeight <= 0) {
+      currentModelMinimapLayout = null;
+      return false;
+    }
+    const size = readModelMinimapPaintSize();
+    const canvas = renderModelMinimapCanvas({
+      bands: model.getMinimapBlockProjection(),
+      documentHeight,
+      height: size.height,
+      ownerDocument: document,
+      pixelRatio: window.devicePixelRatio,
+      width: size.width
+    });
+    minimapContent.replaceChildren(canvas);
+    minimapContent.style.width = `${size.width}px`;
+    minimapContent.style.height = `${size.height}px`;
+    minimapContent.style.transform = "";
+    minimapDocumentHeight = documentHeight;
+    minimapSourceReady = true;
+    return true;
+  }
+  function ensureCurrentModelMinimapContent() {
+    const model = getModelMinimapSource();
+    if (model === null || minimapContent === null) {
+      currentModelMinimapLayout = null;
+      return false;
+    }
+    const documentHeight = model.getTotalHeight();
+    const size = readModelMinimapPaintSize();
+    const canvas = minimapContent.querySelector("canvas[data-mm-model-minimap='true']");
+    const isCurrent = canvas !== null && Number(canvas.dataset["mmModelMinimapSectionCount"]) === model.getSectionCount() && Number(canvas.dataset["mmModelMinimapTotalHeight"]) === documentHeight && Number(canvas.dataset["mmModelMinimapWidth"]) === Math.max(1, Math.round(size.width)) && Number(canvas.dataset["mmModelMinimapHeight"]) === Math.max(1, Math.round(size.height));
+    if (isCurrent) {
+      minimapDocumentHeight = documentHeight;
+      minimapSourceReady = true;
+      return true;
+    }
+    return renderCurrentModelMinimapContent();
+  }
   function refreshMinimapContent(phase = "A") {
     cancelDeferredMinimapContentRefresh();
     emitMark("mm-minimap-refresh-start", { phase });
@@ -5133,6 +5314,7 @@
     if (!buildDecision.allowed) {
       minimapSourceReady = false;
       minimapDocumentHeight = buildDecision.documentHeight;
+      currentModelMinimapLayout = null;
       minimapContent.replaceChildren();
       updateMinimapVisibility(true);
       emitMark("mm-minimap-refresh-skipped", {
@@ -5147,6 +5329,19 @@
       });
       return;
     }
+    if (getModelMinimapSource() !== null) {
+      if (!renderCurrentModelMinimapContent()) {
+        emitMark("mm-minimap-refresh-end", { phase, skipped: "no-model-source" });
+        postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-model-source" });
+        return;
+      }
+      updateMinimapVisibility(true);
+      updateMinimapViewport({ skipVisibilityUpdate: true });
+      emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight, source: "model" });
+      postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight, source: "model" });
+      return;
+    }
+    currentModelMinimapLayout = null;
     const clone = cloneDocumentForMinimap();
     if (!clone) {
       emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
@@ -5180,8 +5375,7 @@
       refreshMinimapContent("A");
       return;
     }
-    const root = document.scrollingElement ?? document.documentElement;
-    minimapDocumentHeight = root.scrollHeight;
+    minimapDocumentHeight = getCurrentMinimapDocumentHeight();
     updateMinimapVisibility(true);
     updateMinimapViewport();
     emitMark("mm-minimap-refresh-skipped", {
@@ -5450,9 +5644,9 @@
     });
   }
   function shouldShowMinimap() {
-    const root = document.scrollingElement ?? document.documentElement;
-    const documentHeight = root.scrollHeight;
-    const viewportHeight = root.clientHeight;
+    const metrics = getDocumentScrollMetrics();
+    const documentHeight = getCurrentMinimapDocumentHeight();
+    const viewportHeight = metrics.viewportHeight;
     if (!hasReceivedHostPreferences || !minimapPolicy || !viewerChromeEnabled || !minimapSourceReady || minimapMode === "off" || viewportHeight <= 0 || documentHeight <= viewportHeight) {
       return false;
     }
@@ -5596,8 +5790,38 @@
     }
     if (minimapRoot.hidden) {
       currentMinimapLayout = null;
+      currentModelMinimapLayout = null;
       return;
     }
+    const model = getModelMinimapSource();
+    if (model !== null) {
+      currentMinimapLayout = null;
+      if (!ensureCurrentModelMinimapContent()) {
+        currentModelMinimapLayout = null;
+        return;
+      }
+      const root2 = document.scrollingElement ?? document.documentElement;
+      const size = readModelMinimapPaintSize();
+      const layout2 = calculateModelMinimapLayout({
+        documentHeight: model.getTotalHeight(),
+        height: size.height,
+        scrollTop: root2.scrollTop,
+        viewportHeight: root2.clientHeight,
+        width: size.width
+      });
+      if (layout2 === null) {
+        currentModelMinimapLayout = null;
+        return;
+      }
+      currentModelMinimapLayout = layout2;
+      minimapContent.style.width = `${size.width}px`;
+      minimapContent.style.height = `${size.height}px`;
+      minimapContent.style.transform = "";
+      minimapViewport.style.transform = `translateY(${layout2.thumbTop}px)`;
+      minimapViewport.style.height = `${layout2.thumbHeight}px`;
+      return;
+    }
+    currentModelMinimapLayout = null;
     const root = document.scrollingElement ?? document.documentElement;
     const knownPolicyHeavyDocument = isPolicyHeavyMinimapDocument();
     const documentScrollHeight = root.scrollHeight;
@@ -5661,11 +5885,19 @@
     minimapViewport.style.height = `${layout.thumbHeight}px`;
   }
   function getCurrentMinimapThumbTravel() {
+    if (currentModelMinimapLayout) {
+      return Math.max(1, currentModelMinimapLayout.thumbTravel);
+    }
     if (currentMinimapLayout) {
       return Math.max(1, currentMinimapLayout.thumbTravel);
     }
     const minimapHeight = minimapRoot?.clientHeight ?? 0;
     return Math.max(1, minimapHeight - 22);
+  }
+  function scrollToModelMinimapPosition(targetScrollTop) {
+    window.scrollTo({ top: targetScrollTop, behavior: "instant" });
+    updateVirtualizedWindowForScroll({ force: true });
+    updateMinimapViewport({ skipVisibilityUpdate: true });
   }
   function scrollFromMinimapClientY(clientY) {
     if (!minimapRoot) {
@@ -5674,6 +5906,10 @@
     const root = document.scrollingElement ?? document.documentElement;
     const rect = minimapRoot.getBoundingClientRect();
     const minimapY = Math.max(0, Math.min(rect.height, clientY - rect.top));
+    if (currentModelMinimapLayout !== null) {
+      scrollToModelMinimapPosition(scrollTopForModelMinimapY(currentModelMinimapLayout, minimapY));
+      return;
+    }
     if (currentMinimapLayout && minimapContent) {
       const cloneYTarget = (minimapY - currentMinimapLayout.contentTranslateY) / currentMinimapLayout.scale;
       const firstTarget = docScrollTopForCloneY(root, cloneYTarget);
@@ -5730,6 +5966,16 @@
     minimapDragMode = "panning";
     const root = document.scrollingElement ?? document.documentElement;
     const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+    if (minimapRoot && minimapViewport && currentModelMinimapLayout !== null) {
+      const rootTop = minimapRoot.getBoundingClientRect().top;
+      const desiredThumbTop = event.clientY - rootTop - minimapDragGrabOffset;
+      const target = scrollTopForModelMinimapThumbTop(currentModelMinimapLayout, desiredThumbTop);
+      scrollToModelMinimapPosition(Math.max(0, target));
+      const pinnedTop = Math.max(0, Math.min(currentModelMinimapLayout.thumbTravel, desiredThumbTop));
+      minimapViewport.style.transform = `translateY(${pinnedTop}px)`;
+      event.preventDefault();
+      return;
+    }
     if (minimapRoot && minimapViewport && currentMinimapLayout && minimapContent && currentMinimapLayout.thumbSlope > 0) {
       const rootTop = minimapRoot.getBoundingClientRect().top;
       const desiredThumbTop = event.clientY - rootTop - minimapDragGrabOffset;
@@ -6452,6 +6698,7 @@
     minimapDocumentHeight = 0;
     lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
     minimapSourceReady = false;
+    currentModelMinimapLayout = null;
     hasInitialLayoutSettled = false;
     resetVirtualizedDocumentWindow();
     findBarController?.close();

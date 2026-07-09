@@ -365,13 +365,13 @@ describe("document window model", () => {
 
   it("projects every model section to minimap block geometry without reading live DOM", () => {
     const model = new DocumentWindowModel([
-      { ...entry(0, 130, 100), kind: "heading" },
+      { ...entry(0, 130, 100), headingLevel: 2, kind: "heading" },
       { ...entry(1, 131, 150), kind: "quote" },
     ]);
 
     expect(model.getMinimapBlockProjection()).toEqual([
-      { height: 100, kind: "heading", top: 0 },
-      { height: 150, kind: "quote", top: 100 },
+      { headingLevel: 2, height: 100, kind: "heading", top: 0 },
+      { headingLevel: 0, height: 150, kind: "quote", top: 100 },
     ]);
   });
 

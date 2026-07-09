@@ -5,6 +5,13 @@ import {
   type MinimapViewportLayout
 } from "./minimapLayout";
 import {
+  calculateModelMinimapLayout,
+  renderModelMinimapCanvas,
+  scrollTopForModelMinimapThumbTop,
+  scrollTopForModelMinimapY,
+  type ModelMinimapLayout,
+} from "./modelMinimap";
+import {
   getWidthResizerVisibilityClasses,
   normalizeWidthResizerVisibility,
   type WidthResizerVisibility
@@ -271,6 +278,7 @@ let minimapRoot: HTMLElement | null = null;
 let minimapContent: HTMLElement | null = null;
 let minimapViewport: HTMLElement | null = null;
 let currentMinimapLayout: MinimapViewportLayout | null = null;
+let currentModelMinimapLayout: ModelMinimapLayout | null = null;
 let minimapDragging = false;
 let minimapDragStartClientY: number | null = null;
 let minimapDragStartScrollTop = 0;
@@ -937,18 +945,29 @@ function renderMath(): MathReadinessController {
   // rebuild was dead on every initial render. isCancelled() still guards a real
   // new-document load.
   const phaseBDocumentCacheKey = currentDocumentCacheKey;
-  const initialVisualSettleReady = schedulePhaseBRebuild({
-    allMathRendered: controller.allMathRendered,
-    getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
-    getCachedDocumentHeight: () => minimapDocumentHeight,
-    refresh: (phase) => {
-      if (phaseBDocumentCacheKey !== currentDocumentCacheKey || controller.isCancelled()) {
-        return;
-      }
+  const initialVisualSettleReady = virtualizationEnabled
+    ? controller.allMathRendered.then(() => {
+        if (phaseBDocumentCacheKey !== currentDocumentCacheKey || controller.isCancelled()) {
+          return;
+        }
 
-      refreshMinimapContent(phase);
-    },
-  });
+        if (getModelMinimapSource() !== null && minimapSourceReady) {
+          renderCurrentModelMinimapContent();
+          updateMinimapViewport({ skipVisibilityUpdate: true });
+        }
+      })
+    : schedulePhaseBRebuild({
+        allMathRendered: controller.allMathRendered,
+        getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
+        getCachedDocumentHeight: () => minimapDocumentHeight,
+        refresh: (phase) => {
+          if (phaseBDocumentCacheKey !== currentDocumentCacheKey || controller.isCancelled()) {
+            return;
+          }
+
+          refreshMinimapContent(phase);
+        },
+      });
   const readinessController: MathReadinessController = {
     ...controller,
     initialVisualSettleReady,
@@ -1481,6 +1500,7 @@ function resetVirtualizedDocumentWindow(resetCalibrator = true): void {
   virtualizedDocumentWindowController = null;
   virtualizedDocumentWindowModel = null;
   virtualizedMeasureFrameRequested = false;
+  currentModelMinimapLayout = null;
   if (resetCalibrator) {
     virtualizedIntrinsicCalibrator.reset();
   }
@@ -1608,9 +1628,14 @@ function adoptVirtualizedRenderedHeights(): void {
   invalidateTopVisibleBlockIndexCache();
   invalidateSourceLineAnchors();
   refreshVirtualizedFindHighlights();
+  if (getModelMinimapSource() !== null && minimapSourceReady) {
+    renderCurrentModelMinimapContent();
+    updateMinimapViewport({ skipVisibilityUpdate: true });
+  }
   scheduleVirtualizedCalibration();
   postPerfMark("mm-virt-window-height-adopted", {
     maxAbsDelta: result.maxAbsDelta,
+    totalHeight: virtualizedDocumentWindowModel?.getTotalHeight() ?? null,
     totalDelta: result.totalDelta,
     updatedCount: result.updatedCount,
   });
@@ -2442,9 +2467,34 @@ function getDocumentScrollMetrics(): { documentHeight: number; viewportHeight: n
   };
 }
 
+function getModelMinimapSource(): DocumentWindowModel | null {
+  return virtualizationEnabled ? virtualizedDocumentWindowModel : null;
+}
+
+function getCurrentMinimapDocumentHeight(): number {
+  return getModelMinimapSource()?.getTotalHeight() ?? getDocumentScrollMetrics().documentHeight;
+}
+
+function readModelMinimapPaintSize(): { width: number; height: number } {
+  const configuredWidth = readRootPixelVariable("--mm-minimap-width", 136);
+  const width = minimapRoot?.clientWidth && minimapRoot.clientWidth > 0
+    ? minimapRoot.clientWidth
+    : configuredWidth;
+  const cssViewportHeight = Math.max(0, window.innerHeight - 128);
+  const height = minimapRoot?.clientHeight && minimapRoot.clientHeight > 0
+    ? minimapRoot.clientHeight
+    : cssViewportHeight;
+  return {
+    height: Math.max(1, height),
+    width: Math.max(1, width),
+  };
+}
+
 function shouldBuildDetailedMinimapContent(): { allowed: boolean; reason?: string; documentHeight: number } {
   const source = document.querySelector<HTMLElement>(".mm-document");
-  const { documentHeight, viewportHeight } = getDocumentScrollMetrics();
+  const metrics = getDocumentScrollMetrics();
+  const documentHeight = getModelMinimapSource()?.getTotalHeight() ?? metrics.documentHeight;
+  const viewportHeight = metrics.viewportHeight;
   if (!source) {
     return { allowed: false, reason: "no-source", documentHeight };
   }
@@ -2493,8 +2543,6 @@ function sanitizeMinimapCloneTree(root: ParentNode): void {
 }
 
 function cloneDocumentForMinimap(): HTMLElement | null {
-  // VIRT-TODO(integration): minimap clones only the live virtualized <main>;
-  // off-window content needs a model/full-document minimap source.
   const source = document.querySelector<HTMLElement>(".mm-document");
   if (!source) {
     minimapSourceReady = false;
@@ -2530,6 +2578,61 @@ function cloneDocumentForMinimap(): HTMLElement | null {
   return clone;
 }
 
+function renderCurrentModelMinimapContent(): boolean {
+  const model = getModelMinimapSource();
+  if (model === null || minimapContent === null) {
+    currentModelMinimapLayout = null;
+    return false;
+  }
+
+  const documentHeight = model.getTotalHeight();
+  if (!Number.isFinite(documentHeight) || documentHeight <= 0) {
+    currentModelMinimapLayout = null;
+    return false;
+  }
+
+  const size = readModelMinimapPaintSize();
+  const canvas = renderModelMinimapCanvas({
+    bands: model.getMinimapBlockProjection(),
+    documentHeight,
+    height: size.height,
+    ownerDocument: document,
+    pixelRatio: window.devicePixelRatio,
+    width: size.width,
+  });
+  minimapContent.replaceChildren(canvas);
+  minimapContent.style.width = `${size.width}px`;
+  minimapContent.style.height = `${size.height}px`;
+  minimapContent.style.transform = "";
+  minimapDocumentHeight = documentHeight;
+  minimapSourceReady = true;
+  return true;
+}
+
+function ensureCurrentModelMinimapContent(): boolean {
+  const model = getModelMinimapSource();
+  if (model === null || minimapContent === null) {
+    currentModelMinimapLayout = null;
+    return false;
+  }
+
+  const documentHeight = model.getTotalHeight();
+  const size = readModelMinimapPaintSize();
+  const canvas = minimapContent.querySelector<HTMLCanvasElement>("canvas[data-mm-model-minimap='true']");
+  const isCurrent = canvas !== null
+    && Number(canvas.dataset["mmModelMinimapSectionCount"]) === model.getSectionCount()
+    && Number(canvas.dataset["mmModelMinimapTotalHeight"]) === documentHeight
+    && Number(canvas.dataset["mmModelMinimapWidth"]) === Math.max(1, Math.round(size.width))
+    && Number(canvas.dataset["mmModelMinimapHeight"]) === Math.max(1, Math.round(size.height));
+  if (isCurrent) {
+    minimapDocumentHeight = documentHeight;
+    minimapSourceReady = true;
+    return true;
+  }
+
+  return renderCurrentModelMinimapContent();
+}
+
 function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   cancelDeferredMinimapContentRefresh();
   emitMark("mm-minimap-refresh-start", { phase });
@@ -2544,6 +2647,7 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   if (!buildDecision.allowed) {
     minimapSourceReady = false;
     minimapDocumentHeight = buildDecision.documentHeight;
+    currentModelMinimapLayout = null;
     minimapContent.replaceChildren();
     updateMinimapVisibility(true);
     emitMark("mm-minimap-refresh-skipped", {
@@ -2558,6 +2662,21 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
     });
     return;
   }
+  if (getModelMinimapSource() !== null) {
+    if (!renderCurrentModelMinimapContent()) {
+      emitMark("mm-minimap-refresh-end", { phase, skipped: "no-model-source" });
+      postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-model-source" });
+      return;
+    }
+
+    updateMinimapVisibility(true);
+    updateMinimapViewport({ skipVisibilityUpdate: true });
+    emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight, source: "model" });
+    postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight, source: "model" });
+    return;
+  }
+
+  currentModelMinimapLayout = null;
   const clone = cloneDocumentForMinimap();
   if (!clone) {
     emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
@@ -2595,8 +2714,7 @@ function refreshInitialVisibleMinimapContent(): void {
     return;
   }
 
-  const root = document.scrollingElement ?? document.documentElement;
-  minimapDocumentHeight = root.scrollHeight;
+  minimapDocumentHeight = getCurrentMinimapDocumentHeight();
   updateMinimapVisibility(true);
   updateMinimapViewport();
   emitMark("mm-minimap-refresh-skipped", {
@@ -2943,9 +3061,9 @@ function rebuildActiveHeadingObserver(headingNodes: HTMLHeadingElement[]): void 
 }
 
 function shouldShowMinimap(): boolean {
-  const root = document.scrollingElement ?? document.documentElement;
-  const documentHeight = root.scrollHeight;
-  const viewportHeight = root.clientHeight;
+  const metrics = getDocumentScrollMetrics();
+  const documentHeight = getCurrentMinimapDocumentHeight();
+  const viewportHeight = metrics.viewportHeight;
   // F-07 fix: minimap decisions require both host preferences AND the
   // canonical minimap policy delivered via the minimap-policy IPC
   // message. Either missing means the renderer is still in the pre-
@@ -3174,9 +3292,42 @@ function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void
   }
   if (minimapRoot.hidden) {
     currentMinimapLayout = null;
+    currentModelMinimapLayout = null;
     return;
   }
 
+  const model = getModelMinimapSource();
+  if (model !== null) {
+    currentMinimapLayout = null;
+    if (!ensureCurrentModelMinimapContent()) {
+      currentModelMinimapLayout = null;
+      return;
+    }
+
+    const root = document.scrollingElement ?? document.documentElement;
+    const size = readModelMinimapPaintSize();
+    const layout = calculateModelMinimapLayout({
+      documentHeight: model.getTotalHeight(),
+      height: size.height,
+      scrollTop: root.scrollTop,
+      viewportHeight: root.clientHeight,
+      width: size.width,
+    });
+    if (layout === null) {
+      currentModelMinimapLayout = null;
+      return;
+    }
+
+    currentModelMinimapLayout = layout;
+    minimapContent.style.width = `${size.width}px`;
+    minimapContent.style.height = `${size.height}px`;
+    minimapContent.style.transform = "";
+    minimapViewport.style.transform = `translateY(${layout.thumbTop}px)`;
+    minimapViewport.style.height = `${layout.thumbHeight}px`;
+    return;
+  }
+
+  currentModelMinimapLayout = null;
   const root = document.scrollingElement ?? document.documentElement;
   // root.scrollHeight / root.scrollTop describe the REAL scroll range the user
   // scrolls over; keep them as the basis for scroll PROGRESS so the thumb
@@ -3277,12 +3428,22 @@ function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void
 }
 
 function getCurrentMinimapThumbTravel(): number {
+  if (currentModelMinimapLayout) {
+    return Math.max(1, currentModelMinimapLayout.thumbTravel);
+  }
+
   if (currentMinimapLayout) {
     return Math.max(1, currentMinimapLayout.thumbTravel);
   }
 
   const minimapHeight = minimapRoot?.clientHeight ?? 0;
   return Math.max(1, minimapHeight - 22);
+}
+
+function scrollToModelMinimapPosition(targetScrollTop: number): void {
+  window.scrollTo({ top: targetScrollTop, behavior: "instant" as ScrollBehavior });
+  updateVirtualizedWindowForScroll({ force: true });
+  updateMinimapViewport({ skipVisibilityUpdate: true });
 }
 
 function scrollFromMinimapClientY(clientY: number): void {
@@ -3293,6 +3454,11 @@ function scrollFromMinimapClientY(clientY: number): void {
   const root = document.scrollingElement ?? document.documentElement;
   const rect = minimapRoot.getBoundingClientRect();
   const minimapY = Math.max(0, Math.min(rect.height, clientY - rect.top));
+
+  if (currentModelMinimapLayout !== null) {
+    scrollToModelMinimapPosition(scrollTopForModelMinimapY(currentModelMinimapLayout, minimapY));
+    return;
+  }
 
   // [block-anchor inverse] Click-jump: invert the forward minimap-space mapping
   // (rawThumbTop = scrollTop*scale + contentTranslateY) to the clone-space Y
@@ -3378,6 +3544,17 @@ function handleMinimapPointerMove(event: PointerEvent): void {
 
   const root = document.scrollingElement ?? document.documentElement;
   const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+
+  if (minimapRoot && minimapViewport && currentModelMinimapLayout !== null) {
+    const rootTop = minimapRoot.getBoundingClientRect().top;
+    const desiredThumbTop = event.clientY - rootTop - minimapDragGrabOffset;
+    const target = scrollTopForModelMinimapThumbTop(currentModelMinimapLayout, desiredThumbTop);
+    scrollToModelMinimapPosition(Math.max(0, target));
+    const pinnedTop = Math.max(0, Math.min(currentModelMinimapLayout.thumbTravel, desiredThumbTop));
+    minimapViewport.style.transform = `translateY(${pinnedTop}px)`;
+    event.preventDefault();
+    return;
+  }
 
   // Block-anchor drag: keep the grabbed point of the viewport indicator under the
   // cursor. The indicator's top is thumbTop = anchorTopY * thumbSlope (the UNCLAMPED
@@ -4342,6 +4519,7 @@ function resetModuleGlobalsForLoadDocument(): void {
   minimapDocumentHeight = 0;
   lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
   minimapSourceReady = false;
+  currentModelMinimapLayout = null;
   // Polish #5 — reset the width-handle reveal gate so the next document's
   // initialVisibleReady has to fire again before the handle becomes visible
   // at its (now-correct) post-settle x. Without this reset, every doc after

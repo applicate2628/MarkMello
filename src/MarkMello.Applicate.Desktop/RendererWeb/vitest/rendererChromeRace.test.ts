@@ -38,6 +38,11 @@ describe("renderer chrome race handling", () => {
     vi.resetModules();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    delete (window as Window & { MARKMELLO_VIRTUALIZATION?: unknown }).MARKMELLO_VIRTUALIZATION;
+    document.documentElement.removeAttribute("data-markmello-virtualization");
+    if (typeof window.localStorage?.removeItem === "function") {
+      window.localStorage.removeItem("MARKMELLO_VIRTUALIZATION");
+    }
     document.documentElement.innerHTML =
       `<body><main class="mm-document"><p>Loaded document</p></main></body>`;
     Object.defineProperty(document, "scrollingElement", {
