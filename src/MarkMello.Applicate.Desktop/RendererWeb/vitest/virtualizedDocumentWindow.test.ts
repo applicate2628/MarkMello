@@ -282,4 +282,43 @@ describe("virtualized document window", () => {
 
     expect(prepare).toHaveBeenCalledTimes(1);
   });
+
+  it("renders a target section without synthesizing a scroll event and preserves the current anchor", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { getScrollTop, root } = setScrollRoot(25, 400, 50);
+    const model = new DocumentWindowModel([
+      entry(0, 70, 100),
+      entry(1, 71, 100),
+      entry(2, 72, 100),
+      entry(3, 73, 100),
+    ]);
+    const controller = makeController({ model, root });
+    controller.updateWindowForScroll();
+
+    expect(controller.isSectionRendered(3)).toBe(false);
+    expect(controller.ensureSectionRendered(3, { preserveAnchor: true })).toBe(true);
+
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    expect(Array.from(main.querySelectorAll<HTMLElement>("[data-mm-block-index]")).map(node =>
+      Number(node.dataset.mmBlockIndex))).toEqual([73]);
+    expect(controller.getCurrentRange()).toEqual({ start: 3, end: 3 });
+    expect(controller.isSectionRendered(3)).toBe(true);
+    expect(getScrollTop()).toBe(25);
+  });
+
+  it("renders a requested section range for future multi-section targets", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 50);
+    const model = new DocumentWindowModel([
+      entry(0, 80, 100),
+      entry(1, 81, 100),
+      entry(2, 82, 100),
+      entry(3, 83, 100),
+    ]);
+    const controller = makeController({ model, root });
+
+    expect(controller.ensureSectionRangeRendered(1, 2)).toBe(true);
+    expect(controller.getCurrentRange()).toEqual({ start: 1, end: 2 });
+    expect(controller.ensureSectionRangeRendered(1, 2)).toBe(false);
+  });
 });

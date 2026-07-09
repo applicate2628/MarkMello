@@ -1629,15 +1629,39 @@
   var DocumentWindowModel = class {
     constructor(entries, options = {}) {
       this.sectionIndexByBlockIndex = /* @__PURE__ */ new Map();
+      this.containingSectionIndexByBlockIndex = /* @__PURE__ */ new Map();
+      this.sectionIndexByHeadingAnchor = /* @__PURE__ */ new Map();
+      this.sourceLineSpans = [];
       this.totalHeight = 0;
       this.leadingOffset = options.leadingOffset ?? 0;
       this.sections = entries.slice().sort((a, b) => a.sectionIndex - b.sectionIndex).map((entry) => ({ ...entry }));
       for (let index = 0; index < this.sections.length; index++) {
         const entry = this.sections[index];
+        const metadata = readSectionModelEntryMetadata(entry);
+        entry.containedBlockIndexes = metadata.containedBlockIndexes;
+        entry.headingAnchors = metadata.headingAnchors;
+        entry.sourceLineSpans = metadata.sourceLineSpans;
         if (!this.sectionIndexByBlockIndex.has(entry.blockIndex)) {
           this.sectionIndexByBlockIndex.set(entry.blockIndex, index);
         }
+        for (const blockIndex of entry.containedBlockIndexes) {
+          if (!this.containingSectionIndexByBlockIndex.has(blockIndex)) {
+            this.containingSectionIndexByBlockIndex.set(blockIndex, index);
+          }
+        }
+        for (const anchor of entry.headingAnchors) {
+          if (!this.sectionIndexByHeadingAnchor.has(anchor)) {
+            this.sectionIndexByHeadingAnchor.set(anchor, index);
+          }
+        }
+        for (const span of entry.sourceLineSpans) {
+          this.sourceLineSpans.push({ ...span, sectionIndex: index });
+        }
       }
+      this.sourceLineSpans.sort((left, right) => {
+        const sourceComparison = left.sourceLine - right.sourceLine;
+        return sourceComparison !== 0 ? sourceComparison : left.sectionIndex - right.sectionIndex;
+      });
       this.refreshHeightModel();
     }
     getSectionCount() {
@@ -1656,6 +1680,57 @@
     getEntryByBlockIndex(blockIndex) {
       const sectionIndex = this.sectionIndexByBlockIndex.get(blockIndex);
       return sectionIndex === void 0 ? void 0 : this.sections[sectionIndex];
+    }
+    getEntryContainingBlockIndex(blockIndex) {
+      const sectionIndex = this.containingSectionIndexByBlockIndex.get(blockIndex);
+      return sectionIndex === void 0 ? void 0 : this.sections[sectionIndex];
+    }
+    getEntryByHeadingAnchor(anchor) {
+      const normalized = normalizeHeadingAnchor(anchor);
+      if (normalized.length === 0) {
+        return void 0;
+      }
+      const sectionIndex = this.sectionIndexByHeadingAnchor.get(normalized);
+      return sectionIndex === void 0 ? void 0 : this.sections[sectionIndex];
+    }
+    getEntryBySourceLine(sourceLine) {
+      if (this.sourceLineSpans.length === 0 || !Number.isFinite(sourceLine)) {
+        return void 0;
+      }
+      const normalizedLine = Math.max(0, Math.floor(sourceLine));
+      let low = 0;
+      let high = this.sourceLineSpans.length - 1;
+      let selectedIndex = -1;
+      while (low <= high) {
+        const mid = low + Math.floor((high - low) / 2);
+        if (this.sourceLineSpans[mid].sourceLine <= normalizedLine) {
+          selectedIndex = mid;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+      const selected = selectedIndex >= 0 ? this.sourceLineSpans[selectedIndex] : this.sourceLineSpans[0];
+      return selected === void 0 ? void 0 : this.sections[selected.sectionIndex];
+    }
+    getSourceLineAnchors() {
+      return this.sourceLineSpans.map((span) => {
+        const entry = this.sections[span.sectionIndex];
+        return {
+          blockIndex: entry.blockIndex,
+          endLine: span.endLine,
+          sectionIndex: span.sectionIndex,
+          sourceLine: span.sourceLine,
+          top: entry.cumulativeTop
+        };
+      });
+    }
+    getMinimapBlockProjection() {
+      return this.sections.map((entry) => ({
+        height: effectiveHeight(entry),
+        kind: entry.kind,
+        top: entry.cumulativeTop
+      }));
     }
     refreshHeightModel() {
       let cumulative = this.leadingOffset;
@@ -2130,6 +2205,121 @@
     const tag = element.tagName.toUpperCase();
     return /^H[1-6]$/.test(tag) ? Number.parseInt(tag.slice(1), 10) : 0;
   }
+  function readSectionModelEntryMetadata(entry) {
+    const parsed = entry.html ? readSectionHtmlMetadata(entry.html) : EMPTY_SECTION_METADATA;
+    return {
+      containedBlockIndexes: uniqueNumbers([
+        entry.blockIndex,
+        ...entry.containedBlockIndexes ?? [],
+        ...parsed.containedBlockIndexes
+      ]),
+      headingAnchors: uniqueStrings([
+        ...entry.headingAnchors ?? [],
+        ...parsed.headingAnchors
+      ]),
+      sourceLineSpans: uniqueSourceLineSpans([
+        ...entry.sourceLineSpans ?? [],
+        ...parsed.sourceLineSpans
+      ])
+    };
+  }
+  var EMPTY_SECTION_METADATA = {
+    containedBlockIndexes: [],
+    headingAnchors: [],
+    sourceLineSpans: []
+  };
+  function readSectionHtmlMetadata(html) {
+    if (typeof document === "undefined") {
+      return EMPTY_SECTION_METADATA;
+    }
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    const elements = Array.from(template.content.querySelectorAll("*"));
+    return readSectionElementMetadata(elements);
+  }
+  function readSectionElementMetadata(elements) {
+    const containedBlockIndexes = [];
+    const headingAnchors = [];
+    const sourceLineSpans = [];
+    for (const element of elements) {
+      const blockIndex = parseFiniteInt(element.dataset["mmBlockIndex"]);
+      if (blockIndex !== null) {
+        containedBlockIndexes.push(blockIndex);
+      }
+      if (/^H[1-6]$/i.test(element.tagName) && element.id.trim().length > 0) {
+        headingAnchors.push(element.id);
+      }
+      const sourceLine = parseNonNegativeInt2(element.dataset["mmSourceLine"]);
+      if (sourceLine !== null) {
+        const rawEndLine = parseNonNegativeInt2(element.dataset["mmSourceEndLine"]);
+        sourceLineSpans.push({
+          endLine: Math.max(sourceLine, rawEndLine ?? sourceLine),
+          sourceLine
+        });
+      }
+    }
+    return {
+      containedBlockIndexes,
+      headingAnchors,
+      sourceLineSpans
+    };
+  }
+  function uniqueNumbers(values) {
+    const result = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const value of values) {
+      if (!Number.isFinite(value) || seen.has(value)) {
+        continue;
+      }
+      seen.add(value);
+      result.push(value);
+    }
+    return result;
+  }
+  function uniqueStrings(values) {
+    const result = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const value of values) {
+      if (value.length === 0 || seen.has(value)) {
+        continue;
+      }
+      seen.add(value);
+      result.push(value);
+    }
+    return result;
+  }
+  function uniqueSourceLineSpans(values) {
+    const result = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const span of values) {
+      if (!Number.isFinite(span.sourceLine) || !Number.isFinite(span.endLine)) {
+        continue;
+      }
+      const sourceLine = Math.max(0, Math.floor(span.sourceLine));
+      const endLine = Math.max(sourceLine, Math.floor(span.endLine));
+      const key = `${sourceLine}:${endLine}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      result.push({ endLine, sourceLine });
+    }
+    return result;
+  }
+  function normalizeHeadingAnchor(anchor) {
+    return anchor.startsWith("#") ? anchor.slice(1) : anchor;
+  }
+  function parseFiniteInt(value) {
+    if (value === void 0 || value.trim() === "") {
+      return null;
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  function parseNonNegativeInt2(value) {
+    const parsed = parseFiniteInt(value);
+    return parsed !== null && parsed >= 0 ? parsed : null;
+  }
 
   // RendererWeb/src/virtualizationFlags.ts
   function readRendererBooleanFlag(input) {
@@ -2218,6 +2408,22 @@
       }
     };
     const computeRange = () => deps.model.computeWindowRange(deps.root.scrollTop, deps.root.clientHeight, renderAhead);
+    const isSectionRendered = (sectionIndex) => currentRange !== null && sectionIndex >= currentRange.start && sectionIndex <= currentRange.end;
+    const ensureRangeRendered = (requestedRange, options = {}) => {
+      const range = normalizeRequestedRange(requestedRange, deps.model.getSectionCount());
+      if (range === null) {
+        return false;
+      }
+      if (options.force !== true && currentRange !== null && rangesEqual(currentRange, range)) {
+        return false;
+      }
+      const anchor = options.preserveAnchor === false ? null : deps.model.captureAnchor(deps.root.scrollTop);
+      renderRange(range);
+      if (anchor !== null) {
+        deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
+      }
+      return true;
+    };
     return {
       adoptRenderedHeights: () => {
         const anchor = deps.model.captureAnchor(deps.root.scrollTop);
@@ -2232,7 +2438,10 @@
         deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
         return result;
       },
+      ensureSectionRangeRendered: (start, end, options = {}) => ensureRangeRendered({ end, start }, options),
+      ensureSectionRendered: (sectionIndex, options = {}) => ensureRangeRendered({ end: sectionIndex, start: sectionIndex }, options),
       getCurrentRange: () => currentRange === null ? null : { ...currentRange },
+      isSectionRendered,
       updateWindowForScroll: (options = {}) => {
         const nextRange = computeRange();
         if (options.force !== true && currentRange !== null && rangesEqual(currentRange, nextRange)) {
@@ -2287,6 +2496,16 @@
   }
   function rangesEqual(left, right) {
     return left.start === right.start && left.end === right.end;
+  }
+  function normalizeRequestedRange(range, sectionCount) {
+    if (sectionCount <= 0 || !Number.isFinite(range.start) || !Number.isFinite(range.end)) {
+      return null;
+    }
+    const rawStart = Math.floor(Math.min(range.start, range.end));
+    const rawEnd = Math.floor(Math.max(range.start, range.end));
+    const start = Math.max(0, Math.min(sectionCount - 1, rawStart));
+    const end = Math.max(start, Math.min(sectionCount - 1, rawEnd));
+    return { end, start };
   }
 
   // RendererWeb/src/virtualizationShadow.ts

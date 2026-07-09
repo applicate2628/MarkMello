@@ -326,6 +326,55 @@ describe("document window model", () => {
     expect(collectLiveDocumentSectionElements(main)).toEqual([topLevel]);
   });
 
+  it("resolves nested block indexes to the containing top-level section", () => {
+    const owner = block(110, 0, 120, "quote");
+    const nested = block(111, 0, 40, "paragraph");
+    owner.append(nested);
+    const model = buildDocumentWindowModelFromLiveBlocks([owner], metrics, 120);
+
+    expect(model.getEntryContainingBlockIndex(111)).toMatchObject({
+      blockIndex: 110,
+      sectionIndex: 0,
+    });
+  });
+
+  it("resolves heading anchors and source lines from the full section HTML", () => {
+    const first = block(120, 0, 100, "heading");
+    first.innerHTML = '<h2 id="alpha-heading">Alpha</h2>';
+    const second = block(121, 100, 140, "quote");
+    second.innerHTML = '<blockquote data-mm-block-index="122" data-mm-source-line="24" data-mm-source-end-line="27">Nested</blockquote>';
+    const model = buildDocumentWindowModelFromLiveBlocks([first, second], metrics, 240);
+
+    expect(model.getEntryByHeadingAnchor("alpha-heading")).toMatchObject({
+      blockIndex: 120,
+      sectionIndex: 0,
+    });
+    expect(model.getEntryBySourceLine(26)).toMatchObject({
+      blockIndex: 121,
+      sectionIndex: 1,
+    });
+    expect(model.getSourceLineAnchors()).toEqual([
+      expect.objectContaining({
+        endLine: 27,
+        sectionIndex: 1,
+        sourceLine: 24,
+        top: 100,
+      }),
+    ]);
+  });
+
+  it("projects every model section to minimap block geometry without reading live DOM", () => {
+    const model = new DocumentWindowModel([
+      { ...entry(0, 130, 100), kind: "heading" },
+      { ...entry(1, 131, 150), kind: "quote" },
+    ]);
+
+    expect(model.getMinimapBlockProjection()).toEqual([
+      { height: 100, kind: "heading", top: 0 },
+      { height: 150, kind: "quote", top: 100 },
+    ]);
+  });
+
   it("ignores non-finite, negative, and unknown measured-height updates", () => {
     const model = new DocumentWindowModel([
       entry(0, 90, 100),

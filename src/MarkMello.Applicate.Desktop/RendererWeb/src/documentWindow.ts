@@ -20,6 +20,26 @@ export type SectionModelEntry = {
   hasMermaid?: boolean;
   intrinsicSize?: SectionIntrinsicCalibrationTarget;
   needsRichPrep?: boolean;
+  containedBlockIndexes?: readonly number[];
+  headingAnchors?: readonly string[];
+  sourceLineSpans?: readonly SourceLineModelSpan[];
+};
+
+export type SourceLineModelSpan = {
+  sourceLine: number;
+  endLine: number;
+};
+
+export type SourceLineModelAnchor = SourceLineModelSpan & {
+  sectionIndex: number;
+  blockIndex: number;
+  top: number;
+};
+
+export type ModelMinimapBlockProjection = {
+  kind: SectionKind;
+  top: number;
+  height: number;
 };
 
 export type EstimateHeightErrorKind = SectionKind | "mermaid";
@@ -129,6 +149,9 @@ export function effectiveHeight(entry: SectionModelEntry): number {
 export class DocumentWindowModel {
   readonly sections: SectionModelEntry[];
   private readonly sectionIndexByBlockIndex = new Map<number, number>();
+  private readonly containingSectionIndexByBlockIndex = new Map<number, number>();
+  private readonly sectionIndexByHeadingAnchor = new Map<string, number>();
+  private readonly sourceLineSpans: Array<SourceLineModelSpan & { sectionIndex: number }> = [];
   private readonly leadingOffset: number;
   private totalHeight = 0;
 
@@ -140,10 +163,31 @@ export class DocumentWindowModel {
       .map(entry => ({ ...entry }));
     for (let index = 0; index < this.sections.length; index++) {
       const entry = this.sections[index]!;
+      const metadata = readSectionModelEntryMetadata(entry);
+      entry.containedBlockIndexes = metadata.containedBlockIndexes;
+      entry.headingAnchors = metadata.headingAnchors;
+      entry.sourceLineSpans = metadata.sourceLineSpans;
       if (!this.sectionIndexByBlockIndex.has(entry.blockIndex)) {
         this.sectionIndexByBlockIndex.set(entry.blockIndex, index);
       }
+      for (const blockIndex of entry.containedBlockIndexes) {
+        if (!this.containingSectionIndexByBlockIndex.has(blockIndex)) {
+          this.containingSectionIndexByBlockIndex.set(blockIndex, index);
+        }
+      }
+      for (const anchor of entry.headingAnchors) {
+        if (!this.sectionIndexByHeadingAnchor.has(anchor)) {
+          this.sectionIndexByHeadingAnchor.set(anchor, index);
+        }
+      }
+      for (const span of entry.sourceLineSpans) {
+        this.sourceLineSpans.push({ ...span, sectionIndex: index });
+      }
     }
+    this.sourceLineSpans.sort((left, right) => {
+      const sourceComparison = left.sourceLine - right.sourceLine;
+      return sourceComparison !== 0 ? sourceComparison : left.sectionIndex - right.sectionIndex;
+    });
     this.refreshHeightModel();
   }
 
@@ -167,6 +211,65 @@ export class DocumentWindowModel {
   getEntryByBlockIndex(blockIndex: number): SectionModelEntry | undefined {
     const sectionIndex = this.sectionIndexByBlockIndex.get(blockIndex);
     return sectionIndex === undefined ? undefined : this.sections[sectionIndex];
+  }
+
+  getEntryContainingBlockIndex(blockIndex: number): SectionModelEntry | undefined {
+    const sectionIndex = this.containingSectionIndexByBlockIndex.get(blockIndex);
+    return sectionIndex === undefined ? undefined : this.sections[sectionIndex];
+  }
+
+  getEntryByHeadingAnchor(anchor: string): SectionModelEntry | undefined {
+    const normalized = normalizeHeadingAnchor(anchor);
+    if (normalized.length === 0) {
+      return undefined;
+    }
+
+    const sectionIndex = this.sectionIndexByHeadingAnchor.get(normalized);
+    return sectionIndex === undefined ? undefined : this.sections[sectionIndex];
+  }
+
+  getEntryBySourceLine(sourceLine: number): SectionModelEntry | undefined {
+    if (this.sourceLineSpans.length === 0 || !Number.isFinite(sourceLine)) {
+      return undefined;
+    }
+
+    const normalizedLine = Math.max(0, Math.floor(sourceLine));
+    let low = 0;
+    let high = this.sourceLineSpans.length - 1;
+    let selectedIndex = -1;
+    while (low <= high) {
+      const mid = low + Math.floor((high - low) / 2);
+      if (this.sourceLineSpans[mid]!.sourceLine <= normalizedLine) {
+        selectedIndex = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    const selected = selectedIndex >= 0 ? this.sourceLineSpans[selectedIndex] : this.sourceLineSpans[0];
+    return selected === undefined ? undefined : this.sections[selected.sectionIndex];
+  }
+
+  getSourceLineAnchors(): SourceLineModelAnchor[] {
+    return this.sourceLineSpans.map(span => {
+      const entry = this.sections[span.sectionIndex]!;
+      return {
+        blockIndex: entry.blockIndex,
+        endLine: span.endLine,
+        sectionIndex: span.sectionIndex,
+        sourceLine: span.sourceLine,
+        top: entry.cumulativeTop,
+      };
+    });
+  }
+
+  getMinimapBlockProjection(): ModelMinimapBlockProjection[] {
+    return this.sections.map(entry => ({
+      height: effectiveHeight(entry),
+      kind: entry.kind,
+      top: entry.cumulativeTop,
+    }));
   }
 
   refreshHeightModel(): void {
@@ -759,4 +862,144 @@ function readBlockIndex(element: HTMLElement, fallback: number): number {
 function readHeadingLevel(element: HTMLElement): number {
   const tag = element.tagName.toUpperCase();
   return /^H[1-6]$/.test(tag) ? Number.parseInt(tag.slice(1), 10) : 0;
+}
+
+type SectionModelEntryMetadata = {
+  containedBlockIndexes: number[];
+  headingAnchors: string[];
+  sourceLineSpans: SourceLineModelSpan[];
+};
+
+function readSectionModelEntryMetadata(entry: SectionModelEntry): SectionModelEntryMetadata {
+  const parsed = entry.html ? readSectionHtmlMetadata(entry.html) : EMPTY_SECTION_METADATA;
+  return {
+    containedBlockIndexes: uniqueNumbers([
+      entry.blockIndex,
+      ...(entry.containedBlockIndexes ?? []),
+      ...parsed.containedBlockIndexes,
+    ]),
+    headingAnchors: uniqueStrings([
+      ...(entry.headingAnchors ?? []),
+      ...parsed.headingAnchors,
+    ]),
+    sourceLineSpans: uniqueSourceLineSpans([
+      ...(entry.sourceLineSpans ?? []),
+      ...parsed.sourceLineSpans,
+    ]),
+  };
+}
+
+const EMPTY_SECTION_METADATA: SectionModelEntryMetadata = {
+  containedBlockIndexes: [],
+  headingAnchors: [],
+  sourceLineSpans: [],
+};
+
+function readSectionHtmlMetadata(html: string): SectionModelEntryMetadata {
+  if (typeof document === "undefined") {
+    return EMPTY_SECTION_METADATA;
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const elements = Array.from(template.content.querySelectorAll<HTMLElement>("*"));
+  return readSectionElementMetadata(elements);
+}
+
+function readSectionElementMetadata(elements: readonly HTMLElement[]): SectionModelEntryMetadata {
+  const containedBlockIndexes: number[] = [];
+  const headingAnchors: string[] = [];
+  const sourceLineSpans: SourceLineModelSpan[] = [];
+  for (const element of elements) {
+    const blockIndex = parseFiniteInt(element.dataset["mmBlockIndex"]);
+    if (blockIndex !== null) {
+      containedBlockIndexes.push(blockIndex);
+    }
+
+    if (/^H[1-6]$/i.test(element.tagName) && element.id.trim().length > 0) {
+      headingAnchors.push(element.id);
+    }
+
+    const sourceLine = parseNonNegativeInt(element.dataset["mmSourceLine"]);
+    if (sourceLine !== null) {
+      const rawEndLine = parseNonNegativeInt(element.dataset["mmSourceEndLine"]);
+      sourceLineSpans.push({
+        endLine: Math.max(sourceLine, rawEndLine ?? sourceLine),
+        sourceLine,
+      });
+    }
+  }
+
+  return {
+    containedBlockIndexes,
+    headingAnchors,
+    sourceLineSpans,
+  };
+}
+
+function uniqueNumbers(values: readonly number[]): number[] {
+  const result: number[] = [];
+  const seen = new Set<number>();
+  for (const value of values) {
+    if (!Number.isFinite(value) || seen.has(value)) {
+      continue;
+    }
+
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (value.length === 0 || seen.has(value)) {
+      continue;
+    }
+
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
+}
+
+function uniqueSourceLineSpans(values: readonly SourceLineModelSpan[]): SourceLineModelSpan[] {
+  const result: SourceLineModelSpan[] = [];
+  const seen = new Set<string>();
+  for (const span of values) {
+    if (!Number.isFinite(span.sourceLine) || !Number.isFinite(span.endLine)) {
+      continue;
+    }
+
+    const sourceLine = Math.max(0, Math.floor(span.sourceLine));
+    const endLine = Math.max(sourceLine, Math.floor(span.endLine));
+    const key = `${sourceLine}:${endLine}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push({ endLine, sourceLine });
+  }
+  return result;
+}
+
+function normalizeHeadingAnchor(anchor: string): string {
+  return anchor.startsWith("#") ? anchor.slice(1) : anchor;
+}
+
+function parseFiniteInt(value: string | undefined): number | null {
+  if (value === undefined || value.trim() === "") {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseNonNegativeInt(value: string | undefined): number | null {
+  const parsed = parseFiniteInt(value);
+  return parsed !== null && parsed >= 0 ? parsed : null;
 }

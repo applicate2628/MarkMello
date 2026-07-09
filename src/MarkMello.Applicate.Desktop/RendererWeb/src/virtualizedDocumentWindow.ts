@@ -28,10 +28,18 @@ export type VirtualizedDocumentWindowController = {
   updateWindowForScroll: (options?: UpdateWindowForScrollOptions) => boolean;
   adoptRenderedHeights: () => MeasuredHeightUpdateResult;
   getCurrentRange: () => WindowRange | null;
+  ensureSectionRendered: (sectionIndex: number, options?: EnsureSectionRenderedOptions) => boolean;
+  ensureSectionRangeRendered: (start: number, end: number, options?: EnsureSectionRenderedOptions) => boolean;
+  isSectionRendered: (sectionIndex: number) => boolean;
 };
 
 export type UpdateWindowForScrollOptions = {
   force?: boolean;
+};
+
+export type EnsureSectionRenderedOptions = {
+  force?: boolean;
+  preserveAnchor?: boolean;
 };
 
 const EMPTY_HEIGHT_UPDATE: MeasuredHeightUpdateResult = {
@@ -87,6 +95,30 @@ export function createVirtualizedDocumentWindowController(
   const computeRange = (): WindowRange =>
     deps.model.computeWindowRange(deps.root.scrollTop, deps.root.clientHeight, renderAhead);
 
+  const isSectionRendered = (sectionIndex: number): boolean =>
+    currentRange !== null && sectionIndex >= currentRange.start && sectionIndex <= currentRange.end;
+
+  const ensureRangeRendered = (
+    requestedRange: WindowRange,
+    options: EnsureSectionRenderedOptions = {}
+  ): boolean => {
+    const range = normalizeRequestedRange(requestedRange, deps.model.getSectionCount());
+    if (range === null) {
+      return false;
+    }
+
+    if (options.force !== true && currentRange !== null && rangesEqual(currentRange, range)) {
+      return false;
+    }
+
+    const anchor = options.preserveAnchor === false ? null : deps.model.captureAnchor(deps.root.scrollTop);
+    renderRange(range);
+    if (anchor !== null) {
+      deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
+    }
+    return true;
+  };
+
   return {
     adoptRenderedHeights: () => {
       const anchor = deps.model.captureAnchor(deps.root.scrollTop);
@@ -104,7 +136,12 @@ export function createVirtualizedDocumentWindowController(
       deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
       return result;
     },
+    ensureSectionRangeRendered: (start, end, options = {}) =>
+      ensureRangeRendered({ end, start }, options),
+    ensureSectionRendered: (sectionIndex, options = {}) =>
+      ensureRangeRendered({ end: sectionIndex, start: sectionIndex }, options),
     getCurrentRange: () => currentRange === null ? null : { ...currentRange },
+    isSectionRendered,
     updateWindowForScroll: (options = {}) => {
       const nextRange = computeRange();
       if (options.force !== true && currentRange !== null && rangesEqual(currentRange, nextRange)) {
@@ -170,4 +207,16 @@ function createSectionNode(ownerDocument: Document, entry: SectionModelEntry): H
 
 function rangesEqual(left: WindowRange, right: WindowRange): boolean {
   return left.start === right.start && left.end === right.end;
+}
+
+function normalizeRequestedRange(range: WindowRange, sectionCount: number): WindowRange | null {
+  if (sectionCount <= 0 || !Number.isFinite(range.start) || !Number.isFinite(range.end)) {
+    return null;
+  }
+
+  const rawStart = Math.floor(Math.min(range.start, range.end));
+  const rawEnd = Math.floor(Math.max(range.start, range.end));
+  const start = Math.max(0, Math.min(sectionCount - 1, rawStart));
+  const end = Math.max(start, Math.min(sectionCount - 1, rawEnd));
+  return { end, start };
 }
