@@ -52,6 +52,7 @@ const makeReadingPreferences = (
 });
 
 async function loadRendererHarness(options: {
+  rectTopShiftByBlockIndex?: Record<number, number>;
   renderedSectionHeight?: number;
   sectionCount: number;
   virtualization: boolean;
@@ -115,7 +116,9 @@ async function loadRendererHarness(options: {
     options.renderedSectionHeight ?? SECTION_HEIGHT
   );
   vi.spyOn(window.HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-    const top = readSyntheticDocumentTop(this) - root.scrollTop;
+    const blockIndex = Number.parseInt(this.dataset.mmBlockIndex ?? "", 10);
+    const rectShift = Number.isFinite(blockIndex) ? options.rectTopShiftByBlockIndex?.[blockIndex] ?? 0 : 0;
+    const top = readSyntheticDocumentTop(this) - root.scrollTop + rectShift;
     const height = this.offsetHeight;
     return {
       bottom: top + height,
@@ -736,6 +739,43 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(await land(true)).toBeCloseTo(0, 0);
   });
 
+  it("corrects a deep block landing after estimated and rendered heights diverge", async () => {
+    const { flushQueuedRafs, load } = await loadRendererHarness({
+      rectTopShiftByBlockIndex: { 90: -64 },
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildSourceLineDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    load({ type: "scroll-to-block", blockIndex: 90 });
+    await flushQueuedRafs();
+
+    const target = document.querySelector<HTMLElement>('body > main.mm-document [data-mm-block-index="90"]');
+    expect(target).not.toBeNull();
+    expect(target!.getBoundingClientRect().top).toBeCloseTo(0, 0);
+  });
+
+  it("terminates correction when a deep block landing estimate remains imperfect", async () => {
+    const { flushQueuedRafs, load, root } = await loadRendererHarness({
+      rectTopShiftByBlockIndex: { 95: 48 },
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildSourceLineDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    load({ type: "scroll-to-block", blockIndex: 95 });
+    await flushQueuedRafs();
+
+    const target = document.querySelector<HTMLElement>('body > main.mm-document [data-mm-block-index="95"]');
+    expect(target).not.toBeNull();
+    expect(Number.isFinite(root.scrollTop)).toBe(true);
+    expect(target!.getBoundingClientRect().top).toBeCloseTo(0, 0);
+  });
+
   it("leaves invalid virtualized anchor and block targets as no-ops", async () => {
     const { flushQueuedRafs, load, scrollCalls } = await loadRendererHarness({
       sectionCount: 20,
@@ -801,6 +841,24 @@ describe("renderer scroll-family virtualization integration", () => {
     };
 
     expect(await land()).toBeCloseTo(VIEWPORT_HEIGHT * 0.38, 0);
+  });
+
+  it("corrects a deep source-line landing to the preview anchor after estimates diverge", async () => {
+    const { flushQueuedRafs, load } = await loadRendererHarness({
+      rectTopShiftByBlockIndex: { 90: -64 },
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildSourceLineDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    load({ type: "scroll-to-source-line", sourceLine: 900 });
+    await flushQueuedRafs();
+
+    const target = document.querySelector<HTMLElement>('body > main.mm-document [data-mm-source-line="900"]');
+    expect(target).not.toBeNull();
+    expect(target!.getBoundingClientRect().top).toBeCloseTo(VIEWPORT_HEIGHT * 0.38, 0);
   });
 
   it("resolves nested source spans through their containing section before edit-to-preview scroll", async () => {
@@ -941,9 +999,17 @@ describe("renderer scroll-family virtualization integration", () => {
     root.scrollTop = anchoredScrollTop + 240;
 
     triggerResize();
-    await flushRafsUntil(() => root.scrollTop === anchoredScrollTop);
+    const expectedAnchorTop = VIEWPORT_HEIGHT * 0.38;
+    const readTargetTop = (): number | null => {
+      const target = document.querySelector<HTMLElement>('body > main.mm-document [data-mm-source-line="900"]');
+      return target === null ? null : target.getBoundingClientRect().top;
+    };
+    await flushRafsUntil(() => {
+      const targetTop = readTargetTop();
+      return targetTop !== null && Math.abs(targetTop - expectedAnchorTop) < 1;
+    });
 
-    expect(root.scrollTop).toBe(anchoredScrollTop);
+    expect(readTargetTop()).toBeCloseTo(expectedAnchorTop, 0);
   });
 
   it("excludes the model-fragment minimap clone from source-line anchor landing", async () => {
