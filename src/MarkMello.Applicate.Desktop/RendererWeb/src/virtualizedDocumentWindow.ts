@@ -1,6 +1,7 @@
 import {
   DEFAULT_RENDER_AHEAD,
   collectLiveDocumentSectionElements,
+  effectiveHeight,
   readLiveBlockOffsetMeasuredHeights,
   type DocumentWindowModel,
   type MeasuredHeightUpdate,
@@ -174,7 +175,7 @@ export function createFullDocumentFragmentFromWindowModel(
 ): DocumentFragment {
   const fragment = ownerDocument.createDocumentFragment();
   for (const entry of model.sections) {
-    const created = createSectionNode(ownerDocument, entry);
+    const created = createSectionNode(ownerDocument, entry, effectiveHeight(entry));
     if (created) {
       fragment.append(created);
     }
@@ -205,7 +206,11 @@ function createSpacer(ownerDocument: Document, kind: typeof TOP_SPACER | typeof 
   return spacer;
 }
 
-function createSectionNode(ownerDocument: Document, entry: SectionModelEntry): HTMLElement | null {
+function createSectionNode(
+  ownerDocument: Document,
+  entry: SectionModelEntry,
+  settledHeightPx?: number
+): HTMLElement | null {
   if (!entry.html) {
     return null;
   }
@@ -214,6 +219,9 @@ function createSectionNode(ownerDocument: Document, entry: SectionModelEntry): H
   template.innerHTML = entry.html;
   const firstElement = Array.from(template.content.childNodes)
     .find((node): node is HTMLElement => node instanceof HTMLElement);
+  if (firstElement && settledHeightPx !== undefined && Number.isFinite(settledHeightPx) && settledHeightPx > 0) {
+    firstElement.style.containIntrinsicSize = `auto ${settledHeightPx}px`;
+  }
   return firstElement ?? null;
 }
 

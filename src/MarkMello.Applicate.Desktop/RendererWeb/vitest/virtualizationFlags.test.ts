@@ -29,11 +29,11 @@ describe("renderer virtualization flags", () => {
     delete (window as Window & { MARKMELLO_VIRT_SHADOW?: unknown }).MARKMELLO_VIRT_SHADOW;
   });
 
-  it("keeps MARKMELLO_VIRTUALIZATION default-off unless an explicit true value is present", () => {
+  it("keeps MARKMELLO_VIRTUALIZATION owned by host-injected sources, not localStorage", () => {
     expect(readVirtualizationFlag(window, document)).toBe(false);
 
     window.localStorage.setItem("MARKMELLO_VIRTUALIZATION", "1");
-    expect(readVirtualizationFlag(window, document)).toBe(true);
+    expect(readVirtualizationFlag(window, document)).toBe(false);
 
     window.localStorage.setItem("MARKMELLO_VIRTUALIZATION", "off");
     document.documentElement.dataset.markmelloVirtualization = "true";
@@ -53,7 +53,7 @@ describe("renderer virtualization flags", () => {
     window.localStorage.setItem("MARKMELLO_VIRTUALIZATION", "yes");
     window.localStorage.setItem("MARKMELLO_VIRT_SHADOW", "0");
 
-    expect(readVirtualizationFlag(window, document)).toBe(true);
+    expect(readVirtualizationFlag(window, document)).toBe(false);
     expect(readVirtualizationShadowFlag(window, document)).toBe(false);
   });
 

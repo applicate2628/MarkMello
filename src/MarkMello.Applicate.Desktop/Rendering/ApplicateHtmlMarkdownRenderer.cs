@@ -613,11 +613,27 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             MarkdownQuoteBlock quote => string.Join(Environment.NewLine, quote.Blocks.Select(GetBlockPlainText)),
             MarkdownListBlock list => string.Join(Environment.NewLine, list.Items.SelectMany(item => item.Blocks).Select(GetBlockPlainText)),
             MarkdownCodeBlock code => code.Code,
-            MarkdownTableBlock table => string.Join(" ", table.Header.Select(cell => GetPlainText(cell.Inlines))),
+            MarkdownTableBlock table => GetTablePlainText(table),
             MarkdownImageBlock image => image.AltText ?? image.Title ?? "image",
             ApplicateMathBlock math => math.Tex,
             _ => string.Empty
         };
+
+    private static string GetTablePlainText(MarkdownTableBlock table)
+    {
+        var rows = new List<string>();
+        if (table.Header.Count > 0)
+        {
+            rows.Add(string.Join(" ", table.Header.Select(cell => GetPlainText(cell.Inlines))));
+        }
+
+        foreach (var row in table.Rows)
+        {
+            rows.Add(string.Join(" ", row.Select(cell => GetPlainText(cell.Inlines))));
+        }
+
+        return string.Join(Environment.NewLine, rows);
+    }
 
     private static string GetPlainText(IReadOnlyList<MarkdownInline> inlines)
     {

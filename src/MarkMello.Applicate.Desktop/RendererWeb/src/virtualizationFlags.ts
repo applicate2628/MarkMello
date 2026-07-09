@@ -3,13 +3,14 @@ export type RendererBooleanFlagInput = {
   ownerDocument: Document;
   globalName: string;
   dataKey: string;
-  storageName: string;
+  storageName?: string;
 };
 
 export function readRendererBooleanFlag(input: RendererBooleanFlagInput): boolean {
   return isTrueFlagValue(readWindowFlag(input.ownerWindow, input.globalName))
     || isTrueFlagValue(input.ownerDocument.documentElement.dataset[input.dataKey])
-    || isTrueFlagValue(readLocalStorageFlag(input.ownerWindow, input.storageName));
+    || (input.storageName !== undefined
+      && isTrueFlagValue(readLocalStorageFlag(input.ownerWindow, input.storageName)));
 }
 
 export function readVirtualizationFlag(
@@ -21,7 +22,6 @@ export function readVirtualizationFlag(
     globalName: "MARKMELLO_VIRTUALIZATION",
     ownerDocument,
     ownerWindow,
-    storageName: "MARKMELLO_VIRTUALIZATION",
   });
 }
 

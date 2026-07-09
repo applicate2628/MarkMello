@@ -6,6 +6,7 @@ import {
   type SectionModelEntry,
 } from "../src/documentWindow";
 import {
+  createFullDocumentFragmentFromWindowModel,
   createVirtualizedDocumentWindowController,
   type VirtualizedDocumentWindowController,
 } from "../src/virtualizedDocumentWindow";
@@ -114,6 +115,21 @@ describe("virtualized document window", () => {
     expect(models.estimateOnlyModel.sections.map(section => section.html)).toEqual([
       '<section data-mm-block-index="10" data-mm-block-kind="paragraph">Alpha</section>',
       '<section data-mm-block-index="11" data-mm-block-kind="paragraph">Beta</section>',
+    ]);
+  });
+
+  it("stamps full model fragments with model effective heights before cache cloning", () => {
+    const measured = entry(0, 10, 120);
+    measured.measuredHeight = 210;
+    const estimated = entry(1, 11, 140);
+    const model = new DocumentWindowModel([measured, estimated]);
+
+    const fragment = createFullDocumentFragmentFromWindowModel(document, model);
+    const nodes = Array.from(fragment.children) as HTMLElement[];
+
+    expect(nodes.map(node => node.style.containIntrinsicSize)).toEqual([
+      "auto 210px",
+      "auto 140px",
     ]);
   });
 

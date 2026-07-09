@@ -2888,15 +2888,14 @@
 
   // RendererWeb/src/virtualizationFlags.ts
   function readRendererBooleanFlag(input) {
-    return isTrueFlagValue(readWindowFlag(input.ownerWindow, input.globalName)) || isTrueFlagValue(input.ownerDocument.documentElement.dataset[input.dataKey]) || isTrueFlagValue(readLocalStorageFlag(input.ownerWindow, input.storageName));
+    return isTrueFlagValue(readWindowFlag(input.ownerWindow, input.globalName)) || isTrueFlagValue(input.ownerDocument.documentElement.dataset[input.dataKey]) || input.storageName !== void 0 && isTrueFlagValue(readLocalStorageFlag(input.ownerWindow, input.storageName));
   }
   function readVirtualizationFlag(ownerWindow = window, ownerDocument = document) {
     return readRendererBooleanFlag({
       dataKey: "markmelloVirtualization",
       globalName: "MARKMELLO_VIRTUALIZATION",
       ownerDocument,
-      ownerWindow,
-      storageName: "MARKMELLO_VIRTUALIZATION"
+      ownerWindow
     });
   }
   function readWindowFlag(ownerWindow, name) {
@@ -3029,7 +3028,7 @@
   function createFullDocumentFragmentFromWindowModel(ownerDocument, model) {
     const fragment = ownerDocument.createDocumentFragment();
     for (const entry of model.sections) {
-      const created = createSectionNode(ownerDocument, entry);
+      const created = createSectionNode(ownerDocument, entry, effectiveHeight(entry));
       if (created) {
         fragment.append(created);
       }
@@ -3057,13 +3056,16 @@
     spacer.style.pointerEvents = "none";
     return spacer;
   }
-  function createSectionNode(ownerDocument, entry) {
+  function createSectionNode(ownerDocument, entry, settledHeightPx) {
     if (!entry.html) {
       return null;
     }
     const template = ownerDocument.createElement("template");
     template.innerHTML = entry.html;
     const firstElement = Array.from(template.content.childNodes).find((node) => node instanceof HTMLElement);
+    if (firstElement && settledHeightPx !== void 0 && Number.isFinite(settledHeightPx) && settledHeightPx > 0) {
+      firstElement.style.containIntrinsicSize = `auto ${settledHeightPx}px`;
+    }
     return firstElement ?? null;
   }
   function rangesEqual(left, right) {
