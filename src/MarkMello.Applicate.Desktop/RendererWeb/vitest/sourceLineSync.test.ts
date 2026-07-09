@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   findScrollTopForSourceLine,
   findSourceLineAtDocumentY,
+  findSourceLineAtDocumentYWithFallback,
   readSourceLineAnchors,
   type SourceLineAnchor
 } from "../src/sourceLineSync";
@@ -23,6 +24,22 @@ describe("sourceLineSync", () => {
     ];
 
     expect(findSourceLineAtDocumentY(anchors, 200)).toBe(15);
+  });
+
+  it("uses full-document anchors only when live window edge interpolation is missing", () => {
+    const liveAnchors: SourceLineAnchor[] = [
+      { sourceLine: 100, endLine: 100, top: 1000 },
+      { sourceLine: 110, endLine: 110, top: 1100 },
+    ];
+    const modelAnchors: SourceLineAnchor[] = [
+      { sourceLine: 0, endLine: 0, top: 0 },
+      { sourceLine: 100, endLine: 100, top: 1000 },
+      { sourceLine: 200, endLine: 200, top: 2000 },
+    ];
+
+    expect(findSourceLineAtDocumentYWithFallback(liveAnchors, () => modelAnchors, 1050)).toBe(105);
+    expect(findSourceLineAtDocumentYWithFallback(liveAnchors, () => modelAnchors, 500)).toBe(50);
+    expect(findSourceLineAtDocumentYWithFallback(liveAnchors, () => modelAnchors, 1500)).toBe(150);
   });
 
   it("reads source-line anchors from rendered DOM metadata", () => {

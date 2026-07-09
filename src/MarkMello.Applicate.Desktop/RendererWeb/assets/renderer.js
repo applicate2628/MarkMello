@@ -1185,6 +1185,19 @@
     const ratio = clamp01((normalizedY - selected.top) / visualSpan);
     return selected.sourceLine + Math.round(lineSpan * ratio);
   }
+  function findSourceLineAtDocumentYWithFallback(liveAnchors, readFallbackAnchors, documentY) {
+    if (!Number.isFinite(documentY)) {
+      return null;
+    }
+    if (liveAnchors.length === 0) {
+      return findSourceLineAtDocumentY(readFallbackAnchors(), documentY);
+    }
+    if (liveEdgeInterpolationMissing(liveAnchors, documentY)) {
+      const fallbackAnchors = readFallbackAnchors();
+      return findSourceLineAtDocumentY(fallbackAnchors, documentY);
+    }
+    return findSourceLineAtDocumentY(liveAnchors, documentY);
+  }
   function findLastAnchorIndexAtOrBeforeLine(anchors, sourceLine) {
     let low = 0;
     let high = anchors.length - 1;
@@ -1214,6 +1227,20 @@
       }
     }
     return result;
+  }
+  function liveEdgeInterpolationMissing(anchors, documentY) {
+    if (anchors.length === 0) {
+      return true;
+    }
+    const normalizedY = Math.max(0, documentY);
+    const first = anchors[0];
+    if (normalizedY < first.top) {
+      return true;
+    }
+    const selectedIndex = findLastAnchorIndexAtOrBeforeTop(anchors, normalizedY);
+    const selected = anchors[selectedIndex];
+    const next = anchors[selectedIndex + 1] ?? null;
+    return next === null && normalizedY > selected.top;
   }
   function parseNonNegativeInt(value) {
     if (value === void 0 || value.trim() === "") {
@@ -4111,7 +4138,14 @@
   function refreshSourceLineAnchors() {
     sourceLineAnchors = readSourceLineAnchors(document);
   }
-  function scrollToSourceLine(sourceLine) {
+  function readVirtualizedModelSourceLineAnchors() {
+    return virtualizedDocumentWindowModel?.getSourceLineAnchors().map((anchor) => ({
+      endLine: anchor.endLine,
+      sourceLine: anchor.sourceLine,
+      top: anchor.top
+    })) ?? [];
+  }
+  function scrollToSourceLineInCurrentWindow(sourceLine) {
     if (!Number.isFinite(sourceLine) || sourceLine < 0) {
       return;
     }
@@ -4128,6 +4162,37 @@
       left: 0,
       top: Math.max(0, scrollTop - getViewportAnchorY()),
       behavior: "instant"
+    });
+  }
+  function scrollToSourceLine(sourceLine) {
+    if (!Number.isFinite(sourceLine) || sourceLine < 0) {
+      return;
+    }
+    if (!virtualizationEnabled) {
+      scrollToSourceLineInCurrentWindow(sourceLine);
+      return;
+    }
+    const main = document.querySelector("main.mm-document");
+    if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+      scrollToSourceLineInCurrentWindow(sourceLine);
+      return;
+    }
+    void renderWindowTargetThenAct({
+      action: () => {
+        refreshSourceLineAnchors();
+        scrollToSourceLineInCurrentWindow(sourceLine);
+      },
+      actionKind: "navigate",
+      controller: virtualizedDocumentWindowController,
+      descriptor: { kind: "source-line", sourceLine },
+      legacyAction: () => {
+        scrollToSourceLineInCurrentWindow(sourceLine);
+      },
+      main,
+      model: virtualizedDocumentWindowModel,
+      ownerWindow: window,
+      root: getDocumentScrollRoot(),
+      virtualizationEnabled: true
     });
   }
   function invalidateSourceLineAnchors() {
@@ -4163,13 +4228,18 @@
         return;
       }
       pendingSourceLineTarget = null;
+      if (virtualizationEnabled) {
+        updateVirtualizedWindowForScroll();
+      }
       if (sourceLineAnchors.length === 0) {
         refreshSourceLineAnchors();
       }
-      const sourceLine = findSourceLineAtDocumentY(
+      const documentY = window.scrollY + getViewportAnchorY();
+      const sourceLine = virtualizationEnabled && virtualizedDocumentWindowModel !== null ? findSourceLineAtDocumentYWithFallback(
         sourceLineAnchors,
-        window.scrollY + getViewportAnchorY()
-      );
+        readVirtualizedModelSourceLineAnchors,
+        documentY
+      ) : findSourceLineAtDocumentY(sourceLineAnchors, documentY);
       if (sourceLine === null || sourceLine === lastPostedPreviewSourceLine) {
         return;
       }

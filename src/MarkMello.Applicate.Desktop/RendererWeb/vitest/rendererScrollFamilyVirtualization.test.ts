@@ -10,9 +10,12 @@ type ScrollCall = {
 type RendererHarness = {
   flushNextRaf: () => Promise<void>;
   flushQueuedRafs: () => Promise<void>;
+  flushRafsUntil: (predicate: () => boolean, maxFrames?: number) => Promise<void>;
   load: HostBridge;
   messages: unknown[];
+  root: HTMLElement;
   scrollCalls: ScrollCall[];
+  triggerResize: () => void;
 };
 
 const SECTION_HEIGHT = 80;
@@ -54,7 +57,41 @@ async function loadRendererHarness(options: {
   }
   vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
 
+  const resizeObservers: TestResizeObserver[] = [];
+  class TestResizeObserver implements ResizeObserver {
+    constructor(private readonly callback: ResizeObserverCallback) {
+      resizeObservers.push(this);
+    }
+
+    disconnect(): void { }
+    observe(): void { }
+    takeRecords(): ResizeObserverEntry[] { return []; }
+    unobserve(): void { }
+
+    trigger(): void {
+      this.callback([], this);
+    }
+  }
+  vi.stubGlobal("ResizeObserver", TestResizeObserver);
+
   const root = installVirtualizedDocumentLayout(options.sectionCount);
+  vi.spyOn(window.HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    const top = readSyntheticDocumentTop(this) - root.scrollTop;
+    const height = this.offsetHeight;
+    return {
+      bottom: top + height,
+      height,
+      left: 0,
+      right: 0,
+      top,
+      width: 0,
+      x: 0,
+      y: top,
+      toJSON() {
+        return this;
+      },
+    } as DOMRect;
+  });
 
   const scrollCalls: ScrollCall[] = [];
   Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", {
@@ -79,7 +116,7 @@ async function loadRendererHarness(options: {
   };
 
   const flushQueuedRafs = async (): Promise<void> => {
-    for (let i = 0; i < 40 && rafCallbacks.length > 0; i++) {
+    for (let i = 0; i < 160 && rafCallbacks.length > 0; i++) {
       const callback = rafCallbacks.shift()!;
       callback(i * 16);
       await Promise.resolve();
@@ -90,7 +127,22 @@ async function loadRendererHarness(options: {
     await Promise.resolve();
   };
 
-  return { flushNextRaf, flushQueuedRafs, load, messages, scrollCalls };
+  const flushRafsUntil = async (predicate: () => boolean, maxFrames = 40): Promise<void> => {
+    for (let i = 0; i < maxFrames && !predicate() && rafCallbacks.length > 0; i++) {
+      const callback = rafCallbacks.shift()!;
+      callback(i * 16);
+      await Promise.resolve();
+    }
+    await Promise.resolve();
+  };
+
+  const triggerResize = (): void => {
+    for (const observer of resizeObservers) {
+      observer.trigger();
+    }
+  };
+
+  return { flushNextRaf, flushQueuedRafs, flushRafsUntil, load, messages, root, scrollCalls, triggerResize };
 }
 
 function installVirtualizedDocumentLayout(sectionCount: number): HTMLElement {
@@ -114,6 +166,14 @@ function installVirtualizedDocumentLayout(sectionCount: number): HTMLElement {
   Object.defineProperty(root, "scrollHeight", {
     configurable: true,
     get: () => sectionCount * SECTION_PITCH,
+  });
+  Object.defineProperty(window, "innerHeight", {
+    configurable: true,
+    get: () => VIEWPORT_HEIGHT,
+  });
+  Object.defineProperty(window, "scrollY", {
+    configurable: true,
+    get: () => root.scrollTop,
   });
   vi.spyOn(window.HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
     if (this.dataset.mmVirtualSpacer === "bottom") {
@@ -163,6 +223,31 @@ function buildNestedBlockDocument(count: number, ownerIndex: number, nestedIndex
     }
 
     return `<p data-mm-block-index="${index}" data-mm-block-kind="paragraph">Block ${index}</p>`;
+  }).join("");
+}
+
+function buildSourceLineDocument(count: number): string {
+  return Array.from({ length: count }, (_, index) =>
+    `<p data-mm-block-index="${index}" data-mm-block-kind="paragraph" data-mm-source-line="${index * 10}" data-mm-source-end-line="${index * 10 + 4}">Block ${index}</p>`
+  ).join("");
+}
+
+function buildNestedSourceLineDocument(count: number, ownerIndex: number, nestedIndex: number): string {
+  return Array.from({ length: count }, (_, index) => {
+    if (index === ownerIndex) {
+      return `<section data-mm-block-index="${index}" data-mm-block-kind="quote"><blockquote data-mm-block-index="${nestedIndex}" data-mm-source-line="${index * 10}" data-mm-source-end-line="${index * 10 + 4}">Nested source ${nestedIndex}</blockquote></section>`;
+    }
+
+    return `<p data-mm-block-index="${index}" data-mm-block-kind="paragraph" data-mm-source-line="${index * 10}" data-mm-source-end-line="${index * 10 + 4}">Block ${index}</p>`;
+  }).join("");
+}
+
+function buildSparseSourceLineDocument(count: number, anchorEvery: number): string {
+  return Array.from({ length: count }, (_, index) => {
+    const sourceLineAttributes = index % anchorEvery === 0
+      ? ` data-mm-source-line="${index * 10}" data-mm-source-end-line="${index * 10}"`
+      : "";
+    return `<p data-mm-block-index="${index}" data-mm-block-kind="paragraph"${sourceLineAttributes}>Block ${index}</p>`;
   }).join("");
 }
 
@@ -308,5 +393,89 @@ describe("renderer scroll-family virtualization integration", () => {
       { element: heading, options: { behavior: "smooth", block: "start" } },
       { element: block!, options: { block: "start", behavior: "instant" } },
     ]);
+  });
+
+  it("renders an off-window source line before applying the 38 percent preview anchor", async () => {
+    const { flushNextRaf, flushQueuedRafs, load, root } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildSourceLineDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    expect(document.querySelector('[data-mm-source-line="900"]')).toBeNull();
+    load({ type: "scroll-to-source-line", sourceLine: 900 });
+    await flushNextRaf();
+
+    expect(document.querySelector('[data-mm-source-line="900"]')).not.toBeNull();
+    expect(root.scrollTop).toBe(90 * SECTION_PITCH - VIEWPORT_HEIGHT * 0.38);
+  });
+
+  it("resolves nested source spans through their containing section before edit-to-preview scroll", async () => {
+    const { flushNextRaf, flushQueuedRafs, load, root } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({
+      type: "load-document",
+      html: buildNestedSourceLineDocument(120, 88, 8801),
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await flushQueuedRafs();
+
+    expect(document.querySelector('[data-mm-block-index="8801"]')).toBeNull();
+    load({ type: "scroll-to-source-line", sourceLine: 882 });
+    await flushNextRaf();
+
+    expect(document.querySelector('[data-mm-block-index="8801"]')).not.toBeNull();
+    expect(root.scrollTop).toBe(88 * SECTION_PITCH + 20 - VIEWPORT_HEIGHT * 0.38);
+  });
+
+  it("posts monotonic preview source lines across sparse virtual window boundaries without duplicates", async () => {
+    const { flushQueuedRafs, load, messages, root } = await loadRendererHarness({
+      sectionCount: 260,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildSparseSourceLineDocument(260, 100), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    messages.length = 0;
+
+    for (const sectionIndex of [130, 150, 170]) {
+      root.scrollTop = sectionIndex * SECTION_PITCH;
+      document.dispatchEvent(new Event("scroll"));
+      await flushQueuedRafs();
+    }
+
+    const postedLines = messages
+      .filter((message): message is { type: "preview-source-line"; sourceLine: number } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type?: unknown }).type === "preview-source-line")
+      .map(message => message.sourceLine)
+      .filter(sourceLine => sourceLine > 0);
+    expect(postedLines).toHaveLength(3);
+    expect(new Set(postedLines).size).toBe(postedLines.length);
+    expect(postedLines[0]).toBeLessThan(postedLines[1]!);
+    expect(postedLines[1]).toBeLessThan(postedLines[2]!);
+  });
+
+  it("reasserts a pending programmatic source-line target after geometry invalidation", async () => {
+    const { flushNextRaf, flushQueuedRafs, flushRafsUntil, load, root, triggerResize } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildSourceLineDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    load({ type: "scroll-to-source-line", sourceLine: 900 });
+    await flushNextRaf();
+    const anchoredScrollTop = root.scrollTop;
+    root.scrollTop = anchoredScrollTop + 240;
+
+    triggerResize();
+    await flushRafsUntil(() => root.scrollTop === anchoredScrollTop);
+
+    expect(root.scrollTop).toBe(anchoredScrollTop);
   });
 });

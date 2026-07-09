@@ -22,6 +22,7 @@ import { createFindBar, type FindBarController } from "./findBar";
 import {
   findScrollTopForSourceLine,
   findSourceLineAtDocumentY,
+  findSourceLineAtDocumentYWithFallback,
   readSourceLineAnchors,
   type SourceLineAnchor
 } from "./sourceLineSync";
@@ -1654,7 +1655,15 @@ function refreshSourceLineAnchors(): void {
   sourceLineAnchors = readSourceLineAnchors(document);
 }
 
-function scrollToSourceLine(sourceLine: number): void {
+function readVirtualizedModelSourceLineAnchors(): SourceLineAnchor[] {
+  return virtualizedDocumentWindowModel?.getSourceLineAnchors().map(anchor => ({
+    endLine: anchor.endLine,
+    sourceLine: anchor.sourceLine,
+    top: anchor.top,
+  })) ?? [];
+}
+
+function scrollToSourceLineInCurrentWindow(sourceLine: number): void {
   if (!Number.isFinite(sourceLine) || sourceLine < 0) {
     return;
   }
@@ -1678,6 +1687,41 @@ function scrollToSourceLine(sourceLine: number): void {
     left: 0,
     top: Math.max(0, scrollTop - getViewportAnchorY()),
     behavior: "instant" as ScrollBehavior
+  });
+}
+
+function scrollToSourceLine(sourceLine: number): void {
+  if (!Number.isFinite(sourceLine) || sourceLine < 0) {
+    return;
+  }
+
+  if (!virtualizationEnabled) {
+    scrollToSourceLineInCurrentWindow(sourceLine);
+    return;
+  }
+
+  const main = document.querySelector<HTMLElement>("main.mm-document");
+  if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+    scrollToSourceLineInCurrentWindow(sourceLine);
+    return;
+  }
+
+  void renderWindowTargetThenAct({
+    action: () => {
+      refreshSourceLineAnchors();
+      scrollToSourceLineInCurrentWindow(sourceLine);
+    },
+    actionKind: "navigate",
+    controller: virtualizedDocumentWindowController,
+    descriptor: { kind: "source-line", sourceLine },
+    legacyAction: () => {
+      scrollToSourceLineInCurrentWindow(sourceLine);
+    },
+    main,
+    model: virtualizedDocumentWindowModel,
+    ownerWindow: window,
+    root: getDocumentScrollRoot(),
+    virtualizationEnabled: true,
   });
 }
 
@@ -1728,13 +1772,21 @@ function queuePreviewSourceLinePost(): void {
     // takes over, the programmatic line target dies.
     pendingSourceLineTarget = null;
 
+    if (virtualizationEnabled) {
+      updateVirtualizedWindowForScroll();
+    }
+
     if (sourceLineAnchors.length === 0) {
       refreshSourceLineAnchors();
     }
 
-    const sourceLine = findSourceLineAtDocumentY(
-      sourceLineAnchors,
-      window.scrollY + getViewportAnchorY());
+    const documentY = window.scrollY + getViewportAnchorY();
+    const sourceLine = virtualizationEnabled && virtualizedDocumentWindowModel !== null
+      ? findSourceLineAtDocumentYWithFallback(
+        sourceLineAnchors,
+        readVirtualizedModelSourceLineAnchors,
+        documentY)
+      : findSourceLineAtDocumentY(sourceLineAnchors, documentY);
     if (sourceLine === null || sourceLine === lastPostedPreviewSourceLine) {
       return;
     }

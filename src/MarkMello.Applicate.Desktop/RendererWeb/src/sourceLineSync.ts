@@ -6,8 +6,6 @@ export type SourceLineAnchor = {
 
 const SOURCE_LINE_ANCHOR_SELECTOR = "[data-mm-source-line]";
 
-// VIRT-TODO(integration): source-line sync reads only live virtualized anchors;
-// off-window source targets need model-backed anchor lookup.
 export function readSourceLineAnchors(root: ParentNode = document, scrollY = window.scrollY): SourceLineAnchor[] {
   const anchors: SourceLineAnchor[] = [];
   for (const element of Array.from(root.querySelectorAll<HTMLElement>(SOURCE_LINE_ANCHOR_SELECTOR))) {
@@ -94,6 +92,27 @@ export function findSourceLineAtDocumentY(
   return selected.sourceLine + Math.round(lineSpan * ratio);
 }
 
+export function findSourceLineAtDocumentYWithFallback(
+  liveAnchors: readonly SourceLineAnchor[],
+  readFallbackAnchors: () => readonly SourceLineAnchor[],
+  documentY: number
+): number | null {
+  if (!Number.isFinite(documentY)) {
+    return null;
+  }
+
+  if (liveAnchors.length === 0) {
+    return findSourceLineAtDocumentY(readFallbackAnchors(), documentY);
+  }
+
+  if (liveEdgeInterpolationMissing(liveAnchors, documentY)) {
+    const fallbackAnchors = readFallbackAnchors();
+    return findSourceLineAtDocumentY(fallbackAnchors, documentY);
+  }
+
+  return findSourceLineAtDocumentY(liveAnchors, documentY);
+}
+
 function findLastAnchorIndexAtOrBeforeLine(
   anchors: readonly SourceLineAnchor[],
   sourceLine: number
@@ -134,6 +153,26 @@ function findLastAnchorIndexAtOrBeforeTop(
   }
 
   return result;
+}
+
+function liveEdgeInterpolationMissing(
+  anchors: readonly SourceLineAnchor[],
+  documentY: number
+): boolean {
+  if (anchors.length === 0) {
+    return true;
+  }
+
+  const normalizedY = Math.max(0, documentY);
+  const first = anchors[0]!;
+  if (normalizedY < first.top) {
+    return true;
+  }
+
+  const selectedIndex = findLastAnchorIndexAtOrBeforeTop(anchors, normalizedY);
+  const selected = anchors[selectedIndex]!;
+  const next = anchors[selectedIndex + 1] ?? null;
+  return next === null && normalizedY > selected.top;
 }
 
 function parseNonNegativeInt(value: string | undefined): number | null {

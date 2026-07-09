@@ -37,7 +37,6 @@ describe("renderer virtualization wiring", () => {
 
     for (const expected of [
       "VIRT-TODO(integration): find-in-page",
-      "VIRT-TODO(integration): source-line sync",
       "VIRT-TODO(integration): minimap",
     ]) {
       expect(combined).toContain(expected);
@@ -47,6 +46,7 @@ describe("renderer virtualization wiring", () => {
       "VIRT-TODO(integration): scroll-to-heading",
       "VIRT-TODO(integration): anchor-link scroll-to",
       "VIRT-TODO(integration): scroll-to-block",
+      ["VIRT-TODO(integration):", "source-line sync"].join(" "),
     ]) {
       expect(combined).not.toContain(resolved);
     }
