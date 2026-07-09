@@ -51,7 +51,7 @@ export function calculateMinimapViewportLayout(input: MinimapViewportLayoutInput
   // When the document is narrower than the minimap area (user dragged the
   // width-handle far left), a raw ratio would scale content UP, making
   // minimap text larger than the source — the opposite of a minimap's purpose.
-  const scale = Math.min(1, input.minimapWidth / input.documentWidth);
+  const scale = Math.min(1, input.minimapWidth / input.documentWidth, input.minimapHeight / input.documentHeight);
   const projectedDocumentHeight = input.documentHeight * scale;
   const maximumScrollTop = Math.max(0, input.documentHeight - input.viewportHeight);
   const scrollProgress = maximumScrollTop > 0

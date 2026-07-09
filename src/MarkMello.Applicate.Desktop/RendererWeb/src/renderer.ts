@@ -924,6 +924,50 @@ function postPerfMark(name: string, detail?: Record<string, unknown>): void {
   postHostMessage(message);
 }
 
+function getLiveDocumentRoot(): HTMLElement | null {
+  return document.querySelector<HTMLElement>("body > main.mm-document");
+}
+
+function readLiveDocumentMathNodes(): HTMLElement[] {
+  return Array.from(getLiveDocumentRoot()?.querySelectorAll<HTMLElement>("[data-tex]") ?? []);
+}
+
+function getLiveDocumentMathCount(): number {
+  return readLiveDocumentMathNodes().length;
+}
+
+function findLiveDocumentElementById(id: string): HTMLElement | null {
+  const main = getLiveDocumentRoot();
+  if (main === null) {
+    return null;
+  }
+
+  if (main.id === id) {
+    return main;
+  }
+
+  for (const element of Array.from(main.querySelectorAll<HTMLElement>("[id]"))) {
+    if (element.id === id) {
+      return element;
+    }
+  }
+  return null;
+}
+
+function findLiveDocumentBlockElement(blockIndex: number): HTMLElement | null {
+  const main = getLiveDocumentRoot();
+  if (main === null || !Number.isFinite(blockIndex)) {
+    return null;
+  }
+
+  for (const element of Array.from(main.querySelectorAll<HTMLElement>("[data-mm-block-index]"))) {
+    if (Number.parseInt(element.dataset["mmBlockIndex"] ?? "", 10) === blockIndex) {
+      return element;
+    }
+  }
+  return null;
+}
+
 function countFailedInSet(nodes: Iterable<HTMLElement>): number {
   let count = 0;
   for (const node of nodes) {
@@ -933,16 +977,16 @@ function countFailedInSet(nodes: Iterable<HTMLElement>): number {
 }
 
 function hasUnrenderedDocumentMath(): boolean {
-  return document.querySelector(".mm-document [data-tex]:not([data-mm-math-rendered])") !== null;
+  return (getLiveDocumentRoot()?.querySelector("[data-tex]:not([data-mm-math-rendered])") ?? null) !== null;
 }
 
 function renderMath(): MathReadinessController {
   // Thin wrapper preserves renderer-local side effects (perf marks,
   // __mmRendererState exposure, Phase B scheduling) while delegating the
   // rendering loop to the seam in mathRenderInit.ts.
-  emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
+  emitMark("mm-render-math-start", { mathCount: getLiveDocumentMathCount() });
   const katex = hostWindow.katex ?? undefined;
-  const controller = renderMathInit({ katex, documentRoot: document });
+  const controller = renderMathInit({ katex, documentRoot: getLiveDocumentRoot() ?? document });
   // Phase B fires after allMathRendered to re-clone the minimap when the
   // document height genuinely drifted (>=100px). The staleness guard must key
   // off document IDENTITY (currentDocumentCacheKey — same token used by
@@ -1011,7 +1055,7 @@ function renderMath(): MathReadinessController {
   controller.allMathRendered.then(() => {
     // Full math pass settled — anchor tops may all have shifted.
     invalidateSourceLineAnchors();
-    const allMathNodes = Array.from(document.querySelectorAll<HTMLElement>("[data-tex]"));
+    const allMathNodes = readLiveDocumentMathNodes();
     emitMark("mm-all-math-rendered", {
       totalCount: controller.totalMathCount,
       failedCount: countFailedInSet(allMathNodes),
@@ -1090,7 +1134,7 @@ async function renderMermaid(): Promise<void> {
   const mermaid = hostWindow.mermaid;
   if (!mermaid) return;
 
-  const allNodes = Array.from(document.querySelectorAll<HTMLElement>("pre.mm-mermaid"));
+  const allNodes = Array.from(getLiveDocumentRoot()?.querySelectorAll<HTMLElement>("pre.mm-mermaid") ?? []);
   await renderMermaidNodes(allNodes, mermaid);
 }
 
@@ -1114,7 +1158,8 @@ function scheduleCachedMermaidResume(hasMermaid?: boolean): void {
       return;
     }
 
-    const missingNodes = Array.from(document.querySelectorAll<HTMLElement>("pre.mm-mermaid:not(.is-rendered)"));
+    const missingNodes = Array.from(
+      getLiveDocumentRoot()?.querySelectorAll<HTMLElement>("pre.mm-mermaid:not(.is-rendered)") ?? []);
     if (missingNodes.length === 0) {
       postPerfMark("mm-mermaid-cache-resume-skipped", { reason: "all-rendered" });
       return;
@@ -1280,7 +1325,7 @@ function postPostReadyEnhancementsComplete(
 }
 
 function hasMermaidNodes(): boolean {
-  return document.querySelector("pre.mm-mermaid") !== null;
+  return (getLiveDocumentRoot()?.querySelector("pre.mm-mermaid") ?? null) !== null;
 }
 
 function scheduleThemeMermaidRefresh(theme: RendererTheme): void {
@@ -2004,7 +2049,8 @@ function postScroll(): void {
 }
 
 function refreshSourceLineAnchors(): void {
-  sourceLineAnchors = readSourceLineAnchors(document);
+  const main = getLiveDocumentRoot();
+  sourceLineAnchors = main === null ? [] : readSourceLineAnchors(main);
 }
 
 function readVirtualizedModelSourceLineAnchors(): SourceLineAnchor[] {
@@ -4204,6 +4250,74 @@ function scheduleHeavyLiveUpdate(): void {
   }, HEAVY_LIVE_UPDATE_DEBOUNCE_MS);
 }
 
+function scrollLegacyHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): void {
+  document.getElementById(anchor)?.scrollIntoView(options);
+}
+
+function scrollLiveHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): void {
+  findLiveDocumentElementById(anchor)?.scrollIntoView(options);
+}
+
+function scrollToHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): void {
+  if (anchor.length === 0) {
+    return;
+  }
+
+  if (!virtualizationEnabled) {
+    scrollLegacyHeadingAnchor(anchor, options);
+    return;
+  }
+
+  const main = getLiveDocumentRoot();
+  if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+    scrollLiveHeadingAnchor(anchor, options);
+    return;
+  }
+
+  const descriptor: WindowTargetDescriptor = { anchor, kind: "heading-anchor" };
+  void renderWindowTargetThenAct({
+    action: (context) => {
+      landVirtualizedProgrammaticNavigation({
+        context,
+        descriptor,
+        viewportOffsetY: 0,
+      });
+    },
+    actionKind: "navigate",
+    controller: virtualizedDocumentWindowController,
+    descriptor,
+    legacyAction: () => {
+      scrollLiveHeadingAnchor(anchor, options);
+    },
+    main,
+    model: virtualizedDocumentWindowModel,
+    ownerWindow: window,
+    root: getDocumentScrollRoot(),
+    virtualizationEnabled: true,
+  });
+}
+
+function readCurrentHashAnchor(): string | null {
+  const hash = window.location.hash;
+  if (hash.length <= 1) {
+    return null;
+  }
+
+  const raw = hash.slice(1);
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function handleCurrentHashNavigation(): void {
+  const anchor = readCurrentHashAnchor();
+  if (anchor !== null) {
+    scrollToHeadingAnchor(anchor, { block: "start" });
+  }
+}
+
 function handleHostMessage(raw: unknown): void {
   const message = raw as HostMessage;
   if (message.type === "host-shortcuts-reset") {
@@ -4239,37 +4353,7 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "scroll-to") {
-    if (!virtualizationEnabled) {
-      document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
-      return;
-    }
-
-    const main = document.querySelector<HTMLElement>("main.mm-document");
-    if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-      document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
-      return;
-    }
-
-    void renderWindowTargetThenAct({
-      action: (context) => {
-        landVirtualizedProgrammaticNavigation({
-          context,
-          descriptor: { anchor: message.anchor, kind: "heading-anchor" },
-          viewportOffsetY: 0,
-        });
-      },
-      actionKind: "navigate",
-      controller: virtualizedDocumentWindowController,
-      descriptor: { anchor: message.anchor, kind: "heading-anchor" },
-      legacyAction: () => {
-        document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
-      },
-      main,
-      model: virtualizedDocumentWindowModel,
-      ownerWindow: window,
-      root: getDocumentScrollRoot(),
-      virtualizationEnabled: true,
-    });
+    scrollToHeadingAnchor(message.anchor, { block: "start" });
     return;
   }
 
@@ -4278,47 +4362,7 @@ function handleHostMessage(raw: unknown): void {
     // used by MarkdownHeadingAnchorSlugger when generating <h1..h6 id="...">
     // in ApplicateHtmlMarkdownRenderer, so getElementById resolves the
     // exact heading the user clicked in the host-side TOC panel.
-    if (!virtualizationEnabled) {
-      const target = document.getElementById(message.id);
-      if (target) {
-        target.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
-      return;
-    }
-
-    const main = document.querySelector<HTMLElement>("main.mm-document");
-    if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-      const target = document.getElementById(message.id);
-      if (target) {
-        target.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
-      return;
-    }
-
-    const descriptor: WindowTargetDescriptor = { anchor: message.id, kind: "heading-anchor" };
-    void renderWindowTargetThenAct({
-      action: (context) => {
-        landVirtualizedProgrammaticNavigation({
-          context,
-          descriptor,
-          viewportOffsetY: 0,
-        });
-      },
-      actionKind: "navigate",
-      controller: virtualizedDocumentWindowController,
-      descriptor,
-      legacyAction: () => {
-        const target = document.getElementById(message.id);
-        if (target) {
-          target.scrollIntoView({ behavior: "smooth", block: "start" });
-        }
-      },
-      main,
-      model: virtualizedDocumentWindowModel,
-      ownerWindow: window,
-      root: getDocumentScrollRoot(),
-      virtualizationEnabled: true,
-    });
+    scrollToHeadingAnchor(message.id, { behavior: "smooth", block: "start" });
     return;
   }
 
@@ -4372,9 +4416,7 @@ function handleHostMessage(raw: unknown): void {
 
     const main = document.querySelector<HTMLElement>("main.mm-document");
     if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-      const target = document.querySelector<HTMLElement>(
-        `[data-mm-block-index="${message.blockIndex}"]`
-      );
+      const target = findLiveDocumentBlockElement(message.blockIndex);
       if (target) {
         target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
       }
@@ -4394,9 +4436,7 @@ function handleHostMessage(raw: unknown): void {
       controller: virtualizedDocumentWindowController,
       descriptor,
       legacyAction: () => {
-        const target = document.querySelector<HTMLElement>(
-          `[data-mm-block-index="${message.blockIndex}"]`
-        );
+        const target = findLiveDocumentBlockElement(message.blockIndex);
         if (target) {
           target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
         }
@@ -4447,6 +4487,7 @@ function handleHostMessage(raw: unknown): void {
         message.theme ?? getCurrentTheme());
     }
     applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+    handleCurrentHashNavigation();
     return;
   }
 
@@ -4479,6 +4520,7 @@ function handleHostMessage(raw: unknown): void {
       loadMessage.hasHljs = message.hasHljs;
     }
     applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+    handleCurrentHashNavigation();
     return;
   }
 
@@ -4859,7 +4901,7 @@ async function runLoadDocumentInitialRenderPipeline(
       // machine restarts for the new document.
       postHostMessage({
         type: "document-ready",
-        mathCount: document.querySelectorAll("[data-tex]").length
+        mathCount: getLiveDocumentMathCount()
       });
     },
     hasMermaid,
@@ -4926,7 +4968,7 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
       postReadyEnhancementsCompleted = true;
       postHostMessage({
         type: "document-ready",
-        mathCount: document.querySelectorAll("[data-tex]").length
+        mathCount: getLiveDocumentMathCount()
       });
       postCachedLayoutReady();
       postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
@@ -5349,7 +5391,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireSaveAsPageChromeSuppress();
   postHostMessage({
     type: "document-ready",
-    mathCount: document.querySelectorAll("[data-tex]").length
+    mathCount: getLiveDocumentMathCount()
   });
   postScroll();
 
@@ -5412,6 +5454,7 @@ document.addEventListener("scroll", () => {
   queuePreviewSourceLinePost();
 }, { passive: true });
 
+window.addEventListener("hashchange", handleCurrentHashNavigation);
 hostWindow.chrome?.webview?.addEventListener?.("message", (event) => handleHostMessage(event.data));
 window.addEventListener("message", (event) => handleHostMessage(event.data));
 // Resize-time reactive work (chrome reposition + minimap viewport refresh)

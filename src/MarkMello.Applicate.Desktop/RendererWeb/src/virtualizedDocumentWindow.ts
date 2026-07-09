@@ -47,6 +47,11 @@ export type AdoptRenderedHeightsOptions = {
   preserveSectionIndex?: number;
 };
 
+type LiveBlockAnchor = {
+  blockIndex: number;
+  viewportTop: number;
+};
+
 const EMPTY_HEIGHT_UPDATE: MeasuredHeightUpdateResult = {
   maxAbsDelta: 0,
   totalDelta: 0,
@@ -129,6 +134,7 @@ export function createVirtualizedDocumentWindowController(
       const preserveSectionIndex = normalizeSectionIndex(options.preserveSectionIndex, deps.model.getSectionCount());
       const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(deps.root.scrollTop) : null;
       const blocks = collectLiveDocumentSectionElements(deps.main);
+      const liveAnchor = preserveSectionIndex === null ? captureFirstVisibleLiveBlockAnchor(blocks) : null;
       const updates = deps.readMeasuredHeights
         ? deps.readMeasuredHeights(blocks)
         : readLiveBlockOffsetMeasuredHeights(blocks);
@@ -144,9 +150,11 @@ export function createVirtualizedDocumentWindowController(
         return result;
       }
 
-      deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!);
+      restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor)
+        || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!));
       renderRange(computeRange());
-      deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!);
+      restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor)
+        || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!));
       return result;
     },
     ensureSectionRangeRendered: (start, end, options = {}) =>
@@ -193,6 +201,51 @@ function collectExistingSections(main: HTMLElement): Map<number, HTMLElement> {
     }
   }
   return result;
+}
+
+function captureFirstVisibleLiveBlockAnchor(blocks: readonly HTMLElement[]): LiveBlockAnchor | null {
+  for (const block of blocks) {
+    const blockIndex = readBlockIndex(block);
+    if (blockIndex === null) {
+      continue;
+    }
+
+    const rect = block.getBoundingClientRect();
+    if (!Number.isFinite(rect.height) || rect.height <= 0 || !Number.isFinite(rect.bottom) || rect.bottom < 0) {
+      continue;
+    }
+
+    return { blockIndex, viewportTop: rect.top };
+  }
+  return null;
+}
+
+function restoreLiveBlockAnchor(
+  model: DocumentWindowModel,
+  root: Element & { scrollTop: number },
+  anchor: LiveBlockAnchor | null
+): boolean {
+  if (anchor === null || !Number.isFinite(anchor.viewportTop)) {
+    return false;
+  }
+
+  const entry = model.getEntryByBlockIndex(anchor.blockIndex);
+  if (entry === undefined) {
+    return false;
+  }
+
+  root.scrollTop = Math.max(0, model.sectionTop(entry.sectionIndex) - anchor.viewportTop);
+  return true;
+}
+
+function readBlockIndex(element: HTMLElement): number | null {
+  const raw = element.dataset["mmBlockIndex"];
+  if (raw === undefined || raw.trim() === "") {
+    return null;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function createSpacer(ownerDocument: Document, kind: typeof TOP_SPACER | typeof BOTTOM_SPACER): HTMLElement {

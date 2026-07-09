@@ -412,7 +412,7 @@ function latestPerfDetail<T extends Record<string, unknown>>(
 }
 
 function highestRenderedHeadingIndex(): number {
-  return [...document.querySelectorAll<HTMLElement>(".mm-document [id^='heading-']")]
+  return [...document.querySelectorAll<HTMLElement>("body > main.mm-document [id^='heading-']")]
     .map(element => Number.parseInt(element.id.replace("heading-", ""), 10))
     .filter(Number.isFinite)
     .reduce((max, index) => Math.max(max, index), -1);
@@ -512,6 +512,7 @@ afterEach(() => {
   removeRendererEventListeners();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  window.history.replaceState(null, "", window.location.pathname);
   delete (window as unknown as { MARKMELLO_VIRTUALIZATION?: boolean }).MARKMELLO_VIRTUALIZATION;
   delete (window as unknown as { chrome?: unknown }).chrome;
 });
@@ -564,6 +565,25 @@ describe("renderer scroll-family virtualization integration", () => {
     await flushNextRaf();
 
     expect(document.getElementById("heading-95")).not.toBeNull();
+    expect(scrollCalls).toEqual([]);
+    expect(root.scrollTop).toBeGreaterThan(0);
+  });
+
+  it("routes hash navigation through the virtualized heading landing owner", async () => {
+    const { flushNextRaf, flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    scrollCalls.length = 0;
+
+    expect(document.getElementById("heading-90")).toBeNull();
+    window.location.hash = "#heading-90";
+    window.dispatchEvent(new Event("hashchange"));
+    await flushNextRaf();
+
+    expect(document.getElementById("heading-90")).not.toBeNull();
     expect(scrollCalls).toEqual([]);
     expect(root.scrollTop).toBeGreaterThan(0);
   });
@@ -796,8 +816,52 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(root.scrollTop).toBe(anchoredScrollTop);
   });
 
+  it("excludes the model-fragment minimap clone from source-line anchor landing", async () => {
+    const { flushQueuedRafs, load } = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildSourceLineDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    const liveMain = document.querySelector<HTMLElement>("body > main.mm-document");
+    expect(liveMain).not.toBeNull();
+    const minimap = document.createElement("aside");
+    minimap.className = "mm-minimap";
+    const minimapContent = document.createElement("div");
+    minimapContent.className = "mm-minimap-content";
+    const cloneDocument = document.createElement("main");
+    cloneDocument.className = "mm-document";
+    cloneDocument.innerHTML = buildSourceLineDocument(120);
+    minimapContent.append(cloneDocument);
+    minimap.append(minimapContent);
+    document.body.append(minimap);
+
+    const cloneAnchor = document.querySelector<HTMLElement>(".mm-minimap-content [data-mm-source-line='900']");
+    expect(cloneAnchor).not.toBeNull();
+    cloneAnchor!.getBoundingClientRect = () => ({
+      bottom: 50_120,
+      height: 120,
+      left: 0,
+      right: 0,
+      top: 50_000,
+      width: 0,
+      x: 0,
+      y: 50_000,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    load({ type: "scroll-to-source-line", sourceLine: 900 });
+    await flushQueuedRafs();
+
+    const target = document.querySelector<HTMLElement>("body > main.mm-document [data-mm-source-line='900']");
+    expect(target).not.toBeNull();
+    expect(target!.getBoundingClientRect().top).toBeCloseTo(VIEWPORT_HEIGHT * 0.38, 0);
+  });
+
   it("uses host find results for a global count and navigates off-window matches through the window target seam", async () => {
-    const { flushNextRaf, flushQueuedRafs, flushRafsUntil, highlights, load, messages, root } = await loadRendererHarness({
+    const { flushQueuedRafs, flushRafsUntil, highlights, load, messages, root } = await loadRendererHarness({
       sectionCount: 120,
       virtualization: true,
     });
@@ -824,12 +888,9 @@ describe("renderer scroll-family virtualization integration", () => {
       matches: [descriptorForBlock(90, 1), descriptorForBlock(95, 2)],
     });
 
-    expect(findBarCount().textContent).toBe("0 of 2");
-    expect(root.scrollTop).toBe(0);
-    expect(highlights.get("mm-find-all") ?? []).toHaveLength(0);
-
-    findButton("next").click();
-    await flushNextRaf();
+    expect(findBarCount().textContent).toBe("1 of 2");
+    await flushRafsUntil(() => document.querySelector('[data-mm-block-index="90"]') !== null);
+    await flushRafsUntil(() => document.querySelector('[data-mm-block-index="90"]') !== null);
 
     const firstTarget = document.querySelector<HTMLElement>('[data-mm-block-index="90"]');
     expect(firstTarget).not.toBeNull();

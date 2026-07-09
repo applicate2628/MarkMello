@@ -20,7 +20,7 @@
       return null;
     }
     const minimumThumbHeight = input.minimumThumbHeight ?? DEFAULT_MINIMUM_THUMB_HEIGHT;
-    const scale = Math.min(1, input.minimapWidth / input.documentWidth);
+    const scale = Math.min(1, input.minimapWidth / input.documentWidth, input.minimapHeight / input.documentHeight);
     const projectedDocumentHeight = input.documentHeight * scale;
     const maximumScrollTop = Math.max(0, input.documentHeight - input.viewportHeight);
     const scrollProgress = maximumScrollTop > 0 ? Math.max(0, Math.min(1, input.scrollTop / maximumScrollTop)) : 0;
@@ -1300,8 +1300,7 @@
         return findBlockElement(sectionElement, descriptor.blockIndex);
       case "heading-anchor": {
         const anchor = descriptor.anchor.startsWith("#") ? descriptor.anchor.slice(1) : descriptor.anchor;
-        const element = sectionElement.ownerDocument.getElementById(anchor);
-        return element instanceof ownerWindow.HTMLElement && sectionElement.contains(element) ? element : null;
+        return findElementByIdWithinSection(ownerWindow, sectionElement, anchor);
       }
       case "source-line":
         return findSourceLineElement(sectionElement, descriptor.sourceLine);
@@ -1311,6 +1310,17 @@
       case "section":
         return sectionElement;
     }
+  }
+  function findElementByIdWithinSection(ownerWindow, sectionElement, id) {
+    if (sectionElement.id === id) {
+      return sectionElement;
+    }
+    for (const element of Array.from(sectionElement.querySelectorAll("[id]"))) {
+      if (element instanceof ownerWindow.HTMLElement && element.id === id) {
+        return element;
+      }
+    }
+    return null;
   }
   function findSectionElement(main, entry) {
     for (const child of Array.from(main.children)) {
@@ -1477,8 +1487,12 @@
       }
       matches = message.matches.filter(isUsableDescriptor).slice().sort((left, right) => left.ordinal - right.ordinal);
       totalCount = Math.max(0, Math.floor(message.totalCount));
-      currentIndex = -1;
+      currentIndex = selectInitialMatchIndex(matches, context);
       paintVisibleHighlights();
+      if (currentIndex >= 0) {
+        const sequence = ++navigationSequence;
+        void renderMatchThenAct(matches[currentIndex], sequence);
+      }
       updateStatus();
     };
     const navigate2 = (direction) => {
@@ -1584,7 +1598,30 @@
     return rangeFromBlockLocalOffset(block, match.blockLocalOffset, match.length) ?? rangeFromNormalizedText(block, match.normalizedText);
   }
   function findLiveBlockElement(blockIndex) {
-    return document.querySelector(`[data-mm-block-index="${blockIndex}"]`);
+    return document.querySelector(`body > main.mm-document [data-mm-block-index="${blockIndex}"]`);
+  }
+  function selectInitialMatchIndex(matches, context) {
+    if (matches.length === 0) {
+      return -1;
+    }
+    const model = context.model;
+    if (model === null) {
+      return 0;
+    }
+    const readingTop = Math.max(0, context.root.scrollTop);
+    for (let index = 0; index < matches.length; index++) {
+      const match = matches[index];
+      const entry = model.getEntryContainingBlockIndex(match.startBlockIndex ?? match.blockIndex) ?? model.getEntryByBlockIndex(match.blockIndex);
+      if (entry === void 0) {
+        continue;
+      }
+      const sectionTop = model.sectionTop(entry.sectionIndex);
+      const sectionBottom = sectionTop + model.sectionEffectiveHeight(entry.sectionIndex);
+      if (sectionBottom >= readingTop) {
+        return index;
+      }
+    }
+    return 0;
   }
   function rangeFromBlockLocalOffset(block, offset, length) {
     const endOffset = offset + length;
@@ -2993,6 +3030,7 @@
         const preserveSectionIndex = normalizeSectionIndex(options.preserveSectionIndex, deps.model.getSectionCount());
         const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(deps.root.scrollTop) : null;
         const blocks = collectLiveDocumentSectionElements(deps.main);
+        const liveAnchor = preserveSectionIndex === null ? captureFirstVisibleLiveBlockAnchor(blocks) : null;
         const updates = deps.readMeasuredHeights ? deps.readMeasuredHeights(blocks) : readLiveBlockOffsetMeasuredHeights(blocks);
         const result = deps.model.updateMeasuredHeightsByBlockIndex(updates);
         if (result.updatedCount === 0) {
@@ -3004,9 +3042,9 @@
           deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
           return result;
         }
-        deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
+        restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor) || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor));
         renderRange(computeRange());
-        deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
+        restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor) || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor));
         return result;
       },
       ensureSectionRangeRendered: (start, end, options = {}) => ensureRangeRendered({ end, start }, options),
@@ -3045,6 +3083,39 @@
       }
     }
     return result;
+  }
+  function captureFirstVisibleLiveBlockAnchor(blocks) {
+    for (const block of blocks) {
+      const blockIndex = readBlockIndex3(block);
+      if (blockIndex === null) {
+        continue;
+      }
+      const rect = block.getBoundingClientRect();
+      if (!Number.isFinite(rect.height) || rect.height <= 0 || !Number.isFinite(rect.bottom) || rect.bottom < 0) {
+        continue;
+      }
+      return { blockIndex, viewportTop: rect.top };
+    }
+    return null;
+  }
+  function restoreLiveBlockAnchor(model, root, anchor) {
+    if (anchor === null || !Number.isFinite(anchor.viewportTop)) {
+      return false;
+    }
+    const entry = model.getEntryByBlockIndex(anchor.blockIndex);
+    if (entry === void 0) {
+      return false;
+    }
+    root.scrollTop = Math.max(0, model.sectionTop(entry.sectionIndex) - anchor.viewportTop);
+    return true;
+  }
+  function readBlockIndex3(element) {
+    const raw = element.dataset["mmBlockIndex"];
+    if (raw === void 0 || raw.trim() === "") {
+      return null;
+    }
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : null;
   }
   function createSpacer(ownerDocument, kind) {
     const spacer = ownerDocument.createElement("div");
@@ -3880,6 +3951,42 @@
     }
     postHostMessage(message);
   }
+  function getLiveDocumentRoot() {
+    return document.querySelector("body > main.mm-document");
+  }
+  function readLiveDocumentMathNodes() {
+    return Array.from(getLiveDocumentRoot()?.querySelectorAll("[data-tex]") ?? []);
+  }
+  function getLiveDocumentMathCount() {
+    return readLiveDocumentMathNodes().length;
+  }
+  function findLiveDocumentElementById(id) {
+    const main = getLiveDocumentRoot();
+    if (main === null) {
+      return null;
+    }
+    if (main.id === id) {
+      return main;
+    }
+    for (const element of Array.from(main.querySelectorAll("[id]"))) {
+      if (element.id === id) {
+        return element;
+      }
+    }
+    return null;
+  }
+  function findLiveDocumentBlockElement(blockIndex) {
+    const main = getLiveDocumentRoot();
+    if (main === null || !Number.isFinite(blockIndex)) {
+      return null;
+    }
+    for (const element of Array.from(main.querySelectorAll("[data-mm-block-index]"))) {
+      if (Number.parseInt(element.dataset["mmBlockIndex"] ?? "", 10) === blockIndex) {
+        return element;
+      }
+    }
+    return null;
+  }
   function countFailedInSet(nodes) {
     let count = 0;
     for (const node of nodes) {
@@ -3888,12 +3995,12 @@
     return count;
   }
   function hasUnrenderedDocumentMath() {
-    return document.querySelector(".mm-document [data-tex]:not([data-mm-math-rendered])") !== null;
+    return (getLiveDocumentRoot()?.querySelector("[data-tex]:not([data-mm-math-rendered])") ?? null) !== null;
   }
   function renderMath2() {
-    emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
+    emitMark("mm-render-math-start", { mathCount: getLiveDocumentMathCount() });
     const katex = hostWindow.katex ?? void 0;
-    const controller = renderMath({ katex, documentRoot: document });
+    const controller = renderMath({ katex, documentRoot: getLiveDocumentRoot() ?? document });
     const phaseBDocumentCacheKey = currentDocumentCacheKey;
     const initialVisualSettleReady = virtualizationEnabled ? controller.allMathRendered.then(() => {
       if (phaseBDocumentCacheKey !== currentDocumentCacheKey || controller.isCancelled()) {
@@ -3935,7 +4042,7 @@
     });
     controller.allMathRendered.then(() => {
       invalidateSourceLineAnchors();
-      const allMathNodes = Array.from(document.querySelectorAll("[data-tex]"));
+      const allMathNodes = readLiveDocumentMathNodes();
       emitMark("mm-all-math-rendered", {
         totalCount: controller.totalMathCount,
         failedCount: countFailedInSet(allMathNodes),
@@ -3991,7 +4098,7 @@
     disconnectMermaidLazyObserver();
     const mermaid = hostWindow.mermaid;
     if (!mermaid) return;
-    const allNodes = Array.from(document.querySelectorAll("pre.mm-mermaid"));
+    const allNodes = Array.from(getLiveDocumentRoot()?.querySelectorAll("pre.mm-mermaid") ?? []);
     await renderMermaidNodes(allNodes, mermaid);
   }
   function scheduleCachedMermaidResume(hasMermaid) {
@@ -4011,7 +4118,9 @@
         postPerfMark("mm-mermaid-cache-resume-skipped", { reason: "no-mermaid-api" });
         return;
       }
-      const missingNodes = Array.from(document.querySelectorAll("pre.mm-mermaid:not(.is-rendered)"));
+      const missingNodes = Array.from(
+        getLiveDocumentRoot()?.querySelectorAll("pre.mm-mermaid:not(.is-rendered)") ?? []
+      );
       if (missingNodes.length === 0) {
         postPerfMark("mm-mermaid-cache-resume-skipped", { reason: "all-rendered" });
         return;
@@ -4140,7 +4249,7 @@
     scheduleCurrentProcessedDocumentCacheClone();
   }
   function hasMermaidNodes() {
-    return document.querySelector("pre.mm-mermaid") !== null;
+    return (getLiveDocumentRoot()?.querySelector("pre.mm-mermaid") ?? null) !== null;
   }
   function scheduleThemeMermaidRefresh(theme) {
     const generation = ++themeMermaidRefreshGeneration;
@@ -4699,7 +4808,8 @@
     scheduleVirtualizationShadowValidation();
   }
   function refreshSourceLineAnchors() {
-    sourceLineAnchors = readSourceLineAnchors(document);
+    const main = getLiveDocumentRoot();
+    sourceLineAnchors = main === null ? [] : readSourceLineAnchors(main);
   }
   function readVirtualizedModelSourceLineAnchors() {
     return virtualizedDocumentWindowModel?.getSourceLineAnchors().map((anchor) => ({
@@ -6311,6 +6421,65 @@
       queueMinimapViewportUpdate();
     }, HEAVY_LIVE_UPDATE_DEBOUNCE_MS);
   }
+  function scrollLegacyHeadingAnchor(anchor, options) {
+    document.getElementById(anchor)?.scrollIntoView(options);
+  }
+  function scrollLiveHeadingAnchor(anchor, options) {
+    findLiveDocumentElementById(anchor)?.scrollIntoView(options);
+  }
+  function scrollToHeadingAnchor(anchor, options) {
+    if (anchor.length === 0) {
+      return;
+    }
+    if (!virtualizationEnabled) {
+      scrollLegacyHeadingAnchor(anchor, options);
+      return;
+    }
+    const main = getLiveDocumentRoot();
+    if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+      scrollLiveHeadingAnchor(anchor, options);
+      return;
+    }
+    const descriptor = { anchor, kind: "heading-anchor" };
+    void renderWindowTargetThenAct({
+      action: (context) => {
+        landVirtualizedProgrammaticNavigation({
+          context,
+          descriptor,
+          viewportOffsetY: 0
+        });
+      },
+      actionKind: "navigate",
+      controller: virtualizedDocumentWindowController,
+      descriptor,
+      legacyAction: () => {
+        scrollLiveHeadingAnchor(anchor, options);
+      },
+      main,
+      model: virtualizedDocumentWindowModel,
+      ownerWindow: window,
+      root: getDocumentScrollRoot(),
+      virtualizationEnabled: true
+    });
+  }
+  function readCurrentHashAnchor() {
+    const hash = window.location.hash;
+    if (hash.length <= 1) {
+      return null;
+    }
+    const raw = hash.slice(1);
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+  function handleCurrentHashNavigation() {
+    const anchor = readCurrentHashAnchor();
+    if (anchor !== null) {
+      scrollToHeadingAnchor(anchor, { block: "start" });
+    }
+  }
   function handleHostMessage(raw) {
     const message = raw;
     if (message.type === "host-shortcuts-reset") {
@@ -6340,77 +6509,11 @@
       return;
     }
     if (message.type === "scroll-to") {
-      if (!virtualizationEnabled) {
-        document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
-        return;
-      }
-      const main = document.querySelector("main.mm-document");
-      if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-        document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
-        return;
-      }
-      void renderWindowTargetThenAct({
-        action: (context) => {
-          landVirtualizedProgrammaticNavigation({
-            context,
-            descriptor: { anchor: message.anchor, kind: "heading-anchor" },
-            viewportOffsetY: 0
-          });
-        },
-        actionKind: "navigate",
-        controller: virtualizedDocumentWindowController,
-        descriptor: { anchor: message.anchor, kind: "heading-anchor" },
-        legacyAction: () => {
-          document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
-        },
-        main,
-        model: virtualizedDocumentWindowModel,
-        ownerWindow: window,
-        root: getDocumentScrollRoot(),
-        virtualizationEnabled: true
-      });
+      scrollToHeadingAnchor(message.anchor, { block: "start" });
       return;
     }
     if (message.type === "scroll-to-heading") {
-      if (!virtualizationEnabled) {
-        const target = document.getElementById(message.id);
-        if (target) {
-          target.scrollIntoView({ behavior: "smooth", block: "start" });
-        }
-        return;
-      }
-      const main = document.querySelector("main.mm-document");
-      if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-        const target = document.getElementById(message.id);
-        if (target) {
-          target.scrollIntoView({ behavior: "smooth", block: "start" });
-        }
-        return;
-      }
-      const descriptor = { anchor: message.id, kind: "heading-anchor" };
-      void renderWindowTargetThenAct({
-        action: (context) => {
-          landVirtualizedProgrammaticNavigation({
-            context,
-            descriptor,
-            viewportOffsetY: 0
-          });
-        },
-        actionKind: "navigate",
-        controller: virtualizedDocumentWindowController,
-        descriptor,
-        legacyAction: () => {
-          const target = document.getElementById(message.id);
-          if (target) {
-            target.scrollIntoView({ behavior: "smooth", block: "start" });
-          }
-        },
-        main,
-        model: virtualizedDocumentWindowModel,
-        ownerWindow: window,
-        root: getDocumentScrollRoot(),
-        virtualizationEnabled: true
-      });
+      scrollToHeadingAnchor(message.id, { behavior: "smooth", block: "start" });
       return;
     }
     if (message.type === "scroll-to-source-line") {
@@ -6449,9 +6552,7 @@
       }
       const main = document.querySelector("main.mm-document");
       if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-        const target = document.querySelector(
-          `[data-mm-block-index="${message.blockIndex}"]`
-        );
+        const target = findLiveDocumentBlockElement(message.blockIndex);
         if (target) {
           target.scrollIntoView({ block: "start", behavior: "instant" });
         }
@@ -6470,9 +6571,7 @@
         controller: virtualizedDocumentWindowController,
         descriptor,
         legacyAction: () => {
-          const target = document.querySelector(
-            `[data-mm-block-index="${message.blockIndex}"]`
-          );
+          const target = findLiveDocumentBlockElement(message.blockIndex);
           if (target) {
             target.scrollIntoView({ block: "start", behavior: "instant" });
           }
@@ -6517,6 +6616,7 @@
         );
       }
       applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+      handleCurrentHashNavigation();
       return;
     }
     if (message.type === "append-document") {
@@ -6547,6 +6647,7 @@
         loadMessage.hasHljs = message.hasHljs;
       }
       applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+      handleCurrentHashNavigation();
       return;
     }
     if (message.type === "clear-document") {
@@ -6825,7 +6926,7 @@
         scheduleLayoutReady(skipFrameWait === true);
         postHostMessage({
           type: "document-ready",
-          mathCount: document.querySelectorAll("[data-tex]").length
+          mathCount: getLiveDocumentMathCount()
         });
       },
       hasMermaid,
@@ -6885,7 +6986,7 @@
         postReadyEnhancementsCompleted = true;
         postHostMessage({
           type: "document-ready",
-          mathCount: document.querySelectorAll("[data-tex]").length
+          mathCount: getLiveDocumentMathCount()
         });
         postCachedLayoutReady();
         postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
@@ -7192,7 +7293,7 @@
     wireSaveAsPageChromeSuppress();
     postHostMessage({
       type: "document-ready",
-      mathCount: document.querySelectorAll("[data-tex]").length
+      mathCount: getLiveDocumentMathCount()
     });
     postScroll();
     const documentElement = document.querySelector(".mm-document");
@@ -7234,6 +7335,7 @@
     queuePostScroll();
     queuePreviewSourceLinePost();
   }, { passive: true });
+  window.addEventListener("hashchange", handleCurrentHashNavigation);
   hostWindow.chrome?.webview?.addEventListener?.("message", (event) => handleHostMessage(event.data));
   window.addEventListener("message", (event) => handleHostMessage(event.data));
   window.addEventListener("resize", () => {

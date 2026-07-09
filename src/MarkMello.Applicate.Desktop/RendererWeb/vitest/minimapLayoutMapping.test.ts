@@ -37,4 +37,20 @@ describe("calculateMinimapViewportLayout", () => {
     expect(layout!.contentTranslateY).toBe(0);
     expect(layout!.thumbTravel).toBeCloseTo((1200 - 900) * (136 / 820));
   });
+
+  it("fits a very tall model-fragment clone to the minimap rail height", () => {
+    const layout = calculateMinimapViewportLayout({
+      minimapWidth: 136,
+      minimapHeight: 709,
+      documentWidth: 756,
+      documentHeight: 3_892_435,
+      viewportHeight: 709,
+      scrollTop: 0,
+    });
+
+    expect(layout).not.toBeNull();
+    expect(layout!.scale).toBeCloseTo(709 / 3_892_435);
+    expect(3_892_435 * layout!.scale).toBeCloseTo(709);
+    expect(layout!.thumbTop + layout!.thumbTravel).toBeCloseTo(709 - layout!.thumbHeight);
+  });
 });

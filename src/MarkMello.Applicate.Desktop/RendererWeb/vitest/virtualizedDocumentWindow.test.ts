@@ -210,6 +210,74 @@ describe("virtualized document window", () => {
     expect(document.querySelector<HTMLElement>("[data-mm-virtual-spacer='top']")?.style.height).toBe("100px");
   });
 
+  it("preserves the first visible rendered block offset when measured heights change", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { getScrollTop, root } = setScrollRoot(95, 500, 100);
+    const model = new DocumentWindowModel([
+      entry(0, 80, 100),
+      entry(1, 81, 100),
+      entry(2, 82, 100),
+      entry(3, 83, 100),
+      entry(4, 84, 100),
+    ]);
+    const rectSpy = vi.spyOn(window.HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const blockIndex = Number.parseInt(this.dataset.mmBlockIndex ?? "", 10);
+      const entry = Number.isFinite(blockIndex) ? model.getEntryByBlockIndex(blockIndex) : undefined;
+      let top = entry === undefined ? 0 : entry.cumulativeTop - root.scrollTop;
+      if (model.sectionTop(1) === 100) {
+        if (blockIndex === 80) {
+          top = -120;
+        } else if (blockIndex === 81) {
+          top = 10;
+        }
+      }
+      const height = entry === undefined ? 0 : model.sectionEffectiveHeight(entry.sectionIndex);
+      return {
+        bottom: top + height,
+        height,
+        left: 0,
+        right: 0,
+        top,
+        width: 0,
+        x: 0,
+        y: top,
+        toJSON() {
+          return this;
+        },
+      } as DOMRect;
+    });
+    const controller = createVirtualizedDocumentWindowController({
+      main: document.querySelector<HTMLElement>("main.mm-document")!,
+      model,
+      ownerWindow: window,
+      readMeasuredHeights: () => [
+        { blockIndex: 80, measuredHeight: 150 },
+        { blockIndex: 81, measuredHeight: 80 },
+      ],
+      renderAhead: {
+        aboveViewports: 1,
+        belowViewports: 0,
+        minAbovePx: 0,
+        minBelowPx: 0,
+      },
+      root,
+    });
+
+    try {
+      controller.updateWindowForScroll();
+      const anchorBefore = document.querySelector<HTMLElement>('[data-mm-block-index="81"]')!;
+      const anchorTopBefore = anchorBefore.getBoundingClientRect().top;
+      const adopted = controller.adoptRenderedHeights();
+      const anchorAfter = document.querySelector<HTMLElement>('[data-mm-block-index="81"]')!;
+
+      expect(adopted.updatedCount).toBe(2);
+      expect(anchorAfter.getBoundingClientRect().top).toBeCloseTo(anchorTopBefore);
+      expect(getScrollTop()).toBe(140);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
   it("re-covers the viewport after restore-time calibration changes an unchanged range", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { getScrollTop, root, setScrollTop } = setScrollRoot(250, 400, 50);

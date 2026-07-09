@@ -249,8 +249,7 @@ function findTargetElement(
       return findBlockElement(sectionElement, descriptor.blockIndex);
     case "heading-anchor": {
       const anchor = descriptor.anchor.startsWith("#") ? descriptor.anchor.slice(1) : descriptor.anchor;
-      const element = sectionElement.ownerDocument.getElementById(anchor);
-      return element instanceof ownerWindow.HTMLElement && sectionElement.contains(element) ? element : null;
+      return findElementByIdWithinSection(ownerWindow, sectionElement, anchor);
     }
     case "source-line":
       return findSourceLineElement(sectionElement, descriptor.sourceLine);
@@ -260,6 +259,23 @@ function findTargetElement(
     case "section":
       return sectionElement;
   }
+}
+
+function findElementByIdWithinSection(
+  ownerWindow: Window & typeof globalThis,
+  sectionElement: HTMLElement,
+  id: string
+): HTMLElement | null {
+  if (sectionElement.id === id) {
+    return sectionElement;
+  }
+
+  for (const element of Array.from(sectionElement.querySelectorAll<HTMLElement>("[id]"))) {
+    if (element instanceof ownerWindow.HTMLElement && element.id === id) {
+      return element;
+    }
+  }
+  return null;
 }
 
 function findSectionElement(main: HTMLElement, entry: SectionModelEntry): HTMLElement | null {

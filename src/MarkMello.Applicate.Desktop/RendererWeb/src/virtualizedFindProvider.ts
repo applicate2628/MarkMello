@@ -170,8 +170,12 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
       .slice()
       .sort((left, right) => left.ordinal - right.ordinal);
     totalCount = Math.max(0, Math.floor(message.totalCount));
-    currentIndex = -1;
+    currentIndex = selectInitialMatchIndex(matches, context);
     paintVisibleHighlights();
+    if (currentIndex >= 0) {
+      const sequence = ++navigationSequence;
+      void renderMatchThenAct(matches[currentIndex]!, sequence);
+    }
     updateStatus();
   };
 
@@ -302,7 +306,39 @@ function resolveLiveRangeForMatch(match: FindMatchDescriptor): Range | null {
 }
 
 function findLiveBlockElement(blockIndex: number): HTMLElement | null {
-  return document.querySelector<HTMLElement>(`[data-mm-block-index="${blockIndex}"]`);
+  return document.querySelector<HTMLElement>(`body > main.mm-document [data-mm-block-index="${blockIndex}"]`);
+}
+
+function selectInitialMatchIndex(
+  matches: readonly FindMatchDescriptor[],
+  context: VirtualizedFindContext
+): number {
+  if (matches.length === 0) {
+    return -1;
+  }
+
+  const model = context.model;
+  if (model === null) {
+    return 0;
+  }
+
+  const readingTop = Math.max(0, context.root.scrollTop);
+  for (let index = 0; index < matches.length; index++) {
+    const match = matches[index]!;
+    const entry = model.getEntryContainingBlockIndex(match.startBlockIndex ?? match.blockIndex)
+      ?? model.getEntryByBlockIndex(match.blockIndex);
+    if (entry === undefined) {
+      continue;
+    }
+
+    const sectionTop = model.sectionTop(entry.sectionIndex);
+    const sectionBottom = sectionTop + model.sectionEffectiveHeight(entry.sectionIndex);
+    if (sectionBottom >= readingTop) {
+      return index;
+    }
+  }
+
+  return 0;
 }
 
 function rangeFromBlockLocalOffset(block: HTMLElement, offset: number, length: number): Range | null {
