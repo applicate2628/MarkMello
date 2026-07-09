@@ -6,6 +6,8 @@ export type SourceLineAnchor = {
 
 const SOURCE_LINE_ANCHOR_SELECTOR = "[data-mm-source-line]";
 
+// VIRT-TODO(integration): source-line sync reads only live virtualized anchors;
+// off-window source targets need model-backed anchor lookup.
 export function readSourceLineAnchors(root: ParentNode = document, scrollY = window.scrollY): SourceLineAnchor[] {
   const anchors: SourceLineAnchor[] = [];
   for (const element of Array.from(root.querySelectorAll<HTMLElement>(SOURCE_LINE_ANCHOR_SELECTOR))) {

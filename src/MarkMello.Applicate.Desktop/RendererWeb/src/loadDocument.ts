@@ -26,7 +26,7 @@ export type LoadDocumentDeps = {
   resetModuleGlobals: () => void;
   scrollWindowToTop: () => void;
   emitMark: (name: string, detail?: Record<string, unknown>) => void;
-  ensureChromeNodes: (useCachedDocumentState?: boolean) => void;
+  ensureChromeNodes: (useCachedDocumentState?: boolean, options?: { allowVirtualization?: boolean }) => void;
   applyTheme: (theme: "light" | "dark" | "classic-white") => void;
   debugLog: (text: string) => void;
   preserveCurrentDocumentCache?: () => void;
@@ -105,7 +105,7 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
   // contents on its Phase A/B rebuild). The ensureChromeNodes() callback wraps
   // ensureMinimap() / ensureWidthHandle() / ensureDropOverlay() so they recreate
   // detached nodes if a previous call accidentally removed them.
-  deps.ensureChromeNodes(cachedFragment !== undefined);
+  deps.ensureChromeNodes(cachedFragment !== undefined, { allowVirtualization: !isProgressiveInitial });
 
   if (cachedFragment !== undefined) {
     deps.restoreCachedScrollPosition?.();

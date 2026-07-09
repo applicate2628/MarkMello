@@ -2,9 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type HostBridge = (msg: unknown) => void;
 
-async function loadRendererWithMessages() {
+async function loadRendererWithMessages(options: { virtualization?: boolean } = {}) {
   vi.resetModules();
   document.documentElement.innerHTML = `<body><main class="mm-document"></main></body>`;
+  if (options.virtualization === true) {
+    (window as unknown as { MARKMELLO_VIRTUALIZATION?: boolean }).MARKMELLO_VIRTUALIZATION = true;
+  } else {
+    delete (window as unknown as { MARKMELLO_VIRTUALIZATION?: boolean }).MARKMELLO_VIRTUALIZATION;
+  }
   const messages: unknown[] = [];
   (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
     webview: { postMessage: (m: unknown) => messages.push(m) }
@@ -31,8 +36,71 @@ function rendererCacheKey(html: string, theme: "light" | "dark" | "classic-white
   return `${theme}|${html.length}|${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
+function perfMarkDetail(messages: readonly unknown[], name: string): Record<string, unknown> | null {
+  const mark = messages
+    .filter((message): message is { type: "perf-mark"; name: string; detail?: string } =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: unknown }).type === "perf-mark"
+      && (message as { name?: unknown }).name === name)
+    .at(-1);
+  if (!mark?.detail) {
+    return null;
+  }
+
+  return JSON.parse(mark.detail) as Record<string, unknown>;
+}
+
+function installVirtualizedDocumentLayout(sectionHeight: number, sectionGap: number, sectionCount: number): void {
+  const root = document.documentElement;
+  let mutableScrollTop = 0;
+  Object.defineProperty(document, "scrollingElement", {
+    configurable: true,
+    get: () => root,
+  });
+  Object.defineProperty(root, "scrollTop", {
+    configurable: true,
+    get: () => mutableScrollTop,
+    set: value => {
+      mutableScrollTop = value;
+    },
+  });
+  Object.defineProperty(root, "clientHeight", {
+    configurable: true,
+    get: () => 400,
+  });
+  Object.defineProperty(root, "scrollHeight", {
+    configurable: true,
+    get: () => sectionCount * (sectionHeight + sectionGap),
+  });
+  vi.spyOn(window.HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+    const blockIndex = Number.parseInt(this.dataset.mmBlockIndex ?? "", 10);
+    if (Number.isFinite(blockIndex)) {
+      return blockIndex * (sectionHeight + sectionGap);
+    }
+
+    if (this.dataset.mmVirtualSpacer === "bottom") {
+      return sectionCount * (sectionHeight + sectionGap);
+    }
+
+    return 0;
+  });
+  vi.spyOn(window.HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+    if (this.hasAttribute("data-mm-block-index")) {
+      return sectionHeight;
+    }
+
+    if (this.dataset.mmVirtualSpacer !== undefined) {
+      return Number.parseFloat(this.style.height) || 0;
+    }
+
+    return 0;
+  });
+}
+
 beforeEach(() => {
   delete (window as unknown as { chrome?: unknown }).chrome;
+  delete (window as unknown as { MARKMELLO_VIRTUALIZATION?: boolean }).MARKMELLO_VIRTUALIZATION;
 });
 
 afterEach(() => {
@@ -455,6 +523,30 @@ describe("renderer document cache", () => {
       type: "headings-updated",
       headings: [expect.objectContaining({ id: "late", text: "Late heading" })],
     }));
+  });
+
+  it("preserves the full model-backed document in cache hits while virtualization windows the live DOM", async () => {
+    const sectionCount = 120;
+    installVirtualizedDocumentLayout(80, 20, sectionCount);
+    const { load, messages } = await loadRendererWithMessages({ virtualization: true });
+    const firstHtml = Array.from({ length: sectionCount }, (_value, index) =>
+      `<section data-mm-block-index="${index}" data-mm-block-kind="paragraph">First ${index}</section>`
+    ).join("");
+    const secondHtml = "<section data-mm-block-index='0' data-mm-block-kind='paragraph'>Second</section>";
+
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+    await letPipelineSettle();
+
+    messages.length = 0;
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 3 });
+    await letPipelineSettle();
+
+    expect(perfMarkDetail(messages, "mm-load-document-cache-hit")).toMatchObject({
+      nodeCount: sectionCount,
+    });
+    expect(document.querySelectorAll("main.mm-document > [data-mm-block-index]").length).toBeLessThan(sectionCount);
   });
 
   it("posts heading inline segments for math spans", async () => {

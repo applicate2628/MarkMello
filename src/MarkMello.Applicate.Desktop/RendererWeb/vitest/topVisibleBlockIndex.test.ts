@@ -22,19 +22,31 @@ function block(index: number, top: number, height: number): HTMLElement {
   return element;
 }
 
+function hiddenBlock(index: number): HTMLElement {
+  const element = block(index, 0, 0);
+  element.style.display = "none";
+  return element;
+}
+
 function referenceTopVisibleBlockIndex(blocks: readonly HTMLElement[], scrollTop: number): number | null {
   if (blocks.length === 0) {
     return null;
   }
 
   for (const element of blocks) {
+    if (element.offsetHeight <= 0) {
+      continue;
+    }
     if (element.offsetTop + element.offsetHeight - scrollTop >= 0) {
       const raw = element.dataset.mmBlockIndex;
       return raw === undefined ? null : Number.parseInt(raw, 10);
     }
   }
 
-  const last = blocks[blocks.length - 1]!;
+  const last = blocks.filter(element => element.offsetHeight > 0).at(-1);
+  if (!last) {
+    return null;
+  }
   const raw = last.dataset.mmBlockIndex;
   return raw === undefined ? null : Number.parseInt(raw, 10);
 }
@@ -79,6 +91,27 @@ describe("top visible block index lookup", () => {
 
     expect(collected).toEqual(liveBlocks);
     expect(findTopVisibleBlockIndexFromBlocks(collected, 121)).toBe(1);
+  });
+
+  it("skips display-none zero-box blocks so binary search remains monotonic", () => {
+    const blocks = [
+      block(20, 0, 90),
+      block(21, 120, 80),
+      hiddenBlock(22),
+      block(23, 260, 90),
+      block(24, 380, 90),
+    ];
+
+    expect(findTopVisibleBlockIndexFromBlocks(blocks, 150)).toBe(21);
+    expect(findTopVisibleBlockIndexFromBlocks(blocks, 260)).toBe(23);
+    expect(findTopVisibleBlockIndexFromBlocks(blocks, 600)).toBe(24);
+  });
+
+  it("handles empty, all-hidden, single-block, and past-total scroll positions", () => {
+    expect(findTopVisibleBlockIndexFromBlocks([], 0)).toBeNull();
+    expect(findTopVisibleBlockIndexFromBlocks([hiddenBlock(30)], 0)).toBeNull();
+    expect(findTopVisibleBlockIndexFromBlocks([block(31, 40, 120)], 0)).toBe(31);
+    expect(findTopVisibleBlockIndexFromBlocks([block(32, 40, 120)], 1000)).toBe(32);
   });
 
   it("reads logarithmically instead of measuring every block", () => {

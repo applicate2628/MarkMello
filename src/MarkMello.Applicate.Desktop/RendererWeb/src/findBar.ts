@@ -175,6 +175,8 @@ export function findCaseInsensitiveMatchOffsets(
  * order, case-insensitive, per-text-node (a match spanning a text-node boundary
  * — e.g. a word split by an inline element — is not found; pre-existing
  * limitation). Skips decorative and hidden-source subtrees.
+ * VIRT-TODO(integration): find-in-page scans only the live virtualized window;
+ * off-window matches need a model/full-text-backed search path.
  */
 export function buildMatches(root: Node, needle: string): Range[] {
   const out: Range[] = [];

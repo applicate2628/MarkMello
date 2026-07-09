@@ -7,6 +7,7 @@ import {
   collectLiveDocumentSectionElements,
   computeLiveBlockWindowRange,
   readLiveBlockMeasuredHeights,
+  readLiveBlockOffsetMeasuredHeights,
   summarizeEstimateHeightErrors,
   type SectionModelEntry,
 } from "../src/documentWindow";
@@ -143,6 +144,56 @@ describe("document window model", () => {
     expect(model.sectionEffectiveHeight(2)).toBe(96);
     expect(model.getTotalHeight()).toBe(260);
     expect(model.captureAnchor(100)).toEqual({ blockIndex: 31, intraOffset: 16, sectionIndex: 1 });
+  });
+
+  it("adopts live rendered heights with the same gap-inclusive footprint convention", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    const first = block(33, 120, 40, "heading");
+    const second = block(34, 180, 50);
+    const third = block(35, 260, 60);
+    const bottomSpacer = document.createElement("div");
+    bottomSpacer.dataset.mmVirtualSpacer = "bottom";
+    Object.defineProperty(bottomSpacer, "offsetTop", {
+      configurable: true,
+      get: () => 350,
+    });
+    main.append(first, second, third, bottomSpacer);
+
+    expect(readLiveBlockOffsetMeasuredHeights([first, second, third])).toEqual([
+      { blockIndex: 33, measuredHeight: 60 },
+      { blockIndex: 34, measuredHeight: 80 },
+      { blockIndex: 35, measuredHeight: 90 },
+    ]);
+  });
+
+  it("keeps the document leading offset out of virtual DOM spacer heights", () => {
+    const model = new DocumentWindowModel([
+      entry(0, 36, 50),
+      entry(1, 37, 60),
+      entry(2, 38, 70),
+    ], { leadingOffset: 120 });
+
+    expect(model.sectionTop(1)).toBe(170);
+    expect(model.computeSpacerHeights({ start: 1, end: 1 })).toEqual({
+      bottomSpacer: 70,
+      topSpacer: 50,
+      totalHeight: 300,
+      windowHeight: 60,
+    });
+  });
+
+  it("keeps a fresh top anchor at the document top before the leading offset", () => {
+    const model = new DocumentWindowModel([
+      entry(0, 39, 50),
+      entry(1, 40, 60),
+    ], { leadingOffset: 120 });
+
+    const topAnchor = model.captureAnchor(0);
+
+    expect(topAnchor).toEqual({ blockIndex: -1, intraOffset: 0, sectionIndex: -1 });
+    expect(model.scrollTopForAnchor(topAnchor)).toBe(0);
+    expect(model.scrollTopForAnchor(model.captureAnchor(120))).toBe(120);
   });
 
   it("builds estimate-only and measured twin models with per-kind estimate error stats", () => {

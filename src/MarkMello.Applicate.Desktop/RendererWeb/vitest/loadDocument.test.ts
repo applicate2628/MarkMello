@@ -119,6 +119,15 @@ describe("applyLoadDocument", () => {
     expect(deps.runInitialRenderPipeline).toHaveBeenCalledWith(true, true, 7, true, true);
   });
 
+  it("keeps virtualization out of progressive initial partial bodies", () => {
+    const deps = makeDeps();
+
+    applyLoadDocument({ html: "<p>partial</p>", cacheKey: null }, deps);
+
+    expect(deps.ensureChromeNodes).toHaveBeenCalledWith(false, { allowVirtualization: false });
+    expect(deps.runInitialRenderPipeline).toHaveBeenCalledWith(undefined, undefined, undefined, undefined, false);
+  });
+
   it("scrolls to top after swap", () => {
     const deps = makeDeps();
     applyLoadDocument({ html: "<p>x</p>" }, deps);

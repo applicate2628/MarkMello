@@ -265,7 +265,7 @@
     deps.setCurrentDocumentCacheKey?.(message.cacheKey ?? null);
     const firstHeading = main.querySelector("h1,h2,h3")?.textContent?.trim().replace(/\s+/g, " ").slice(0, 120) ?? "";
     deps.debugLog(`load-document:swapped id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${document.documentElement.dataset.theme ?? "(none)"} firstHeading=${firstHeading}`);
-    deps.ensureChromeNodes(cachedFragment !== void 0);
+    deps.ensureChromeNodes(cachedFragment !== void 0, { allowVirtualization: !isProgressiveInitial });
     if (cachedFragment !== void 0) {
       deps.restoreCachedScrollPosition?.();
     } else {
@@ -1775,6 +1775,14 @@
       return { start, end };
     }
     captureAnchor(scrollTop) {
+      const firstTop = this.sections[0]?.cumulativeTop ?? this.leadingOffset;
+      if (this.sections.length === 0 || scrollTop < firstTop) {
+        return {
+          blockIndex: -1,
+          intraOffset: Math.max(0, scrollTop),
+          sectionIndex: -1
+        };
+      }
       const sectionIndex = this.sectionIndexAtDocumentY(scrollTop);
       const entry = this.sections[sectionIndex];
       const top = entry?.cumulativeTop ?? this.leadingOffset;
@@ -1785,6 +1793,9 @@
       };
     }
     scrollTopForAnchor(anchor) {
+      if (anchor.sectionIndex < 0 || anchor.blockIndex < 0) {
+        return Math.max(0, anchor.intraOffset);
+      }
       const byBlock = anchor.blockIndex >= 0 ? this.getEntryByBlockIndex(anchor.blockIndex) : void 0;
       const entry = byBlock ?? this.sections[anchor.sectionIndex];
       return (entry?.cumulativeTop ?? this.leadingOffset) + anchor.intraOffset;
@@ -1800,13 +1811,14 @@
       }
       const start = Math.max(0, Math.min(range.start, this.sections.length - 1));
       const end = Math.max(start, Math.min(range.end, this.sections.length - 1));
-      const topSpacer = this.sectionTop(start);
+      const windowTop = this.sectionTop(start);
+      const topSpacer = Math.max(0, windowTop - this.leadingOffset);
       let windowHeight = 0;
       for (let index = start; index <= end; index++) {
         windowHeight += effectiveHeight(this.sections[index]);
       }
       return {
-        bottomSpacer: Math.max(0, this.totalHeight - topSpacer - windowHeight),
+        bottomSpacer: Math.max(0, this.totalHeight - windowTop - windowHeight),
         topSpacer,
         totalHeight: this.totalHeight,
         windowHeight
@@ -1841,6 +1853,21 @@
         measuredHeight: measurement.measuredHeight
       };
       if (measurement.measuredHeightPlaceholder) {
+        update.measuredHeightPlaceholder = true;
+      }
+      return update;
+    });
+  }
+  function readLiveBlockOffsetMeasuredHeights(blocks) {
+    const geometry = readVisibleBlockGeometry(blocks);
+    return geometry.map((item, index) => {
+      const nextTop = geometry[index + 1]?.top ?? readNextSiblingDocumentTop(item.element);
+      const measuredHeight = nextTop !== void 0 && nextTop > item.top ? nextTop - item.top : item.height;
+      const update = {
+        blockIndex: readBlockIndex2(item.element, item.sourceIndex),
+        measuredHeight: Math.max(0, measuredHeight)
+      };
+      if (isContentVisibilityPlaceholderMeasurement(item)) {
         update.measuredHeightPlaceholder = true;
       }
       return update;
@@ -1884,6 +1911,17 @@
       current = parent instanceof HTMLElement ? parent : null;
     }
     return top;
+  }
+  function readNextSiblingDocumentTop(element) {
+    let sibling = element.nextElementSibling;
+    while (sibling instanceof HTMLElement) {
+      const top = elementDocumentTop(sibling);
+      if (Number.isFinite(top)) {
+        return top;
+      }
+      sibling = sibling.nextElementSibling;
+    }
+    return void 0;
   }
   function summarizeEstimateHeightErrors(estimateOnlyModel, measuredModel) {
     const mutableBuckets = /* @__PURE__ */ new Map();
@@ -1986,6 +2024,7 @@
         estimatedHeight: options.intrinsicSizeCalibrator?.estimateTargetHeight(intrinsicSize) ?? intrinsicSize.defaultHeight,
         hasMermaid: hasMermaidContent(measurement.element),
         headingLevel: readHeadingLevel2(measurement.element),
+        html: measurement.element.outerHTML,
         intrinsicSize,
         kind: normalizeSectionKind(measurement.element.dataset["mmBlockKind"]),
         measuredHeight: measured ? measurement.measuredHeight : void 0,
@@ -2092,15 +2131,25 @@
     return /^H[1-6]$/.test(tag) ? Number.parseInt(tag.slice(1), 10) : 0;
   }
 
-  // RendererWeb/src/virtualizationShadow.ts
-  var SHADOW_FLAG_NAME = "MARKMELLO_VIRT_SHADOW";
-  function readVirtualizationShadowFlag(ownerWindow = window, ownerDocument = document) {
-    const shadowWindow = ownerWindow;
-    return isTrueFlagValue(shadowWindow.MARKMELLO_VIRT_SHADOW) || isTrueFlagValue(ownerDocument.documentElement.dataset["markmelloVirtShadow"]) || isTrueFlagValue(readLocalStorageFlag(ownerWindow));
+  // RendererWeb/src/virtualizationFlags.ts
+  function readRendererBooleanFlag(input) {
+    return isTrueFlagValue(readWindowFlag(input.ownerWindow, input.globalName)) || isTrueFlagValue(input.ownerDocument.documentElement.dataset[input.dataKey]) || isTrueFlagValue(readLocalStorageFlag(input.ownerWindow, input.storageName));
   }
-  function readLocalStorageFlag(ownerWindow) {
+  function readVirtualizationFlag(ownerWindow = window, ownerDocument = document) {
+    return readRendererBooleanFlag({
+      dataKey: "markmelloVirtualization",
+      globalName: "MARKMELLO_VIRTUALIZATION",
+      ownerDocument,
+      ownerWindow,
+      storageName: "MARKMELLO_VIRTUALIZATION"
+    });
+  }
+  function readWindowFlag(ownerWindow, name) {
+    return ownerWindow[name];
+  }
+  function readLocalStorageFlag(ownerWindow, name) {
     try {
-      return ownerWindow.localStorage.getItem(SHADOW_FLAG_NAME);
+      return ownerWindow.localStorage.getItem(name);
     } catch {
       return null;
     }
@@ -2121,6 +2170,135 @@
       default:
         return false;
     }
+  }
+
+  // RendererWeb/src/virtualizedDocumentWindow.ts
+  var TOP_SPACER = "top";
+  var BOTTOM_SPACER = "bottom";
+  var SPACER_CLASS = "mm-virtual-spacer";
+  var EMPTY_HEIGHT_UPDATE = {
+    maxAbsDelta: 0,
+    totalDelta: 0,
+    updatedCount: 0
+  };
+  function createVirtualizedDocumentWindowController(deps) {
+    let currentRange = null;
+    const renderAhead = deps.renderAhead ?? DEFAULT_RENDER_AHEAD;
+    const renderRange = (range) => {
+      const existingByBlockIndex = collectExistingSections(deps.main);
+      const nodes = [];
+      let insertedCount = 0;
+      const topSpacer = createSpacer(deps.ownerWindow.document, TOP_SPACER);
+      const bottomSpacer = createSpacer(deps.ownerWindow.document, BOTTOM_SPACER);
+      const spacers = deps.model.computeSpacerHeights(range);
+      topSpacer.style.height = `${Math.round(spacers.topSpacer)}px`;
+      bottomSpacer.style.height = `${Math.round(spacers.bottomSpacer)}px`;
+      nodes.push(topSpacer);
+      for (let index = range.start; index <= range.end; index++) {
+        const entry = deps.model.sections[index];
+        if (!entry) {
+          continue;
+        }
+        const existing = existingByBlockIndex.get(entry.blockIndex);
+        if (existing) {
+          nodes.push(existing);
+          continue;
+        }
+        const created = createSectionNode(deps.ownerWindow.document, entry);
+        if (created) {
+          insertedCount++;
+          nodes.push(created);
+        }
+      }
+      nodes.push(bottomSpacer);
+      deps.main.replaceChildren(...nodes);
+      currentRange = { ...range };
+      if (insertedCount > 0) {
+        deps.prepareInsertedContent?.(deps.main);
+      }
+    };
+    const computeRange = () => deps.model.computeWindowRange(deps.root.scrollTop, deps.root.clientHeight, renderAhead);
+    return {
+      adoptRenderedHeights: () => {
+        const anchor = deps.model.captureAnchor(deps.root.scrollTop);
+        const blocks = collectLiveDocumentSectionElements(deps.main);
+        const updates = deps.readMeasuredHeights ? deps.readMeasuredHeights(blocks) : readLiveBlockOffsetMeasuredHeights(blocks);
+        const result = deps.model.updateMeasuredHeightsByBlockIndex(updates);
+        if (result.updatedCount === 0) {
+          return EMPTY_HEIGHT_UPDATE;
+        }
+        deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
+        renderRange(computeRange());
+        deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
+        return result;
+      },
+      getCurrentRange: () => currentRange === null ? null : { ...currentRange },
+      updateWindowForScroll: (options = {}) => {
+        const nextRange = computeRange();
+        if (options.force !== true && currentRange !== null && rangesEqual(currentRange, nextRange)) {
+          return false;
+        }
+        const anchor = deps.model.captureAnchor(deps.root.scrollTop);
+        renderRange(nextRange);
+        deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
+        return true;
+      }
+    };
+  }
+  function createFullDocumentFragmentFromWindowModel(ownerDocument, model) {
+    const fragment = ownerDocument.createDocumentFragment();
+    for (const entry of model.sections) {
+      const created = createSectionNode(ownerDocument, entry);
+      if (created) {
+        fragment.append(created);
+      }
+    }
+    return fragment;
+  }
+  function collectExistingSections(main) {
+    const result = /* @__PURE__ */ new Map();
+    for (const element of collectLiveDocumentSectionElements(main)) {
+      const raw = element.dataset["mmBlockIndex"];
+      const blockIndex = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
+      if (Number.isFinite(blockIndex)) {
+        result.set(blockIndex, element);
+      }
+    }
+    return result;
+  }
+  function createSpacer(ownerDocument, kind) {
+    const spacer = ownerDocument.createElement("div");
+    spacer.className = `${SPACER_CLASS} ${SPACER_CLASS}-${kind}`;
+    spacer.dataset["mmVirtualSpacer"] = kind;
+    spacer.setAttribute("aria-hidden", "true");
+    spacer.style.display = "block";
+    spacer.style.flex = "0 0 auto";
+    spacer.style.pointerEvents = "none";
+    return spacer;
+  }
+  function createSectionNode(ownerDocument, entry) {
+    if (!entry.html) {
+      return null;
+    }
+    const template = ownerDocument.createElement("template");
+    template.innerHTML = entry.html;
+    const firstElement = Array.from(template.content.childNodes).find((node) => node instanceof HTMLElement);
+    return firstElement ?? null;
+  }
+  function rangesEqual(left, right) {
+    return left.start === right.start && left.end === right.end;
+  }
+
+  // RendererWeb/src/virtualizationShadow.ts
+  var SHADOW_FLAG_NAME = "MARKMELLO_VIRT_SHADOW";
+  function readVirtualizationShadowFlag(ownerWindow = window, ownerDocument = document) {
+    return readRendererBooleanFlag({
+      dataKey: "markmelloVirtShadow",
+      globalName: SHADOW_FLAG_NAME,
+      ownerDocument,
+      ownerWindow,
+      storageName: SHADOW_FLAG_NAME
+    });
   }
   function validateVirtualizationShadowGeometry(input) {
     const estimateModel = input.estimateModel ?? input.model;
@@ -2466,9 +2644,16 @@
   var lastPostedPreviewSourceLine = null;
   var liveDocumentBlockElements = [];
   var liveDocumentBlockElementsStale = true;
+  var virtualizationEnabled = readVirtualizationFlag(window, document);
   var virtualizationShadowEnabled = readVirtualizationShadowFlag(window, document);
   var virtualizationShadowValidator = null;
   var virtualizationShadowDocumentFinal = true;
+  var virtualizedDocumentWindowController = null;
+  var virtualizedDocumentWindowModel = null;
+  var virtualizedIntrinsicCalibrator = createSectionIntrinsicCalibrator();
+  var virtualizedMeasureFrameRequested = false;
+  var virtualizedCalibrationHandle = null;
+  var virtualizedWindowMathController = null;
   var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
   function cloneHeadingPayload(heading) {
     return {
@@ -2534,9 +2719,10 @@
     if (!main || main.childNodes.length === 0) {
       return null;
     }
-    const sourceNodes = Array.from(main.childNodes);
+    const virtualizedFullFragment = virtualizationEnabled && virtualizedDocumentWindowModel !== null ? createFullDocumentFragmentFromWindowModel(document, virtualizedDocumentWindowModel) : null;
+    const sourceNodes = Array.from(virtualizedFullFragment?.childNodes ?? main.childNodes);
     const fragment = document.createDocumentFragment();
-    if (mode === "clone") {
+    if (mode === "clone" || virtualizedFullFragment !== null) {
       const clones = sourceNodes.map((node) => node.cloneNode(true));
       for (let index = 0; index < sourceNodes.length; index++) {
         const live = sourceNodes[index];
@@ -3292,6 +3478,177 @@
     }
     getVirtualizationShadowValidator().schedule();
   }
+  function getDocumentScrollRoot() {
+    return document.scrollingElement ?? document.documentElement;
+  }
+  function cancelVirtualizedCalibration() {
+    if (virtualizedCalibrationHandle === null) {
+      return;
+    }
+    if (virtualizedCalibrationHandle.kind === "idle") {
+      window.cancelIdleCallback?.(virtualizedCalibrationHandle.id);
+    } else {
+      window.clearTimeout(virtualizedCalibrationHandle.id);
+    }
+    virtualizedCalibrationHandle = null;
+  }
+  function resetVirtualizedDocumentWindow(resetCalibrator = true) {
+    cancelVirtualizedCalibration();
+    virtualizedWindowMathController?.cancel();
+    virtualizedWindowMathController = null;
+    virtualizedDocumentWindowController = null;
+    virtualizedDocumentWindowModel = null;
+    virtualizedMeasureFrameRequested = false;
+    if (resetCalibrator) {
+      virtualizedIntrinsicCalibrator.reset();
+    }
+  }
+  function prepareVirtualizedInsertedContent(root) {
+    renderCodeBlocks(root);
+    virtualizedWindowMathController?.cancel();
+    const mathController = renderMath({
+      katex: hostWindow.katex ?? void 0,
+      documentRoot: root
+    });
+    virtualizedWindowMathController = mathController;
+    const scheduleAfterRichContent = () => {
+      if (virtualizedWindowMathController !== mathController || mathController.isCancelled()) {
+        return;
+      }
+      invalidateSourceLineAnchors();
+      scheduleVirtualizedMeasuredHeightAdoption();
+    };
+    mathController.initialVisibleReady.then(scheduleAfterRichContent, scheduleAfterRichContent);
+    mathController.allMathRendered.then(scheduleAfterRichContent, scheduleAfterRichContent);
+    const mermaid = hostWindow.mermaid;
+    if (!mermaid) {
+      return;
+    }
+    const mermaidNodes = Array.from(root.querySelectorAll("pre.mm-mermaid"));
+    if (mermaidNodes.length === 0) {
+      return;
+    }
+    disconnectMermaidLazyObserver();
+    void renderMermaidNodes(mermaidNodes, mermaid, "mm-mermaid-virt-window").finally(scheduleAfterRichContent);
+  }
+  function initializeVirtualizedDocumentWindow() {
+    if (!virtualizationEnabled) {
+      return;
+    }
+    const main = document.querySelector("main.mm-document");
+    if (!main) {
+      resetVirtualizedDocumentWindow(false);
+      return;
+    }
+    const blocks = collectLiveDocumentSectionElements(main);
+    if (blocks.length === 0) {
+      resetVirtualizedDocumentWindow(false);
+      return;
+    }
+    const root = getDocumentScrollRoot();
+    const models = buildDocumentWindowModelsFromLiveBlocks(
+      blocks,
+      readIntrinsicSizeMetrics(main),
+      root.scrollHeight,
+      { intrinsicSizeCalibrator: virtualizedIntrinsicCalibrator }
+    );
+    virtualizedDocumentWindowModel = models.estimateOnlyModel;
+    virtualizedDocumentWindowController = createVirtualizedDocumentWindowController({
+      main,
+      model: virtualizedDocumentWindowModel,
+      ownerWindow: window,
+      prepareInsertedContent: prepareVirtualizedInsertedContent,
+      root
+    });
+    virtualizedDocumentWindowController.updateWindowForScroll();
+    invalidateTopVisibleBlockIndexCache();
+    postPerfMark("mm-virt-window-built", {
+      estimateMeanAbsError: models.estimateHeightError.meanAbsError,
+      sectionCount: virtualizedDocumentWindowModel.getSectionCount(),
+      totalHeight: virtualizedDocumentWindowModel.getTotalHeight()
+    });
+    scheduleVirtualizedMeasuredHeightAdoption();
+  }
+  function updateVirtualizedWindowForScroll(options = {}) {
+    if (!virtualizationEnabled || virtualizedDocumentWindowController === null) {
+      return;
+    }
+    if (virtualizedDocumentWindowController.updateWindowForScroll(options)) {
+      invalidateTopVisibleBlockIndexCache();
+      invalidateSourceLineAnchors();
+      scheduleVirtualizedMeasuredHeightAdoption();
+    }
+  }
+  function scheduleVirtualizedMeasuredHeightAdoption() {
+    if (!virtualizationEnabled || virtualizedDocumentWindowController === null || virtualizedMeasureFrameRequested) {
+      return;
+    }
+    virtualizedMeasureFrameRequested = true;
+    window.requestAnimationFrame(() => {
+      virtualizedMeasureFrameRequested = false;
+      adoptVirtualizedRenderedHeights();
+    });
+  }
+  function adoptVirtualizedRenderedHeights() {
+    if (!virtualizationEnabled || virtualizedDocumentWindowController === null) {
+      return;
+    }
+    const result = virtualizedDocumentWindowController.adoptRenderedHeights();
+    if (result.updatedCount === 0) {
+      return;
+    }
+    invalidateTopVisibleBlockIndexCache();
+    invalidateSourceLineAnchors();
+    scheduleVirtualizedCalibration();
+    postPerfMark("mm-virt-window-height-adopted", {
+      maxAbsDelta: result.maxAbsDelta,
+      totalDelta: result.totalDelta,
+      updatedCount: result.updatedCount
+    });
+  }
+  function scheduleVirtualizedCalibration() {
+    if (!virtualizationEnabled || virtualizedDocumentWindowModel === null || virtualizedCalibrationHandle !== null) {
+      return;
+    }
+    const run = () => {
+      virtualizedCalibrationHandle = null;
+      runVirtualizedCalibration();
+    };
+    const requestIdle = window.requestIdleCallback;
+    if (requestIdle) {
+      virtualizedCalibrationHandle = { kind: "idle", id: requestIdle(run, { timeout: 1500 }) };
+      return;
+    }
+    virtualizedCalibrationHandle = { kind: "timeout", id: window.setTimeout(run, 250) };
+  }
+  function runVirtualizedCalibration() {
+    const model = virtualizedDocumentWindowModel;
+    const controller = virtualizedDocumentWindowController;
+    if (!virtualizationEnabled || model === null || controller === null) {
+      return;
+    }
+    const root = getDocumentScrollRoot();
+    const anchor = model.captureAnchor(root.scrollTop);
+    const recordedCount = model.recordIntrinsicSizeCalibrationSamples(virtualizedIntrinsicCalibrator);
+    if (recordedCount === 0) {
+      return;
+    }
+    const result = model.updateEstimatedHeightsFromCalibration(virtualizedIntrinsicCalibrator);
+    if (result.updatedCount === 0) {
+      return;
+    }
+    root.scrollTop = model.scrollTopForAnchor(anchor);
+    controller.updateWindowForScroll({ force: true });
+    root.scrollTop = model.scrollTopForAnchor(anchor);
+    invalidateTopVisibleBlockIndexCache();
+    invalidateSourceLineAnchors();
+    postPerfMark("mm-virt-window-calibrated", {
+      maxAbsDelta: result.maxAbsDelta,
+      recordedCount,
+      totalDelta: result.totalDelta,
+      updatedCount: result.updatedCount
+    });
+  }
   function postScroll() {
     const scrollState = getScrollState();
     const topBlockIndex = findTopVisibleBlockIndex();
@@ -3483,6 +3840,7 @@
       top: layoutState.scrollTop,
       behavior: "instant"
     });
+    updateVirtualizedWindowForScroll({ force: true });
   }
   function scheduleLayoutReady(skipFrameWait = false) {
     const generation = ++layoutReadyGeneration;
@@ -5101,6 +5459,7 @@
     lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
     minimapSourceReady = false;
     hasInitialLayoutSettled = false;
+    resetVirtualizedDocumentWindow();
     findBarController?.close();
     if (activeHeadingObserver) {
       activeHeadingObserver.disconnect();
@@ -5118,6 +5477,11 @@
     ensureMinimap();
     ensureWidthHandle();
     ensureDropOverlay();
+    if (options.allowVirtualization === false) {
+      resetVirtualizedDocumentWindow(false);
+    } else {
+      initializeVirtualizedDocumentWindow();
+    }
     refreshTopVisibleBlockIndexCache();
     updateWidthHandlePositionForCurrentLayout();
     if (options.refreshMinimap === false) {
@@ -5523,6 +5887,7 @@
         queueMinimapRefreshAfterLayoutSettles();
         scheduleResizeReactions();
         invalidateSourceLineAnchors();
+        scheduleVirtualizedMeasuredHeightAdoption();
         window.requestAnimationFrame(postScroll);
       });
       resizeObserver.observe(documentElement);
@@ -5531,10 +5896,12 @@
     document.fonts?.ready.then(() => {
       queueMinimapRefreshAfterLayoutSettles();
       invalidateSourceLineAnchors();
+      scheduleVirtualizedMeasuredHeightAdoption();
     }).catch(() => void 0);
   });
   var queuePostScroll = createScrollCoalescer({
     postScroll: () => {
+      updateVirtualizedWindowForScroll();
       postScroll();
       queueMinimapViewportUpdate();
     },

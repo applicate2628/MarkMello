@@ -35,6 +35,21 @@ import {
   findTopVisibleBlockIndexFromBlocks
 } from "./topVisibleBlockIndex";
 import {
+  buildDocumentWindowModelsFromLiveBlocks,
+  collectLiveDocumentSectionElements,
+  type DocumentWindowModel,
+} from "./documentWindow";
+import {
+  createSectionIntrinsicCalibrator,
+  readIntrinsicSizeMetrics,
+} from "./sectionIntrinsicSize";
+import { readVirtualizationFlag } from "./virtualizationFlags";
+import {
+  createFullDocumentFragmentFromWindowModel,
+  createVirtualizedDocumentWindowController,
+  type VirtualizedDocumentWindowController,
+} from "./virtualizedDocumentWindow";
+import {
   createVirtualizationShadowValidator,
   readVirtualizationShadowFlag,
   type VirtualizationShadowValidator
@@ -322,9 +337,16 @@ let suppressPreviewSourceLineSequence = 0;
 let lastPostedPreviewSourceLine: number | null = null;
 let liveDocumentBlockElements: HTMLElement[] = [];
 let liveDocumentBlockElementsStale = true;
+const virtualizationEnabled = readVirtualizationFlag(window, document);
 const virtualizationShadowEnabled = readVirtualizationShadowFlag(window, document);
 let virtualizationShadowValidator: VirtualizationShadowValidator | null = null;
 let virtualizationShadowDocumentFinal = true;
+let virtualizedDocumentWindowController: VirtualizedDocumentWindowController | null = null;
+let virtualizedDocumentWindowModel: DocumentWindowModel | null = null;
+const virtualizedIntrinsicCalibrator = createSectionIntrinsicCalibrator();
+let virtualizedMeasureFrameRequested = false;
+let virtualizedCalibrationHandle: { kind: "idle" | "timeout"; id: number } | null = null;
+let virtualizedWindowMathController: MathReadinessController | null = null;
 const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
 type ProcessedDocumentCacheEntry = {
   fragment: DocumentFragment;
@@ -427,9 +449,12 @@ function captureCurrentProcessedDocumentCacheEntry(mode: "clone" | "move"): Proc
     return null;
   }
 
-  const sourceNodes = Array.from(main.childNodes);
+  const virtualizedFullFragment = virtualizationEnabled && virtualizedDocumentWindowModel !== null
+    ? createFullDocumentFragmentFromWindowModel(document, virtualizedDocumentWindowModel)
+    : null;
+  const sourceNodes = Array.from(virtualizedFullFragment?.childNodes ?? main.childNodes);
   const fragment = document.createDocumentFragment();
-  if (mode === "clone") {
+  if (mode === "clone" || virtualizedFullFragment !== null) {
     const clones = sourceNodes.map(node => node.cloneNode(true));
     // Stamp each realized block's settled height onto its clone as
     // contain-intrinsic-size. Top-level blocks are `content-visibility: auto;
@@ -1402,6 +1427,213 @@ function scheduleVirtualizationShadowValidation(): void {
 
   getVirtualizationShadowValidator().schedule();
 }
+
+function getDocumentScrollRoot(): Element & { scrollTop: number; scrollHeight: number; clientHeight: number } {
+  return (document.scrollingElement ?? document.documentElement) as Element & {
+    scrollTop: number;
+    scrollHeight: number;
+    clientHeight: number;
+  };
+}
+
+function cancelVirtualizedCalibration(): void {
+  if (virtualizedCalibrationHandle === null) {
+    return;
+  }
+
+  if (virtualizedCalibrationHandle.kind === "idle") {
+    (window as Window & { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback?.(virtualizedCalibrationHandle.id);
+  } else {
+    window.clearTimeout(virtualizedCalibrationHandle.id);
+  }
+  virtualizedCalibrationHandle = null;
+}
+
+function resetVirtualizedDocumentWindow(resetCalibrator = true): void {
+  cancelVirtualizedCalibration();
+  virtualizedWindowMathController?.cancel();
+  virtualizedWindowMathController = null;
+  virtualizedDocumentWindowController = null;
+  virtualizedDocumentWindowModel = null;
+  virtualizedMeasureFrameRequested = false;
+  if (resetCalibrator) {
+    virtualizedIntrinsicCalibrator.reset();
+  }
+}
+
+function prepareVirtualizedInsertedContent(root: ParentNode): void {
+  renderCodeBlocks(root);
+
+  virtualizedWindowMathController?.cancel();
+  const mathController = renderMathInit({
+    katex: hostWindow.katex ?? undefined,
+    documentRoot: root,
+  });
+  virtualizedWindowMathController = mathController;
+
+  const scheduleAfterRichContent = () => {
+    if (virtualizedWindowMathController !== mathController || mathController.isCancelled()) {
+      return;
+    }
+
+    invalidateSourceLineAnchors();
+    scheduleVirtualizedMeasuredHeightAdoption();
+  };
+  mathController.initialVisibleReady.then(scheduleAfterRichContent, scheduleAfterRichContent);
+  mathController.allMathRendered.then(scheduleAfterRichContent, scheduleAfterRichContent);
+
+  const mermaid = hostWindow.mermaid;
+  if (!mermaid) {
+    return;
+  }
+
+  const mermaidNodes = Array.from(root.querySelectorAll<HTMLElement>("pre.mm-mermaid"));
+  if (mermaidNodes.length === 0) {
+    return;
+  }
+
+  disconnectMermaidLazyObserver();
+  void renderMermaidNodes(mermaidNodes, mermaid, "mm-mermaid-virt-window")
+    .finally(scheduleAfterRichContent);
+}
+
+function initializeVirtualizedDocumentWindow(): void {
+  if (!virtualizationEnabled) {
+    return;
+  }
+
+  const main = document.querySelector<HTMLElement>("main.mm-document");
+  if (!main) {
+    resetVirtualizedDocumentWindow(false);
+    return;
+  }
+
+  const blocks = collectLiveDocumentSectionElements(main);
+  if (blocks.length === 0) {
+    resetVirtualizedDocumentWindow(false);
+    return;
+  }
+
+  const root = getDocumentScrollRoot();
+  const models = buildDocumentWindowModelsFromLiveBlocks(
+    blocks,
+    readIntrinsicSizeMetrics(main),
+    root.scrollHeight,
+    { intrinsicSizeCalibrator: virtualizedIntrinsicCalibrator });
+  virtualizedDocumentWindowModel = models.estimateOnlyModel;
+  virtualizedDocumentWindowController = createVirtualizedDocumentWindowController({
+    main,
+    model: virtualizedDocumentWindowModel,
+    ownerWindow: window,
+    prepareInsertedContent: prepareVirtualizedInsertedContent,
+    root,
+  });
+
+  virtualizedDocumentWindowController.updateWindowForScroll();
+  invalidateTopVisibleBlockIndexCache();
+  postPerfMark("mm-virt-window-built", {
+    estimateMeanAbsError: models.estimateHeightError.meanAbsError,
+    sectionCount: virtualizedDocumentWindowModel.getSectionCount(),
+    totalHeight: virtualizedDocumentWindowModel.getTotalHeight(),
+  });
+  scheduleVirtualizedMeasuredHeightAdoption();
+}
+
+function updateVirtualizedWindowForScroll(options: { force?: boolean } = {}): void {
+  if (!virtualizationEnabled || virtualizedDocumentWindowController === null) {
+    return;
+  }
+
+  if (virtualizedDocumentWindowController.updateWindowForScroll(options)) {
+    invalidateTopVisibleBlockIndexCache();
+    invalidateSourceLineAnchors();
+    scheduleVirtualizedMeasuredHeightAdoption();
+  }
+}
+
+function scheduleVirtualizedMeasuredHeightAdoption(): void {
+  if (!virtualizationEnabled || virtualizedDocumentWindowController === null || virtualizedMeasureFrameRequested) {
+    return;
+  }
+
+  virtualizedMeasureFrameRequested = true;
+  window.requestAnimationFrame(() => {
+    virtualizedMeasureFrameRequested = false;
+    adoptVirtualizedRenderedHeights();
+  });
+}
+
+function adoptVirtualizedRenderedHeights(): void {
+  if (!virtualizationEnabled || virtualizedDocumentWindowController === null) {
+    return;
+  }
+
+  const result = virtualizedDocumentWindowController.adoptRenderedHeights();
+  if (result.updatedCount === 0) {
+    return;
+  }
+
+  invalidateTopVisibleBlockIndexCache();
+  invalidateSourceLineAnchors();
+  scheduleVirtualizedCalibration();
+  postPerfMark("mm-virt-window-height-adopted", {
+    maxAbsDelta: result.maxAbsDelta,
+    totalDelta: result.totalDelta,
+    updatedCount: result.updatedCount,
+  });
+}
+
+function scheduleVirtualizedCalibration(): void {
+  if (!virtualizationEnabled || virtualizedDocumentWindowModel === null || virtualizedCalibrationHandle !== null) {
+    return;
+  }
+
+  const run = () => {
+    virtualizedCalibrationHandle = null;
+    runVirtualizedCalibration();
+  };
+  const requestIdle = (window as Window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+  }).requestIdleCallback;
+  if (requestIdle) {
+    virtualizedCalibrationHandle = { kind: "idle", id: requestIdle(run, { timeout: 1500 }) };
+    return;
+  }
+
+  virtualizedCalibrationHandle = { kind: "timeout", id: window.setTimeout(run, 250) };
+}
+
+function runVirtualizedCalibration(): void {
+  const model = virtualizedDocumentWindowModel;
+  const controller = virtualizedDocumentWindowController;
+  if (!virtualizationEnabled || model === null || controller === null) {
+    return;
+  }
+
+  const root = getDocumentScrollRoot();
+  const anchor = model.captureAnchor(root.scrollTop);
+  const recordedCount = model.recordIntrinsicSizeCalibrationSamples(virtualizedIntrinsicCalibrator);
+  if (recordedCount === 0) {
+    return;
+  }
+
+  const result = model.updateEstimatedHeightsFromCalibration(virtualizedIntrinsicCalibrator);
+  if (result.updatedCount === 0) {
+    return;
+  }
+
+  root.scrollTop = model.scrollTopForAnchor(anchor);
+  controller.updateWindowForScroll({ force: true });
+  root.scrollTop = model.scrollTopForAnchor(anchor);
+  invalidateTopVisibleBlockIndexCache();
+  invalidateSourceLineAnchors();
+  postPerfMark("mm-virt-window-calibrated", {
+    maxAbsDelta: result.maxAbsDelta,
+    recordedCount,
+    totalDelta: result.totalDelta,
+    updatedCount: result.updatedCount,
+  });
+}
 function postScroll(): void {
   const scrollState = getScrollState();
   const topBlockIndex = findTopVisibleBlockIndex();
@@ -1631,6 +1863,7 @@ function restoreCachedScrollPosition(): void {
     top: layoutState.scrollTop,
     behavior: "instant" as ScrollBehavior,
   });
+  updateVirtualizedWindowForScroll({ force: true });
 }
 
 function scheduleLayoutReady(skipFrameWait = false): void {
@@ -2176,6 +2409,8 @@ function sanitizeMinimapCloneTree(root: ParentNode): void {
 }
 
 function cloneDocumentForMinimap(): HTMLElement | null {
+  // VIRT-TODO(integration): minimap clones only the live virtualized <main>;
+  // off-window content needs a model/full-document minimap source.
   const source = document.querySelector<HTMLElement>(".mm-document");
   if (!source) {
     minimapSourceReady = false;
@@ -2399,6 +2634,8 @@ function extractHeadingSegments(root: HTMLElement): HeadingSegmentPayload[] {
 }
 
 function extractAndPostHeadings(): void {
+  // VIRT-TODO(integration): TOC scans only live virtualized headings; off-window
+  // headings need a model/full-heading index.
   const main = document.querySelector<HTMLElement>("main.mm-document");
   if (!main) {
     postHostMessage({ type: "headings-updated", headings: [] });
@@ -3443,11 +3680,13 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "scroll-to") {
+    // VIRT-TODO(integration): anchor-link scroll-to resolves only live window DOM.
     document.getElementById(message.anchor)?.scrollIntoView({ block: "start" });
     return;
   }
 
   if (message.type === "scroll-to-heading") {
+    // VIRT-TODO(integration): scroll-to-heading resolves only live window headings.
     // Avalonia-side TOC click handler. The heading id matches the slug
     // used by MarkdownHeadingAnchorSlugger when generating <h1..h6 id="...">
     // in ApplicateHtmlMarkdownRenderer, so getElementById resolves the
@@ -3492,6 +3731,7 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "scroll-to-block") {
+    // VIRT-TODO(integration): scroll-to-block resolves only live window blocks.
     const target = document.querySelector<HTMLElement>(
       `[data-mm-block-index="${message.blockIndex}"]`
     );
@@ -3860,6 +4100,7 @@ function resetModuleGlobalsForLoadDocument(): void {
   // briefly show the handle at the wrong x — the same jitter the gate was
   // added to prevent, just on the second-and-subsequent doc loads.
   hasInitialLayoutSettled = false;
+  resetVirtualizedDocumentWindow();
   // Find bar — close on doc swap. The bar lives as a body sibling so it
   // survives the <main> innerHTML write, but its match-state references
   // detached nodes after the swap. Close clears state and removes
@@ -3883,6 +4124,7 @@ function resetModuleGlobalsForLoadDocument(): void {
 }
 
 type EnsureChromeNodesOptions = {
+  allowVirtualization?: boolean;
   refreshMinimap?: boolean;
 };
 
@@ -3890,6 +4132,11 @@ function ensureChromeNodes(useCachedDocumentState = false, options: EnsureChrome
   ensureMinimap();
   ensureWidthHandle();
   ensureDropOverlay();
+  if (options.allowVirtualization === false) {
+    resetVirtualizedDocumentWindow(false);
+  } else {
+    initializeVirtualizedDocumentWindow();
+  }
   refreshTopVisibleBlockIndexCache();
   // Width-handle X depends on the new .mm-document bounding rect after innerHTML
   // swap; ensureWidthHandle only ensures the node exists.
@@ -4455,6 +4702,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // does not snap the chrome on every observer tick.
       scheduleResizeReactions();
       invalidateSourceLineAnchors();
+      scheduleVirtualizedMeasuredHeightAdoption();
       window.requestAnimationFrame(postScroll);
     });
     resizeObserver.observe(documentElement);
@@ -4464,11 +4712,13 @@ document.addEventListener("DOMContentLoaded", () => {
   document.fonts?.ready.then(() => {
     queueMinimapRefreshAfterLayoutSettles();
     invalidateSourceLineAnchors();
+    scheduleVirtualizedMeasuredHeightAdoption();
   }).catch(() => undefined);
 });
 
 const queuePostScroll = createScrollCoalescer({
   postScroll: () => {
+    updateVirtualizedWindowForScroll();
     postScroll();
     queueMinimapViewportUpdate();
   },

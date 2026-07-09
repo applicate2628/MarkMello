@@ -2,3 +2,7 @@
 # bytes stable on Windows runners instead of letting autocrlf rewrite newlines.
 src/MarkMello.Applicate.Desktop/RendererWeb/assets/**/*.js text eol=lf
 src/MarkMello.Applicate.Desktop/RendererWeb/assets/**/*.css text eol=lf
+
+# Renderer TypeScript sources + vitest are authored LF. Pin so Windows autocrlf
+# cannot reintroduce mixed EOL (mixed EOL turns any edit into a whole-file diff).
+src/MarkMello.Applicate.Desktop/RendererWeb/**/*.ts text eol=lf

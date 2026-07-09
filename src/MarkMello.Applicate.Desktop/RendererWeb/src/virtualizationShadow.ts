@@ -15,16 +15,13 @@ import {
   collectLiveDocumentBlockElements,
   findTopVisibleBlockIndexFromBlocks,
 } from "./topVisibleBlockIndex";
+import { readRendererBooleanFlag } from "./virtualizationFlags";
 import {
   createSectionIntrinsicCalibrator,
   type SectionIntrinsicCalibrationSummary,
 } from "./sectionIntrinsicSize";
 
 const SHADOW_FLAG_NAME = "MARKMELLO_VIRT_SHADOW";
-
-type ShadowFlagWindow = Window & {
-  MARKMELLO_VIRT_SHADOW?: unknown;
-};
 
 export type VirtualizationShadowValidation = {
   sectionCount: number;
@@ -78,37 +75,13 @@ export function readVirtualizationShadowFlag(
   ownerWindow: Window = window,
   ownerDocument: Document = document
 ): boolean {
-  const shadowWindow = ownerWindow as ShadowFlagWindow;
-  return isTrueFlagValue(shadowWindow.MARKMELLO_VIRT_SHADOW)
-    || isTrueFlagValue(ownerDocument.documentElement.dataset["markmelloVirtShadow"])
-    || isTrueFlagValue(readLocalStorageFlag(ownerWindow));
-}
-
-function readLocalStorageFlag(ownerWindow: Window): string | null {
-  try {
-    return ownerWindow.localStorage.getItem(SHADOW_FLAG_NAME);
-  } catch {
-    return null;
-  }
-}
-
-function isTrueFlagValue(value: unknown): boolean {
-  if (value === true) {
-    return true;
-  }
-  if (typeof value !== "string") {
-    return false;
-  }
-
-  switch (value.trim().toLowerCase()) {
-    case "1":
-    case "true":
-    case "yes":
-    case "on":
-      return true;
-    default:
-      return false;
-  }
+  return readRendererBooleanFlag({
+    dataKey: "markmelloVirtShadow",
+    globalName: SHADOW_FLAG_NAME,
+    ownerDocument,
+    ownerWindow,
+    storageName: SHADOW_FLAG_NAME,
+  });
 }
 
 export function validateVirtualizationShadowGeometry(input: {

@@ -11,7 +11,7 @@ type KatexLike = {
 
 export type RenderMathDeps = {
   katex: KatexLike | undefined;
-  documentRoot: Document;
+  documentRoot: ParentNode;
 };
 
 const INITIAL_LOOKAHEAD_PX = 500;

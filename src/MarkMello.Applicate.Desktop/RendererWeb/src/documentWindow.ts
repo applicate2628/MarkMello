@@ -306,6 +306,15 @@ export class DocumentWindowModel {
   }
 
   captureAnchor(scrollTop: number): ScrollAnchor {
+    const firstTop = this.sections[0]?.cumulativeTop ?? this.leadingOffset;
+    if (this.sections.length === 0 || scrollTop < firstTop) {
+      return {
+        blockIndex: -1,
+        intraOffset: Math.max(0, scrollTop),
+        sectionIndex: -1,
+      };
+    }
+
     const sectionIndex = this.sectionIndexAtDocumentY(scrollTop);
     const entry = this.sections[sectionIndex];
     const top = entry?.cumulativeTop ?? this.leadingOffset;
@@ -317,6 +326,10 @@ export class DocumentWindowModel {
   }
 
   scrollTopForAnchor(anchor: ScrollAnchor): number {
+    if (anchor.sectionIndex < 0 || anchor.blockIndex < 0) {
+      return Math.max(0, anchor.intraOffset);
+    }
+
     const byBlock = anchor.blockIndex >= 0 ? this.getEntryByBlockIndex(anchor.blockIndex) : undefined;
     const entry = byBlock ?? this.sections[anchor.sectionIndex];
     return (entry?.cumulativeTop ?? this.leadingOffset) + anchor.intraOffset;
@@ -334,13 +347,14 @@ export class DocumentWindowModel {
 
     const start = Math.max(0, Math.min(range.start, this.sections.length - 1));
     const end = Math.max(start, Math.min(range.end, this.sections.length - 1));
-    const topSpacer = this.sectionTop(start);
+    const windowTop = this.sectionTop(start);
+    const topSpacer = Math.max(0, windowTop - this.leadingOffset);
     let windowHeight = 0;
     for (let index = start; index <= end; index++) {
       windowHeight += effectiveHeight(this.sections[index]!);
     }
     return {
-      bottomSpacer: Math.max(0, this.totalHeight - topSpacer - windowHeight),
+      bottomSpacer: Math.max(0, this.totalHeight - windowTop - windowHeight),
       topSpacer,
       totalHeight: this.totalHeight,
       windowHeight,
@@ -402,6 +416,24 @@ export function readLiveBlockMeasuredHeights(
   });
 }
 
+export function readLiveBlockOffsetMeasuredHeights(blocks: readonly HTMLElement[]): MeasuredHeightUpdate[] {
+  const geometry = readVisibleBlockGeometry(blocks);
+  return geometry.map((item, index): MeasuredHeightUpdate => {
+    const nextTop = geometry[index + 1]?.top ?? readNextSiblingDocumentTop(item.element);
+    const measuredHeight = nextTop !== undefined && nextTop > item.top
+      ? nextTop - item.top
+      : item.height;
+    const update: MeasuredHeightUpdate = {
+      blockIndex: readBlockIndex(item.element, item.sourceIndex),
+      measuredHeight: Math.max(0, measuredHeight),
+    };
+    if (isContentVisibilityPlaceholderMeasurement(item)) {
+      update.measuredHeightPlaceholder = true;
+    }
+    return update;
+  });
+}
+
 export function computeLiveBlockWindowRange(
   blocks: readonly HTMLElement[],
   scrollTop: number,
@@ -448,6 +480,20 @@ export function elementDocumentTop(element: HTMLElement): number {
     current = parent instanceof HTMLElement ? parent : null;
   }
   return top;
+}
+
+function readNextSiblingDocumentTop(element: HTMLElement): number | undefined {
+  let sibling = element.nextElementSibling;
+  while (sibling instanceof HTMLElement) {
+    const top = elementDocumentTop(sibling);
+    if (Number.isFinite(top)) {
+      return top;
+    }
+
+    sibling = sibling.nextElementSibling;
+  }
+
+  return undefined;
 }
 
 export function summarizeEstimateHeightErrors(
@@ -581,6 +627,7 @@ function readLiveSectionModelEntries(
       estimatedHeight: options.intrinsicSizeCalibrator?.estimateTargetHeight(intrinsicSize) ?? intrinsicSize.defaultHeight,
       hasMermaid: hasMermaidContent(measurement.element),
       headingLevel: readHeadingLevel(measurement.element),
+      html: measurement.element.outerHTML,
       intrinsicSize,
       kind: normalizeSectionKind(measurement.element.dataset["mmBlockKind"]),
       measuredHeight: measured ? measurement.measuredHeight : undefined,
