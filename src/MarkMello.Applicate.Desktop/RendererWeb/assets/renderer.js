@@ -802,38 +802,34 @@
     if (needle.length === 0) {
       return out;
     }
-    const walker = document.createTreeWalker(
-      root,
-      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(node) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            const el = node;
-            if (SKIP_TAGS.has(el.tagName)) {
-              return NodeFilter.FILTER_REJECT;
-            }
-            for (const cls of SKIP_CLASSES) {
-              if (el.classList.contains(cls)) {
-                return NodeFilter.FILTER_REJECT;
-              }
-            }
-            if (el.matches?.(SKIP_SELECTOR)) {
-              return NodeFilter.FILTER_REJECT;
-            }
-            return NodeFilter.FILTER_SKIP;
-          }
-          return NodeFilter.FILTER_ACCEPT;
+    const visit = (node) => {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node;
+        if (SKIP_TAGS.has(el.tagName)) {
+          return;
         }
+        for (const cls of SKIP_CLASSES) {
+          if (el.classList.contains(cls)) {
+            return;
+          }
+        }
+        if (el.matches?.(SKIP_SELECTOR)) {
+          return;
+        }
+      } else if (node.nodeType === Node.TEXT_NODE) {
+        for (const [start, end] of findCaseInsensitiveMatchOffsets(node.nodeValue ?? "", needle)) {
+          const range = document.createRange();
+          range.setStart(node, start);
+          range.setEnd(node, end);
+          out.push(range);
+        }
+        return;
       }
-    );
-    for (let cur = walker.nextNode(); cur !== null; cur = walker.nextNode()) {
-      for (const [start, end] of findCaseInsensitiveMatchOffsets(cur.nodeValue ?? "", needle)) {
-        const range = document.createRange();
-        range.setStart(cur, start);
-        range.setEnd(cur, end);
-        out.push(range);
+      for (const child of Array.from(node.childNodes)) {
+        visit(child);
       }
-    }
+    };
+    visit(root);
     return out;
   }
   function applyHighlights(s) {
@@ -3028,6 +3024,7 @@
     return {
       adoptRenderedHeights: (options = {}) => {
         const preserveSectionIndex = normalizeSectionIndex(options.preserveSectionIndex, deps.model.getSectionCount());
+        const reanchor = options.reanchor !== false;
         const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(deps.root.scrollTop) : null;
         const blocks = collectLiveDocumentSectionElements(deps.main);
         const liveAnchor = preserveSectionIndex === null ? captureFirstVisibleLiveBlockAnchor(blocks) : null;
@@ -3037,14 +3034,22 @@
           return EMPTY_HEIGHT_UPDATE;
         }
         if (preserveSectionIndex !== null) {
-          deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+          if (reanchor) {
+            deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+          }
           renderRange(computeRange());
-          deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+          if (reanchor) {
+            deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+          }
           return result;
         }
-        restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor) || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor));
+        if (reanchor) {
+          restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor) || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor));
+        }
         renderRange(computeRange());
-        restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor) || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor));
+        if (reanchor) {
+          restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor) || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor));
+        }
         return result;
       },
       ensureSectionRangeRendered: (start, end, options = {}) => ensureRangeRendered({ end, start }, options),
@@ -3532,7 +3537,11 @@
   var virtualizedCalibrationHandle = null;
   var virtualizedProgrammaticNavigationInProgress = false;
   var virtualizedProgrammaticNavigationGeneration = 0;
+  var virtualizedProgrammaticNavigationExpectedScrollTop = null;
+  var virtualizedProgrammaticNavigationExternalShiftCount = 0;
   var virtualizedProgrammaticNavigationPostSettleTarget = null;
+  var virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
+  var virtualizedCalibrationDeferredDuringNavigation = false;
   var virtualizedWindowMathController = null;
   var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
   function cloneHeadingPayload(heading) {
@@ -4421,6 +4430,29 @@
   function isVirtualizedProgrammaticNavigationInProgress() {
     return virtualizationEnabled && virtualizedProgrammaticNavigationInProgress;
   }
+  function writeVirtualizedProgrammaticNavigationScrollTop(root, scrollTop) {
+    const nextScrollTop = Math.max(0, scrollTop);
+    root.scrollTop = nextScrollTop;
+    virtualizedProgrammaticNavigationExpectedScrollTop = root.scrollTop;
+  }
+  function recordVirtualizedProgrammaticNavigationExternalShift(root) {
+    const expected = virtualizedProgrammaticNavigationExpectedScrollTop;
+    if (expected === null) {
+      return;
+    }
+    const actual = root.scrollTop;
+    const delta = actual - expected;
+    if (Math.abs(delta) <= VIRTUALIZED_NAVIGATION_SETTLE_TOLERANCE_PX) {
+      return;
+    }
+    virtualizedProgrammaticNavigationExternalShiftCount++;
+    virtualizedProgrammaticNavigationExpectedScrollTop = actual;
+    postPerfMark("mm-virt-navigation-external-shift", {
+      actualScrollTop: actual,
+      delta,
+      expectedScrollTop: expected
+    });
+  }
   function resolveVirtualizedNavigationTargetSectionIndex(descriptor) {
     const model = virtualizedDocumentWindowModel;
     if (model === null) {
@@ -4517,7 +4549,7 @@
       descriptor,
       viewportOffsetY
     );
-    root.scrollTop = scrollTop;
+    writeVirtualizedProgrammaticNavigationScrollTop(root, scrollTop);
     return true;
   }
   function readVirtualizedProgrammaticNavigationResidual(context, viewportOffsetY) {
@@ -4543,7 +4575,12 @@
     }
     if (Math.abs(residual) > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
       const root = getDocumentScrollRoot();
-      root.scrollTop = Math.max(0, root.scrollTop + residual);
+      const nextScrollTop = Math.max(0, root.scrollTop + residual);
+      if (isVirtualizedProgrammaticNavigationInProgress()) {
+        writeVirtualizedProgrammaticNavigationScrollTop(root, nextScrollTop);
+      } else {
+        root.scrollTop = nextScrollTop;
+      }
     }
     return true;
   }
@@ -4561,7 +4598,9 @@
     if (options.alignPostSettleTarget !== false) {
       alignVirtualizedProgrammaticNavigationPostSettleTarget();
     }
-    scheduleVirtualizedCalibration();
+    if (options.scheduleCalibration !== false) {
+      scheduleVirtualizedCalibration();
+    }
     postPerfMark("mm-virt-window-height-adopted", {
       maxAbsDelta: result.maxAbsDelta,
       totalHeight: virtualizedDocumentWindowModel?.getTotalHeight() ?? null,
@@ -4574,18 +4613,36 @@
     if (!virtualizationEnabled || controller === null) {
       return;
     }
-    const result = controller.adoptRenderedHeights({ preserveSectionIndex: context.sectionIndex });
-    applyVirtualizedRenderedHeightAdoptionEffects(result, { alignPostSettleTarget: false });
+    const result = controller.adoptRenderedHeights({ preserveSectionIndex: context.sectionIndex, reanchor: false });
+    applyVirtualizedRenderedHeightAdoptionEffects(result, {
+      alignPostSettleTarget: false,
+      scheduleCalibration: false
+    });
   }
-  function finishVirtualizedProgrammaticNavigationCorrection(generation) {
+  function finishVirtualizedProgrammaticNavigationCorrection(generation, input) {
     if (generation !== virtualizedProgrammaticNavigationGeneration) {
       return;
     }
+    postPerfMark("mm-virt-navigation-settled", {
+      descriptorKind: input.descriptor.kind,
+      externalShiftCount: virtualizedProgrammaticNavigationExternalShiftCount,
+      passCount: input.passCount,
+      residual: input.residual
+    });
     updateMinimapViewport({ skipVisibilityUpdate: true });
     postScroll();
     window.requestAnimationFrame(() => {
       if (generation === virtualizedProgrammaticNavigationGeneration) {
         virtualizedProgrammaticNavigationInProgress = false;
+        virtualizedProgrammaticNavigationExpectedScrollTop = null;
+        if (virtualizedMeasuredHeightAdoptionDeferredDuringNavigation) {
+          virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
+          scheduleVirtualizedMeasuredHeightAdoption();
+        }
+        if (virtualizedCalibrationDeferredDuringNavigation) {
+          virtualizedCalibrationDeferredDuringNavigation = false;
+          scheduleVirtualizedCalibration();
+        }
       }
     });
   }
@@ -4594,6 +4651,7 @@
       return;
     }
     const root = getDocumentScrollRoot();
+    recordVirtualizedProgrammaticNavigationExternalShift(root);
     updateVirtualizedWindowForScroll({ force: true });
     forceRenderVirtualizedNavigationTarget(input.descriptor);
     let context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
@@ -4615,10 +4673,14 @@
     }
     const residualAbs = Math.abs(residual);
     if (residualAbs <= VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX || pass >= VIRTUALIZED_NAVIGATION_CORRECTION_MAX_PASSES || pass > 0 && residualAbs >= previousResidualAbs - VIRTUALIZED_NAVIGATION_CORRECTION_MIN_SHRINK_PX) {
-      finishVirtualizedProgrammaticNavigationCorrection(generation);
+      finishVirtualizedProgrammaticNavigationCorrection(generation, {
+        descriptor: input.descriptor,
+        passCount: pass,
+        residual
+      });
       return;
     }
-    root.scrollTop = Math.max(0, root.scrollTop + residual);
+    writeVirtualizedProgrammaticNavigationScrollTop(root, root.scrollTop + residual);
     window.requestAnimationFrame(() => {
       settleVirtualizedProgrammaticNavigationTarget(input, generation, pass + 1, residualAbs);
     });
@@ -4695,6 +4757,11 @@
     }
     const generation = ++virtualizedProgrammaticNavigationGeneration;
     virtualizedProgrammaticNavigationInProgress = true;
+    virtualizedProgrammaticNavigationExpectedScrollTop = null;
+    virtualizedProgrammaticNavigationExternalShiftCount = 0;
+    virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
+    virtualizedCalibrationDeferredDuringNavigation = false;
+    cancelVirtualizedCalibration();
     const root = getDocumentScrollRoot();
     if (input.initialContext !== void 0) {
       applyVirtualizedProgrammaticNavigationContext(input.initialContext, input.descriptor, input.viewportOffsetY);
@@ -4718,6 +4785,7 @@
         return;
       }
       const currentScrollTop = root.scrollTop;
+      recordVirtualizedProgrammaticNavigationExternalShift(root);
       if (Math.abs(currentScrollTop - lastScrollTop) <= VIRTUALIZED_NAVIGATION_SETTLE_TOLERANCE_PX) {
         stableFrames++;
       } else {
@@ -4753,7 +4821,11 @@
     virtualizedMeasureFrameRequested = false;
     virtualizedProgrammaticNavigationInProgress = false;
     virtualizedProgrammaticNavigationGeneration++;
+    virtualizedProgrammaticNavigationExpectedScrollTop = null;
+    virtualizedProgrammaticNavigationExternalShiftCount = 0;
     virtualizedProgrammaticNavigationPostSettleTarget = null;
+    virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
+    virtualizedCalibrationDeferredDuringNavigation = false;
     if (resetCalibrator) {
       virtualizedIntrinsicCalibrator.reset();
     }
@@ -4844,7 +4916,14 @@
     }
   }
   function scheduleVirtualizedMeasuredHeightAdoption() {
-    if (!virtualizationEnabled || virtualizedDocumentWindowController === null || virtualizedMeasureFrameRequested) {
+    if (!virtualizationEnabled || virtualizedDocumentWindowController === null) {
+      return;
+    }
+    if (isVirtualizedProgrammaticNavigationInProgress()) {
+      virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = true;
+      return;
+    }
+    if (virtualizedMeasureFrameRequested) {
       return;
     }
     virtualizedMeasureFrameRequested = true;
@@ -4858,7 +4937,7 @@
       return;
     }
     if (isVirtualizedProgrammaticNavigationInProgress()) {
-      scheduleVirtualizedMeasuredHeightAdoption();
+      virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = true;
       return;
     }
     const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
@@ -4868,7 +4947,14 @@
     applyVirtualizedRenderedHeightAdoptionEffects(result);
   }
   function scheduleVirtualizedCalibration() {
-    if (!virtualizationEnabled || virtualizedDocumentWindowModel === null || virtualizedCalibrationHandle !== null) {
+    if (!virtualizationEnabled || virtualizedDocumentWindowModel === null) {
+      return;
+    }
+    if (isVirtualizedProgrammaticNavigationInProgress()) {
+      virtualizedCalibrationDeferredDuringNavigation = true;
+      return;
+    }
+    if (virtualizedCalibrationHandle !== null) {
       return;
     }
     const run = () => {
@@ -4889,7 +4975,7 @@
       return;
     }
     if (isVirtualizedProgrammaticNavigationInProgress()) {
-      scheduleVirtualizedCalibration();
+      virtualizedCalibrationDeferredDuringNavigation = true;
       return;
     }
     const root = getDocumentScrollRoot();
@@ -5602,7 +5688,6 @@
   }
   var minimapCloneMetadata = /* @__PURE__ */ new WeakMap();
   var minimapCloneBlockIndexes = /* @__PURE__ */ new WeakMap();
-  var MINIMAP_TEXT_SANITIZE_NODE_FILTER = NodeFilter.SHOW_TEXT;
   function parseMinimapBlockIndex(value) {
     if (value === void 0 || value.trim() === "") {
       return null;
@@ -5720,12 +5805,6 @@
         node.removeAttribute("href");
       }
     });
-    const walker = document.createTreeWalker(root, MINIMAP_TEXT_SANITIZE_NODE_FILTER);
-    let textNode = walker.nextNode();
-    while (textNode !== null) {
-      textNode.nodeValue = "";
-      textNode = walker.nextNode();
-    }
   }
   function cloneDocumentElementForMinimap(source, sourceStyle) {
     const clone = source.cloneNode(true);

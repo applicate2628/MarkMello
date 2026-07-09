@@ -45,6 +45,7 @@ export type EnsureSectionRenderedOptions = {
 
 export type AdoptRenderedHeightsOptions = {
   preserveSectionIndex?: number;
+  reanchor?: boolean;
 };
 
 type LiveBlockAnchor = {
@@ -132,6 +133,7 @@ export function createVirtualizedDocumentWindowController(
   return {
     adoptRenderedHeights: (options = {}) => {
       const preserveSectionIndex = normalizeSectionIndex(options.preserveSectionIndex, deps.model.getSectionCount());
+      const reanchor = options.reanchor !== false;
       const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(deps.root.scrollTop) : null;
       const blocks = collectLiveDocumentSectionElements(deps.main);
       const liveAnchor = preserveSectionIndex === null ? captureFirstVisibleLiveBlockAnchor(blocks) : null;
@@ -144,17 +146,25 @@ export function createVirtualizedDocumentWindowController(
       }
 
       if (preserveSectionIndex !== null) {
-        deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+        if (reanchor) {
+          deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+        }
         renderRange(computeRange());
-        deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+        if (reanchor) {
+          deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+        }
         return result;
       }
 
-      restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor)
-        || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!));
+      if (reanchor) {
+        restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor)
+          || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!));
+      }
       renderRange(computeRange());
-      restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor)
-        || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!));
+      if (reanchor) {
+        restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor)
+          || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!));
+      }
       return result;
     },
     ensureSectionRangeRendered: (start, end, options = {}) =>

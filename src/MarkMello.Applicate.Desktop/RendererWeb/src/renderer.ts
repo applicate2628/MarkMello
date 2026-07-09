@@ -372,10 +372,14 @@ let virtualizedMeasureFrameRequested = false;
 let virtualizedCalibrationHandle: { kind: "idle" | "timeout"; id: number } | null = null;
 let virtualizedProgrammaticNavigationInProgress = false;
 let virtualizedProgrammaticNavigationGeneration = 0;
+let virtualizedProgrammaticNavigationExpectedScrollTop: number | null = null;
+let virtualizedProgrammaticNavigationExternalShiftCount = 0;
 let virtualizedProgrammaticNavigationPostSettleTarget: {
   descriptor: WindowTargetDescriptor;
   viewportOffsetY: number;
 } | null = null;
+let virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
+let virtualizedCalibrationDeferredDuringNavigation = false;
 let virtualizedWindowMathController: MathReadinessController | null = null;
 const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
 type ProcessedDocumentCacheEntry = {
@@ -1540,6 +1544,36 @@ function isVirtualizedProgrammaticNavigationInProgress(): boolean {
   return virtualizationEnabled && virtualizedProgrammaticNavigationInProgress;
 }
 
+function writeVirtualizedProgrammaticNavigationScrollTop(
+  root: Element & { scrollTop: number },
+  scrollTop: number
+): void {
+  const nextScrollTop = Math.max(0, scrollTop);
+  root.scrollTop = nextScrollTop;
+  virtualizedProgrammaticNavigationExpectedScrollTop = root.scrollTop;
+}
+
+function recordVirtualizedProgrammaticNavigationExternalShift(root: Element & { scrollTop: number }): void {
+  const expected = virtualizedProgrammaticNavigationExpectedScrollTop;
+  if (expected === null) {
+    return;
+  }
+
+  const actual = root.scrollTop;
+  const delta = actual - expected;
+  if (Math.abs(delta) <= VIRTUALIZED_NAVIGATION_SETTLE_TOLERANCE_PX) {
+    return;
+  }
+
+  virtualizedProgrammaticNavigationExternalShiftCount++;
+  virtualizedProgrammaticNavigationExpectedScrollTop = actual;
+  postPerfMark("mm-virt-navigation-external-shift", {
+    actualScrollTop: actual,
+    delta,
+    expectedScrollTop: expected,
+  });
+}
+
 function resolveVirtualizedNavigationTargetSectionIndex(descriptor: WindowTargetDescriptor): number | null {
   const model = virtualizedDocumentWindowModel;
   if (model === null) {
@@ -1665,7 +1699,7 @@ function applyVirtualizedProgrammaticNavigationContext(
     descriptor,
     viewportOffsetY
   );
-  root.scrollTop = scrollTop;
+  writeVirtualizedProgrammaticNavigationScrollTop(root, scrollTop);
   return true;
 }
 
@@ -1715,7 +1749,12 @@ function correctVirtualizedProgrammaticNavigationResidual(input: {
 
   if (Math.abs(residual) > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
     const root = getDocumentScrollRoot();
-    root.scrollTop = Math.max(0, root.scrollTop + residual);
+    const nextScrollTop = Math.max(0, root.scrollTop + residual);
+    if (isVirtualizedProgrammaticNavigationInProgress()) {
+      writeVirtualizedProgrammaticNavigationScrollTop(root, nextScrollTop);
+    } else {
+      root.scrollTop = nextScrollTop;
+    }
   }
 
   return true;
@@ -1723,7 +1762,7 @@ function correctVirtualizedProgrammaticNavigationResidual(input: {
 
 function applyVirtualizedRenderedHeightAdoptionEffects(
   result: MeasuredHeightUpdateResult,
-  options: { alignPostSettleTarget?: boolean } = {}
+  options: { alignPostSettleTarget?: boolean; scheduleCalibration?: boolean } = {}
 ): void {
   if (result.updatedCount === 0) {
     return;
@@ -1739,7 +1778,9 @@ function applyVirtualizedRenderedHeightAdoptionEffects(
   if (options.alignPostSettleTarget !== false) {
     alignVirtualizedProgrammaticNavigationPostSettleTarget();
   }
-  scheduleVirtualizedCalibration();
+  if (options.scheduleCalibration !== false) {
+    scheduleVirtualizedCalibration();
+  }
   postPerfMark("mm-virt-window-height-adopted", {
     maxAbsDelta: result.maxAbsDelta,
     totalHeight: virtualizedDocumentWindowModel?.getTotalHeight() ?? null,
@@ -1754,20 +1795,45 @@ function adoptVirtualizedProgrammaticNavigationRenderedHeights(context: WindowTa
     return;
   }
 
-  const result = controller.adoptRenderedHeights({ preserveSectionIndex: context.sectionIndex });
-  applyVirtualizedRenderedHeightAdoptionEffects(result, { alignPostSettleTarget: false });
+  const result = controller.adoptRenderedHeights({ preserveSectionIndex: context.sectionIndex, reanchor: false });
+  applyVirtualizedRenderedHeightAdoptionEffects(result, {
+    alignPostSettleTarget: false,
+    scheduleCalibration: false,
+  });
 }
 
-function finishVirtualizedProgrammaticNavigationCorrection(generation: number): void {
+function finishVirtualizedProgrammaticNavigationCorrection(
+  generation: number,
+  input: {
+    descriptor: WindowTargetDescriptor;
+    passCount: number;
+    residual: number | null;
+  }
+): void {
   if (generation !== virtualizedProgrammaticNavigationGeneration) {
     return;
   }
 
+  postPerfMark("mm-virt-navigation-settled", {
+    descriptorKind: input.descriptor.kind,
+    externalShiftCount: virtualizedProgrammaticNavigationExternalShiftCount,
+    passCount: input.passCount,
+    residual: input.residual,
+  });
   updateMinimapViewport({ skipVisibilityUpdate: true });
   postScroll();
   window.requestAnimationFrame(() => {
     if (generation === virtualizedProgrammaticNavigationGeneration) {
       virtualizedProgrammaticNavigationInProgress = false;
+      virtualizedProgrammaticNavigationExpectedScrollTop = null;
+      if (virtualizedMeasuredHeightAdoptionDeferredDuringNavigation) {
+        virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
+        scheduleVirtualizedMeasuredHeightAdoption();
+      }
+      if (virtualizedCalibrationDeferredDuringNavigation) {
+        virtualizedCalibrationDeferredDuringNavigation = false;
+        scheduleVirtualizedCalibration();
+      }
     }
   });
 }
@@ -1786,6 +1852,7 @@ function settleVirtualizedProgrammaticNavigationTarget(
   }
 
   const root = getDocumentScrollRoot();
+  recordVirtualizedProgrammaticNavigationExternalShift(root);
   updateVirtualizedWindowForScroll({ force: true });
   forceRenderVirtualizedNavigationTarget(input.descriptor);
   let context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
@@ -1814,11 +1881,15 @@ function settleVirtualizedProgrammaticNavigationTarget(
     || pass >= VIRTUALIZED_NAVIGATION_CORRECTION_MAX_PASSES
     || (pass > 0 && residualAbs >= previousResidualAbs - VIRTUALIZED_NAVIGATION_CORRECTION_MIN_SHRINK_PX)
   ) {
-    finishVirtualizedProgrammaticNavigationCorrection(generation);
+    finishVirtualizedProgrammaticNavigationCorrection(generation, {
+      descriptor: input.descriptor,
+      passCount: pass,
+      residual,
+    });
     return;
   }
 
-  root.scrollTop = Math.max(0, root.scrollTop + residual);
+  writeVirtualizedProgrammaticNavigationScrollTop(root, root.scrollTop + residual);
   window.requestAnimationFrame(() => {
     settleVirtualizedProgrammaticNavigationTarget(input, generation, pass + 1, residualAbs);
   });
@@ -1933,6 +2004,11 @@ function startVirtualizedProgrammaticNavigationSettle(input: {
 
   const generation = ++virtualizedProgrammaticNavigationGeneration;
   virtualizedProgrammaticNavigationInProgress = true;
+  virtualizedProgrammaticNavigationExpectedScrollTop = null;
+  virtualizedProgrammaticNavigationExternalShiftCount = 0;
+  virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
+  virtualizedCalibrationDeferredDuringNavigation = false;
+  cancelVirtualizedCalibration();
   const root = getDocumentScrollRoot();
   if (input.initialContext !== undefined) {
     applyVirtualizedProgrammaticNavigationContext(input.initialContext, input.descriptor, input.viewportOffsetY);
@@ -1961,6 +2037,7 @@ function startVirtualizedProgrammaticNavigationSettle(input: {
     }
 
     const currentScrollTop = root.scrollTop;
+    recordVirtualizedProgrammaticNavigationExternalShift(root);
     if (Math.abs(currentScrollTop - lastScrollTop) <= VIRTUALIZED_NAVIGATION_SETTLE_TOLERANCE_PX) {
       stableFrames++;
     } else {
@@ -2005,7 +2082,11 @@ function resetVirtualizedDocumentWindow(resetCalibrator = true): void {
   virtualizedMeasureFrameRequested = false;
   virtualizedProgrammaticNavigationInProgress = false;
   virtualizedProgrammaticNavigationGeneration++;
+  virtualizedProgrammaticNavigationExpectedScrollTop = null;
+  virtualizedProgrammaticNavigationExternalShiftCount = 0;
   virtualizedProgrammaticNavigationPostSettleTarget = null;
+  virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
+  virtualizedCalibrationDeferredDuringNavigation = false;
   if (resetCalibrator) {
     virtualizedIntrinsicCalibrator.reset();
   }
@@ -2113,7 +2194,16 @@ function updateVirtualizedWindowForScroll(options: { force?: boolean } = {}): vo
 }
 
 function scheduleVirtualizedMeasuredHeightAdoption(): void {
-  if (!virtualizationEnabled || virtualizedDocumentWindowController === null || virtualizedMeasureFrameRequested) {
+  if (!virtualizationEnabled || virtualizedDocumentWindowController === null) {
+    return;
+  }
+
+  if (isVirtualizedProgrammaticNavigationInProgress()) {
+    virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = true;
+    return;
+  }
+
+  if (virtualizedMeasureFrameRequested) {
     return;
   }
 
@@ -2130,7 +2220,7 @@ function adoptVirtualizedRenderedHeights(): void {
   }
 
   if (isVirtualizedProgrammaticNavigationInProgress()) {
-    scheduleVirtualizedMeasuredHeightAdoption();
+    virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = true;
     return;
   }
 
@@ -2142,7 +2232,16 @@ function adoptVirtualizedRenderedHeights(): void {
 }
 
 function scheduleVirtualizedCalibration(): void {
-  if (!virtualizationEnabled || virtualizedDocumentWindowModel === null || virtualizedCalibrationHandle !== null) {
+  if (!virtualizationEnabled || virtualizedDocumentWindowModel === null) {
+    return;
+  }
+
+  if (isVirtualizedProgrammaticNavigationInProgress()) {
+    virtualizedCalibrationDeferredDuringNavigation = true;
+    return;
+  }
+
+  if (virtualizedCalibrationHandle !== null) {
     return;
   }
 
@@ -2169,7 +2268,7 @@ function runVirtualizedCalibration(): void {
   }
 
   if (isVirtualizedProgrammaticNavigationInProgress()) {
-    scheduleVirtualizedCalibration();
+    virtualizedCalibrationDeferredDuringNavigation = true;
     return;
   }
 
@@ -3079,7 +3178,6 @@ type MinimapCloneMetadata = {
 
 const minimapCloneMetadata = new WeakMap<HTMLElement, MinimapCloneMetadata>();
 const minimapCloneBlockIndexes = new WeakMap<HTMLElement, number>();
-const MINIMAP_TEXT_SANITIZE_NODE_FILTER = NodeFilter.SHOW_TEXT;
 
 function parseMinimapBlockIndex(value: string | undefined): number | null {
   if (value === undefined || value.trim() === "") {
@@ -3226,12 +3324,6 @@ function sanitizeMinimapCloneTree(root: ParentNode): void {
       node.removeAttribute("href");
     }
   });
-  const walker = document.createTreeWalker(root, MINIMAP_TEXT_SANITIZE_NODE_FILTER);
-  let textNode = walker.nextNode();
-  while (textNode !== null) {
-    textNode.nodeValue = "";
-    textNode = walker.nextNode();
-  }
 }
 
 function cloneDocumentElementForMinimap(source: HTMLElement, sourceStyle: CSSStyleDeclaration): HTMLElement {
@@ -3246,9 +3338,9 @@ function cloneDocumentElementForMinimap(source: HTMLElement, sourceStyle: CSSSty
   clone.style.paddingLeft = "0";
   registerMinimapCloneMetadata(source, clone);
   // Minimap clone invariant: no node inside `.mm-minimap-content` may carry
-  // lookup-visible identity (`id`, `data-mm-*`, `data-tex`) or searchable text.
-  // The viewport/click block map is stored in WeakMaps above, so the painted
-  // clone cannot pollute current or future document-wide selectors/TreeWalkers.
+  // lookup-visible identity (`id`, `data-mm-*`, `data-tex`). Text stays intact
+  // because the rail is scaled real content; search paths must exclude the
+  // minimap subtree at their own root/filter instead of destroying clone paint.
   sanitizeMinimapCloneTree(clone);
   return clone;
 }

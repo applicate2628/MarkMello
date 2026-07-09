@@ -201,42 +201,39 @@ export function buildMatches(root: Node, needle: string): Range[] {
     return out;
   }
 
-  const walker = document.createTreeWalker(
-    root,
-    NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-    {
-      acceptNode(node: Node): number {
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          const el = node as Element;
-          if (SKIP_TAGS.has(el.tagName)) {
-            return NodeFilter.FILTER_REJECT;
-          }
-          for (const cls of SKIP_CLASSES) {
-            if (el.classList.contains(cls)) {
-              return NodeFilter.FILTER_REJECT;
-            }
-          }
-          if (el.matches?.(SKIP_SELECTOR)) {
-            return NodeFilter.FILTER_REJECT;
-          }
-          return NodeFilter.FILTER_SKIP; // descend, don't count the element
+  const visit = (node: Node): void => {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const el = node as Element;
+      if (SKIP_TAGS.has(el.tagName)) {
+        return;
+      }
+      for (const cls of SKIP_CLASSES) {
+        if (el.classList.contains(cls)) {
+          return;
         }
-        return NodeFilter.FILTER_ACCEPT; // text node
-      },
+      }
+      if (el.matches?.(SKIP_SELECTOR)) {
+        return;
+      }
+    } else if (node.nodeType === Node.TEXT_NODE) {
+      // Offsets come back valid in node.nodeValue (the ORIGINAL text), so
+      // setStart/setEnd can never overshoot the node — the old lowercased-offset
+      // math threw IndexSizeError on text containing length-expanding characters.
+      for (const [start, end] of findCaseInsensitiveMatchOffsets(node.nodeValue ?? "", needle)) {
+        const range = document.createRange();
+        range.setStart(node, start);
+        range.setEnd(node, end);
+        out.push(range);
+      }
+      return;
     }
-  );
 
-  for (let cur = walker.nextNode(); cur !== null; cur = walker.nextNode()) {
-    // Offsets come back valid in cur.nodeValue (the ORIGINAL text), so setStart/
-    // setEnd can never overshoot the node — the old lowercased-offset math threw
-    // IndexSizeError on text containing length-expanding characters (e.g. 'İ').
-    for (const [start, end] of findCaseInsensitiveMatchOffsets(cur.nodeValue ?? "", needle)) {
-      const range = document.createRange();
-      range.setStart(cur, start);
-      range.setEnd(cur, end);
-      out.push(range);
+    for (const child of Array.from(node.childNodes)) {
+      visit(child);
     }
-  }
+  };
+
+  visit(root);
 
   return out;
 }

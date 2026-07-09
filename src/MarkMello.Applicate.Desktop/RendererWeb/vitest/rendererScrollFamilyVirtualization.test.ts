@@ -16,6 +16,7 @@ type RendererHarness = {
   messages: unknown[];
   root: HTMLElement;
   scrollCalls: ScrollCall[];
+  scrollWrites: number[];
   triggerResize: () => void;
 };
 
@@ -115,6 +116,16 @@ async function loadRendererHarness(options: {
     options.sectionCount,
     options.renderedSectionHeight ?? SECTION_HEIGHT
   );
+  const scrollWrites: number[] = [];
+  const scrollTopDescriptor = Object.getOwnPropertyDescriptor(root, "scrollTop");
+  Object.defineProperty(root, "scrollTop", {
+    configurable: true,
+    get: () => scrollTopDescriptor?.get?.call(root) as number,
+    set: value => {
+      scrollWrites.push(value);
+      scrollTopDescriptor?.set?.call(root, value);
+    },
+  });
   vi.spyOn(window.HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
     const blockIndex = Number.parseInt(this.dataset.mmBlockIndex ?? "", 10);
     const rectShift = Number.isFinite(blockIndex) ? options.rectTopShiftByBlockIndex?.[blockIndex] ?? 0 : 0;
@@ -210,7 +221,7 @@ async function loadRendererHarness(options: {
     }
   };
 
-  return { flushNextRaf, flushQueuedRafs, flushRafsUntil, highlights, load, messages, root, scrollCalls, triggerResize };
+  return { flushNextRaf, flushQueuedRafs, flushRafsUntil, highlights, load, messages, root, scrollCalls, scrollWrites, triggerResize };
 }
 
 function installVirtualizedDocumentLayout(
@@ -562,12 +573,19 @@ function countTextMatches(root: Node, needle: string): number {
   return count;
 }
 
-function expectMinimapCloneSanitized(): void {
+function expectMinimapCloneIdentitySanitized(): void {
   const minimapContent = getMinimapContent();
   expect(minimapContent.querySelectorAll("[id]")).toHaveLength(0);
   expect(minimapContent.querySelectorAll("[data-tex]")).toHaveLength(0);
   expect(dataMmAttributeNames(minimapContent)).toEqual([]);
-  expect(countTextMatches(minimapContent, "gamma")).toBe(0);
+}
+
+function expectMinimapCloneTextRetained(needle: string, minimumMatches = 1): void {
+  const minimapContent = getMinimapContent();
+  const text = minimapContent.textContent ?? "";
+  const occurrences = text.split(needle).length - 1;
+  expect(text.length).toBeGreaterThan(0);
+  expect(occurrences).toBeGreaterThanOrEqual(minimumMatches);
 }
 
 afterEach(() => {
@@ -937,7 +955,8 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(document.querySelectorAll("[data-tex]")).toHaveLength(
       liveMain!.querySelectorAll("[data-tex]").length
     );
-    expectMinimapCloneSanitized();
+    expectMinimapCloneIdentitySanitized();
+    expectMinimapCloneTextRetained("gamma", sectionCount);
   });
 
   it("keeps clone-active programmatic landings anchored to the live window", async () => {
@@ -950,7 +969,8 @@ describe("renderer scroll-family virtualization integration", () => {
     await enableDetailedMinimap(load, flushQueuedRafs);
     load({ type: "load-document", html: buildClonePollutionDocument(sectionCount), hasMermaid: false, hasHljs: false });
     await flushQueuedRafs();
-    expectMinimapCloneSanitized();
+    expectMinimapCloneIdentitySanitized();
+    expectMinimapCloneTextRetained("gamma", sectionCount);
     scrollCalls.length = 0;
 
     window.location.hash = "#heading-90";
@@ -983,6 +1003,32 @@ describe("renderer scroll-family virtualization integration", () => {
     }
 
     expect(scrollCalls).toEqual([]);
+  });
+
+  it("keeps legacy minimap clone text while legacy find excludes the clone", async () => {
+    const sectionCount = 20;
+    const { flushQueuedRafs, load } = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: false,
+    });
+    await enableDetailedMinimap(load, flushQueuedRafs);
+    load({ type: "load-document", html: buildClonePollutionDocument(sectionCount), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    const liveMain = document.querySelector<HTMLElement>("body > main.mm-document");
+    const minimapDocument = document.querySelector<HTMLElement>(".mm-minimap-content .mm-document");
+    expect(liveMain).not.toBeNull();
+    expect(minimapDocument).not.toBeNull();
+    expectMinimapCloneIdentitySanitized();
+    expect(minimapDocument!.textContent?.length).toBe(liveMain!.textContent?.length);
+    expectMinimapCloneTextRetained("gamma", sectionCount);
+
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    load({ type: "open-find-bar" });
+    submitFindQuery("gamma");
+
+    expect(findBarCount().textContent).toBe(`1 of ${sectionCount}`);
   });
 
   it("reasserts a pending programmatic source-line target after geometry invalidation", async () => {
@@ -1144,6 +1190,43 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(findQueryMessages(messages)).toEqual([]);
   });
 
+  it("keeps model-fragment minimap text while virtualized find counts only host results", async () => {
+    const sectionCount = 120;
+    const { flushQueuedRafs, load, messages, root } = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    await enableDetailedMinimap(load, flushQueuedRafs);
+    load({ type: "load-document", html: buildClonePollutionDocument(sectionCount), hasMermaid: false, hasHljs: false, renderId: 11 });
+    await flushQueuedRafs();
+    messages.length = 0;
+    root.scrollTop = 0;
+
+    const minimapDocument = document.querySelector<HTMLElement>(".mm-minimap-content .mm-document");
+    expect(minimapDocument).not.toBeNull();
+    expectMinimapCloneIdentitySanitized();
+    expectMinimapCloneTextRetained("gamma", sectionCount);
+
+    load({ type: "open-find-bar" });
+    submitFindQuery("gamma");
+
+    const request = findQueryMessages(messages).at(-1);
+    expect(findQueryMessages(messages)).toHaveLength(1);
+    expect(root.scrollTop).toBe(0);
+    load({
+      type: "find-results",
+      requestId: request!.requestId,
+      query: "gamma",
+      renderId: 11,
+      totalCount: 1,
+      matches: [descriptorForBlock(90, 1)],
+    });
+
+    expect(findBarCount().textContent).toBe("1 of 1");
+  });
+
   it("builds flag-on minimap content from a full model-fragment clone without cloning the live window", async () => {
     const cloneSpy = vi.spyOn(window.HTMLElement.prototype, "cloneNode");
     const sectionCount = 120;
@@ -1177,7 +1260,8 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(cloneSpy).toHaveBeenCalledWith(true);
     expect(cloneSpy.mock.contexts).not.toContain(liveMain);
     expect(minimapDocument).not.toBeNull();
-    expectMinimapCloneSanitized();
+    expectMinimapCloneIdentitySanitized();
+    expectMinimapCloneTextRetained("Heading", sectionCount);
     expect(document.querySelectorAll(".mm-minimap-content [data-mm-block-index]")).toHaveLength(0);
     expect(document.querySelector(".mm-minimap-content canvas[data-mm-model-minimap='true']")).toBeNull();
     expect(expectedTotalHeight).toBeGreaterThan(0);
@@ -1211,10 +1295,42 @@ describe("renderer scroll-family virtualization integration", () => {
 
     const minimapDocument = document.querySelector<HTMLElement>(".mm-minimap-content .mm-document");
     expect(minimapDocument).not.toBeNull();
-    expectMinimapCloneSanitized();
+    expectMinimapCloneIdentitySanitized();
+    expectMinimapCloneTextRetained("Heading", sectionCount);
     expect(document.querySelectorAll(".mm-minimap-content [data-mm-block-index]")).toHaveLength(0);
     expect(modelCloneCount()).toBe(1);
     expect(latestPerfDetail(messages, "mm-virt-window-height-adopted")).toBeDefined();
+  });
+
+  it("records zero external scroll shifts and terminates source-line correction within the navigation cap", async () => {
+    const { flushQueuedRafs, load, messages, scrollWrites, triggerResize } = await loadRendererHarness({
+      rectTopShiftByBlockIndex: { 90: -64 },
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildSourceLineDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    messages.length = 0;
+    scrollWrites.length = 0;
+
+    load({ type: "scroll-to-source-line", sourceLine: 900 });
+    triggerResize();
+    await flushQueuedRafs();
+
+    const target = document.querySelector<HTMLElement>('body > main.mm-document [data-mm-source-line="900"]');
+    const settled = latestPerfDetail<{
+      externalShiftCount: number;
+      passCount: number;
+      residual: number | null;
+    }>(messages, "mm-virt-navigation-settled");
+    expect(target).not.toBeNull();
+    expect(target!.getBoundingClientRect().top).toBeCloseTo(VIEWPORT_HEIGHT * 0.38, 0);
+    expect(settled).toBeDefined();
+    expect(settled!.externalShiftCount).toBe(0);
+    expect(settled!.passCount).toBeLessThanOrEqual(3);
+    expect(Math.abs(settled!.residual ?? Number.POSITIVE_INFINITY)).toBeLessThanOrEqual(2);
+    expect(scrollWrites.length).toBeGreaterThan(0);
   });
 
   it("clicks and drags the model-fragment minimap clone to off-window sections", async () => {

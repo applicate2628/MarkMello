@@ -1,13 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { findCaseInsensitiveMatchOffsets } from "../src/findBar";
 
-// buildMatches itself is not integration-tested here: it relies on a
-// TreeWalker whose element filter returns FILTER_SKIP to descend into text
-// nodes, and happy-dom does not honor FILTER_SKIP descent (it returns no nodes),
-// so a DOM-level buildMatches test would be vacuous in this environment (real
-// WebView2 / Chromium 149 implements FILTER_SKIP correctly). The match-offset
-// logic — where the reported crash lived — is extracted into the pure
-// findCaseInsensitiveMatchOffsets and covered directly below.
+// The match-offset logic — where the reported crash lived — is extracted into
+// the pure findCaseInsensitiveMatchOffsets and covered directly below.
 
 describe("findCaseInsensitiveMatchOffsets", () => {
   it("returns case-insensitive offsets valid in the original string", () => {
