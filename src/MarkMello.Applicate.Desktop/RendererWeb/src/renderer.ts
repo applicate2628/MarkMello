@@ -2839,13 +2839,6 @@ function syncModelMinimapCloneMetadata(): void {
   }
 
   minimapDocumentHeight = model.getTotalHeight();
-  const clone = minimapContent?.querySelector<HTMLElement>(".mm-document[data-mm-minimap-source='model-fragment']");
-  if (clone === undefined || clone === null) {
-    return;
-  }
-
-  clone.dataset["mmModelMinimapSectionCount"] = String(model.getSectionCount());
-  clone.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
 }
 
 function getCurrentMinimapDocumentHeight(): number {
@@ -2892,16 +2885,173 @@ function isPolicyHeavyMinimapHeight(documentHeight: number): boolean {
   return minimapPolicy !== null && documentHeight > minimapPolicy.maxDetailedDocumentHeight;
 }
 
+type MinimapCloneBlockRecord = {
+  blockIndex: number;
+  element: HTMLElement;
+  height: number | null;
+  top: number | null;
+};
+
+type MinimapCloneMetadata = {
+  blocks: MinimapCloneBlockRecord[];
+  blocksByIndex: Map<number, MinimapCloneBlockRecord>;
+};
+
+const minimapCloneMetadata = new WeakMap<HTMLElement, MinimapCloneMetadata>();
+const minimapCloneBlockIndexes = new WeakMap<HTMLElement, number>();
+const MINIMAP_TEXT_SANITIZE_NODE_FILTER = NodeFilter.SHOW_TEXT;
+
+function parseMinimapBlockIndex(value: string | undefined): number | null {
+  if (value === undefined || value.trim() === "") {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function readPositivePxValue(value: string): number | null {
+  let parsed: number | null = null;
+  for (const match of value.matchAll(/([0-9]+(?:\.[0-9]+)?)px/g)) {
+    const next = Number.parseFloat(match[1] ?? "");
+    if (Number.isFinite(next) && next > 0) {
+      parsed = next;
+    }
+  }
+  return parsed;
+}
+
+function readMinimapSourceBlockHeight(element: HTMLElement): number | null {
+  if (element.isConnected && element.offsetHeight > 0) {
+    return element.offsetHeight;
+  }
+
+  return readPositivePxValue(element.style.minHeight)
+    ?? readPositivePxValue(element.style.height)
+    ?? readPositivePxValue(element.style.containIntrinsicSize);
+}
+
+function buildTopLevelMinimapBlockMetrics(source: HTMLElement, clone: HTMLElement): Map<HTMLElement, { height: number; top: number }> {
+  const metrics = new Map<HTMLElement, { height: number; top: number }>();
+  const sourceChildren = Array.from(source.children);
+  const cloneChildren = Array.from(clone.children);
+  let top = 0;
+
+  for (let index = 0; index < sourceChildren.length; index++) {
+    const sourceChild = sourceChildren[index];
+    const cloneChild = cloneChildren[index];
+    if (!(sourceChild instanceof HTMLElement) || !(cloneChild instanceof HTMLElement)) {
+      continue;
+    }
+
+    const height = readMinimapSourceBlockHeight(sourceChild);
+    if (height === null) {
+      continue;
+    }
+
+    metrics.set(cloneChild, { height, top });
+    top += height;
+  }
+
+  return metrics;
+}
+
+function registerMinimapCloneMetadata(source: HTMLElement, clone: HTMLElement): void {
+  const sourceBlocks = Array.from(source.querySelectorAll<HTMLElement>("[data-mm-block-index]"));
+  const cloneBlocks = Array.from(clone.querySelectorAll<HTMLElement>("[data-mm-block-index]"));
+  const topLevelMetrics = buildTopLevelMinimapBlockMetrics(source, clone);
+  const blocks: MinimapCloneBlockRecord[] = [];
+  const blocksByIndex = new Map<number, MinimapCloneBlockRecord>();
+
+  for (let index = 0; index < cloneBlocks.length; index++) {
+    const cloneBlock = cloneBlocks[index]!;
+    const sourceBlock = sourceBlocks[index];
+    const blockIndex = parseMinimapBlockIndex(cloneBlock.dataset["mmBlockIndex"]);
+    if (blockIndex === null) {
+      continue;
+    }
+
+    const topLevelMetric = topLevelMetrics.get(cloneBlock);
+    if (topLevelMetric) {
+      cloneBlock.style.minHeight = `${topLevelMetric.height}px`;
+    }
+
+    const record: MinimapCloneBlockRecord = {
+      blockIndex,
+      element: cloneBlock,
+      height: topLevelMetric?.height ?? (sourceBlock ? readMinimapSourceBlockHeight(sourceBlock) : null),
+      top: topLevelMetric?.top ?? null,
+    };
+    minimapCloneBlockIndexes.set(cloneBlock, blockIndex);
+    blocks.push(record);
+    if (!blocksByIndex.has(blockIndex)) {
+      blocksByIndex.set(blockIndex, record);
+    }
+  }
+
+  minimapCloneMetadata.set(clone, { blocks, blocksByIndex });
+}
+
+function getMinimapCloneBlockIndex(block: HTMLElement): number | null {
+  return minimapCloneBlockIndexes.get(block) ?? parseMinimapBlockIndex(block.dataset["mmBlockIndex"]);
+}
+
+function getMinimapCloneBlockRecord(clone: HTMLElement, block: HTMLElement): MinimapCloneBlockRecord | null {
+  const metadata = minimapCloneMetadata.get(clone);
+  if (!metadata) {
+    return null;
+  }
+
+  const blockIndex = getMinimapCloneBlockIndex(block);
+  return blockIndex === null ? null : (metadata.blocksByIndex.get(blockIndex) ?? null);
+}
+
+function findMinimapCloneBlock(clone: HTMLElement, blockIndex: string): HTMLElement | null {
+  const parsed = parseMinimapBlockIndex(blockIndex);
+  if (parsed === null) {
+    return null;
+  }
+
+  return minimapCloneMetadata.get(clone)?.blocksByIndex.get(parsed)?.element
+    ?? clone.querySelector<HTMLElement>(`[data-mm-block-index="${blockIndex}"]`);
+}
+
+function getMinimapCloneBlocks(clone: HTMLElement): MinimapCloneBlockRecord[] {
+  return minimapCloneMetadata.get(clone)?.blocks
+    ?? Array.from(clone.querySelectorAll<HTMLElement>("[data-mm-block-index]"))
+      .flatMap((element): MinimapCloneBlockRecord[] => {
+        const blockIndex = getMinimapCloneBlockIndex(element);
+        return blockIndex === null
+          ? []
+          : [{ blockIndex, element, height: null, top: null }];
+      });
+}
+
 function sanitizeMinimapCloneTree(root: ParentNode): void {
-  root.querySelectorAll<Element>("*").forEach((node) => {
-    const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
-    if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
+  const nodes = [
+    ...(root instanceof Element ? [root] : []),
+    ...Array.from(root.querySelectorAll<Element>("*")),
+  ];
+  nodes.forEach((node) => {
+    if (node.hasAttribute("id")) node.removeAttribute("id");
+    if (node.hasAttribute("data-tex")) node.removeAttribute("data-tex");
+    for (const attribute of Array.from(node.attributes)) {
+      if (attribute.name.startsWith("data-mm-")) {
+        node.removeAttribute(attribute.name);
+      }
+    }
     const tag = node.tagName;
     if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
       node.setAttribute("tabindex", "-1");
       node.removeAttribute("href");
     }
   });
+  const walker = document.createTreeWalker(root, MINIMAP_TEXT_SANITIZE_NODE_FILTER);
+  let textNode = walker.nextNode();
+  while (textNode !== null) {
+    textNode.nodeValue = "";
+    textNode = walker.nextNode();
+  }
 }
 
 function cloneDocumentElementForMinimap(source: HTMLElement, sourceStyle: CSSStyleDeclaration): HTMLElement {
@@ -2914,22 +3064,11 @@ function cloneDocumentElementForMinimap(source: HTMLElement, sourceStyle: CSSSty
   clone.style.paddingRight = "0";
   clone.style.paddingBottom = sourceStyle.paddingBottom;
   clone.style.paddingLeft = "0";
-  // Single tree walk: id-strip + interactive-disable per node. Aria/role/name/for
-  // scrubbing dropped — the clone is already inert + aria-hidden, so per-node
-  // aria attributes have no a11y effect. On a 138-formula doc KaTeX produces
-  // many aria-hidden spans; skipping per-node attribute iteration is a
-  // measurable refresh-clone cost reduction.
-  //
-  // IDs are stripped only on HTML elements. SVG ids are load-bearing —
-  // mermaid emits `<style>#mm-mermaid-XYZ .node rect{fill:...}</style>`
-  // inside the SVG and `<path marker-end="url(#arrowhead-XYZ)"/>` arrow
-  // refs, both scoped by the SVG's root id. Stripping those leaves the
-  // SVG's selectors orphaned (boxes fall back to default black fill,
-  // arrowheads disappear) — visible as dark filled rectangles in the
-  // minimap clone while the source view paints correctly. Duplicate
-  // ids across source/clone are accepted: the clone is inert and
-  // aria-hidden, and SVG `url(#...)` lookups in Chromium resolve to the
-  // first DOM match deterministically.
+  registerMinimapCloneMetadata(source, clone);
+  // Minimap clone invariant: no node inside `.mm-minimap-content` may carry
+  // lookup-visible identity (`id`, `data-mm-*`, `data-tex`) or searchable text.
+  // The viewport/click block map is stored in WeakMaps above, so the painted
+  // clone cannot pollute current or future document-wide selectors/TreeWalkers.
   sanitizeMinimapCloneTree(clone);
   return clone;
 }
@@ -2957,8 +3096,6 @@ function cloneModelDocumentForMinimap(model: DocumentWindowModel): HTMLElement |
   source.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
   source.append(createFullDocumentFragmentFromWindowModel(document, model));
   const clone = cloneDocumentElementForMinimap(source, getComputedStyle(liveSource));
-  clone.dataset["mmModelMinimapSectionCount"] = String(model.getSectionCount());
-  clone.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
   return clone;
 }
 
@@ -3502,6 +3639,11 @@ type MinimapViewportUpdateOptions = {
 // Transform-independent (offsetTop ignores the clone's scale()/translateY()).
 // Returns null when the walk does not terminate at the container.
 function cloneSpaceTop(el: HTMLElement, container: HTMLElement): number | null {
+  const recordTop = getMinimapCloneBlockRecord(container, el)?.top;
+  if (recordTop !== undefined && recordTop !== null) {
+    return recordTop;
+  }
+
   let y = 0;
   let n: HTMLElement | null = el;
   while (n && n !== container) {
@@ -3520,14 +3662,15 @@ function cloneSpaceTop(el: HTMLElement, container: HTMLElement): number | null {
 function cloneYForDocBlock(docBlock: HTMLElement, clone: HTMLElement, rect: DOMRect, clientY: number): number | null {
   const idx = docBlock.dataset["mmBlockIndex"];
   if (idx === undefined) return null;
-  const cln = clone.querySelector<HTMLElement>(`[data-mm-block-index="${idx}"]`);
+  const cln = findMinimapCloneBlock(clone, idx);
   if (!cln) return null;
   const top = cloneSpaceTop(cln, clone);
   if (top === null) return null;
+  const cloneHeight = getMinimapCloneBlockRecord(clone, cln)?.height ?? cln.offsetHeight;
   const offset = clientY - rect.top;
   const contribution = offset <= 0
     ? offset
-    : (rect.height > 0 ? (offset / rect.height) * cln.offsetHeight : 0);
+    : (rect.height > 0 ? (offset / rect.height) * cloneHeight : 0);
   return top + contribution;
 }
 
@@ -3562,19 +3705,25 @@ function getDocumentViewportTopCloneY(clone: HTMLElement): number | null {
 // gap/tail around it). Mirror of the forward map. Returns null when the clone
 // has no annotated blocks.
 function cloneBlockAtCloneY(clone: HTMLElement, y: number):
-    { block: HTMLElement; mode: "gap" | "frac" | "tail"; value: number } | null {
-  let prev: HTMLElement | null = null;
+    { block: HTMLElement; blockIndex: number; mode: "gap" | "frac" | "tail"; value: number } | null {
+  let prev: MinimapCloneBlockRecord | null = null;
   let prevTop = 0;
-  for (const b of Array.from(clone.querySelectorAll<HTMLElement>("[data-mm-block-index]"))) {
-    const top = cloneSpaceTop(b, clone);
+  for (const record of getMinimapCloneBlocks(clone)) {
+    const b = record.element;
+    const top = record.top ?? cloneSpaceTop(b, clone);
     if (top === null) continue;
-    const h = b.offsetHeight;
-    if (y < top) return { block: b, mode: "gap", value: y - top };
-    if (y < top + h) return { block: b, mode: "frac", value: h > 0 ? (y - top) / h : 0 };
-    prev = b;
+    const h = record.height ?? b.offsetHeight;
+    if (y < top) return { block: b, blockIndex: record.blockIndex, mode: "gap", value: y - top };
+    if (y < top + h) return { block: b, blockIndex: record.blockIndex, mode: "frac", value: h > 0 ? (y - top) / h : 0 };
+    prev = record;
     prevTop = top;
   }
-  if (prev) return { block: prev, mode: "tail", value: y - (prevTop + prev.offsetHeight) };
+  if (prev) return {
+    block: prev.element,
+    blockIndex: prev.blockIndex,
+    mode: "tail",
+    value: y - (prevTop + (prev.height ?? prev.element.offsetHeight)),
+  };
   return null;
 }
 
@@ -3585,9 +3734,8 @@ function docScrollTopForCloneY(root: Element, y: number): number | null {
   if (!minimapContent) return null;
   const hit = cloneBlockAtCloneY(minimapContent, y);
   if (!hit) return null;
-  const idx = hit.block.dataset["mmBlockIndex"];
-  if (idx === undefined) return null;
-  const blockIndex = Number.parseInt(idx, 10);
+  const idx = String(hit.blockIndex);
+  const blockIndex = hit.blockIndex;
   const docBlock = document.querySelector<HTMLElement>(`body > main.mm-document [data-mm-block-index="${idx}"]`);
   let scrollTop: number;
   if (docBlock) {

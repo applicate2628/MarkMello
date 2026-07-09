@@ -386,6 +386,21 @@ function buildFindDocument(count: number, matchIndexes: readonly number[]): stri
   }).join("");
 }
 
+function buildClonePollutionDocument(count: number): string {
+  return Array.from({ length: count }, (_, index) => {
+    const nested = index === 88
+      ? `<blockquote data-mm-block-index="8801" data-mm-source-line="880" data-mm-source-end-line="884">Nested gamma ${index}</blockquote>`
+      : "";
+    return [
+      `<section id="section-${index}" data-mm-block-index="${index}" data-mm-block-kind="paragraph" data-mm-source-line="${index * 10}" data-mm-source-end-line="${index * 10 + 4}">`,
+      `<h2 id="heading-${index}">Heading ${index}</h2>`,
+      `<p>Block ${index} gamma <span class="math-inline" data-tex="x_${index}">x_${index}</span></p>`,
+      nested,
+      "</section>",
+    ].join("");
+  }).join("");
+}
+
 function loadMinimapPolicy(load: HostBridge): void {
   load({
     type: "minimap-policy",
@@ -506,6 +521,50 @@ function latestHeadingsUpdated(messages: readonly unknown[]): { headings: Array<
       && message !== null
       && (message as { type?: unknown }).type === "headings-updated")
     .at(-1);
+}
+
+async function enableDetailedMinimap(load: HostBridge, flushQueuedRafs: () => Promise<void>): Promise<void> {
+  document.documentElement.style.setProperty("--mm-minimap-width", "136px");
+  setMinimapViewportHeight(592);
+  load({ type: "reading-preferences", ...makeReadingPreferences("on") });
+  await flushQueuedRafs();
+  loadMinimapPolicy(load);
+}
+
+function getMinimapContent(): HTMLElement {
+  const minimapContent = document.querySelector<HTMLElement>(".mm-minimap-content");
+  if (minimapContent === null) {
+    throw new Error("minimap content was not rendered");
+  }
+  return minimapContent;
+}
+
+function dataMmAttributeNames(root: ParentNode): string[] {
+  return Array.from(root.querySelectorAll<Element>("*"))
+    .flatMap(element => Array.from(element.attributes))
+    .map(attribute => attribute.name)
+    .filter(name => name.startsWith("data-mm-"));
+}
+
+function countTextMatches(root: Node, needle: string): number {
+  let count = 0;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node !== null) {
+    if ((node.nodeValue ?? "").includes(needle)) {
+      count++;
+    }
+    node = walker.nextNode();
+  }
+  return count;
+}
+
+function expectMinimapCloneSanitized(): void {
+  const minimapContent = getMinimapContent();
+  expect(minimapContent.querySelectorAll("[id]")).toHaveLength(0);
+  expect(minimapContent.querySelectorAll("[data-tex]")).toHaveLength(0);
+  expect(dataMmAttributeNames(minimapContent)).toEqual([]);
+  expect(countTextMatches(minimapContent, "gamma")).toBe(0);
 }
 
 afterEach(() => {
@@ -797,6 +856,77 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(postedLines[1]).toBeLessThan(postedLines[2]!);
   });
 
+  it("sanitizes the model-fragment minimap clone so global document lookups only see the live window", async () => {
+    const sectionCount = 120;
+    const { flushQueuedRafs, load } = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    await enableDetailedMinimap(load, flushQueuedRafs);
+    load({ type: "load-document", html: buildClonePollutionDocument(sectionCount), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    const liveMain = document.querySelector<HTMLElement>("body > main.mm-document");
+    expect(liveMain).not.toBeNull();
+    expect(document.getElementById("heading-90")).toBeNull();
+    expect(document.querySelectorAll("[data-mm-source-line]")).toHaveLength(
+      liveMain!.querySelectorAll("[data-mm-source-line]").length
+    );
+    expect(document.querySelectorAll("[data-mm-block-index]")).toHaveLength(
+      liveMain!.querySelectorAll("[data-mm-block-index]").length
+    );
+    expect(document.querySelectorAll("[data-tex]")).toHaveLength(
+      liveMain!.querySelectorAll("[data-tex]").length
+    );
+    expectMinimapCloneSanitized();
+  });
+
+  it("keeps clone-active programmatic landings anchored to the live window", async () => {
+    const sectionCount = 120;
+    const { flushNextRaf, flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    await enableDetailedMinimap(load, flushQueuedRafs);
+    load({ type: "load-document", html: buildClonePollutionDocument(sectionCount), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    expectMinimapCloneSanitized();
+    scrollCalls.length = 0;
+
+    window.location.hash = "#heading-90";
+    window.dispatchEvent(new Event("hashchange"));
+    await flushNextRaf();
+    await flushQueuedRafs();
+    expect(document.querySelector<HTMLElement>("body > main.mm-document #heading-90")?.getBoundingClientRect().top)
+      .toBeCloseTo(0, 0);
+
+    load({ type: "scroll-to-heading", id: "heading-95" });
+    await flushNextRaf();
+    await flushQueuedRafs();
+    expect(document.querySelector<HTMLElement>("body > main.mm-document #heading-95")?.getBoundingClientRect().top)
+      .toBeCloseTo(0, 0);
+
+    load({ type: "scroll-to-block", blockIndex: 50 });
+    await flushNextRaf();
+    await flushQueuedRafs();
+    expect(document.querySelector<HTMLElement>('body > main.mm-document [data-mm-block-index="50"]')?.getBoundingClientRect().top)
+      .toBeCloseTo(0, 0);
+
+    for (let run = 0; run < 3; run++) {
+      root.scrollTop += 47;
+      document.dispatchEvent(new Event("scroll"));
+      load({ type: "scroll-to-block", blockIndex: 8801 });
+      await flushNextRaf();
+      await flushQueuedRafs();
+      expect(document.querySelector<HTMLElement>('body > main.mm-document [data-mm-block-index="8801"]')?.getBoundingClientRect().top)
+        .toBeCloseTo(0, 0);
+    }
+
+    expect(scrollCalls).toEqual([]);
+  });
+
   it("reasserts a pending programmatic source-line target after geometry invalidation", async () => {
     const { flushNextRaf, flushQueuedRafs, flushRafsUntil, load, root, triggerResize } = await loadRendererHarness({
       sectionCount: 120,
@@ -981,9 +1111,10 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(cloneSpy).toHaveBeenCalledWith(true);
     expect(cloneSpy.mock.contexts).not.toContain(liveMain);
     expect(minimapDocument).not.toBeNull();
-    expect(minimapDocument!.querySelectorAll("[data-mm-block-index]")).toHaveLength(sectionCount);
+    expectMinimapCloneSanitized();
+    expect(document.querySelectorAll(".mm-minimap-content [data-mm-block-index]")).toHaveLength(0);
     expect(document.querySelector(".mm-minimap-content canvas[data-mm-model-minimap='true']")).toBeNull();
-    expect(Number(minimapDocument!.dataset["mmModelMinimapTotalHeight"])).toBe(expectedTotalHeight);
+    expect(expectedTotalHeight).toBeGreaterThan(0);
   });
 
   it("rescales the model-fragment minimap after height adoption without rebuilding the clone", async () => {
@@ -1014,7 +1145,8 @@ describe("renderer scroll-family virtualization integration", () => {
 
     const minimapDocument = document.querySelector<HTMLElement>(".mm-minimap-content .mm-document");
     expect(minimapDocument).not.toBeNull();
-    expect(minimapDocument!.querySelectorAll("[data-mm-block-index]")).toHaveLength(sectionCount);
+    expectMinimapCloneSanitized();
+    expect(document.querySelectorAll(".mm-minimap-content [data-mm-block-index]")).toHaveLength(0);
     expect(modelCloneCount()).toBe(1);
     expect(latestPerfDetail(messages, "mm-virt-window-height-adopted")).toBeDefined();
   });

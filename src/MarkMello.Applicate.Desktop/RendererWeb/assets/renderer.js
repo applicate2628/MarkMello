@@ -5430,12 +5430,6 @@
       return;
     }
     minimapDocumentHeight = model.getTotalHeight();
-    const clone = minimapContent?.querySelector(".mm-document[data-mm-minimap-source='model-fragment']");
-    if (clone === void 0 || clone === null) {
-      return;
-    }
-    clone.dataset["mmModelMinimapSectionCount"] = String(model.getSectionCount());
-    clone.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
   }
   function getCurrentMinimapDocumentHeight() {
     return getModelMinimapSource()?.getTotalHeight() ?? getDocumentScrollMetrics().documentHeight;
@@ -5471,16 +5465,132 @@
   function isPolicyHeavyMinimapHeight(documentHeight) {
     return minimapPolicy !== null && documentHeight > minimapPolicy.maxDetailedDocumentHeight;
   }
+  var minimapCloneMetadata = /* @__PURE__ */ new WeakMap();
+  var minimapCloneBlockIndexes = /* @__PURE__ */ new WeakMap();
+  var MINIMAP_TEXT_SANITIZE_NODE_FILTER = NodeFilter.SHOW_TEXT;
+  function parseMinimapBlockIndex(value) {
+    if (value === void 0 || value.trim() === "") {
+      return null;
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+  function readPositivePxValue(value) {
+    let parsed = null;
+    for (const match of value.matchAll(/([0-9]+(?:\.[0-9]+)?)px/g)) {
+      const next = Number.parseFloat(match[1] ?? "");
+      if (Number.isFinite(next) && next > 0) {
+        parsed = next;
+      }
+    }
+    return parsed;
+  }
+  function readMinimapSourceBlockHeight(element) {
+    if (element.isConnected && element.offsetHeight > 0) {
+      return element.offsetHeight;
+    }
+    return readPositivePxValue(element.style.minHeight) ?? readPositivePxValue(element.style.height) ?? readPositivePxValue(element.style.containIntrinsicSize);
+  }
+  function buildTopLevelMinimapBlockMetrics(source, clone) {
+    const metrics = /* @__PURE__ */ new Map();
+    const sourceChildren = Array.from(source.children);
+    const cloneChildren = Array.from(clone.children);
+    let top = 0;
+    for (let index = 0; index < sourceChildren.length; index++) {
+      const sourceChild = sourceChildren[index];
+      const cloneChild = cloneChildren[index];
+      if (!(sourceChild instanceof HTMLElement) || !(cloneChild instanceof HTMLElement)) {
+        continue;
+      }
+      const height = readMinimapSourceBlockHeight(sourceChild);
+      if (height === null) {
+        continue;
+      }
+      metrics.set(cloneChild, { height, top });
+      top += height;
+    }
+    return metrics;
+  }
+  function registerMinimapCloneMetadata(source, clone) {
+    const sourceBlocks = Array.from(source.querySelectorAll("[data-mm-block-index]"));
+    const cloneBlocks = Array.from(clone.querySelectorAll("[data-mm-block-index]"));
+    const topLevelMetrics = buildTopLevelMinimapBlockMetrics(source, clone);
+    const blocks = [];
+    const blocksByIndex = /* @__PURE__ */ new Map();
+    for (let index = 0; index < cloneBlocks.length; index++) {
+      const cloneBlock = cloneBlocks[index];
+      const sourceBlock = sourceBlocks[index];
+      const blockIndex = parseMinimapBlockIndex(cloneBlock.dataset["mmBlockIndex"]);
+      if (blockIndex === null) {
+        continue;
+      }
+      const topLevelMetric = topLevelMetrics.get(cloneBlock);
+      if (topLevelMetric) {
+        cloneBlock.style.minHeight = `${topLevelMetric.height}px`;
+      }
+      const record = {
+        blockIndex,
+        element: cloneBlock,
+        height: topLevelMetric?.height ?? (sourceBlock ? readMinimapSourceBlockHeight(sourceBlock) : null),
+        top: topLevelMetric?.top ?? null
+      };
+      minimapCloneBlockIndexes.set(cloneBlock, blockIndex);
+      blocks.push(record);
+      if (!blocksByIndex.has(blockIndex)) {
+        blocksByIndex.set(blockIndex, record);
+      }
+    }
+    minimapCloneMetadata.set(clone, { blocks, blocksByIndex });
+  }
+  function getMinimapCloneBlockIndex(block) {
+    return minimapCloneBlockIndexes.get(block) ?? parseMinimapBlockIndex(block.dataset["mmBlockIndex"]);
+  }
+  function getMinimapCloneBlockRecord(clone, block) {
+    const metadata = minimapCloneMetadata.get(clone);
+    if (!metadata) {
+      return null;
+    }
+    const blockIndex = getMinimapCloneBlockIndex(block);
+    return blockIndex === null ? null : metadata.blocksByIndex.get(blockIndex) ?? null;
+  }
+  function findMinimapCloneBlock(clone, blockIndex) {
+    const parsed = parseMinimapBlockIndex(blockIndex);
+    if (parsed === null) {
+      return null;
+    }
+    return minimapCloneMetadata.get(clone)?.blocksByIndex.get(parsed)?.element ?? clone.querySelector(`[data-mm-block-index="${blockIndex}"]`);
+  }
+  function getMinimapCloneBlocks(clone) {
+    return minimapCloneMetadata.get(clone)?.blocks ?? Array.from(clone.querySelectorAll("[data-mm-block-index]")).flatMap((element) => {
+      const blockIndex = getMinimapCloneBlockIndex(element);
+      return blockIndex === null ? [] : [{ blockIndex, element, height: null, top: null }];
+    });
+  }
   function sanitizeMinimapCloneTree(root) {
-    root.querySelectorAll("*").forEach((node) => {
-      const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
-      if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
+    const nodes = [
+      ...root instanceof Element ? [root] : [],
+      ...Array.from(root.querySelectorAll("*"))
+    ];
+    nodes.forEach((node) => {
+      if (node.hasAttribute("id")) node.removeAttribute("id");
+      if (node.hasAttribute("data-tex")) node.removeAttribute("data-tex");
+      for (const attribute of Array.from(node.attributes)) {
+        if (attribute.name.startsWith("data-mm-")) {
+          node.removeAttribute(attribute.name);
+        }
+      }
       const tag = node.tagName;
       if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
         node.setAttribute("tabindex", "-1");
         node.removeAttribute("href");
       }
     });
+    const walker = document.createTreeWalker(root, MINIMAP_TEXT_SANITIZE_NODE_FILTER);
+    let textNode = walker.nextNode();
+    while (textNode !== null) {
+      textNode.nodeValue = "";
+      textNode = walker.nextNode();
+    }
   }
   function cloneDocumentElementForMinimap(source, sourceStyle) {
     const clone = source.cloneNode(true);
@@ -5492,6 +5602,7 @@
     clone.style.paddingRight = "0";
     clone.style.paddingBottom = sourceStyle.paddingBottom;
     clone.style.paddingLeft = "0";
+    registerMinimapCloneMetadata(source, clone);
     sanitizeMinimapCloneTree(clone);
     return clone;
   }
@@ -5516,8 +5627,6 @@
     source.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
     source.append(createFullDocumentFragmentFromWindowModel(document, model));
     const clone = cloneDocumentElementForMinimap(source, getComputedStyle(liveSource));
-    clone.dataset["mmModelMinimapSectionCount"] = String(model.getSectionCount());
-    clone.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
     return clone;
   }
   function refreshMinimapContent(phase = "A") {
@@ -5932,6 +6041,10 @@
     });
   }
   function cloneSpaceTop(el, container) {
+    const recordTop = getMinimapCloneBlockRecord(container, el)?.top;
+    if (recordTop !== void 0 && recordTop !== null) {
+      return recordTop;
+    }
     let y = 0;
     let n = el;
     while (n && n !== container) {
@@ -5943,12 +6056,13 @@
   function cloneYForDocBlock(docBlock, clone, rect, clientY) {
     const idx = docBlock.dataset["mmBlockIndex"];
     if (idx === void 0) return null;
-    const cln = clone.querySelector(`[data-mm-block-index="${idx}"]`);
+    const cln = findMinimapCloneBlock(clone, idx);
     if (!cln) return null;
     const top = cloneSpaceTop(cln, clone);
     if (top === null) return null;
+    const cloneHeight = getMinimapCloneBlockRecord(clone, cln)?.height ?? cln.offsetHeight;
     const offset = clientY - rect.top;
-    const contribution = offset <= 0 ? offset : rect.height > 0 ? offset / rect.height * cln.offsetHeight : 0;
+    const contribution = offset <= 0 ? offset : rect.height > 0 ? offset / rect.height * cloneHeight : 0;
     return top + contribution;
   }
   function getDocumentViewportTopCloneY(clone) {
@@ -5966,25 +6080,30 @@
   function cloneBlockAtCloneY(clone, y) {
     let prev = null;
     let prevTop = 0;
-    for (const b of Array.from(clone.querySelectorAll("[data-mm-block-index]"))) {
-      const top = cloneSpaceTop(b, clone);
+    for (const record of getMinimapCloneBlocks(clone)) {
+      const b = record.element;
+      const top = record.top ?? cloneSpaceTop(b, clone);
       if (top === null) continue;
-      const h = b.offsetHeight;
-      if (y < top) return { block: b, mode: "gap", value: y - top };
-      if (y < top + h) return { block: b, mode: "frac", value: h > 0 ? (y - top) / h : 0 };
-      prev = b;
+      const h = record.height ?? b.offsetHeight;
+      if (y < top) return { block: b, blockIndex: record.blockIndex, mode: "gap", value: y - top };
+      if (y < top + h) return { block: b, blockIndex: record.blockIndex, mode: "frac", value: h > 0 ? (y - top) / h : 0 };
+      prev = record;
       prevTop = top;
     }
-    if (prev) return { block: prev, mode: "tail", value: y - (prevTop + prev.offsetHeight) };
+    if (prev) return {
+      block: prev.element,
+      blockIndex: prev.blockIndex,
+      mode: "tail",
+      value: y - (prevTop + (prev.height ?? prev.element.offsetHeight))
+    };
     return null;
   }
   function docScrollTopForCloneY(root, y) {
     if (!minimapContent) return null;
     const hit = cloneBlockAtCloneY(minimapContent, y);
     if (!hit) return null;
-    const idx = hit.block.dataset["mmBlockIndex"];
-    if (idx === void 0) return null;
-    const blockIndex = Number.parseInt(idx, 10);
+    const idx = String(hit.blockIndex);
+    const blockIndex = hit.blockIndex;
     const docBlock = document.querySelector(`body > main.mm-document [data-mm-block-index="${idx}"]`);
     let scrollTop;
     if (docBlock) {
