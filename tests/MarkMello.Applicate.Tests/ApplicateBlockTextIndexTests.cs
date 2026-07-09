@@ -90,4 +90,42 @@ public sealed class ApplicateBlockTextIndexTests
         var code = Assert.Single(index.Search("needle").Matches);
         Assert.Equal("code", body.Blocks[code.BlockIndex].Kind);
     }
+
+    [Fact]
+    public async Task SearchCountsNestedQuoteAndListTextOnceUsingChildMarkers()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        var markdown = "> gamma in quote\n\n"
+            + "- gamma in list\n";
+        var body = await renderer.RenderBodyAsync(
+            new MarkdownSource("nested.md", "nested.md", markdown),
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        var result = ApplicateBlockTextIndex.Create(body.Blocks).Search("gamma");
+
+        Assert.Equal(2, result.TotalCount);
+        Assert.DoesNotContain(result.Matches, match =>
+            body.Blocks[match.BlockIndex].Kind is "quote" or "list");
+    }
+
+    [Fact]
+    public async Task SearchPreservesTopLevelBlockCounts()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+        var markdown = "gamma in paragraph\n\n"
+            + "```text\n"
+            + "gamma in code\n"
+            + "```\n";
+        var body = await renderer.RenderBodyAsync(
+            new MarkdownSource("top-level.md", "top-level.md", markdown),
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            CancellationToken.None);
+
+        var result = ApplicateBlockTextIndex.Create(body.Blocks).Search("gamma");
+
+        Assert.Equal(2, result.TotalCount);
+    }
 }

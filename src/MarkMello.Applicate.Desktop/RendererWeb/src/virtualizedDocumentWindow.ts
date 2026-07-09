@@ -26,7 +26,7 @@ export type VirtualizedDocumentWindowDeps = {
 
 export type VirtualizedDocumentWindowController = {
   updateWindowForScroll: (options?: UpdateWindowForScrollOptions) => boolean;
-  adoptRenderedHeights: () => MeasuredHeightUpdateResult;
+  adoptRenderedHeights: (options?: AdoptRenderedHeightsOptions) => MeasuredHeightUpdateResult;
   getCurrentRange: () => WindowRange | null;
   ensureSectionRendered: (sectionIndex: number, options?: EnsureSectionRenderedOptions) => boolean;
   ensureSectionRangeRendered: (start: number, end: number, options?: EnsureSectionRenderedOptions) => boolean;
@@ -40,6 +40,10 @@ export type UpdateWindowForScrollOptions = {
 export type EnsureSectionRenderedOptions = {
   force?: boolean;
   preserveAnchor?: boolean;
+};
+
+export type AdoptRenderedHeightsOptions = {
+  preserveSectionIndex?: number;
 };
 
 const EMPTY_HEIGHT_UPDATE: MeasuredHeightUpdateResult = {
@@ -120,8 +124,9 @@ export function createVirtualizedDocumentWindowController(
   };
 
   return {
-    adoptRenderedHeights: () => {
-      const anchor = deps.model.captureAnchor(deps.root.scrollTop);
+    adoptRenderedHeights: (options = {}) => {
+      const preserveSectionIndex = normalizeSectionIndex(options.preserveSectionIndex, deps.model.getSectionCount());
+      const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(deps.root.scrollTop) : null;
       const blocks = collectLiveDocumentSectionElements(deps.main);
       const updates = deps.readMeasuredHeights
         ? deps.readMeasuredHeights(blocks)
@@ -131,9 +136,16 @@ export function createVirtualizedDocumentWindowController(
         return EMPTY_HEIGHT_UPDATE;
       }
 
-      deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
+      if (preserveSectionIndex !== null) {
+        deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+        renderRange(computeRange());
+        deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+        return result;
+      }
+
+      deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!);
       renderRange(computeRange());
-      deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
+      deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!);
       return result;
     },
     ensureSectionRangeRendered: (start, end, options = {}) =>
@@ -219,4 +231,12 @@ function normalizeRequestedRange(range: WindowRange, sectionCount: number): Wind
   const start = Math.max(0, Math.min(sectionCount - 1, rawStart));
   const end = Math.max(start, Math.min(sectionCount - 1, rawEnd));
   return { end, start };
+}
+
+function normalizeSectionIndex(sectionIndex: number | undefined, sectionCount: number): number | null {
+  if (sectionIndex === undefined || sectionCount <= 0 || !Number.isFinite(sectionIndex)) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(sectionCount - 1, Math.floor(sectionIndex)));
 }

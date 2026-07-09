@@ -35,6 +35,11 @@ public sealed class ApplicateBlockTextIndex
         var ordinal = 0;
         foreach (var block in _blocks)
         {
+            if (IsAggregateContainerKind(block.Kind))
+            {
+                continue;
+            }
+
             var text = block.PlainText ?? string.Empty;
             if (text.Length == 0)
             {
@@ -70,6 +75,10 @@ public sealed class ApplicateBlockTextIndex
 
         return new ApplicateBlockTextSearchResult(matches.Count, matches);
     }
+
+    private static bool IsAggregateContainerKind(string kind)
+        => string.Equals(kind, "quote", StringComparison.Ordinal)
+            || string.Equals(kind, "list", StringComparison.Ordinal);
 
     private static string NormalizeForFind(string value)
     {

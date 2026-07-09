@@ -48,108 +48,6 @@
     };
   }
 
-  // RendererWeb/src/modelMinimap.ts
-  var DEFAULT_MINIMUM_THUMB_HEIGHT2 = 22;
-  var MAX_CANVAS_PIXEL_RATIO = 2;
-  var KIND_FILL = {
-    code: "rgba(76, 90, 115, 0.72)",
-    heading: "rgba(212, 109, 61, 0.88)",
-    image: "rgba(90, 112, 129, 0.62)",
-    list: "rgba(76, 83, 91, 0.72)",
-    math: "rgba(121, 91, 154, 0.72)",
-    paragraph: "rgba(63, 63, 63, 0.68)",
-    quote: "rgba(86, 99, 92, 0.68)",
-    rule: "rgba(96, 96, 96, 0.56)",
-    table: "rgba(94, 105, 122, 0.72)",
-    unknown: "rgba(68, 68, 68, 0.62)"
-  };
-  function renderModelMinimapCanvas(input) {
-    const canvas = input.ownerDocument.createElement("canvas");
-    const width = Math.max(1, Math.round(input.width));
-    const height = Math.max(1, Math.round(input.height));
-    const pixelRatio = normalizePixelRatio(input.pixelRatio);
-    canvas.width = Math.max(1, Math.round(width * pixelRatio));
-    canvas.height = Math.max(1, Math.round(height * pixelRatio));
-    canvas.style.display = "block";
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
-    canvas.dataset["mmModelMinimap"] = "true";
-    canvas.dataset["mmModelMinimapSectionCount"] = String(input.bands.length);
-    canvas.dataset["mmModelMinimapTotalHeight"] = String(input.documentHeight);
-    canvas.dataset["mmModelMinimapWidth"] = String(width);
-    canvas.dataset["mmModelMinimapHeight"] = String(height);
-    const context = canvas.getContext("2d");
-    if (context === null || input.documentHeight <= 0) {
-      return canvas;
-    }
-    context.resetTransform?.();
-    context.scale(pixelRatio, pixelRatio);
-    context.clearRect(0, 0, width, height);
-    const scaleY = height / input.documentHeight;
-    for (const band of input.bands) {
-      if (!Number.isFinite(band.top) || !Number.isFinite(band.height) || band.height <= 0) {
-        continue;
-      }
-      const y = clamp(band.top * scaleY, 0, height);
-      const scaledHeight = Math.max(0.5, band.height * scaleY);
-      const bandHeight = Math.min(height - y, scaledHeight);
-      if (bandHeight <= 0) {
-        continue;
-      }
-      context.fillStyle = fillForBand(band);
-      context.fillRect(0, y, width, bandHeight);
-    }
-    return canvas;
-  }
-  function calculateModelMinimapLayout(input) {
-    if (input.documentHeight <= 0 || input.width <= 0 || input.height <= 0 || input.viewportHeight <= 0) {
-      return null;
-    }
-    const minimumThumbHeight = input.minimumThumbHeight ?? DEFAULT_MINIMUM_THUMB_HEIGHT2;
-    const maximumScrollTop = Math.max(0, input.documentHeight - input.viewportHeight);
-    const thumbHeight = maximumScrollTop <= 0 ? input.height : Math.min(input.height, Math.max(minimumThumbHeight, input.height * (input.viewportHeight / input.documentHeight)));
-    const thumbTravel = Math.max(0, input.height - thumbHeight);
-    const scrollTop = clamp(input.scrollTop, 0, maximumScrollTop);
-    const scrollProgress = maximumScrollTop > 0 ? scrollTop / maximumScrollTop : 0;
-    return {
-      documentHeight: input.documentHeight,
-      height: input.height,
-      maximumScrollTop,
-      scrollTop,
-      thumbHeight,
-      thumbTop: thumbTravel * scrollProgress,
-      thumbTravel,
-      viewportHeight: input.viewportHeight,
-      width: input.width
-    };
-  }
-  function scrollTopForModelMinimapY(layout, minimapY) {
-    const documentY = clamp(minimapY, 0, layout.height) / layout.height * layout.documentHeight;
-    return clamp(documentY, 0, layout.maximumScrollTop);
-  }
-  function scrollTopForModelMinimapThumbTop(layout, thumbTop) {
-    if (layout.thumbTravel <= 0 || layout.maximumScrollTop <= 0) {
-      return 0;
-    }
-    return clamp(thumbTop, 0, layout.thumbTravel) / layout.thumbTravel * layout.maximumScrollTop;
-  }
-  function fillForBand(band) {
-    if (band.kind === "heading") {
-      const opacity = band.headingLevel <= 1 ? 0.94 : band.headingLevel <= 3 ? 0.86 : 0.76;
-      return `rgba(212, 109, 61, ${opacity})`;
-    }
-    return KIND_FILL[band.kind] ?? "rgba(68, 68, 68, 0.62)";
-  }
-  function normalizePixelRatio(pixelRatio) {
-    if (pixelRatio === void 0 || !Number.isFinite(pixelRatio) || pixelRatio <= 0) {
-      return 1;
-    }
-    return Math.max(1, Math.min(MAX_CANVAS_PIXEL_RATIO, pixelRatio));
-  }
-  function clamp(value, minimum, maximum) {
-    return Math.max(minimum, Math.min(maximum, value));
-  }
-
   // RendererWeb/src/widthResizerVisibility.ts
   function normalizeWidthResizerVisibility(raw) {
     return raw === "always" ? "always" : "on-hover";
@@ -3092,13 +2990,20 @@
       return true;
     };
     return {
-      adoptRenderedHeights: () => {
-        const anchor = deps.model.captureAnchor(deps.root.scrollTop);
+      adoptRenderedHeights: (options = {}) => {
+        const preserveSectionIndex = normalizeSectionIndex(options.preserveSectionIndex, deps.model.getSectionCount());
+        const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(deps.root.scrollTop) : null;
         const blocks = collectLiveDocumentSectionElements(deps.main);
         const updates = deps.readMeasuredHeights ? deps.readMeasuredHeights(blocks) : readLiveBlockOffsetMeasuredHeights(blocks);
         const result = deps.model.updateMeasuredHeightsByBlockIndex(updates);
         if (result.updatedCount === 0) {
           return EMPTY_HEIGHT_UPDATE;
+        }
+        if (preserveSectionIndex !== null) {
+          deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+          renderRange(computeRange());
+          deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
+          return result;
         }
         deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
         renderRange(computeRange());
@@ -3173,6 +3078,12 @@
     const start = Math.max(0, Math.min(sectionCount - 1, rawStart));
     const end = Math.max(start, Math.min(sectionCount - 1, rawEnd));
     return { end, start };
+  }
+  function normalizeSectionIndex(sectionIndex, sectionCount) {
+    if (sectionIndex === void 0 || sectionCount <= 0 || !Number.isFinite(sectionIndex)) {
+      return null;
+    }
+    return Math.max(0, Math.min(sectionCount - 1, Math.floor(sectionIndex)));
   }
 
   // RendererWeb/src/virtualizationShadow.ts
@@ -3449,6 +3360,9 @@
   var MODE_REVEAL_EASING = "cubic-bezier(0.215, 0.61, 0.355, 1)";
   var MODE_SETTLE_VIEWPORT_TOLERANCE = 2;
   var MODE_SETTLE_VIEWPORT_MAX_FRAMES = 18;
+  var VIRTUALIZED_NAVIGATION_SETTLE_TOLERANCE_PX = 0.5;
+  var VIRTUALIZED_NAVIGATION_SETTLE_STABLE_FRAMES = 2;
+  var VIRTUALIZED_NAVIGATION_SETTLE_MAX_FRAMES = 120;
   var minimapMode = "off";
   var hasReceivedHostPreferences = false;
   var hasInitialLayoutSettled = false;
@@ -3470,7 +3384,6 @@
   var minimapContent = null;
   var minimapViewport = null;
   var currentMinimapLayout = null;
-  var currentModelMinimapLayout = null;
   var minimapDragging = false;
   var minimapDragStartClientY = null;
   var minimapDragStartScrollTop = 0;
@@ -3541,6 +3454,9 @@
   var virtualizedIntrinsicCalibrator = createSectionIntrinsicCalibrator();
   var virtualizedMeasureFrameRequested = false;
   var virtualizedCalibrationHandle = null;
+  var virtualizedProgrammaticNavigationInProgress = false;
+  var virtualizedProgrammaticNavigationGeneration = 0;
+  var virtualizedProgrammaticNavigationPostSettleTarget = null;
   var virtualizedWindowMathController = null;
   var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
   function cloneHeadingPayload(heading) {
@@ -3982,7 +3898,7 @@
         return;
       }
       if (getModelMinimapSource() !== null && minimapSourceReady) {
-        renderCurrentModelMinimapContent();
+        syncModelMinimapCloneMetadata();
         updateMinimapViewport({ skipVisibilityUpdate: true });
       }
     }) : schedulePhaseBRebuild({
@@ -4388,6 +4304,118 @@
       virtualizationEnabled
     };
   }
+  function isVirtualizedProgrammaticNavigationInProgress() {
+    return virtualizationEnabled && virtualizedProgrammaticNavigationInProgress;
+  }
+  function resolveVirtualizedNavigationTargetSectionIndex(descriptor) {
+    const model = virtualizedDocumentWindowModel;
+    if (model === null) {
+      return null;
+    }
+    const entry = (() => {
+      switch (descriptor.kind) {
+        case "block":
+          return model.getEntryContainingBlockIndex(descriptor.blockIndex);
+        case "heading-anchor":
+          return model.getEntryByHeadingAnchor(descriptor.anchor);
+        case "source-line":
+          return model.getEntryBySourceLine(descriptor.sourceLine);
+        case "document-y":
+          return model.sections[model.sectionIndexAtDocumentY(descriptor.documentY)];
+        case "section":
+          return model.sections[descriptor.sectionIndex];
+        case "find-match":
+          return descriptor.blockIndex === void 0 ? void 0 : model.getEntryContainingBlockIndex(descriptor.blockIndex);
+      }
+    })();
+    if (entry === void 0) {
+      return null;
+    }
+    const sectionIndex = model.sections.findIndex((candidate) => candidate.blockIndex === entry.blockIndex);
+    return sectionIndex < 0 ? null : sectionIndex;
+  }
+  function forceRenderVirtualizedNavigationTarget(descriptor) {
+    const controller = virtualizedDocumentWindowController;
+    if (controller === null) {
+      return false;
+    }
+    const sectionIndex = resolveVirtualizedNavigationTargetSectionIndex(descriptor);
+    if (sectionIndex === null) {
+      return false;
+    }
+    return controller.ensureSectionRendered(sectionIndex, {
+      force: true,
+      preserveAnchor: false
+    });
+  }
+  function rememberVirtualizedProgrammaticNavigationPostSettleTarget(input) {
+    virtualizedProgrammaticNavigationPostSettleTarget = input;
+  }
+  function clearVirtualizedProgrammaticNavigationPostSettleTarget() {
+    virtualizedProgrammaticNavigationPostSettleTarget = null;
+  }
+  function reassertVirtualizedProgrammaticNavigationPostSettleTarget() {
+    const target = virtualizedProgrammaticNavigationPostSettleTarget;
+    if (target === null) {
+      return;
+    }
+    forceRenderVirtualizedNavigationTarget(target.descriptor);
+    target.finalAlign?.();
+  }
+  function alignVirtualizedProgrammaticNavigationPostSettleTarget() {
+    virtualizedProgrammaticNavigationPostSettleTarget?.finalAlign?.();
+  }
+  function getVirtualizedProgrammaticNavigationPostSettleSectionIndex() {
+    const target = virtualizedProgrammaticNavigationPostSettleTarget;
+    return target === null ? null : resolveVirtualizedNavigationTargetSectionIndex(target.descriptor);
+  }
+  function startVirtualizedProgrammaticNavigationSettle(input) {
+    if (!virtualizationEnabled || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+      return;
+    }
+    const generation = ++virtualizedProgrammaticNavigationGeneration;
+    virtualizedProgrammaticNavigationInProgress = true;
+    const root = getDocumentScrollRoot();
+    let lastScrollTop = root.scrollTop;
+    let stableFrames = 0;
+    let frameCount = 0;
+    const finish = () => {
+      if (generation !== virtualizedProgrammaticNavigationGeneration) {
+        return;
+      }
+      virtualizedProgrammaticNavigationInProgress = false;
+      const model = virtualizedDocumentWindowModel;
+      const controller = virtualizedDocumentWindowController;
+      if (model === null || controller === null) {
+        return;
+      }
+      rememberVirtualizedProgrammaticNavigationPostSettleTarget(input);
+      reassertVirtualizedProgrammaticNavigationPostSettleTarget();
+      updateVirtualizedWindowForScroll({ force: true });
+      reassertVirtualizedProgrammaticNavigationPostSettleTarget();
+      updateMinimapViewport({ skipVisibilityUpdate: true });
+      postScroll();
+    };
+    const tick = () => {
+      if (generation !== virtualizedProgrammaticNavigationGeneration) {
+        return;
+      }
+      const currentScrollTop = root.scrollTop;
+      if (Math.abs(currentScrollTop - lastScrollTop) <= VIRTUALIZED_NAVIGATION_SETTLE_TOLERANCE_PX) {
+        stableFrames++;
+      } else {
+        stableFrames = 0;
+        lastScrollTop = currentScrollTop;
+      }
+      frameCount++;
+      if (stableFrames >= VIRTUALIZED_NAVIGATION_SETTLE_STABLE_FRAMES || frameCount >= VIRTUALIZED_NAVIGATION_SETTLE_MAX_FRAMES) {
+        finish();
+        return;
+      }
+      window.requestAnimationFrame(tick);
+    };
+    window.requestAnimationFrame(tick);
+  }
   function cancelVirtualizedCalibration() {
     if (virtualizedCalibrationHandle === null) {
       return;
@@ -4406,7 +4434,9 @@
     virtualizedDocumentWindowController = null;
     virtualizedDocumentWindowModel = null;
     virtualizedMeasureFrameRequested = false;
-    currentModelMinimapLayout = null;
+    virtualizedProgrammaticNavigationInProgress = false;
+    virtualizedProgrammaticNavigationGeneration++;
+    virtualizedProgrammaticNavigationPostSettleTarget = null;
     if (resetCalibrator) {
       virtualizedIntrinsicCalibrator.reset();
     }
@@ -4486,6 +4516,9 @@
     if (!virtualizationEnabled || virtualizedDocumentWindowController === null) {
       return;
     }
+    if (options.force !== true && isVirtualizedProgrammaticNavigationInProgress()) {
+      return;
+    }
     if (virtualizedDocumentWindowController.updateWindowForScroll(options)) {
       invalidateTopVisibleBlockIndexCache();
       invalidateSourceLineAnchors();
@@ -4507,7 +4540,14 @@
     if (!virtualizationEnabled || virtualizedDocumentWindowController === null) {
       return;
     }
-    const result = virtualizedDocumentWindowController.adoptRenderedHeights();
+    if (isVirtualizedProgrammaticNavigationInProgress()) {
+      scheduleVirtualizedMeasuredHeightAdoption();
+      return;
+    }
+    const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
+    const result = virtualizedDocumentWindowController.adoptRenderedHeights(
+      preserveSectionIndex === null ? void 0 : { preserveSectionIndex }
+    );
     if (result.updatedCount === 0) {
       return;
     }
@@ -4515,9 +4555,10 @@
     invalidateSourceLineAnchors();
     refreshVirtualizedFindHighlights();
     if (getModelMinimapSource() !== null && minimapSourceReady) {
-      renderCurrentModelMinimapContent();
+      syncModelMinimapCloneMetadata();
       updateMinimapViewport({ skipVisibilityUpdate: true });
     }
+    alignVirtualizedProgrammaticNavigationPostSettleTarget();
     scheduleVirtualizedCalibration();
     postPerfMark("mm-virt-window-height-adopted", {
       maxAbsDelta: result.maxAbsDelta,
@@ -4547,8 +4588,13 @@
     if (!virtualizationEnabled || model === null || controller === null) {
       return;
     }
+    if (isVirtualizedProgrammaticNavigationInProgress()) {
+      scheduleVirtualizedCalibration();
+      return;
+    }
     const root = getDocumentScrollRoot();
-    const anchor = model.captureAnchor(root.scrollTop);
+    const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
+    const anchor = preserveSectionIndex === null ? model.captureAnchor(root.scrollTop) : null;
     const recordedCount = model.recordIntrinsicSizeCalibrationSamples(virtualizedIntrinsicCalibrator);
     if (recordedCount === 0) {
       return;
@@ -4557,9 +4603,18 @@
     if (result.updatedCount === 0) {
       return;
     }
-    root.scrollTop = model.scrollTopForAnchor(anchor);
+    if (preserveSectionIndex !== null) {
+      root.scrollTop = model.sectionTop(preserveSectionIndex);
+    } else {
+      root.scrollTop = model.scrollTopForAnchor(anchor);
+    }
     controller.updateWindowForScroll({ force: true });
-    root.scrollTop = model.scrollTopForAnchor(anchor);
+    if (preserveSectionIndex !== null) {
+      root.scrollTop = model.sectionTop(preserveSectionIndex);
+      alignVirtualizedProgrammaticNavigationPostSettleTarget();
+    } else {
+      root.scrollTop = model.scrollTopForAnchor(anchor);
+    }
     invalidateTopVisibleBlockIndexCache();
     invalidateSourceLineAnchors();
     postPerfMark("mm-virt-window-calibrated", {
@@ -5181,18 +5236,21 @@
   function getModelMinimapSource() {
     return virtualizationEnabled ? virtualizedDocumentWindowModel : null;
   }
+  function syncModelMinimapCloneMetadata() {
+    const model = getModelMinimapSource();
+    if (model === null) {
+      return;
+    }
+    minimapDocumentHeight = model.getTotalHeight();
+    const clone = minimapContent?.querySelector(".mm-document[data-mm-minimap-source='model-fragment']");
+    if (clone === void 0 || clone === null) {
+      return;
+    }
+    clone.dataset["mmModelMinimapSectionCount"] = String(model.getSectionCount());
+    clone.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
+  }
   function getCurrentMinimapDocumentHeight() {
     return getModelMinimapSource()?.getTotalHeight() ?? getDocumentScrollMetrics().documentHeight;
-  }
-  function readModelMinimapPaintSize() {
-    const configuredWidth = readRootPixelVariable("--mm-minimap-width", 136);
-    const width = minimapRoot?.clientWidth && minimapRoot.clientWidth > 0 ? minimapRoot.clientWidth : configuredWidth;
-    const cssViewportHeight = Math.max(0, window.innerHeight - 128);
-    const height = minimapRoot?.clientHeight && minimapRoot.clientHeight > 0 ? minimapRoot.clientHeight : cssViewportHeight;
-    return {
-      height: Math.max(1, height),
-      width: Math.max(1, width)
-    };
   }
   function shouldBuildDetailedMinimapContent() {
     const source = document.querySelector(".mm-document");
@@ -5236,13 +5294,7 @@
       }
     });
   }
-  function cloneDocumentForMinimap() {
-    const source = document.querySelector(".mm-document");
-    if (!source) {
-      minimapSourceReady = false;
-      return null;
-    }
-    const sourceStyle = getComputedStyle(source);
+  function cloneDocumentElementForMinimap(source, sourceStyle) {
     const clone = source.cloneNode(true);
     minimapSourceReady = true;
     clone.removeAttribute("id");
@@ -5255,50 +5307,30 @@
     sanitizeMinimapCloneTree(clone);
     return clone;
   }
-  function renderCurrentModelMinimapContent() {
-    const model = getModelMinimapSource();
-    if (model === null || minimapContent === null) {
-      currentModelMinimapLayout = null;
-      return false;
+  function cloneDocumentForMinimap() {
+    const source = document.querySelector(".mm-document");
+    if (!source) {
+      minimapSourceReady = false;
+      return null;
     }
-    const documentHeight = model.getTotalHeight();
-    if (!Number.isFinite(documentHeight) || documentHeight <= 0) {
-      currentModelMinimapLayout = null;
-      return false;
-    }
-    const size = readModelMinimapPaintSize();
-    const canvas = renderModelMinimapCanvas({
-      bands: model.getMinimapBlockProjection(),
-      documentHeight,
-      height: size.height,
-      ownerDocument: document,
-      pixelRatio: window.devicePixelRatio,
-      width: size.width
-    });
-    minimapContent.replaceChildren(canvas);
-    minimapContent.style.width = `${size.width}px`;
-    minimapContent.style.height = `${size.height}px`;
-    minimapContent.style.transform = "";
-    minimapDocumentHeight = documentHeight;
-    minimapSourceReady = true;
-    return true;
+    return cloneDocumentElementForMinimap(source, getComputedStyle(source));
   }
-  function ensureCurrentModelMinimapContent() {
-    const model = getModelMinimapSource();
-    if (model === null || minimapContent === null) {
-      currentModelMinimapLayout = null;
-      return false;
+  function cloneModelDocumentForMinimap(model) {
+    const liveSource = document.querySelector(".mm-document");
+    if (!liveSource) {
+      minimapSourceReady = false;
+      return null;
     }
-    const documentHeight = model.getTotalHeight();
-    const size = readModelMinimapPaintSize();
-    const canvas = minimapContent.querySelector("canvas[data-mm-model-minimap='true']");
-    const isCurrent = canvas !== null && Number(canvas.dataset["mmModelMinimapSectionCount"]) === model.getSectionCount() && Number(canvas.dataset["mmModelMinimapTotalHeight"]) === documentHeight && Number(canvas.dataset["mmModelMinimapWidth"]) === Math.max(1, Math.round(size.width)) && Number(canvas.dataset["mmModelMinimapHeight"]) === Math.max(1, Math.round(size.height));
-    if (isCurrent) {
-      minimapDocumentHeight = documentHeight;
-      minimapSourceReady = true;
-      return true;
-    }
-    return renderCurrentModelMinimapContent();
+    const source = document.createElement(liveSource.localName);
+    source.className = liveSource.className;
+    source.dataset["mmMinimapSource"] = "model-fragment";
+    source.dataset["mmModelMinimapSectionCount"] = String(model.getSectionCount());
+    source.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
+    source.append(createFullDocumentFragmentFromWindowModel(document, model));
+    const clone = cloneDocumentElementForMinimap(source, getComputedStyle(liveSource));
+    clone.dataset["mmModelMinimapSectionCount"] = String(model.getSectionCount());
+    clone.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
+    return clone;
   }
   function refreshMinimapContent(phase = "A") {
     cancelDeferredMinimapContentRefresh();
@@ -5314,7 +5346,7 @@
     if (!buildDecision.allowed) {
       minimapSourceReady = false;
       minimapDocumentHeight = buildDecision.documentHeight;
-      currentModelMinimapLayout = null;
+      currentMinimapLayout = null;
       minimapContent.replaceChildren();
       updateMinimapVisibility(true);
       emitMark("mm-minimap-refresh-skipped", {
@@ -5329,35 +5361,26 @@
       });
       return;
     }
-    if (getModelMinimapSource() !== null) {
-      if (!renderCurrentModelMinimapContent()) {
-        emitMark("mm-minimap-refresh-end", { phase, skipped: "no-model-source" });
-        postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-model-source" });
-        return;
-      }
-      updateMinimapVisibility(true);
-      updateMinimapViewport({ skipVisibilityUpdate: true });
-      emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight, source: "model" });
-      postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight, source: "model" });
-      return;
-    }
-    currentModelMinimapLayout = null;
-    const clone = cloneDocumentForMinimap();
+    currentMinimapLayout = null;
+    const model = getModelMinimapSource();
+    const clone = model === null ? cloneDocumentForMinimap() : cloneModelDocumentForMinimap(model);
     if (!clone) {
       emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
       postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
       return;
     }
     const root = document.scrollingElement ?? document.documentElement;
-    minimapDocumentHeight = root.scrollHeight;
+    minimapDocumentHeight = model === null ? root.scrollHeight : model.getTotalHeight();
     if (isPolicyHeavyMinimapDocument()) {
       minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
     }
     minimapContent.replaceChildren(clone);
+    syncModelMinimapCloneMetadata();
     updateMinimapVisibility(true);
     updateMinimapViewport({ skipVisibilityUpdate: true });
-    emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
-    postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
+    const source = model === null ? "live-dom" : "model-fragment";
+    emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight, source });
+    postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight, source });
     scheduleCurrentProcessedDocumentCacheClone();
   }
   function ensureDetailedMinimapContentForVisiblePath(phase = "A") {
@@ -5773,12 +5796,26 @@
     if (!hit) return null;
     const idx = hit.block.dataset["mmBlockIndex"];
     if (idx === void 0) return null;
+    const blockIndex = Number.parseInt(idx, 10);
     const docBlock = document.querySelector(`body > main.mm-document [data-mm-block-index="${idx}"]`);
-    if (!docBlock) return null;
-    const r = docBlock.getBoundingClientRect();
-    const contribution = hit.mode === "gap" ? hit.value : hit.mode === "tail" ? r.height + hit.value : hit.value * r.height;
+    let scrollTop;
+    if (docBlock) {
+      const r = docBlock.getBoundingClientRect();
+      const contribution = hit.mode === "gap" ? hit.value : hit.mode === "tail" ? r.height + hit.value : hit.value * r.height;
+      scrollTop = root.scrollTop + r.top + contribution;
+    } else if (virtualizationEnabled && virtualizedDocumentWindowModel !== null && Number.isFinite(blockIndex)) {
+      const entry = virtualizedDocumentWindowModel.getEntryContainingBlockIndex(blockIndex);
+      if (entry === void 0) {
+        return null;
+      }
+      const sectionHeight = virtualizedDocumentWindowModel.sectionEffectiveHeight(entry.sectionIndex);
+      const contribution = hit.mode === "gap" ? hit.value : hit.mode === "tail" ? sectionHeight + hit.value : hit.value * sectionHeight;
+      scrollTop = entry.cumulativeTop + contribution;
+    } else {
+      return null;
+    }
     const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
-    return Math.max(0, Math.min(maxScrollTop, root.scrollTop + r.top + contribution));
+    return Math.max(0, Math.min(maxScrollTop, scrollTop));
   }
   function updateMinimapViewport(options = {}) {
     ensureMinimap();
@@ -5790,38 +5827,8 @@
     }
     if (minimapRoot.hidden) {
       currentMinimapLayout = null;
-      currentModelMinimapLayout = null;
       return;
     }
-    const model = getModelMinimapSource();
-    if (model !== null) {
-      currentMinimapLayout = null;
-      if (!ensureCurrentModelMinimapContent()) {
-        currentModelMinimapLayout = null;
-        return;
-      }
-      const root2 = document.scrollingElement ?? document.documentElement;
-      const size = readModelMinimapPaintSize();
-      const layout2 = calculateModelMinimapLayout({
-        documentHeight: model.getTotalHeight(),
-        height: size.height,
-        scrollTop: root2.scrollTop,
-        viewportHeight: root2.clientHeight,
-        width: size.width
-      });
-      if (layout2 === null) {
-        currentModelMinimapLayout = null;
-        return;
-      }
-      currentModelMinimapLayout = layout2;
-      minimapContent.style.width = `${size.width}px`;
-      minimapContent.style.height = `${size.height}px`;
-      minimapContent.style.transform = "";
-      minimapViewport.style.transform = `translateY(${layout2.thumbTop}px)`;
-      minimapViewport.style.height = `${layout2.thumbHeight}px`;
-      return;
-    }
-    currentModelMinimapLayout = null;
     const root = document.scrollingElement ?? document.documentElement;
     const knownPolicyHeavyDocument = isPolicyHeavyMinimapDocument();
     const documentScrollHeight = root.scrollHeight;
@@ -5885,19 +5892,11 @@
     minimapViewport.style.height = `${layout.thumbHeight}px`;
   }
   function getCurrentMinimapThumbTravel() {
-    if (currentModelMinimapLayout) {
-      return Math.max(1, currentModelMinimapLayout.thumbTravel);
-    }
     if (currentMinimapLayout) {
       return Math.max(1, currentMinimapLayout.thumbTravel);
     }
     const minimapHeight = minimapRoot?.clientHeight ?? 0;
     return Math.max(1, minimapHeight - 22);
-  }
-  function scrollToModelMinimapPosition(targetScrollTop) {
-    window.scrollTo({ top: targetScrollTop, behavior: "instant" });
-    updateVirtualizedWindowForScroll({ force: true });
-    updateMinimapViewport({ skipVisibilityUpdate: true });
   }
   function scrollFromMinimapClientY(clientY) {
     if (!minimapRoot) {
@@ -5906,10 +5905,6 @@
     const root = document.scrollingElement ?? document.documentElement;
     const rect = minimapRoot.getBoundingClientRect();
     const minimapY = Math.max(0, Math.min(rect.height, clientY - rect.top));
-    if (currentModelMinimapLayout !== null) {
-      scrollToModelMinimapPosition(scrollTopForModelMinimapY(currentModelMinimapLayout, minimapY));
-      return;
-    }
     if (currentMinimapLayout && minimapContent) {
       const cloneYTarget = (minimapY - currentMinimapLayout.contentTranslateY) / currentMinimapLayout.scale;
       const firstTarget = docScrollTopForCloneY(root, cloneYTarget);
@@ -5966,16 +5961,6 @@
     minimapDragMode = "panning";
     const root = document.scrollingElement ?? document.documentElement;
     const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
-    if (minimapRoot && minimapViewport && currentModelMinimapLayout !== null) {
-      const rootTop = minimapRoot.getBoundingClientRect().top;
-      const desiredThumbTop = event.clientY - rootTop - minimapDragGrabOffset;
-      const target = scrollTopForModelMinimapThumbTop(currentModelMinimapLayout, desiredThumbTop);
-      scrollToModelMinimapPosition(Math.max(0, target));
-      const pinnedTop = Math.max(0, Math.min(currentModelMinimapLayout.thumbTravel, desiredThumbTop));
-      minimapViewport.style.transform = `translateY(${pinnedTop}px)`;
-      event.preventDefault();
-      return;
-    }
     if (minimapRoot && minimapViewport && currentMinimapLayout && minimapContent && currentMinimapLayout.thumbSlope > 0) {
       const rootTop = minimapRoot.getBoundingClientRect().top;
       const desiredThumbTop = event.clientY - rootTop - minimapDragGrabOffset;
@@ -6320,15 +6305,22 @@
         }
         return;
       }
+      const descriptor = { anchor: message.id, kind: "heading-anchor" };
       void renderWindowTargetThenAct({
         action: ({ targetElement }) => {
           if (targetElement) {
+            startVirtualizedProgrammaticNavigationSettle({
+              descriptor,
+              finalAlign: () => {
+                document.getElementById(message.id)?.scrollIntoView({ behavior: "instant", block: "start" });
+              }
+            });
             targetElement.scrollIntoView({ behavior: "smooth", block: "start" });
           }
         },
         actionKind: "navigate",
         controller: virtualizedDocumentWindowController,
-        descriptor: { anchor: message.id, kind: "heading-anchor" },
+        descriptor,
         legacyAction: () => {
           const target = document.getElementById(message.id);
           if (target) {
@@ -6387,16 +6379,25 @@
         }
         return;
       }
+      const descriptor = { blockIndex: message.blockIndex, kind: "block" };
       void renderWindowTargetThenAct({
         action: ({ element, targetElement }) => {
           const target = targetElement ?? element;
           if (target) {
+            startVirtualizedProgrammaticNavigationSettle({
+              descriptor,
+              finalAlign: () => {
+                document.querySelector(
+                  `[data-mm-block-index="${message.blockIndex}"]`
+                )?.scrollIntoView({ block: "start", behavior: "instant" });
+              }
+            });
             target.scrollIntoView({ block: "start", behavior: "instant" });
           }
         },
         actionKind: "navigate",
         controller: virtualizedDocumentWindowController,
-        descriptor: { blockIndex: message.blockIndex, kind: "block" },
+        descriptor,
         legacyAction: () => {
           const target = document.querySelector(
             `[data-mm-block-index="${message.blockIndex}"]`
@@ -6698,7 +6699,7 @@
     minimapDocumentHeight = 0;
     lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
     minimapSourceReady = false;
-    currentModelMinimapLayout = null;
+    currentMinimapLayout = null;
     hasInitialLayoutSettled = false;
     resetVirtualizedDocumentWindow();
     findBarController?.close();
@@ -7155,6 +7156,10 @@
     }
   });
   document.addEventListener("scroll", () => {
+    const programmaticNavigationScroll = isVirtualizedProgrammaticNavigationInProgress();
+    if (!programmaticNavigationScroll) {
+      clearVirtualizedProgrammaticNavigationPostSettleTarget();
+    }
     queuePostScroll();
     queuePreviewSourceLinePost();
   }, { passive: true });

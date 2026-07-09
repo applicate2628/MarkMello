@@ -36,13 +36,6 @@ type ReadingPreferencesMessage = {
   widthResizerVisibility: "always" | "on-hover";
 };
 
-type ModelMinimapDrawCall = {
-  height: number;
-  width: number;
-  x: number;
-  y: number;
-};
-
 const makeReadingPreferences = (
   minimapMode: ReadingPreferencesMessage["minimapMode"] = "on"
 ): ReadingPreferencesMessage => ({
@@ -341,31 +334,6 @@ function loadMinimapPolicy(load: HostBridge): void {
   });
 }
 
-function installCanvasDrawSpy(): ModelMinimapDrawCall[] {
-  const calls: ModelMinimapDrawCall[] = [];
-  Object.defineProperty(window.HTMLCanvasElement.prototype, "getContext", {
-    configurable: true,
-    value(type: string) {
-      if (type !== "2d") {
-        return null;
-      }
-
-      return {
-        clearRect: vi.fn(),
-        fillRect: vi.fn((x: number, y: number, width: number, height: number) => {
-          calls.push({ height, width, x, y });
-        }),
-        resetTransform: vi.fn(),
-        scale: vi.fn(),
-        set fillStyle(_value: string) {
-          // Test canvas only records geometry.
-        },
-      };
-    },
-  });
-  return calls;
-}
-
 function latestPerfDetail<T extends Record<string, unknown>>(
   messages: readonly unknown[],
   name: string
@@ -378,20 +346,6 @@ function latestPerfDetail<T extends Record<string, unknown>>(
       && (message as { name?: unknown }).name === name)
     .at(-1);
   return mark?.detail ? JSON.parse(mark.detail) as T : undefined;
-}
-
-function minimapCanvas(): HTMLCanvasElement {
-  const canvas = document.querySelector<HTMLCanvasElement>(".mm-minimap-content canvas[data-mm-model-minimap='true']");
-  if (canvas === null) {
-    throw new Error("model minimap canvas was not rendered");
-  }
-
-  return canvas;
-}
-
-function parseTranslateY(value: string): number {
-  const match = /translateY\((-?\d+(?:\.\d+)?)px\)/.exec(value);
-  return match ? Number.parseFloat(match[1]!) : Number.NaN;
 }
 
 function highestRenderedHeadingIndex(): number {
@@ -554,6 +508,39 @@ describe("renderer scroll-family virtualization integration", () => {
     ]);
   });
 
+  it("keeps an off-window TOC target rendered through intermediate smooth-scroll frames", async () => {
+    const { flushNextRaf, flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    scrollCalls.length = 0;
+    Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value(this: HTMLElement, scrollOptions?: ScrollIntoViewOptions | boolean) {
+        scrollCalls.push({ element: this, options: scrollOptions });
+        if (typeof scrollOptions === "object" && scrollOptions.behavior === "smooth") {
+          root.scrollTop = 10 * SECTION_PITCH;
+          document.dispatchEvent(new Event("scroll"));
+          return;
+        }
+
+        root.scrollTop = readSyntheticDocumentTop(this);
+      },
+    });
+
+    expect(document.getElementById("heading-95")).toBeNull();
+    load({ type: "scroll-to-heading", id: "heading-95" });
+    await flushNextRaf();
+    expect(document.getElementById("heading-95")).not.toBeNull();
+
+    await flushNextRaf();
+
+    expect(document.getElementById("heading-95")).not.toBeNull();
+    expect(root.scrollTop).toBe(10 * SECTION_PITCH);
+  });
+
   it("renders the containing section and scrolls the nested block descendant", async () => {
     const { flushNextRaf, flushQueuedRafs, load, scrollCalls } = await loadRendererHarness({
       sectionCount: 120,
@@ -577,6 +564,34 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(scrollCalls).toEqual([
       { element: target!, options: { block: "start", behavior: "instant" } },
     ]);
+  });
+
+  it("reasserts a nested scroll-to-block target after a post-navigation window shift", async () => {
+    const { flushNextRaf, flushQueuedRafs, load, root } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({
+      type: "load-document",
+      html: buildNestedBlockDocument(120, 88, 8801),
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await flushQueuedRafs();
+
+    load({ type: "scroll-to-block", blockIndex: 8801 });
+    await flushNextRaf();
+    const target = document.querySelector<HTMLElement>('[data-mm-block-index="8801"]');
+    expect(target).not.toBeNull();
+    const targetTop = readSyntheticDocumentTop(target!);
+    expect(root.scrollTop).toBe(targetTop);
+
+    root.scrollTop = targetTop - 693;
+    document.dispatchEvent(new Event("scroll"));
+    await flushQueuedRafs();
+
+    expect(document.querySelector('[data-mm-block-index="8801"]')).not.toBeNull();
+    expect(root.scrollTop).toBe(targetTop);
   });
 
   it("leaves invalid virtualized anchor and block targets as no-ops", async () => {
@@ -799,8 +814,7 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(findQueryMessages(messages)).toEqual([]);
   });
 
-  it("builds flag-on minimap content from the full model without cloning the live window", async () => {
-    const drawCalls = installCanvasDrawSpy();
+  it("builds flag-on minimap content from a full model-fragment clone without cloning the live window", async () => {
     const cloneSpy = vi.spyOn(window.HTMLElement.prototype, "cloneNode");
     const sectionCount = 120;
     const { flushQueuedRafs, load, messages } = await loadRendererHarness({
@@ -816,24 +830,33 @@ describe("renderer scroll-family virtualization integration", () => {
     load({ type: "load-document", html: buildHeadingDocument(sectionCount), hasMermaid: false, hasHljs: false });
     await flushQueuedRafs();
 
-    const canvas = minimapCanvas();
+    const liveMain = document.querySelector<HTMLElement>("main.mm-document");
+    const minimapDocument = document.querySelector<HTMLElement>(".mm-minimap-content .mm-document");
     const built = latestPerfDetail<{ totalHeight: number }>(messages, "mm-virt-window-built");
     const adopted = latestPerfDetail<{ totalHeight: number | null }>(messages, "mm-virt-window-height-adopted");
     const expectedTotalHeight = adopted?.totalHeight ?? built?.totalHeight;
+    const modelCloneSources = cloneSpy.mock.contexts.filter(
+      (context): context is HTMLElement =>
+        context instanceof window.HTMLElement
+        && context.dataset["mmMinimapSource"] === "model-fragment");
 
-    expect(cloneSpy).not.toHaveBeenCalledWith(true);
-    expect(document.querySelector(".mm-minimap-content .mm-document")).toBeNull();
-    expect(canvas.dataset.mmModelMinimapSectionCount).toBe(String(sectionCount));
-    expect(Number(canvas.dataset.mmModelMinimapTotalHeight)).toBe(expectedTotalHeight);
-    expect(canvas.height).toBeLessThanOrEqual(592);
-    expect(drawCalls.slice(-sectionCount)).toHaveLength(sectionCount);
-    expect(drawCalls.slice(-sectionCount).every(call => call.y < 592 && call.y + call.height > 0)).toBe(true);
+    expect(liveMain).not.toBeNull();
+    expect(liveMain!.querySelectorAll("[data-mm-block-index]")).not.toHaveLength(sectionCount);
+    expect(modelCloneSources).toHaveLength(1);
+    expect(modelCloneSources[0]!.querySelectorAll("[data-mm-block-index]")).toHaveLength(sectionCount);
+    expect(cloneSpy).toHaveBeenCalledWith(true);
+    expect(cloneSpy.mock.contexts).not.toContain(liveMain);
+    expect(minimapDocument).not.toBeNull();
+    expect(minimapDocument!.querySelectorAll("[data-mm-block-index]")).toHaveLength(sectionCount);
+    expect(document.querySelector(".mm-minimap-content canvas[data-mm-model-minimap='true']")).toBeNull();
+    expect(Number(minimapDocument!.dataset["mmModelMinimapTotalHeight"])).toBe(expectedTotalHeight);
   });
 
-  it("moves the model minimap viewport thumb to the bottom on a heavy virtualized document", async () => {
-    installCanvasDrawSpy();
-    const { flushQueuedRafs, load, root } = await loadRendererHarness({
-      sectionCount: 160,
+  it("rescales the model-fragment minimap after height adoption without rebuilding the clone", async () => {
+    const cloneSpy = vi.spyOn(window.HTMLElement.prototype, "cloneNode");
+    const sectionCount = 160;
+    const { flushQueuedRafs, load, messages, root } = await loadRendererHarness({
+      sectionCount,
       virtualization: true,
     });
     document.documentElement.style.setProperty("--mm-minimap-width", "136px");
@@ -842,23 +865,27 @@ describe("renderer scroll-family virtualization integration", () => {
     load({ type: "reading-preferences", ...makeReadingPreferences("on") });
     await flushQueuedRafs();
     loadMinimapPolicy(load);
-    load({ type: "load-document", html: buildHeadingDocument(160), hasMermaid: false, hasHljs: false });
+    load({ type: "load-document", html: buildHeadingDocument(sectionCount), hasMermaid: false, hasHljs: false });
     await flushQueuedRafs();
 
-    const canvas = minimapCanvas();
-    root.scrollTop = Number(canvas.dataset.mmModelMinimapTotalHeight) - root.clientHeight;
+    const modelCloneCount = () => cloneSpy.mock.contexts.filter(
+      (context): context is HTMLElement =>
+        context instanceof window.HTMLElement
+        && context.dataset["mmMinimapSource"] === "model-fragment").length;
+    expect(modelCloneCount()).toBe(1);
+
+    root.scrollTop = 20 * SECTION_PITCH;
     document.dispatchEvent(new Event("scroll"));
     await flushQueuedRafs();
 
-    const viewport = document.querySelector<HTMLElement>(".mm-minimap-viewport");
-    expect(viewport).not.toBeNull();
-    const thumbTop = parseTranslateY(viewport!.style.transform);
-    const thumbHeight = Number.parseFloat(viewport!.style.height);
-    expect(thumbTop + thumbHeight).toBeCloseTo(Number(canvas.dataset.mmModelMinimapHeight), 3);
+    const minimapDocument = document.querySelector<HTMLElement>(".mm-minimap-content .mm-document");
+    expect(minimapDocument).not.toBeNull();
+    expect(minimapDocument!.querySelectorAll("[data-mm-block-index]")).toHaveLength(sectionCount);
+    expect(modelCloneCount()).toBe(1);
+    expect(latestPerfDetail(messages, "mm-virt-window-height-adopted")).toBeDefined();
   });
 
-  it("clicks and drags the model minimap to off-window sections without clone block lookup", async () => {
-    installCanvasDrawSpy();
+  it("clicks and drags the model-fragment minimap clone to off-window sections", async () => {
     const sectionCount = 120;
     const { flushQueuedRafs, load, root } = await loadRendererHarness({
       sectionCount,
@@ -893,8 +920,10 @@ describe("renderer scroll-family virtualization integration", () => {
     minimap!.dispatchEvent(pointerEvent("pointerdown", 588));
     minimap!.dispatchEvent(pointerEvent("pointerup", 588));
 
-    expect(root.scrollTop).toBeGreaterThan(0);
-    expect(highestRenderedHeadingIndex()).toBeGreaterThanOrEqual(sectionCount - 25);
+    const clickedScrollTop = root.scrollTop;
+    const clickedHighest = highestRenderedHeadingIndex();
+    expect(clickedScrollTop).toBeGreaterThan(0);
+    expect(clickedHighest).toBeGreaterThan(25);
 
     root.scrollTop = 0;
     document.dispatchEvent(new Event("scroll"));
@@ -904,7 +933,7 @@ describe("renderer scroll-family virtualization integration", () => {
     minimap!.dispatchEvent(pointerEvent("pointerdown", 12));
     minimap!.dispatchEvent(pointerEvent("pointermove", 588));
 
-    expect(root.scrollTop).toBeGreaterThan(0);
-    expect(highestRenderedHeadingIndex()).toBeGreaterThanOrEqual(sectionCount - 25);
+    expect(root.scrollTop).toBeGreaterThanOrEqual(clickedScrollTop);
+    expect(highestRenderedHeadingIndex()).toBeGreaterThanOrEqual(clickedHighest);
   });
 });
