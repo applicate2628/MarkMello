@@ -1130,7 +1130,14 @@ async function renderMermaidNodes(
 
   try {
     for (const node of eagerNodes) {
-      await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+      await renderMermaidNode(
+        node,
+        generation,
+        () => mermaidRenderGeneration,
+        mermaid,
+        MERMAID_PER_DIAGRAM_TIMEOUT_MS,
+        virtualizationEnabled ? { manageVirtualizedProxyLifecycle: true } : undefined
+      );
       if (eagerBudgetExpired || generation !== mermaidRenderGeneration) return;
     }
   } finally {
@@ -1276,7 +1283,14 @@ function enqueueLazyMermaidRender(
     .then(async () => {
       if (generation !== mermaidRenderGeneration) return;
       postPerfMark("mm-mermaid-lazy-render-start");
-      await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+      await renderMermaidNode(
+        node,
+        generation,
+        () => mermaidRenderGeneration,
+        mermaid,
+        MERMAID_PER_DIAGRAM_TIMEOUT_MS,
+        virtualizationEnabled ? { manageVirtualizedProxyLifecycle: true } : undefined
+      );
       if (generation === mermaidRenderGeneration) {
         postPerfMark("mm-mermaid-lazy-render-end");
         scheduleCurrentProcessedDocumentCacheClone();

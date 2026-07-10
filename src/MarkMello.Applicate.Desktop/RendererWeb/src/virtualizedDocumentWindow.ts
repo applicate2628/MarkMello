@@ -11,6 +11,7 @@ import {
   type SectionModelEntry,
   type WindowRange,
 } from "./documentWindow";
+import { readReadyMermaidProxy } from "./mermaidRender";
 
 const TOP_SPACER = "top";
 const BOTTOM_SPACER = "bottom";
@@ -87,6 +88,11 @@ type RealizationWatch = {
   readyMeasuredHeight: number | null;
 };
 
+type ExistingSectionUnit = {
+  source: HTMLElement;
+  proxy: HTMLElement | null;
+};
+
 const EMPTY_HEIGHT_UPDATE: MeasuredHeightUpdateResult = {
   maxAbsDelta: 0,
   totalDelta: 0,
@@ -106,6 +112,8 @@ export function createVirtualizedDocumentWindowController(
     const existingByBlockIndex = collectExistingSections(deps.main);
     const nodes: Node[] = [];
     let insertedCount = 0;
+    let repairedMermaidCount = 0;
+    const repairedMermaidBlockIndexes = new Set<number>();
     const topSpacer = createSpacer(deps.ownerWindow.document, TOP_SPACER);
     const bottomSpacer = createSpacer(deps.ownerWindow.document, BOTTOM_SPACER);
     const spacers = deps.model.computeSpacerHeights(range);
@@ -121,14 +129,17 @@ export function createVirtualizedDocumentWindowController(
 
       const existing = existingByBlockIndex.get(entry.blockIndex);
       if (existing) {
-        nodes.push(existing);
+        if (appendSectionUnit(nodes, existing.source, existing.proxy, entry)) {
+          repairedMermaidCount++;
+          repairedMermaidBlockIndexes.add(entry.blockIndex);
+        }
         continue;
       }
 
       const created = createSectionNode(deps.ownerWindow.document, entry);
       if (created) {
         insertedCount++;
-        nodes.push(created);
+        appendSectionUnit(nodes, created, null, entry);
       }
     }
 
@@ -136,9 +147,9 @@ export function createVirtualizedDocumentWindowController(
     deps.main.replaceChildren(...nodes);
     currentRange = { ...range };
     const mountedBlocks = collectLiveDocumentSectionElements(deps.main);
-    reconcileMountedNonContentMetadata(deps.model, mountedBlocks);
+    reconcileMountedNonContentMetadata(deps.model, mountedBlocks, repairedMermaidBlockIndexes);
     realizationTracker?.syncMountedSections(mountedBlocks);
-    if (insertedCount > 0) {
+    if (insertedCount > 0 || repairedMermaidCount > 0) {
       deps.prepareInsertedContent?.(deps.main);
     }
   };
@@ -246,16 +257,41 @@ export function createFullDocumentFragmentFromWindowModel(
   return fragment;
 }
 
-function collectExistingSections(main: HTMLElement): Map<number, HTMLElement> {
-  const result = new Map<number, HTMLElement>();
+function collectExistingSections(main: HTMLElement): Map<number, ExistingSectionUnit> {
+  const result = new Map<number, ExistingSectionUnit>();
   for (const element of collectLiveDocumentSectionElements(main)) {
     const raw = element.dataset["mmBlockIndex"];
     const blockIndex = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
     if (Number.isFinite(blockIndex)) {
-      result.set(blockIndex, element);
+      result.set(blockIndex, {
+        proxy: readReadyMermaidProxy(element),
+        source: element,
+      });
     }
   }
   return result;
+}
+
+function appendSectionUnit(
+  nodes: Node[],
+  source: HTMLElement,
+  proxy: HTMLElement | null,
+  entry: SectionModelEntry
+): boolean {
+  nodes.push(source);
+  if (proxy !== null) {
+    source.style.removeProperty("contain-intrinsic-size");
+    nodes.push(proxy);
+    return false;
+  }
+
+  if (!source.matches("pre.mm-mermaid.is-rendered")) {
+    return false;
+  }
+
+  source.classList.remove("is-rendered");
+  writeIntrinsicSizeStamp(source, entry);
+  return true;
 }
 
 function captureFirstVisibleLiveBlockAnchor(blocks: readonly HTMLElement[]): LiveBlockAnchor | null {
@@ -265,7 +301,8 @@ function captureFirstVisibleLiveBlockAnchor(blocks: readonly HTMLElement[]): Liv
       continue;
     }
 
-    const rect = block.getBoundingClientRect();
+    const boxElement = readReadyMermaidProxy(block) ?? block;
+    const rect = boxElement.getBoundingClientRect();
     if (!Number.isFinite(rect.height) || rect.height <= 0 || !Number.isFinite(rect.bottom) || rect.bottom < 0) {
       continue;
     }
@@ -327,6 +364,9 @@ function createSectionNode(
   const firstElement = Array.from(template.content.childNodes)
     .find((node): node is HTMLElement => node instanceof HTMLElement);
   if (firstElement) {
+    if (firstElement.matches("pre.mm-mermaid.is-rendered")) {
+      firstElement.classList.remove("is-rendered");
+    }
     writeIntrinsicSizeStamp(firstElement, entry);
   }
   return firstElement ?? null;
@@ -354,10 +394,20 @@ function readIntrinsicSizeStamp(entry: SectionModelEntry): number | null {
 
 function reconcileMountedNonContentMetadata(
   model: DocumentWindowModel,
-  blocks: readonly HTMLElement[]
+  blocks: readonly HTMLElement[],
+  excludedBlockIndexes: ReadonlySet<number>
 ): void {
   const updates = readLiveBlockOffsetMeasuredHeights(blocks);
   for (const update of updates) {
+    if (excludedBlockIndexes.has(update.blockIndex)) {
+      continue;
+    }
+    const block = blocks.find(candidate => readBlockIndex(candidate) === update.blockIndex);
+    if (update.geometryOwner === "mermaid-proxy") {
+      block?.style.removeProperty("contain-intrinsic-size");
+      continue;
+    }
+
     const occupiedNonContentHeight = update.occupiedNonContentHeight;
     if (typeof occupiedNonContentHeight !== "number" || !Number.isFinite(occupiedNonContentHeight)) {
       continue;
@@ -369,7 +419,6 @@ function reconcileMountedNonContentMetadata(
     }
 
     entry.occupiedNonContentHeight = occupiedNonContentHeight;
-    const block = blocks.find(candidate => readBlockIndex(candidate) === update.blockIndex);
     if (block !== undefined) {
       writeIntrinsicSizeStamp(block, entry);
     }
@@ -441,6 +490,11 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
 
     mountGeneration++;
     for (const block of blocks) {
+      if (readReadyMermaidProxy(block) !== null) {
+        watches.delete(block);
+        continue;
+      }
+
       if (!isContentVisibilityAutoOwner(block)) {
         watches.delete(block);
         continue;
@@ -496,6 +550,14 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
     for (const update of updates) {
       const block = blocksByBlockIndex.get(update.blockIndex);
       if (block === undefined || block === null || readBlockIndex(block) !== update.blockIndex) {
+        continue;
+      }
+
+      if (update.geometryOwner === "mermaid-proxy") {
+        const proxy = readReadyMermaidProxy(block);
+        if (proxy !== null && deps.main.contains(proxy)) {
+          accepted.push(update);
+        }
         continue;
       }
 

@@ -6,6 +6,7 @@ import {
   type IntrinsicSizeMetrics,
   type SectionKind,
 } from "./sectionIntrinsicSize";
+import { readReadyMermaidProxy } from "./mermaidRender";
 
 export type SectionModelEntry = {
   sectionIndex: number;
@@ -19,12 +20,15 @@ export type SectionModelEntry = {
   html?: string;
   hasMermaid?: boolean;
   intrinsicSize?: SectionIntrinsicCalibrationTarget;
+  geometryOwner?: SectionGeometryOwner;
   occupiedNonContentHeight?: number;
   needsRichPrep?: boolean;
   containedBlockIndexes?: readonly number[];
   headingAnchors?: readonly string[];
   sourceLineSpans?: readonly SourceLineModelSpan[];
 };
+
+export type SectionGeometryOwner = "mermaid-proxy";
 
 export type SourceLineModelSpan = {
   sourceLine: number;
@@ -105,6 +109,7 @@ export type RenderAheadConfig = {
 export type MeasuredHeightUpdate = {
   blockIndex: number;
   measuredHeight: number;
+  geometryOwner?: SectionGeometryOwner;
   measuredHeightPlaceholder?: boolean;
   occupiedNonContentHeight?: number;
 };
@@ -309,6 +314,11 @@ export class DocumentWindowModel {
 
       const previous = effectiveHeight(entry);
       entry.measuredHeight = update.measuredHeight;
+      if (update.geometryOwner === undefined) {
+        delete entry.geometryOwner;
+      } else {
+        entry.geometryOwner = update.geometryOwner;
+      }
       delete entry.measuredHeightPlaceholder;
       const delta = update.measuredHeight - previous;
       updatedCount++;
@@ -328,6 +338,9 @@ export class DocumentWindowModel {
         continue;
       }
       if (entry.measuredHeightPlaceholder === true) {
+        continue;
+      }
+      if (entry.geometryOwner === "mermaid-proxy") {
         continue;
       }
 
@@ -518,6 +531,9 @@ export function readLiveBlockMeasuredHeights(
       blockIndex: measurement.blockIndex,
       measuredHeight: measurement.measuredHeight,
     };
+    if (measurement.geometryOwner !== undefined) {
+      update.geometryOwner = measurement.geometryOwner;
+    }
     if (measurement.measuredHeightPlaceholder) {
       update.measuredHeightPlaceholder = true;
     }
@@ -531,14 +547,20 @@ export function readLiveBlockMeasuredHeights(
 export function readLiveBlockOffsetMeasuredHeights(blocks: readonly HTMLElement[]): MeasuredHeightUpdate[] {
   const geometry = readVisibleBlockGeometry(blocks);
   return geometry.map((item, index): MeasuredHeightUpdate => {
-    const nextTop = geometry[index + 1]?.top ?? readNextSiblingDocumentTop(item.element);
+    const nextItem = geometry[index + 1];
+    const nextTop = hasInvalidRenderedMermaidBetween(blocks, item.sourceIndex, nextItem?.sourceIndex)
+      ? readNextSiblingDocumentTop(item.boxElement)
+      : nextItem?.top ?? readNextSiblingDocumentTop(item.boxElement);
     const measuredHeight = nextTop !== undefined && nextTop > item.top
       ? nextTop - item.top
       : item.height;
     const update: MeasuredHeightUpdate = {
-      blockIndex: readBlockIndex(item.element, item.sourceIndex),
+      blockIndex: readBlockIndex(item.semanticElement, item.sourceIndex),
       measuredHeight: Math.max(0, measuredHeight),
     };
+    if (item.geometryOwner !== undefined) {
+      update.geometryOwner = item.geometryOwner;
+    }
     if (isContentVisibilityPlaceholderMeasurement(item)) {
       update.measuredHeightPlaceholder = true;
     }
@@ -715,7 +737,9 @@ export function summarizeEstimateHeightErrors(
 }
 
 type VisibleBlockGeometry = {
-  element: HTMLElement;
+  semanticElement: HTMLElement;
+  boxElement: HTMLElement;
+  geometryOwner?: SectionGeometryOwner;
   sourceIndex: number;
   top: number;
   height: number;
@@ -736,19 +760,23 @@ function readLiveSectionModelEntries(
   options: BuildDocumentWindowModelOptions
 ): SectionModelEntry[] {
   return readLiveBlockMeasurements(blocks, documentScrollHeight).map((measurement, sectionIndex): SectionModelEntry => {
-    const intrinsicSize = readSectionIntrinsicCalibrationTarget(measurement.element, metrics);
+    const semanticElement = measurement.semanticElement;
+    const intrinsicSize = readSectionIntrinsicCalibrationTarget(semanticElement, metrics);
     const entry: SectionModelEntry = {
       blockIndex: measurement.blockIndex,
       cumulativeTop: measurement.top,
       estimatedHeight: options.intrinsicSizeCalibrator?.estimateTargetHeight(intrinsicSize) ?? intrinsicSize.defaultHeight,
-      hasMermaid: hasMermaidContent(measurement.element),
-      headingLevel: readHeadingLevel(measurement.element),
-      html: measurement.element.outerHTML,
+      hasMermaid: hasMermaidContent(semanticElement),
+      headingLevel: readHeadingLevel(semanticElement),
+      html: semanticElement.outerHTML,
       intrinsicSize,
-      kind: normalizeSectionKind(measurement.element.dataset["mmBlockKind"]),
+      kind: normalizeSectionKind(semanticElement.dataset["mmBlockKind"]),
       measuredHeight: measured ? measurement.measuredHeight : undefined,
       sectionIndex,
     };
+    if (measurement.geometryOwner !== undefined) {
+      entry.geometryOwner = measurement.geometryOwner;
+    }
     if (measurement.occupiedNonContentHeight !== undefined) {
       entry.occupiedNonContentHeight = measurement.occupiedNonContentHeight;
     }
@@ -767,13 +795,23 @@ function readLiveBlockMeasurements(
   const geometry = readVisibleBlockGeometry(blocks);
   const safeDocumentScrollHeight = Number.isFinite(documentScrollHeight) ? documentScrollHeight : 0;
   return geometry.map((item, index): LiveBlockMeasurement => {
-    const nextTop = geometry[index + 1]?.top;
-    const measuredHeight = nextTop === undefined
-      ? Math.max(0, item.height, safeDocumentScrollHeight - item.top)
-      : Math.max(0, nextTop - item.top);
+    const nextItem = geometry[index + 1];
+    const invalidMermaidBoundary = hasInvalidRenderedMermaidBetween(
+      blocks,
+      item.sourceIndex,
+      nextItem?.sourceIndex
+    );
+    const nextTop = invalidMermaidBoundary
+      ? readNextSiblingDocumentTop(item.boxElement)
+      : nextItem?.top;
+    const measuredHeight = nextTop !== undefined && nextTop > item.top
+      ? Math.max(0, nextTop - item.top)
+      : invalidMermaidBoundary
+        ? Math.max(0, item.height)
+        : Math.max(0, item.height, safeDocumentScrollHeight - item.top);
     const measurement: LiveBlockMeasurement = {
       ...item,
-      blockIndex: readBlockIndex(item.element, item.sourceIndex),
+      blockIndex: readBlockIndex(item.semanticElement, item.sourceIndex),
       measuredHeight,
       measuredHeightPlaceholder: isContentVisibilityPlaceholderMeasurement(item),
     };
@@ -788,25 +826,59 @@ function readLiveBlockMeasurements(
 function readVisibleBlockGeometry(blocks: readonly HTMLElement[]): VisibleBlockGeometry[] {
   const geometry: VisibleBlockGeometry[] = [];
   for (let sourceIndex = 0; sourceIndex < blocks.length; sourceIndex++) {
-    const element = blocks[sourceIndex]!;
-    const top = elementDocumentTop(element);
-    const height = element.offsetHeight;
+    const semanticElement = blocks[sourceIndex]!;
+    const mermaidProxy = readReadyMermaidProxy(semanticElement);
+    if (semanticElement.matches("pre.mm-mermaid.is-rendered") && mermaidProxy === null) {
+      continue;
+    }
+
+    const boxElement = mermaidProxy ?? semanticElement;
+    const top = elementDocumentTop(boxElement);
+    const height = boxElement.offsetHeight;
     if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) {
       continue;
     }
-    geometry.push({ element, height, sourceIndex, top });
+    const item: VisibleBlockGeometry = {
+      boxElement,
+      height,
+      semanticElement,
+      sourceIndex,
+      top,
+    };
+    if (mermaidProxy !== null) {
+      item.geometryOwner = "mermaid-proxy";
+    }
+    geometry.push(item);
   }
   return geometry;
+}
+
+function hasInvalidRenderedMermaidBetween(
+  blocks: readonly HTMLElement[],
+  sourceIndex: number,
+  nextSourceIndex: number | undefined
+): boolean {
+  const end = nextSourceIndex ?? blocks.length;
+  for (let index = sourceIndex + 1; index < end; index++) {
+    const candidate = blocks[index];
+    if (
+      candidate?.matches("pre.mm-mermaid.is-rendered")
+      && readReadyMermaidProxy(candidate) === null
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX = 1;
 
 function isContentVisibilityPlaceholderMeasurement(item: VisibleBlockGeometry): boolean {
-  if (readCssProperty(item.element, "content-visibility").trim() !== "auto") {
+  if (readCssProperty(item.boxElement, "content-visibility").trim() !== "auto") {
     return false;
   }
 
-  const viewport = readDocumentViewport(item.element);
+  const viewport = readDocumentViewport(item.boxElement);
   if (viewport === null) {
     return false;
   }
@@ -817,6 +889,9 @@ function isContentVisibilityPlaceholderMeasurement(item: VisibleBlockGeometry): 
 }
 
 function readOccupiedNonContentHeight(item: VisibleBlockGeometry, occupiedHeight: number): number | null {
+  if (item.geometryOwner === "mermaid-proxy") {
+    return null;
+  }
   if (!Number.isFinite(occupiedHeight)) {
     return null;
   }
@@ -832,10 +907,10 @@ function readOccupiedNonContentHeight(item: VisibleBlockGeometry, occupiedHeight
 
 function readContentBoxContributionHeight(item: VisibleBlockGeometry): number | null {
   if (isContentVisibilityPlaceholderMeasurement(item)) {
-    return readContainIntrinsicBlockSizePx(item.element);
+    return readContainIntrinsicBlockSizePx(item.boxElement);
   }
 
-  const blockAxisNonContent = readBlockAxisPaddingBorderHeightPx(item.element);
+  const blockAxisNonContent = readBlockAxisPaddingBorderHeightPx(item.boxElement);
   if (blockAxisNonContent === null) {
     return null;
   }

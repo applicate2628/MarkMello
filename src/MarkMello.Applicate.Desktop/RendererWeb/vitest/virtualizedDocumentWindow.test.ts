@@ -11,6 +11,7 @@ import {
   type VirtualizedDocumentWindowController,
 } from "../src/virtualizedDocumentWindow";
 import type { IntrinsicSizeMetrics, SectionKind } from "../src/sectionIntrinsicSize";
+import { renderMermaidNode, type MermaidApiLike } from "../src/mermaidRender";
 
 const metrics: IntrinsicSizeMetrics = {
   charsPerLine: 40,
@@ -158,6 +159,54 @@ function dispatchContentVisibilityState(element: HTMLElement, skipped: boolean):
     value: skipped,
   });
   element.dispatchEvent(event);
+}
+
+function createMermaidPrepareHarness(): {
+  flush: () => Promise<void>;
+  prepare: ReturnType<typeof vi.fn<(root: ParentNode) => void>>;
+} {
+  let generation = 0;
+  const pending: Promise<void>[] = [];
+  const api: MermaidApiLike = {
+    render: async () => ({ svg: "<svg>owned</svg>" }),
+  };
+  const prepare = vi.fn((root: ParentNode) => {
+    const source = root.querySelector<HTMLElement>("pre.mm-mermaid");
+    if (source === null) {
+      return;
+    }
+    const currentGeneration = ++generation;
+    pending.push(renderMermaidNode(
+      source,
+      currentGeneration,
+      () => generation,
+      api,
+      1000,
+      { manageVirtualizedProxyLifecycle: true }
+    ));
+  });
+  return {
+    flush: async () => {
+      await Promise.all(pending.splice(0));
+    },
+    prepare,
+  };
+}
+
+function setReadyMermaidLayout(
+  source: HTMLElement,
+  input: { proxyHeight?: number; proxyTop?: number; sourceHeight?: number } = {}
+): HTMLElement {
+  const proxy = source.nextElementSibling as HTMLElement;
+  setElementLayout(source, {
+    height: () => input.sourceHeight ?? 0,
+    top: () => 0,
+  });
+  setElementLayout(proxy, {
+    height: () => input.proxyHeight ?? 182,
+    top: () => input.proxyTop ?? 50,
+  });
+  return proxy;
 }
 
 describe("virtualized document window", () => {
@@ -776,6 +825,235 @@ describe("virtualized document window", () => {
     }
 
     expect(new Set(totals)).toEqual(new Set([165]));
+  });
+
+  it("rendered mermaid source and proxy remain one adjacency unit on reuse", async () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root, setScrollTop } = setScrollRoot(0, 500, 50);
+    const model = new DocumentWindowModel([
+      entry(0, 260, 100, {
+        hasMermaid: true,
+        html: '<pre class="mm-mermaid" data-mm-block-index="260" data-mm-block-kind="code"><code data-mm-mermaid>graph TD</code></pre>',
+        kind: "code",
+      }),
+      entry(1, 261, 100),
+    ]);
+    const mermaid = createMermaidPrepareHarness();
+    const controller = makeController({ model, prepare: mermaid.prepare, root });
+
+    controller.updateWindowForScroll();
+    await mermaid.flush();
+    const source = document.querySelector<HTMLElement>("[data-mm-block-index='260']")!;
+    const proxy = setReadyMermaidLayout(source);
+
+    expect(controller.updateWindowForScroll({ force: true })).toBe(true);
+    expect(source.nextElementSibling).toBe(proxy);
+    expect(proxy.isConnected).toBe(true);
+    expect(mermaid.prepare).toHaveBeenCalledTimes(1);
+
+    setScrollTop(150);
+    controller.updateWindowForScroll({ force: true });
+
+    expect(source.isConnected).toBe(false);
+    expect(proxy.isConnected).toBe(false);
+  });
+
+  it("stale rendered source without proxy is re-rendered before adoption", async () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 100);
+    const model = new DocumentWindowModel([
+      entry(0, 262, 180, {
+        hasMermaid: true,
+        html: '<pre class="mm-mermaid" data-mm-block-index="262" data-mm-block-kind="code" style="content-visibility:auto"><code data-mm-mermaid>graph TD</code></pre>',
+        kind: "code",
+        occupiedNonContentHeight: 20,
+      }),
+    ]);
+    const mermaid = createMermaidPrepareHarness();
+    const controller = makeController({
+      measure: blocks => {
+        const source = blocks[0];
+        return source?.nextElementSibling?.classList.contains("mm-mermaid-svg")
+          ? [{ blockIndex: 262, geometryOwner: "mermaid-proxy", measuredHeight: 200 }]
+          : [];
+      },
+      model,
+      prepare: mermaid.prepare,
+      realization: { enabled: true },
+      root,
+    });
+
+    controller.updateWindowForScroll();
+    await mermaid.flush();
+    const source = document.querySelector<HTMLElement>("[data-mm-block-index='262']")!;
+    const staleProxy = setReadyMermaidLayout(source);
+    staleProxy.remove();
+
+    controller.updateWindowForScroll({ force: true });
+    expect(mermaid.prepare).toHaveBeenCalledTimes(2);
+    expect(source.classList.contains("is-rendered")).toBe(false);
+    expect(source.style.containIntrinsicSize).toBe("auto 160px");
+    await mermaid.flush();
+    const replacementProxy = setReadyMermaidLayout(source);
+    const adopted = controller.adoptRenderedHeights({ reanchor: false });
+
+    expect(source.classList.contains("is-rendered")).toBe(true);
+    expect(replacementProxy).not.toBe(staleProxy);
+    expect(replacementProxy.classList.contains("mm-mermaid-svg")).toBe(true);
+    expect(adopted.updatedCount).toBe(1);
+  });
+
+  it.each([
+    {
+      name: "zero-height proxy",
+      mutate: (source: HTMLElement, proxy: HTMLElement) => {
+        setElementLayout(proxy, { height: () => 0, top: () => 50 });
+      },
+    },
+    {
+      name: "display-none proxy",
+      mutate: (source: HTMLElement, proxy: HTMLElement) => {
+        proxy.style.display = "none";
+      },
+    },
+    {
+      name: "non-hidden positive source",
+      mutate: (source: HTMLElement) => {
+        setElementLayout(source, { height: () => 24, top: () => 0 });
+      },
+    },
+    {
+      name: "immediate duplicate proxy",
+      mutate: (source: HTMLElement, proxy: HTMLElement) => {
+        const duplicate = document.createElement("div");
+        duplicate.className = "mm-mermaid-svg";
+        proxy.after(duplicate);
+      },
+    },
+    {
+      name: "unmanaged current-shaped proxy",
+      mutate: (source: HTMLElement, proxy: HTMLElement) => {
+        proxy.remove();
+        const unmanaged = document.createElement("div");
+        unmanaged.className = "mm-mermaid-svg";
+        source.after(unmanaged);
+        setElementLayout(unmanaged, { height: () => 182, top: () => 50 });
+      },
+    },
+  ])("repairs $name on zero-insert reuse before adoption", async ({ mutate, name }) => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 100);
+    const model = new DocumentWindowModel([
+      entry(0, 263, 180, {
+        hasMermaid: true,
+        html: '<pre class="mm-mermaid" data-mm-block-index="263" data-mm-block-kind="code" style="content-visibility:auto"><code data-mm-mermaid>graph TD</code></pre>',
+        kind: "code",
+        occupiedNonContentHeight: 20,
+      }),
+    ]);
+    const mermaid = createMermaidPrepareHarness();
+    const controller = makeController({
+      measure: blocks => {
+        const source = blocks[0];
+        return source?.nextElementSibling?.classList.contains("mm-mermaid-svg")
+          ? [{ blockIndex: 263, geometryOwner: "mermaid-proxy", measuredHeight: 200 }]
+          : [];
+      },
+      model,
+      prepare: mermaid.prepare,
+      realization: { enabled: true },
+      root,
+    });
+
+    controller.updateWindowForScroll();
+    await mermaid.flush();
+    const source = document.querySelector<HTMLElement>("[data-mm-block-index='263']")!;
+    const originalProxy = setReadyMermaidLayout(source);
+    mutate(source, originalProxy);
+    const invalidProxy = source.nextElementSibling as HTMLElement;
+
+    controller.updateWindowForScroll({ force: true });
+
+    expect(mermaid.prepare, name).toHaveBeenCalledTimes(2);
+    expect(source.classList.contains("is-rendered"), name).toBe(false);
+    expect(source.style.containIntrinsicSize, name).toBe("auto 160px");
+    expect(invalidProxy.isConnected, name).toBe(false);
+
+    await mermaid.flush();
+    const replacementProxy = setReadyMermaidLayout(source);
+    const adopted = controller.adoptRenderedHeights({ reanchor: false });
+
+    expect(replacementProxy).not.toBe(invalidProxy);
+    expect(adopted.updatedCount).toBe(1);
+  });
+
+  it("keeps the Task 1 realization watch while a zero-box pair awaits rerender", async () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 180);
+    const frames = installFrameQueue();
+    const model = new DocumentWindowModel([
+      entry(0, 264, 180, {
+        hasMermaid: true,
+        html: '<pre class="mm-mermaid" data-mm-block-index="264" data-mm-block-kind="code" style="content-visibility:auto"><code data-mm-mermaid>graph TD</code></pre>',
+        kind: "code",
+        occupiedNonContentHeight: 20,
+      }),
+    ]);
+    let generation = 0;
+    let resolveRepair: ((value: { svg: string }) => void) | undefined;
+    let pendingRender = Promise.resolve();
+    const prepare = vi.fn((rootNode: ParentNode) => {
+      const source = rootNode.querySelector<HTMLElement>("pre.mm-mermaid");
+      if (source === null) {
+        return;
+      }
+      const currentGeneration = ++generation;
+      const api: MermaidApiLike = currentGeneration === 1
+        ? { render: async () => ({ svg: "<svg>initial</svg>" }) }
+        : { render: () => new Promise(resolve => { resolveRepair = resolve; }) };
+      pendingRender = renderMermaidNode(
+        source,
+        currentGeneration,
+        () => generation,
+        api,
+        5000,
+        { manageVirtualizedProxyLifecycle: true }
+      );
+    });
+    const controller = makeController({
+      model,
+      prepare,
+      realization: { enabled: true },
+      root,
+    });
+
+    try {
+      controller.updateWindowForScroll();
+      await pendingRender;
+      const source = document.querySelector<HTMLElement>("[data-mm-block-index='264']")!;
+      const zeroProxy = setReadyMermaidLayout(source, { proxyHeight: 0 });
+
+      controller.updateWindowForScroll({ force: true });
+
+      expect(prepare).toHaveBeenCalledTimes(2);
+      expect(zeroProxy.isConnected).toBe(false);
+      expect(source.classList.contains("is-rendered")).toBe(false);
+      const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(source, { height: () => 122, top: () => 0 });
+      setElementLayout(bottomSpacer, { top: () => 144 });
+
+      dispatchContentVisibilityState(source, false);
+      expect(frames.pending()).toBe(1);
+      frames.flush(2);
+      const adopted = controller.adoptRenderedHeights({ reanchor: false });
+
+      expect(adopted.updatedCount).toBe(1);
+      expect(model.getEntryByBlockIndex(264)?.measuredHeight).toBe(144);
+    } finally {
+      resolveRepair?.({ svg: "<svg>repaired</svg>" });
+      await pendingRender;
+      frames.restore();
+    }
   });
 
   it("does no DOM work when scroll stays inside the current model window", () => {

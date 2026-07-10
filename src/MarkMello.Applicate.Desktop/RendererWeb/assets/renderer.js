@@ -59,14 +59,16 @@
   }
 
   // RendererWeb/src/mermaidRender.ts
+  var MERMAID_PROXY_LIFECYCLE_OWNER = /* @__PURE__ */ Symbol("mm-mermaid-proxy-lifecycle-owner");
   function isMermaidNodeNearViewport(node, viewportHeight, marginPx) {
     const rect = node.getBoundingClientRect();
     return rect.bottom >= -marginPx && rect.top <= viewportHeight + marginPx;
   }
-  async function renderMermaidNode(node, generation, getCurrentGeneration, mermaid, perDiagramTimeoutMs) {
+  async function renderMermaidNode(node, generation, getCurrentGeneration, mermaid, perDiagramTimeoutMs, options) {
     const codeEl = node.querySelector("code[data-mm-mermaid]");
     if (!codeEl) return;
     const source = codeEl.textContent ?? "";
+    const lifecycleClaim = options?.manageVirtualizedProxyLifecycle === true ? claimProxyLifecycle(node) : null;
     let timeoutHandle;
     try {
       const id = `mm-mermaid-${generation}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -74,22 +76,108 @@
         timeoutHandle = setTimeout(() => reject(new Error("mermaid render timeout")), perDiagramTimeoutMs);
       });
       const { svg } = await Promise.race([mermaid.render(id, source), timeoutPromise]);
-      if (getCurrentGeneration() !== generation) return;
+      if (getCurrentGeneration() !== generation || lifecycleClaim !== null && (!node.isConnected || !ownsLifecycleClaim(node, lifecycleClaim))) {
+        if (lifecycleClaim !== null) {
+          resetOwnedProxyLifecycle(node, lifecycleClaim);
+        }
+        return;
+      }
       let svgHost = node.nextElementSibling;
       if (!svgHost || !svgHost.classList.contains("mm-mermaid-svg")) {
-        svgHost = document.createElement("div");
+        svgHost = node.ownerDocument.createElement("div");
         svgHost.className = "mm-mermaid-svg";
         node.after(svgHost);
       }
+      if (lifecycleClaim !== null) {
+        lifecycleClaim.proxy = svgHost;
+        svgHost[MERMAID_PROXY_LIFECYCLE_OWNER] = lifecycleClaim;
+        removeExtraAdjacentProxies(svgHost);
+      }
       svgHost.innerHTML = svg;
       node.classList.add("is-rendered");
+      if (lifecycleClaim !== null) {
+        lifecycleClaim.state = "ready";
+      }
     } catch {
+      if (lifecycleClaim !== null) {
+        resetOwnedProxyLifecycle(node, lifecycleClaim);
+        return;
+      }
       if (getCurrentGeneration() !== generation) return;
       node.classList.remove("is-rendered");
       const sibling = node.nextElementSibling;
       if (sibling?.classList.contains("mm-mermaid-svg")) sibling.remove();
     } finally {
       if (timeoutHandle !== void 0) clearTimeout(timeoutHandle);
+    }
+  }
+  function readReadyMermaidProxy(source) {
+    if (!source.matches("pre.mm-mermaid.is-rendered") || !source.isConnected) {
+      return null;
+    }
+    const claim = source[MERMAID_PROXY_LIFECYCLE_OWNER];
+    const proxy = source.nextElementSibling;
+    if (claim === void 0 || claim.state !== "ready" || claim.source !== source || !(proxy instanceof HTMLElement) || claim.proxy !== proxy || proxy[MERMAID_PROXY_LIFECYCLE_OWNER] !== claim || !proxy.isConnected || proxy.parentElement !== source.parentElement || !proxy.classList.contains("mm-mermaid-svg") || proxy.hasAttribute("data-mm-block-index") || proxy.nextElementSibling?.classList.contains("mm-mermaid-svg")) {
+      return null;
+    }
+    const sourceHeight = source.offsetHeight;
+    const proxyHeight = proxy.offsetHeight;
+    const sourceStyle = readComputedStyle(source);
+    const proxyStyle = readComputedStyle(proxy);
+    const sourceIsHiddenOrZeroBox = Number.isFinite(sourceHeight) && (sourceStyle?.display === "none" || sourceHeight <= 0);
+    const proxyIsVisible = proxyStyle?.display !== "none" && proxyStyle?.visibility !== "hidden" && proxyStyle?.visibility !== "collapse";
+    if (!sourceIsHiddenOrZeroBox || !Number.isFinite(proxyHeight) || proxyHeight <= 0 || !proxyIsVisible) {
+      return null;
+    }
+    return proxy;
+  }
+  function claimProxyLifecycle(node) {
+    const previousClaim = node[MERMAID_PROXY_LIFECYCLE_OWNER];
+    if (previousClaim !== void 0) {
+      previousClaim.state = "superseded";
+    }
+    const claim = {
+      proxy: null,
+      source: node,
+      state: "pending"
+    };
+    node[MERMAID_PROXY_LIFECYCLE_OWNER] = claim;
+    let sibling = node.nextElementSibling;
+    while (sibling instanceof HTMLElement && sibling.classList.contains("mm-mermaid-svg")) {
+      sibling[MERMAID_PROXY_LIFECYCLE_OWNER] = claim;
+      sibling = sibling.nextElementSibling;
+    }
+    return claim;
+  }
+  function ownsLifecycleClaim(node, claim) {
+    return claim.state === "pending" && claim.source === node && node[MERMAID_PROXY_LIFECYCLE_OWNER] === claim;
+  }
+  function resetOwnedProxyLifecycle(node, claim) {
+    const ownedNode = node;
+    if (ownedNode[MERMAID_PROXY_LIFECYCLE_OWNER] !== claim) {
+      return;
+    }
+    claim.state = "superseded";
+    delete ownedNode[MERMAID_PROXY_LIFECYCLE_OWNER];
+    node.classList.remove("is-rendered");
+    let sibling = node.nextElementSibling;
+    while (sibling instanceof HTMLElement && sibling.classList.contains("mm-mermaid-svg")) {
+      const nextSibling = sibling.nextElementSibling;
+      if (sibling[MERMAID_PROXY_LIFECYCLE_OWNER] === claim) {
+        sibling.remove();
+      }
+      sibling = nextSibling;
+    }
+  }
+  function readComputedStyle(element) {
+    return element.ownerDocument.defaultView?.getComputedStyle(element) ?? null;
+  }
+  function removeExtraAdjacentProxies(proxy) {
+    let sibling = proxy.nextElementSibling;
+    while (sibling instanceof HTMLElement && sibling.classList.contains("mm-mermaid-svg")) {
+      const nextSibling = sibling.nextElementSibling;
+      sibling.remove();
+      sibling = nextSibling;
     }
   }
 
@@ -2360,6 +2448,11 @@
         }
         const previous = effectiveHeight(entry);
         entry.measuredHeight = update.measuredHeight;
+        if (update.geometryOwner === void 0) {
+          delete entry.geometryOwner;
+        } else {
+          entry.geometryOwner = update.geometryOwner;
+        }
         delete entry.measuredHeightPlaceholder;
         const delta = update.measuredHeight - previous;
         updatedCount++;
@@ -2378,6 +2471,9 @@
           continue;
         }
         if (entry.measuredHeightPlaceholder === true) {
+          continue;
+        }
+        if (entry.geometryOwner === "mermaid-proxy") {
           continue;
         }
         const sample = {
@@ -2528,6 +2624,9 @@
         blockIndex: measurement.blockIndex,
         measuredHeight: measurement.measuredHeight
       };
+      if (measurement.geometryOwner !== void 0) {
+        update.geometryOwner = measurement.geometryOwner;
+      }
       if (measurement.measuredHeightPlaceholder) {
         update.measuredHeightPlaceholder = true;
       }
@@ -2540,12 +2639,16 @@
   function readLiveBlockOffsetMeasuredHeights(blocks) {
     const geometry = readVisibleBlockGeometry(blocks);
     return geometry.map((item, index) => {
-      const nextTop = geometry[index + 1]?.top ?? readNextSiblingDocumentTop(item.element);
+      const nextItem = geometry[index + 1];
+      const nextTop = hasInvalidRenderedMermaidBetween(blocks, item.sourceIndex, nextItem?.sourceIndex) ? readNextSiblingDocumentTop(item.boxElement) : nextItem?.top ?? readNextSiblingDocumentTop(item.boxElement);
       const measuredHeight = nextTop !== void 0 && nextTop > item.top ? nextTop - item.top : item.height;
       const update = {
-        blockIndex: readBlockIndex2(item.element, item.sourceIndex),
+        blockIndex: readBlockIndex2(item.semanticElement, item.sourceIndex),
         measuredHeight: Math.max(0, measuredHeight)
       };
+      if (item.geometryOwner !== void 0) {
+        update.geometryOwner = item.geometryOwner;
+      }
       if (isContentVisibilityPlaceholderMeasurement(item)) {
         update.measuredHeightPlaceholder = true;
       }
@@ -2700,19 +2803,23 @@
   }
   function readLiveSectionModelEntries(blocks, metrics, documentScrollHeight, measured, options) {
     return readLiveBlockMeasurements(blocks, documentScrollHeight).map((measurement, sectionIndex) => {
-      const intrinsicSize = readSectionIntrinsicCalibrationTarget(measurement.element, metrics);
+      const semanticElement = measurement.semanticElement;
+      const intrinsicSize = readSectionIntrinsicCalibrationTarget(semanticElement, metrics);
       const entry = {
         blockIndex: measurement.blockIndex,
         cumulativeTop: measurement.top,
         estimatedHeight: options.intrinsicSizeCalibrator?.estimateTargetHeight(intrinsicSize) ?? intrinsicSize.defaultHeight,
-        hasMermaid: hasMermaidContent(measurement.element),
-        headingLevel: readHeadingLevel2(measurement.element),
-        html: measurement.element.outerHTML,
+        hasMermaid: hasMermaidContent(semanticElement),
+        headingLevel: readHeadingLevel2(semanticElement),
+        html: semanticElement.outerHTML,
         intrinsicSize,
-        kind: normalizeSectionKind(measurement.element.dataset["mmBlockKind"]),
+        kind: normalizeSectionKind(semanticElement.dataset["mmBlockKind"]),
         measuredHeight: measured ? measurement.measuredHeight : void 0,
         sectionIndex
       };
+      if (measurement.geometryOwner !== void 0) {
+        entry.geometryOwner = measurement.geometryOwner;
+      }
       if (measurement.occupiedNonContentHeight !== void 0) {
         entry.occupiedNonContentHeight = measurement.occupiedNonContentHeight;
       }
@@ -2727,11 +2834,17 @@
     const geometry = readVisibleBlockGeometry(blocks);
     const safeDocumentScrollHeight = Number.isFinite(documentScrollHeight) ? documentScrollHeight : 0;
     return geometry.map((item, index) => {
-      const nextTop = geometry[index + 1]?.top;
-      const measuredHeight = nextTop === void 0 ? Math.max(0, item.height, safeDocumentScrollHeight - item.top) : Math.max(0, nextTop - item.top);
+      const nextItem = geometry[index + 1];
+      const invalidMermaidBoundary = hasInvalidRenderedMermaidBetween(
+        blocks,
+        item.sourceIndex,
+        nextItem?.sourceIndex
+      );
+      const nextTop = invalidMermaidBoundary ? readNextSiblingDocumentTop(item.boxElement) : nextItem?.top;
+      const measuredHeight = nextTop !== void 0 && nextTop > item.top ? Math.max(0, nextTop - item.top) : invalidMermaidBoundary ? Math.max(0, item.height) : Math.max(0, item.height, safeDocumentScrollHeight - item.top);
       const measurement = {
         ...item,
-        blockIndex: readBlockIndex2(item.element, item.sourceIndex),
+        blockIndex: readBlockIndex2(item.semanticElement, item.sourceIndex),
         measuredHeight,
         measuredHeightPlaceholder: isContentVisibilityPlaceholderMeasurement(item)
       };
@@ -2745,22 +2858,47 @@
   function readVisibleBlockGeometry(blocks) {
     const geometry = [];
     for (let sourceIndex = 0; sourceIndex < blocks.length; sourceIndex++) {
-      const element = blocks[sourceIndex];
-      const top = elementDocumentTop(element);
-      const height = element.offsetHeight;
+      const semanticElement = blocks[sourceIndex];
+      const mermaidProxy = readReadyMermaidProxy(semanticElement);
+      if (semanticElement.matches("pre.mm-mermaid.is-rendered") && mermaidProxy === null) {
+        continue;
+      }
+      const boxElement = mermaidProxy ?? semanticElement;
+      const top = elementDocumentTop(boxElement);
+      const height = boxElement.offsetHeight;
       if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) {
         continue;
       }
-      geometry.push({ element, height, sourceIndex, top });
+      const item = {
+        boxElement,
+        height,
+        semanticElement,
+        sourceIndex,
+        top
+      };
+      if (mermaidProxy !== null) {
+        item.geometryOwner = "mermaid-proxy";
+      }
+      geometry.push(item);
     }
     return geometry;
   }
+  function hasInvalidRenderedMermaidBetween(blocks, sourceIndex, nextSourceIndex) {
+    const end = nextSourceIndex ?? blocks.length;
+    for (let index = sourceIndex + 1; index < end; index++) {
+      const candidate = blocks[index];
+      if (candidate?.matches("pre.mm-mermaid.is-rendered") && readReadyMermaidProxy(candidate) === null) {
+        return true;
+      }
+    }
+    return false;
+  }
   var CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX = 1;
   function isContentVisibilityPlaceholderMeasurement(item) {
-    if (readCssProperty(item.element, "content-visibility").trim() !== "auto") {
+    if (readCssProperty(item.boxElement, "content-visibility").trim() !== "auto") {
       return false;
     }
-    const viewport = readDocumentViewport(item.element);
+    const viewport = readDocumentViewport(item.boxElement);
     if (viewport === null) {
       return false;
     }
@@ -2768,6 +2906,9 @@
     return bottom <= viewport.top + CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX || item.top >= viewport.bottom - CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX;
   }
   function readOccupiedNonContentHeight(item, occupiedHeight) {
+    if (item.geometryOwner === "mermaid-proxy") {
+      return null;
+    }
     if (!Number.isFinite(occupiedHeight)) {
       return null;
     }
@@ -2780,9 +2921,9 @@
   }
   function readContentBoxContributionHeight(item) {
     if (isContentVisibilityPlaceholderMeasurement(item)) {
-      return readContainIntrinsicBlockSizePx(item.element);
+      return readContainIntrinsicBlockSizePx(item.boxElement);
     }
-    const blockAxisNonContent = readBlockAxisPaddingBorderHeightPx(item.element);
+    const blockAxisNonContent = readBlockAxisPaddingBorderHeightPx(item.boxElement);
     if (blockAxisNonContent === null) {
       return null;
     }
@@ -3039,6 +3180,8 @@
       const existingByBlockIndex = collectExistingSections(deps.main);
       const nodes = [];
       let insertedCount = 0;
+      let repairedMermaidCount = 0;
+      const repairedMermaidBlockIndexes = /* @__PURE__ */ new Set();
       const topSpacer = createSpacer(deps.ownerWindow.document, TOP_SPACER);
       const bottomSpacer = createSpacer(deps.ownerWindow.document, BOTTOM_SPACER);
       const spacers = deps.model.computeSpacerHeights(range);
@@ -3052,22 +3195,25 @@
         }
         const existing = existingByBlockIndex.get(entry.blockIndex);
         if (existing) {
-          nodes.push(existing);
+          if (appendSectionUnit(nodes, existing.source, existing.proxy, entry)) {
+            repairedMermaidCount++;
+            repairedMermaidBlockIndexes.add(entry.blockIndex);
+          }
           continue;
         }
         const created = createSectionNode(deps.ownerWindow.document, entry);
         if (created) {
           insertedCount++;
-          nodes.push(created);
+          appendSectionUnit(nodes, created, null, entry);
         }
       }
       nodes.push(bottomSpacer);
       deps.main.replaceChildren(...nodes);
       currentRange = { ...range };
       const mountedBlocks = collectLiveDocumentSectionElements(deps.main);
-      reconcileMountedNonContentMetadata(deps.model, mountedBlocks);
+      reconcileMountedNonContentMetadata(deps.model, mountedBlocks, repairedMermaidBlockIndexes);
       realizationTracker?.syncMountedSections(mountedBlocks);
-      if (insertedCount > 0) {
+      if (insertedCount > 0 || repairedMermaidCount > 0) {
         deps.prepareInsertedContent?.(deps.main);
       }
     };
@@ -3156,10 +3302,27 @@
       const raw = element.dataset["mmBlockIndex"];
       const blockIndex = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
       if (Number.isFinite(blockIndex)) {
-        result.set(blockIndex, element);
+        result.set(blockIndex, {
+          proxy: readReadyMermaidProxy(element),
+          source: element
+        });
       }
     }
     return result;
+  }
+  function appendSectionUnit(nodes, source, proxy, entry) {
+    nodes.push(source);
+    if (proxy !== null) {
+      source.style.removeProperty("contain-intrinsic-size");
+      nodes.push(proxy);
+      return false;
+    }
+    if (!source.matches("pre.mm-mermaid.is-rendered")) {
+      return false;
+    }
+    source.classList.remove("is-rendered");
+    writeIntrinsicSizeStamp(source, entry);
+    return true;
   }
   function captureFirstVisibleLiveBlockAnchor(blocks) {
     for (const block of blocks) {
@@ -3167,7 +3330,8 @@
       if (blockIndex === null) {
         continue;
       }
-      const rect = block.getBoundingClientRect();
+      const boxElement = readReadyMermaidProxy(block) ?? block;
+      const rect = boxElement.getBoundingClientRect();
       if (!Number.isFinite(rect.height) || rect.height <= 0 || !Number.isFinite(rect.bottom) || rect.bottom < 0) {
         continue;
       }
@@ -3212,6 +3376,9 @@
     template.innerHTML = entry.html;
     const firstElement = Array.from(template.content.childNodes).find((node) => node instanceof HTMLElement);
     if (firstElement) {
+      if (firstElement.matches("pre.mm-mermaid.is-rendered")) {
+        firstElement.classList.remove("is-rendered");
+      }
       writeIntrinsicSizeStamp(firstElement, entry);
     }
     return firstElement ?? null;
@@ -3232,9 +3399,17 @@
     const stamp = Math.max(0, effectiveHeight(entry) - occupiedNonContentHeight);
     return Number.isFinite(stamp) ? stamp : null;
   }
-  function reconcileMountedNonContentMetadata(model, blocks) {
+  function reconcileMountedNonContentMetadata(model, blocks, excludedBlockIndexes) {
     const updates = readLiveBlockOffsetMeasuredHeights(blocks);
     for (const update of updates) {
+      if (excludedBlockIndexes.has(update.blockIndex)) {
+        continue;
+      }
+      const block = blocks.find((candidate) => readBlockIndex3(candidate) === update.blockIndex);
+      if (update.geometryOwner === "mermaid-proxy") {
+        block?.style.removeProperty("contain-intrinsic-size");
+        continue;
+      }
       const occupiedNonContentHeight = update.occupiedNonContentHeight;
       if (typeof occupiedNonContentHeight !== "number" || !Number.isFinite(occupiedNonContentHeight)) {
         continue;
@@ -3244,7 +3419,6 @@
         continue;
       }
       entry.occupiedNonContentHeight = occupiedNonContentHeight;
-      const block = blocks.find((candidate) => readBlockIndex3(candidate) === update.blockIndex);
       if (block !== void 0) {
         writeIntrinsicSizeStamp(block, entry);
       }
@@ -3298,6 +3472,10 @@
       }
       mountGeneration++;
       for (const block of blocks) {
+        if (readReadyMermaidProxy(block) !== null) {
+          watches.delete(block);
+          continue;
+        }
         if (!isContentVisibilityAutoOwner(block)) {
           watches.delete(block);
           continue;
@@ -3341,6 +3519,13 @@
       for (const update of updates) {
         const block = blocksByBlockIndex.get(update.blockIndex);
         if (block === void 0 || block === null || readBlockIndex3(block) !== update.blockIndex) {
+          continue;
+        }
+        if (update.geometryOwner === "mermaid-proxy") {
+          const proxy = readReadyMermaidProxy(block);
+          if (proxy !== null && deps.main.contains(proxy)) {
+            accepted.push(update);
+          }
           continue;
         }
         const watch = watches.get(block);
@@ -4472,7 +4657,14 @@
     }, MERMAID_WATCHDOG_MS);
     try {
       for (const node of eagerNodes) {
-        await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+        await renderMermaidNode(
+          node,
+          generation,
+          () => mermaidRenderGeneration,
+          mermaid,
+          MERMAID_PER_DIAGRAM_TIMEOUT_MS,
+          virtualizationEnabled ? { manageVirtualizedProxyLifecycle: true } : void 0
+        );
         if (eagerBudgetExpired || generation !== mermaidRenderGeneration) return;
       }
     } finally {
@@ -4584,7 +4776,14 @@
     mermaidLazyRenderQueue = mermaidLazyRenderQueue.catch(() => void 0).then(async () => {
       if (generation !== mermaidRenderGeneration) return;
       postPerfMark("mm-mermaid-lazy-render-start");
-      await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+      await renderMermaidNode(
+        node,
+        generation,
+        () => mermaidRenderGeneration,
+        mermaid,
+        MERMAID_PER_DIAGRAM_TIMEOUT_MS,
+        virtualizationEnabled ? { manageVirtualizedProxyLifecycle: true } : void 0
+      );
       if (generation === mermaidRenderGeneration) {
         postPerfMark("mm-mermaid-lazy-render-end");
         scheduleCurrentProcessedDocumentCacheClone();

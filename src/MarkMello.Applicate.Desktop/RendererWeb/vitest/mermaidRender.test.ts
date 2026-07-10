@@ -64,6 +64,145 @@ describe("renderMermaidNode", () => {
     expect(node.classList.contains("is-rendered")).toBe(false);
     expect(node.nextElementSibling).toBeNull();
   });
+
+  it("mermaid terminal lifecycle removes stale or failed proxy without orphaning source", async () => {
+    const node = makeNode("graph TD");
+    node.style.containIntrinsicSize = "auto 140px";
+    const existingProxy = document.createElement("div");
+    existingProxy.className = "mm-mermaid-svg";
+    node.after(existingProxy);
+    node.classList.add("is-rendered");
+    let resolveRender!: (value: { svg: string }) => void;
+    const staleApi: MermaidApiLike = {
+      render: () => new Promise(resolve => { resolveRender = resolve; })
+    };
+    let currentGeneration = 1;
+    const staleRender = renderMermaidNode(
+      node,
+      1,
+      () => currentGeneration,
+      staleApi,
+      5000,
+      { manageVirtualizedProxyLifecycle: true }
+    );
+
+    currentGeneration = 2;
+    resolveRender!({ svg: "<svg>STALE</svg>" });
+    await staleRender;
+
+    expect(node.classList.contains("is-rendered")).toBe(false);
+    expect(node.nextElementSibling).toBeNull();
+    expect(node.style.containIntrinsicSize).toBe("auto 140px");
+
+    const currentApi: MermaidApiLike = {
+      render: async () => { throw new Error("syntax"); }
+    };
+    const failedProxy = document.createElement("div");
+    failedProxy.className = "mm-mermaid-svg";
+    node.after(failedProxy);
+    node.classList.add("is-rendered");
+
+    await renderMermaidNode(
+      node,
+      2,
+      () => 2,
+      currentApi,
+      5000,
+      { manageVirtualizedProxyLifecycle: true }
+    );
+
+    expect(node.classList.contains("is-rendered")).toBe(false);
+    expect(node.nextElementSibling).toBeNull();
+    expect(node.style.containIntrinsicSize).toBe("auto 140px");
+  });
+
+  it("newer lifecycle claim supersedes older completion without overwrite or cleanup", async () => {
+    const node = makeNode("graph TD");
+    let resolveOlder!: (value: { svg: string }) => void;
+    let resolveNewer!: (value: { svg: string }) => void;
+    const olderApi: MermaidApiLike = {
+      render: () => new Promise(resolve => { resolveOlder = resolve; }),
+    };
+    const newerApi: MermaidApiLike = {
+      render: () => new Promise(resolve => { resolveNewer = resolve; }),
+    };
+    const older = renderMermaidNode(
+      node,
+      1,
+      () => 1,
+      olderApi,
+      5000,
+      { manageVirtualizedProxyLifecycle: true }
+    );
+    const newer = renderMermaidNode(
+      node,
+      1,
+      () => 1,
+      newerApi,
+      5000,
+      { manageVirtualizedProxyLifecycle: true }
+    );
+
+    resolveNewer({ svg: "<svg>NEW</svg>" });
+    await newer;
+    const currentProxy = node.nextElementSibling;
+    resolveOlder({ svg: "<svg>OLD</svg>" });
+    await older;
+
+    expect(node.classList.contains("is-rendered")).toBe(true);
+    expect(node.nextElementSibling).toBe(currentProxy);
+    expect(currentProxy?.innerHTML).toBe("<svg>NEW</svg>");
+
+    let rejectSuperseded!: (reason?: unknown) => void;
+    const supersededFailureApi: MermaidApiLike = {
+      render: () => new Promise((_resolve, reject) => { rejectSuperseded = reject; }),
+    };
+    const supersededFailure = renderMermaidNode(
+      node,
+      1,
+      () => 1,
+      supersededFailureApi,
+      5000,
+      { manageVirtualizedProxyLifecycle: true }
+    );
+    const latest = renderMermaidNode(
+      node,
+      1,
+      () => 1,
+      { render: async () => ({ svg: "<svg>LATEST</svg>" }) },
+      5000,
+      { manageVirtualizedProxyLifecycle: true }
+    );
+    await latest;
+    rejectSuperseded(new Error("superseded"));
+    await supersededFailure;
+
+    expect(node.classList.contains("is-rendered")).toBe(true);
+    expect(node.nextElementSibling?.innerHTML).toBe("<svg>LATEST</svg>");
+  });
+
+  it("detached lifecycle completion cannot create or retain a proxy", async () => {
+    const node = makeNode("graph TD");
+    let resolveRender!: (value: { svg: string }) => void;
+    const api: MermaidApiLike = {
+      render: () => new Promise(resolve => { resolveRender = resolve; }),
+    };
+    const completion = renderMermaidNode(
+      node,
+      1,
+      () => 1,
+      api,
+      5000,
+      { manageVirtualizedProxyLifecycle: true }
+    );
+
+    node.remove();
+    resolveRender({ svg: "<svg>DETACHED</svg>" });
+    await completion;
+
+    expect(node.classList.contains("is-rendered")).toBe(false);
+    expect(node.nextElementSibling).toBeNull();
+  });
 });
 
 describe("isMermaidNodeNearViewport", () => {

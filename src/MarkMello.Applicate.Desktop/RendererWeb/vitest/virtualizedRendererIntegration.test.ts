@@ -78,4 +78,13 @@ describe("renderer virtualization wiring", () => {
     expect(source).not.toContain("offsetHeight !==");
     expect(source).not.toContain("Math.abs(item.height - intrinsicSize) > CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX");
   });
+
+  it("enables Mermaid proxy lifecycle ownership only through the virtualization flag", () => {
+    const source = readRendererSource();
+
+    expect(source).toContain(
+      "virtualizationEnabled ? { manageVirtualizedProxyLifecycle: true } : undefined"
+    );
+    expect(source).not.toContain("manageVirtualizedProxyLifecycle: false");
+  });
 });

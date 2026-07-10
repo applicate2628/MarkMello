@@ -15,6 +15,7 @@ import {
   createSectionIntrinsicCalibrator,
   type IntrinsicSizeMetrics,
 } from "../src/sectionIntrinsicSize";
+import { renderMermaidNode, type MermaidApiLike } from "../src/mermaidRender";
 
 const metrics: IntrinsicSizeMetrics = {
   charsPerLine: 40,
@@ -89,13 +90,56 @@ function setComputedBoxStyle(
 }
 
 function mermaidBlock(index: number, top: number, height: number): HTMLElement {
-  const element = block(index, top, height, "code");
+  const element = block(index, top, height, "code", "pre");
   element.className = "mm-mermaid";
   const code = document.createElement("code");
   code.dataset.mmMermaid = "";
   code.textContent = "flowchart LR\nA --> B";
   element.append(code);
   return element;
+}
+
+function mermaidProxy(top: number, height: number): HTMLElement {
+  const element = document.createElement("div");
+  element.className = "mm-mermaid-svg";
+  Object.defineProperty(element, "offsetTop", {
+    configurable: true,
+    get: () => top,
+  });
+  Object.defineProperty(element, "offsetHeight", {
+    configurable: true,
+    get: () => height,
+  });
+  return element;
+}
+
+async function renderOwnedMermaidProxy(
+  source: HTMLElement,
+  top: number,
+  height: number,
+  generation = 1
+): Promise<HTMLElement> {
+  const api: MermaidApiLike = {
+    render: async () => ({ svg: "<svg>owned</svg>" }),
+  };
+  await renderMermaidNode(
+    source,
+    generation,
+    () => generation,
+    api,
+    1000,
+    { manageVirtualizedProxyLifecycle: true }
+  );
+  const proxy = source.nextElementSibling as HTMLElement;
+  Object.defineProperty(proxy, "offsetTop", {
+    configurable: true,
+    get: () => top,
+  });
+  Object.defineProperty(proxy, "offsetHeight", {
+    configurable: true,
+    get: () => height,
+  });
+  return proxy;
 }
 
 describe("document window model", () => {
@@ -190,6 +234,156 @@ describe("document window model", () => {
       { blockIndex: 34, measuredHeight: 80, occupiedNonContentHeight: 30 },
       { blockIndex: 35, measuredHeight: 90, occupiedNonContentHeight: 30 },
     ]);
+  });
+
+  it("rendered mermaid uses adjacent svg proxy without duplicating block index", async () => {
+    const main = document.createElement("main");
+    const source = mermaidBlock(90, 0, 0);
+    const bottomSpacer = block(-1, 250, 0);
+    bottomSpacer.removeAttribute("data-mm-block-index");
+    main.append(source, bottomSpacer);
+    document.body.append(main);
+    const proxy = await renderOwnedMermaidProxy(source, 50, 182);
+
+    expect(collectLiveDocumentSectionElements(main)).toEqual([source]);
+    expect(proxy.hasAttribute("data-mm-block-index")).toBe(false);
+    expect(readLiveBlockOffsetMeasuredHeights([source])).toEqual([
+      {
+        blockIndex: 90,
+        geometryOwner: "mermaid-proxy",
+        measuredHeight: 200,
+      },
+    ]);
+  });
+
+  it("rendered mermaid height is not absorbed by previous section", async () => {
+    const main = document.createElement("main");
+    const previous = block(91, 0, 40);
+    const source = mermaidBlock(92, 0, 0);
+    const next = block(93, 279, 56);
+    main.append(previous, source, next);
+    document.body.append(main);
+    await renderOwnedMermaidProxy(source, 79, 182);
+
+    const updates = readLiveBlockOffsetMeasuredHeights([previous, source, next]);
+
+    expect(updates[0]).toMatchObject({ blockIndex: 91, measuredHeight: 79 });
+    expect(updates[1]).toEqual({
+      blockIndex: 92,
+      geometryOwner: "mermaid-proxy",
+      measuredHeight: 200,
+    });
+  });
+
+  it("mermaid proxy never enters generic intrinsic calibration", async () => {
+    const main = document.createElement("main");
+    const source = mermaidBlock(94, 0, 0);
+    const bottomSpacer = block(-1, 240, 0);
+    bottomSpacer.removeAttribute("data-mm-block-index");
+    main.append(source, bottomSpacer);
+    document.body.append(main);
+    await renderOwnedMermaidProxy(source, 40, 160);
+
+    const model = buildDocumentWindowModelFromLiveBlocks([source], metrics, 240);
+    const calibrator = createSectionIntrinsicCalibrator({ minSamplesPerBucket: 1 });
+
+    expect(model.sections).toHaveLength(1);
+    expect(model.sections[0]).toMatchObject({
+      blockIndex: 94,
+      geometryOwner: "mermaid-proxy",
+      measuredHeight: 200,
+    });
+    expect(model.recordIntrinsicSizeCalibrationSamples(calibrator)).toBe(0);
+    expect(calibrator.getSummary().sampleCount).toBe(0);
+  });
+
+  it("rejects an unmanaged adjacent Mermaid proxy without predecessor absorption", () => {
+    const main = document.createElement("main");
+    const previous = block(95, 0, 40);
+    const source = mermaidBlock(96, 0, 0);
+    source.classList.add("is-rendered");
+    const unmanagedProxy = mermaidProxy(79, 182);
+    const next = block(97, 279, 56);
+    main.append(previous, source, unmanagedProxy, next);
+    document.body.append(main);
+
+    const updates = readLiveBlockOffsetMeasuredHeights([previous, source, next]);
+
+    expect(updates[0]).toMatchObject({ blockIndex: 95, measuredHeight: 40 });
+    expect(updates.some(update => update.blockIndex === 96)).toBe(false);
+  });
+
+  it("rejects a current pending Mermaid claim until its exact proxy is terminal ready", async () => {
+    const main = document.createElement("main");
+    const source = mermaidBlock(98, 0, 0);
+    const bottomSpacer = block(-1, 250, 0);
+    bottomSpacer.removeAttribute("data-mm-block-index");
+    main.append(source, bottomSpacer);
+    document.body.append(main);
+    const proxy = await renderOwnedMermaidProxy(source, 50, 182);
+    let resolveRender!: (value: { svg: string }) => void;
+    const pendingApi: MermaidApiLike = {
+      render: () => new Promise(resolve => { resolveRender = resolve; }),
+    };
+    const pending = renderMermaidNode(
+      source,
+      2,
+      () => 2,
+      pendingApi,
+      5000,
+      { manageVirtualizedProxyLifecycle: true }
+    );
+
+    expect(readLiveBlockOffsetMeasuredHeights([source])).toEqual([]);
+
+    resolveRender({ svg: "<svg>ready</svg>" });
+    await pending;
+
+    expect(source.nextElementSibling).toBe(proxy);
+    expect(readLiveBlockOffsetMeasuredHeights([source])).toEqual([
+      { blockIndex: 98, geometryOwner: "mermaid-proxy", measuredHeight: 200 },
+    ]);
+  });
+
+  it.each([
+    {
+      name: "zero-height proxy",
+      mutate: (source: HTMLElement, proxy: HTMLElement) => {
+        Object.defineProperty(proxy, "offsetHeight", { configurable: true, get: () => 0 });
+      },
+    },
+    {
+      name: "display-none proxy",
+      mutate: (source: HTMLElement, proxy: HTMLElement) => {
+        proxy.style.display = "none";
+      },
+    },
+    {
+      name: "non-hidden positive source",
+      mutate: (source: HTMLElement) => {
+        Object.defineProperty(source, "offsetHeight", { configurable: true, get: () => 24 });
+      },
+    },
+    {
+      name: "immediate duplicate proxy",
+      mutate: (source: HTMLElement, proxy: HTMLElement) => {
+        const duplicate = document.createElement("div");
+        duplicate.className = "mm-mermaid-svg";
+        proxy.after(duplicate);
+      },
+    },
+  ])("rejects a terminal claim with $name", async ({ mutate }) => {
+    const main = document.createElement("main");
+    const source = mermaidBlock(99, 0, 0);
+    const bottomSpacer = block(-1, 250, 0);
+    bottomSpacer.removeAttribute("data-mm-block-index");
+    main.append(source, bottomSpacer);
+    document.body.append(main);
+    const proxy = await renderOwnedMermaidProxy(source, 50, 182);
+
+    mutate(source, proxy);
+
+    expect(readLiveBlockOffsetMeasuredHeights([source])).toEqual([]);
   });
 
   it("derives occupied non-content metadata as occupied minus content box", () => {
