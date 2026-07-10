@@ -1867,6 +1867,8 @@
       const occupiedNonContentHeight = readOccupiedNonContentHeight(item, update.measuredHeight);
       if (occupiedNonContentHeight !== null) {
         update.occupiedNonContentHeight = occupiedNonContentHeight;
+      } else if (item.geometryOwner !== "mermaid-proxy") {
+        update.measuredHeightPlaceholder = true;
       }
       return update;
     });
@@ -2063,6 +2065,8 @@
       const occupiedNonContentHeight = readOccupiedNonContentHeight(item, measuredHeight);
       if (occupiedNonContentHeight !== null) {
         measurement.occupiedNonContentHeight = occupiedNonContentHeight;
+      } else if (item.geometryOwner !== "mermaid-proxy") {
+        measurement.measuredHeightPlaceholder = true;
       }
       return measurement;
     });
