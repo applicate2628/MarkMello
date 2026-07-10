@@ -2348,16 +2348,19 @@
           continue;
         }
         const entry = this.sections[index];
+        const occupiedNonContentHeight = update.occupiedNonContentHeight;
+        if (typeof occupiedNonContentHeight === "number" && Number.isFinite(occupiedNonContentHeight)) {
+          entry.occupiedNonContentHeight = occupiedNonContentHeight;
+        }
+        if (update.measuredHeightPlaceholder === true) {
+          continue;
+        }
         if (!Number.isFinite(update.measuredHeight) || update.measuredHeight < 0) {
           continue;
         }
         const previous = effectiveHeight(entry);
         entry.measuredHeight = update.measuredHeight;
-        if (update.measuredHeightPlaceholder === true) {
-          entry.measuredHeightPlaceholder = true;
-        } else {
-          delete entry.measuredHeightPlaceholder;
-        }
+        delete entry.measuredHeightPlaceholder;
         const delta = update.measuredHeight - previous;
         updatedCount++;
         maxAbsDelta = Math.max(maxAbsDelta, Math.abs(delta));
@@ -2374,14 +2377,14 @@
         if (entry.measuredHeight === void 0 || entry.intrinsicSize === void 0) {
           continue;
         }
+        if (entry.measuredHeightPlaceholder === true) {
+          continue;
+        }
         const sample = {
           ...entry.intrinsicSize,
           blockIndex: entry.blockIndex,
           measuredHeight: entry.measuredHeight
         };
-        if (entry.measuredHeightPlaceholder === true) {
-          Object.assign(sample, { measuredHeightPlaceholder: true });
-        }
         if (calibrator.recordSample(sample)) {
           recordedCount++;
         }
@@ -2528,6 +2531,9 @@
       if (measurement.measuredHeightPlaceholder) {
         update.measuredHeightPlaceholder = true;
       }
+      if (measurement.occupiedNonContentHeight !== void 0) {
+        update.occupiedNonContentHeight = measurement.occupiedNonContentHeight;
+      }
       return update;
     });
   }
@@ -2542,6 +2548,10 @@
       };
       if (isContentVisibilityPlaceholderMeasurement(item)) {
         update.measuredHeightPlaceholder = true;
+      }
+      const occupiedNonContentHeight = readOccupiedNonContentHeight(item, update.measuredHeight);
+      if (occupiedNonContentHeight !== null) {
+        update.occupiedNonContentHeight = occupiedNonContentHeight;
       }
       return update;
     });
@@ -2615,9 +2625,6 @@
     let placeholderCount = 0;
     const worstOffenders = [];
     for (const measuredEntry of measuredModel.sections) {
-      if (measuredEntry.measuredHeight === void 0) {
-        continue;
-      }
       const kind = estimateErrorKind(measuredEntry);
       if (measuredEntry.measuredHeightPlaceholder === true) {
         const bucket2 = mutableBuckets.get(kind) ?? {
@@ -2632,6 +2639,9 @@
         bucket2.placeholderCount++;
         mutableBuckets.set(kind, bucket2);
         placeholderCount++;
+        continue;
+      }
+      if (measuredEntry.measuredHeight === void 0) {
         continue;
       }
       const estimateEntry = estimateOnlyModel.getEntryByBlockIndex(measuredEntry.blockIndex);
@@ -2703,7 +2713,11 @@
         measuredHeight: measured ? measurement.measuredHeight : void 0,
         sectionIndex
       };
+      if (measurement.occupiedNonContentHeight !== void 0) {
+        entry.occupiedNonContentHeight = measurement.occupiedNonContentHeight;
+      }
       if (measured && measurement.measuredHeightPlaceholder) {
+        entry.measuredHeight = void 0;
         entry.measuredHeightPlaceholder = true;
       }
       return entry;
@@ -2715,12 +2729,17 @@
     return geometry.map((item, index) => {
       const nextTop = geometry[index + 1]?.top;
       const measuredHeight = nextTop === void 0 ? Math.max(0, item.height, safeDocumentScrollHeight - item.top) : Math.max(0, nextTop - item.top);
-      return {
+      const measurement = {
         ...item,
         blockIndex: readBlockIndex2(item.element, item.sourceIndex),
         measuredHeight,
         measuredHeightPlaceholder: isContentVisibilityPlaceholderMeasurement(item)
       };
+      const occupiedNonContentHeight = readOccupiedNonContentHeight(item, measuredHeight);
+      if (occupiedNonContentHeight !== null) {
+        measurement.occupiedNonContentHeight = occupiedNonContentHeight;
+      }
+      return measurement;
     });
   }
   function readVisibleBlockGeometry(blocks) {
@@ -2741,16 +2760,60 @@
     if (readCssProperty(item.element, "content-visibility").trim() !== "auto") {
       return false;
     }
-    const intrinsicSize = readContainIntrinsicBlockSizePx(item.element);
-    if (intrinsicSize === null || Math.abs(item.height - intrinsicSize) > CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX) {
-      return false;
-    }
     const viewport = readDocumentViewport(item.element);
     if (viewport === null) {
       return false;
     }
     const bottom = item.top + item.height;
-    return bottom < viewport.top - CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX || item.top > viewport.bottom + CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX;
+    return bottom <= viewport.top + CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX || item.top >= viewport.bottom - CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX;
+  }
+  function readOccupiedNonContentHeight(item, occupiedHeight) {
+    if (!Number.isFinite(occupiedHeight)) {
+      return null;
+    }
+    const contentBoxHeight = readContentBoxContributionHeight(item);
+    if (contentBoxHeight === null) {
+      return null;
+    }
+    const occupiedNonContentHeight = occupiedHeight - contentBoxHeight;
+    return Number.isFinite(occupiedNonContentHeight) ? occupiedNonContentHeight : null;
+  }
+  function readContentBoxContributionHeight(item) {
+    if (isContentVisibilityPlaceholderMeasurement(item)) {
+      return readContainIntrinsicBlockSizePx(item.element);
+    }
+    const blockAxisNonContent = readBlockAxisPaddingBorderHeightPx(item.element);
+    if (blockAxisNonContent === null) {
+      return null;
+    }
+    const contentBoxHeight = item.height - blockAxisNonContent;
+    return Number.isFinite(contentBoxHeight) && contentBoxHeight >= 0 ? contentBoxHeight : null;
+  }
+  function readBlockAxisPaddingBorderHeightPx(element) {
+    const styles = element.ownerDocument.defaultView?.getComputedStyle(element);
+    if (!styles) {
+      return 0;
+    }
+    let total = 0;
+    for (const propertyName of ["padding-top", "padding-bottom", "border-top-width", "border-bottom-width"]) {
+      const value = readCssPixelLength(styles.getPropertyValue(propertyName));
+      if (value === null) {
+        return null;
+      }
+      total += value;
+    }
+    return total;
+  }
+  function readCssPixelLength(raw) {
+    const value = raw.trim();
+    if (value === "" || value === "0") {
+      return 0;
+    }
+    if (!value.endsWith("px")) {
+      return null;
+    }
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
   }
   function readContainIntrinsicBlockSizePx(element) {
     const raw = readCssProperty(element, "contain-intrinsic-size");
@@ -2971,6 +3034,7 @@
   function createVirtualizedDocumentWindowController(deps) {
     let currentRange = null;
     const renderAhead = deps.renderAhead ?? DEFAULT_RENDER_AHEAD;
+    const realizationTracker = deps.realization?.enabled === true ? createRealizationTracker(deps) : null;
     const renderRange = (range) => {
       const existingByBlockIndex = collectExistingSections(deps.main);
       const nodes = [];
@@ -3000,6 +3064,9 @@
       nodes.push(bottomSpacer);
       deps.main.replaceChildren(...nodes);
       currentRange = { ...range };
+      const mountedBlocks = collectLiveDocumentSectionElements(deps.main);
+      reconcileMountedNonContentMetadata(deps.model, mountedBlocks);
+      realizationTracker?.syncMountedSections(mountedBlocks);
       if (insertedCount > 0) {
         deps.prepareInsertedContent?.(deps.main);
       }
@@ -3029,7 +3096,9 @@
         const blocks = collectLiveDocumentSectionElements(deps.main);
         const liveAnchor = preserveSectionIndex === null ? captureFirstVisibleLiveBlockAnchor(blocks) : null;
         const updates = deps.readMeasuredHeights ? deps.readMeasuredHeights(blocks) : readLiveBlockOffsetMeasuredHeights(blocks);
-        const result = deps.model.updateMeasuredHeightsByBlockIndex(updates);
+        const result = deps.model.updateMeasuredHeightsByBlockIndex(
+          realizationTracker?.filterRealizedUpdates(blocks, updates) ?? updates
+        );
         if (result.updatedCount === 0) {
           return EMPTY_HEIGHT_UPDATE;
         }
@@ -3052,6 +3121,9 @@
         }
         return result;
       },
+      dispose: () => {
+        realizationTracker?.dispose();
+      },
       ensureSectionRangeRendered: (start, end, options = {}) => ensureRangeRendered({ end, start }, options),
       ensureSectionRendered: (sectionIndex, options = {}) => ensureRangeRendered({ end: sectionIndex, start: sectionIndex }, options),
       getCurrentRange: () => currentRange === null ? null : { ...currentRange },
@@ -3071,7 +3143,7 @@
   function createFullDocumentFragmentFromWindowModel(ownerDocument, model) {
     const fragment = ownerDocument.createDocumentFragment();
     for (const entry of model.sections) {
-      const created = createSectionNode(ownerDocument, entry, effectiveHeight(entry));
+      const created = createSectionNode(ownerDocument, entry);
       if (created) {
         fragment.append(created);
       }
@@ -3132,17 +3204,318 @@
     spacer.style.pointerEvents = "none";
     return spacer;
   }
-  function createSectionNode(ownerDocument, entry, settledHeightPx) {
+  function createSectionNode(ownerDocument, entry) {
     if (!entry.html) {
       return null;
     }
     const template = ownerDocument.createElement("template");
     template.innerHTML = entry.html;
     const firstElement = Array.from(template.content.childNodes).find((node) => node instanceof HTMLElement);
-    if (firstElement && settledHeightPx !== void 0 && Number.isFinite(settledHeightPx) && settledHeightPx > 0) {
-      firstElement.style.containIntrinsicSize = `auto ${settledHeightPx}px`;
+    if (firstElement) {
+      writeIntrinsicSizeStamp(firstElement, entry);
     }
     return firstElement ?? null;
+  }
+  function writeIntrinsicSizeStamp(element, entry) {
+    const stamp = readIntrinsicSizeStamp(entry);
+    if (stamp === null) {
+      element.style.removeProperty("contain-intrinsic-size");
+      return;
+    }
+    element.style.containIntrinsicSize = `auto ${stamp}px`;
+  }
+  function readIntrinsicSizeStamp(entry) {
+    const occupiedNonContentHeight = entry.occupiedNonContentHeight;
+    if (!Number.isFinite(occupiedNonContentHeight)) {
+      return null;
+    }
+    const stamp = Math.max(0, effectiveHeight(entry) - occupiedNonContentHeight);
+    return Number.isFinite(stamp) ? stamp : null;
+  }
+  function reconcileMountedNonContentMetadata(model, blocks) {
+    const updates = readLiveBlockOffsetMeasuredHeights(blocks);
+    for (const update of updates) {
+      const occupiedNonContentHeight = update.occupiedNonContentHeight;
+      if (typeof occupiedNonContentHeight !== "number" || !Number.isFinite(occupiedNonContentHeight)) {
+        continue;
+      }
+      const entry = model.getEntryByBlockIndex(update.blockIndex);
+      if (entry === void 0) {
+        continue;
+      }
+      entry.occupiedNonContentHeight = occupiedNonContentHeight;
+      const block = blocks.find((candidate) => readBlockIndex3(candidate) === update.blockIndex);
+      if (block !== void 0) {
+        writeIntrinsicSizeStamp(block, entry);
+      }
+    }
+  }
+  function createRealizationTracker(deps) {
+    const watches = /* @__PURE__ */ new Map();
+    let mountGeneration = 0;
+    let disposed = false;
+    const eventOptions = { capture: true };
+    const handleContentVisibilityStateChange = (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+      const watch = watches.get(target);
+      if (watch === void 0 || watch.element !== target || !deps.main.contains(target)) {
+        return;
+      }
+      const stateEvent = event;
+      if (stateEvent.skipped === true) {
+        watch.skipped = true;
+        watch.readyMeasuredHeight = null;
+        watch.stableFrameCount = 0;
+        watch.lastOffsetHeight = null;
+        watch.lastOccupiedHeight = null;
+        watch.state = watch.state === "real-ready" ? "realized-then-skipped" : "placeholder-not-intersecting";
+        return;
+      }
+      watch.skipped = false;
+      watch.frameBudget = 120;
+      watch.stableFrameCount = 0;
+      watch.lastOffsetHeight = null;
+      watch.lastOccupiedHeight = null;
+      watch.readyMeasuredHeight = null;
+      watch.state = "event-observed-settling";
+      scheduleSample(watch);
+    };
+    deps.main.addEventListener("contentvisibilityautostatechange", handleContentVisibilityStateChange, eventOptions);
+    const dispose = () => {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      watches.clear();
+      deps.main.removeEventListener("contentvisibilityautostatechange", handleContentVisibilityStateChange, eventOptions);
+    };
+    const syncMountedSections = (blocks) => {
+      if (disposed) {
+        return;
+      }
+      mountGeneration++;
+      for (const block of blocks) {
+        if (!isContentVisibilityAutoOwner(block)) {
+          watches.delete(block);
+          continue;
+        }
+        const blockIndex = readBlockIndex3(block);
+        if (blockIndex === null) {
+          continue;
+        }
+        const existing = watches.get(block);
+        if (existing !== void 0) {
+          existing.blockIndex = blockIndex;
+          existing.mountGeneration = mountGeneration;
+          if (existing.state !== "real-ready" && existing.state !== "event-equal-fallback-noop") {
+            existing.state = isStrictlyIntersecting(block) ? "intersecting-await-event" : "placeholder-not-intersecting";
+          }
+          continue;
+        }
+        watches.set(block, {
+          blockIndex,
+          element: block,
+          frameBudget: 120,
+          frameRequested: false,
+          lastOccupiedHeight: null,
+          lastOffsetHeight: null,
+          mountGeneration,
+          readyMeasuredHeight: null,
+          skipped: true,
+          stableFrameCount: 0,
+          state: isStrictlyIntersecting(block) ? "intersecting-await-event" : "placeholder-not-intersecting"
+        });
+      }
+      for (const [element, watch] of watches) {
+        if (watch.mountGeneration !== mountGeneration || !deps.main.contains(element)) {
+          watches.delete(element);
+        }
+      }
+    };
+    const filterRealizedUpdates = (blocks, updates) => {
+      const accepted = [];
+      const blocksByBlockIndex = mapBlocksByBlockIndex(blocks);
+      for (const update of updates) {
+        const block = blocksByBlockIndex.get(update.blockIndex);
+        if (block === void 0 || block === null || readBlockIndex3(block) !== update.blockIndex) {
+          continue;
+        }
+        const watch = watches.get(block);
+        if (watch === void 0) {
+          accepted.push(update);
+          continue;
+        }
+        if (watch.element !== block || watch.blockIndex !== update.blockIndex || watch.mountGeneration !== mountGeneration || !deps.main.contains(block) || watch.state !== "real-ready" || watch.readyMeasuredHeight === null) {
+          continue;
+        }
+        const acceptedUpdate = {
+          ...update,
+          measuredHeight: watch.readyMeasuredHeight
+        };
+        delete acceptedUpdate.measuredHeightPlaceholder;
+        accepted.push(acceptedUpdate);
+      }
+      return accepted;
+    };
+    function scheduleSample(watch) {
+      if (disposed || watch.frameRequested || watch.state !== "event-observed-settling") {
+        return;
+      }
+      const expectedGeneration = watch.mountGeneration;
+      watch.frameRequested = true;
+      deps.ownerWindow.requestAnimationFrame(() => {
+        watch.frameRequested = false;
+        if (disposed || watch.mountGeneration !== expectedGeneration || watches.get(watch.element) !== watch || !deps.main.contains(watch.element)) {
+          return;
+        }
+        sampleWatch(watch);
+      });
+    }
+    function sampleWatch(watch) {
+      if (watch.skipped || watch.state !== "event-observed-settling") {
+        return;
+      }
+      const sample = readRealizationSample(watch.element);
+      if (sample === null) {
+        expireOrContinue(watch);
+        return;
+      }
+      const offsetStable = watch.lastOffsetHeight === null || Math.abs(sample.offsetHeight - watch.lastOffsetHeight) <= 1;
+      const occupiedStable = watch.lastOccupiedHeight === null || Math.abs(sample.occupiedHeight - watch.lastOccupiedHeight) <= 1;
+      watch.stableFrameCount = offsetStable && occupiedStable ? watch.stableFrameCount + 1 : 1;
+      watch.lastOffsetHeight = sample.offsetHeight;
+      watch.lastOccupiedHeight = sample.occupiedHeight;
+      if (watch.stableFrameCount >= 2) {
+        if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) <= 1) {
+          watch.state = "event-equal-fallback-noop";
+          watch.readyMeasuredHeight = null;
+          return;
+        }
+        if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) > 1) {
+          watch.state = "real-ready";
+          watch.readyMeasuredHeight = Math.max(0, sample.occupiedHeight);
+          return;
+        }
+      }
+      expireOrContinue(watch);
+    }
+    function expireOrContinue(watch) {
+      watch.frameBudget--;
+      if (watch.frameBudget <= 0) {
+        watch.state = "expired-nonconvergent";
+        watch.readyMeasuredHeight = null;
+        return;
+      }
+      scheduleSample(watch);
+    }
+    return { dispose, filterRealizedUpdates, syncMountedSections };
+  }
+  function mapBlocksByBlockIndex(blocks) {
+    const blocksByBlockIndex = /* @__PURE__ */ new Map();
+    for (const block of blocks) {
+      const blockIndex = readBlockIndex3(block);
+      if (blockIndex === null) {
+        continue;
+      }
+      blocksByBlockIndex.set(
+        blockIndex,
+        blocksByBlockIndex.has(blockIndex) ? null : block
+      );
+    }
+    return blocksByBlockIndex;
+  }
+  function readRealizationSample(element) {
+    const offsetHeight = element.offsetHeight;
+    const occupiedHeight = readOccupiedHeight(element);
+    const fallbackBorderBoxHeight = readFallbackBorderBoxHeight(element);
+    if (!Number.isFinite(offsetHeight) || occupiedHeight === null || !Number.isFinite(occupiedHeight) || fallbackBorderBoxHeight === null) {
+      return null;
+    }
+    return { fallbackBorderBoxHeight, occupiedHeight, offsetHeight };
+  }
+  function readOccupiedHeight(element) {
+    const top = elementDocumentTop(element);
+    const nextTop = readNextSiblingTop(element);
+    if (!Number.isFinite(top) || nextTop === null || !Number.isFinite(nextTop) || nextTop <= top) {
+      return null;
+    }
+    return nextTop - top;
+  }
+  function readNextSiblingTop(element) {
+    let sibling = element.nextElementSibling;
+    while (sibling instanceof HTMLElement) {
+      const top = elementDocumentTop(sibling);
+      if (Number.isFinite(top)) {
+        return top;
+      }
+      sibling = sibling.nextElementSibling;
+    }
+    return null;
+  }
+  function readFallbackBorderBoxHeight(element) {
+    const intrinsicSize = readContainIntrinsicBlockSizePx2(element);
+    const nonContent = readBlockAxisPaddingBorderHeightPx2(element);
+    if (intrinsicSize === null || nonContent === null) {
+      return null;
+    }
+    return intrinsicSize + nonContent;
+  }
+  function isContentVisibilityAutoOwner(element) {
+    const inlineValue = element.style.getPropertyValue("content-visibility");
+    if (inlineValue.trim().length > 0) {
+      return inlineValue.trim() === "auto";
+    }
+    return element.ownerDocument.defaultView?.getComputedStyle(element).getPropertyValue("content-visibility").trim() === "auto";
+  }
+  function readContainIntrinsicBlockSizePx2(element) {
+    const raw = element.style.getPropertyValue("contain-intrinsic-size") || element.ownerDocument.defaultView?.getComputedStyle(element).getPropertyValue("contain-intrinsic-size") || "";
+    const matches = Array.from(raw.matchAll(/(-?\d+(?:\.\d+)?)px/g));
+    const lastMatch = matches[matches.length - 1];
+    if (!lastMatch) {
+      return null;
+    }
+    const parsed = Number.parseFloat(lastMatch[1]);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+  function readBlockAxisPaddingBorderHeightPx2(element) {
+    const styles = element.ownerDocument.defaultView?.getComputedStyle(element);
+    if (!styles) {
+      return 0;
+    }
+    let total = 0;
+    for (const propertyName of ["padding-top", "padding-bottom", "border-top-width", "border-bottom-width"]) {
+      const value = readCssPixelLength2(styles.getPropertyValue(propertyName));
+      if (value === null) {
+        return null;
+      }
+      total += value;
+    }
+    return total;
+  }
+  function readCssPixelLength2(raw) {
+    const value = raw.trim();
+    if (value === "" || value === "0") {
+      return 0;
+    }
+    if (!value.endsWith("px")) {
+      return null;
+    }
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  function isStrictlyIntersecting(element) {
+    const root = element.ownerDocument.scrollingElement ?? element.ownerDocument.documentElement;
+    const top = elementDocumentTop(element);
+    const height = element.offsetHeight;
+    const viewportTop = Number.isFinite(root.scrollTop) ? root.scrollTop : 0;
+    const viewportHeight = root.clientHeight || element.ownerDocument.defaultView?.innerHeight || 0;
+    if (!Number.isFinite(top) || !Number.isFinite(height) || !Number.isFinite(viewportHeight) || viewportHeight <= 0) {
+      return false;
+    }
+    return top < viewportTop + viewportHeight && top + height > viewportTop;
   }
   function rangesEqual(left, right) {
     return left.start === right.start && left.end === right.end;
@@ -4816,6 +5189,7 @@
     cancelVirtualizedCalibration();
     virtualizedWindowMathController?.cancel();
     virtualizedWindowMathController = null;
+    virtualizedDocumentWindowController?.dispose();
     virtualizedDocumentWindowController = null;
     virtualizedDocumentWindowModel = null;
     virtualizedMeasureFrameRequested = false;
@@ -4889,6 +5263,10 @@
       model: virtualizedDocumentWindowModel,
       ownerWindow: window,
       prepareInsertedContent: prepareVirtualizedInsertedContent,
+      readMeasuredHeights: readLiveBlockOffsetMeasuredHeights,
+      // The delegated contentvisibilityautostatechange listener is installed only
+      // by this flag-on controller path.
+      realization: { enabled: true },
       root
     });
     virtualizedDocumentWindowController.updateWindowForScroll();

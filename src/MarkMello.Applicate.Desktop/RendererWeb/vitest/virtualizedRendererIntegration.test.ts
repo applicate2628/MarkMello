@@ -48,4 +48,34 @@ describe("renderer virtualization wiring", () => {
       expect(combined).not.toContain(resolved);
     }
   });
+
+  it("installs event-realization machinery only through the flag-on controller path", () => {
+    const source = readRendererSource();
+    const initializeStart = source.indexOf("function initializeVirtualizedDocumentWindow()");
+    const initializeEnd = source.indexOf("function updateVirtualizedWindowForScroll", initializeStart);
+    const initializeBody = source.slice(initializeStart, initializeEnd);
+    const resetStart = source.indexOf("function resetVirtualizedDocumentWindow");
+    const resetEnd = source.indexOf("function initializeVirtualizedDocumentWindow", resetStart);
+    const resetBody = source.slice(resetStart, resetEnd);
+
+    expect(initializeStart).toBeGreaterThanOrEqual(0);
+    expect(initializeEnd).toBeGreaterThan(initializeStart);
+    expect(initializeBody).toContain("if (!virtualizationEnabled)");
+    expect(initializeBody).toContain("realization:");
+    expect(initializeBody).toContain("contentvisibilityautostatechange");
+    expect(resetBody).toContain("virtualizedDocumentWindowController?.dispose()");
+    expect(source).not.toContain("document.addEventListener(\"contentvisibilityautostatechange\"");
+  });
+
+  it("keeps the realization tracker as the sole virtualized height adoption authority", () => {
+    const source = readRendererSource();
+    const createStart = source.indexOf("createVirtualizedDocumentWindowController({");
+    const createEnd = source.indexOf("});", createStart);
+    const controllerDeps = source.slice(createStart, createEnd);
+
+    expect(controllerDeps).toContain("readMeasuredHeights:");
+    expect(controllerDeps).toContain("realization:");
+    expect(source).not.toContain("offsetHeight !==");
+    expect(source).not.toContain("Math.abs(item.height - intrinsicSize) > CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX");
+  });
 });

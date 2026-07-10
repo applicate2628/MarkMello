@@ -19,6 +19,7 @@ export type SectionModelEntry = {
   html?: string;
   hasMermaid?: boolean;
   intrinsicSize?: SectionIntrinsicCalibrationTarget;
+  occupiedNonContentHeight?: number;
   needsRichPrep?: boolean;
   containedBlockIndexes?: readonly number[];
   headingAnchors?: readonly string[];
@@ -105,6 +106,7 @@ export type MeasuredHeightUpdate = {
   blockIndex: number;
   measuredHeight: number;
   measuredHeightPlaceholder?: boolean;
+  occupiedNonContentHeight?: number;
 };
 
 export type MeasuredHeightUpdateResult = {
@@ -294,17 +296,20 @@ export class DocumentWindowModel {
       }
 
       const entry = this.sections[index]!;
+      const occupiedNonContentHeight = update.occupiedNonContentHeight;
+      if (typeof occupiedNonContentHeight === "number" && Number.isFinite(occupiedNonContentHeight)) {
+        entry.occupiedNonContentHeight = occupiedNonContentHeight;
+      }
+      if (update.measuredHeightPlaceholder === true) {
+        continue;
+      }
       if (!Number.isFinite(update.measuredHeight) || update.measuredHeight < 0) {
         continue;
       }
 
       const previous = effectiveHeight(entry);
       entry.measuredHeight = update.measuredHeight;
-      if (update.measuredHeightPlaceholder === true) {
-        entry.measuredHeightPlaceholder = true;
-      } else {
-        delete entry.measuredHeightPlaceholder;
-      }
+      delete entry.measuredHeightPlaceholder;
       const delta = update.measuredHeight - previous;
       updatedCount++;
       maxAbsDelta = Math.max(maxAbsDelta, Math.abs(delta));
@@ -322,16 +327,15 @@ export class DocumentWindowModel {
       if (entry.measuredHeight === undefined || entry.intrinsicSize === undefined) {
         continue;
       }
+      if (entry.measuredHeightPlaceholder === true) {
+        continue;
+      }
 
       const sample = {
         ...entry.intrinsicSize,
         blockIndex: entry.blockIndex,
         measuredHeight: entry.measuredHeight,
       };
-      if (entry.measuredHeightPlaceholder === true) {
-        Object.assign(sample, { measuredHeightPlaceholder: true });
-      }
-
       if (calibrator.recordSample(sample)) {
         recordedCount++;
       }
@@ -517,6 +521,9 @@ export function readLiveBlockMeasuredHeights(
     if (measurement.measuredHeightPlaceholder) {
       update.measuredHeightPlaceholder = true;
     }
+    if (measurement.occupiedNonContentHeight !== undefined) {
+      update.occupiedNonContentHeight = measurement.occupiedNonContentHeight;
+    }
     return update;
   });
 }
@@ -534,6 +541,10 @@ export function readLiveBlockOffsetMeasuredHeights(blocks: readonly HTMLElement[
     };
     if (isContentVisibilityPlaceholderMeasurement(item)) {
       update.measuredHeightPlaceholder = true;
+    }
+    const occupiedNonContentHeight = readOccupiedNonContentHeight(item, update.measuredHeight);
+    if (occupiedNonContentHeight !== null) {
+      update.occupiedNonContentHeight = occupiedNonContentHeight;
     }
     return update;
   });
@@ -624,10 +635,6 @@ export function summarizeEstimateHeightErrors(
   let placeholderCount = 0;
   const worstOffenders: EstimateHeightErrorOffender[] = [];
   for (const measuredEntry of measuredModel.sections) {
-    if (measuredEntry.measuredHeight === undefined) {
-      continue;
-    }
-
     const kind = estimateErrorKind(measuredEntry);
     if (measuredEntry.measuredHeightPlaceholder === true) {
       const bucket = mutableBuckets.get(kind) ?? {
@@ -642,6 +649,9 @@ export function summarizeEstimateHeightErrors(
       bucket.placeholderCount++;
       mutableBuckets.set(kind, bucket);
       placeholderCount++;
+      continue;
+    }
+    if (measuredEntry.measuredHeight === undefined) {
       continue;
     }
 
@@ -715,6 +725,7 @@ type LiveBlockMeasurement = VisibleBlockGeometry & {
   blockIndex: number;
   measuredHeight: number;
   measuredHeightPlaceholder: boolean;
+  occupiedNonContentHeight?: number;
 };
 
 function readLiveSectionModelEntries(
@@ -738,7 +749,11 @@ function readLiveSectionModelEntries(
       measuredHeight: measured ? measurement.measuredHeight : undefined,
       sectionIndex,
     };
+    if (measurement.occupiedNonContentHeight !== undefined) {
+      entry.occupiedNonContentHeight = measurement.occupiedNonContentHeight;
+    }
     if (measured && measurement.measuredHeightPlaceholder) {
+      entry.measuredHeight = undefined;
       entry.measuredHeightPlaceholder = true;
     }
     return entry;
@@ -756,12 +771,17 @@ function readLiveBlockMeasurements(
     const measuredHeight = nextTop === undefined
       ? Math.max(0, item.height, safeDocumentScrollHeight - item.top)
       : Math.max(0, nextTop - item.top);
-    return {
+    const measurement: LiveBlockMeasurement = {
       ...item,
       blockIndex: readBlockIndex(item.element, item.sourceIndex),
       measuredHeight,
       measuredHeightPlaceholder: isContentVisibilityPlaceholderMeasurement(item),
     };
+    const occupiedNonContentHeight = readOccupiedNonContentHeight(item, measuredHeight);
+    if (occupiedNonContentHeight !== null) {
+      measurement.occupiedNonContentHeight = occupiedNonContentHeight;
+    }
+    return measurement;
   });
 }
 
@@ -786,19 +806,72 @@ function isContentVisibilityPlaceholderMeasurement(item: VisibleBlockGeometry): 
     return false;
   }
 
-  const intrinsicSize = readContainIntrinsicBlockSizePx(item.element);
-  if (intrinsicSize === null || Math.abs(item.height - intrinsicSize) > CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX) {
-    return false;
-  }
-
   const viewport = readDocumentViewport(item.element);
   if (viewport === null) {
     return false;
   }
 
   const bottom = item.top + item.height;
-  return bottom < viewport.top - CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX
-    || item.top > viewport.bottom + CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX;
+  return bottom <= viewport.top + CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX
+    || item.top >= viewport.bottom - CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX;
+}
+
+function readOccupiedNonContentHeight(item: VisibleBlockGeometry, occupiedHeight: number): number | null {
+  if (!Number.isFinite(occupiedHeight)) {
+    return null;
+  }
+
+  const contentBoxHeight = readContentBoxContributionHeight(item);
+  if (contentBoxHeight === null) {
+    return null;
+  }
+
+  const occupiedNonContentHeight = occupiedHeight - contentBoxHeight;
+  return Number.isFinite(occupiedNonContentHeight) ? occupiedNonContentHeight : null;
+}
+
+function readContentBoxContributionHeight(item: VisibleBlockGeometry): number | null {
+  if (isContentVisibilityPlaceholderMeasurement(item)) {
+    return readContainIntrinsicBlockSizePx(item.element);
+  }
+
+  const blockAxisNonContent = readBlockAxisPaddingBorderHeightPx(item.element);
+  if (blockAxisNonContent === null) {
+    return null;
+  }
+
+  const contentBoxHeight = item.height - blockAxisNonContent;
+  return Number.isFinite(contentBoxHeight) && contentBoxHeight >= 0 ? contentBoxHeight : null;
+}
+
+function readBlockAxisPaddingBorderHeightPx(element: HTMLElement): number | null {
+  const styles = element.ownerDocument.defaultView?.getComputedStyle(element);
+  if (!styles) {
+    return 0;
+  }
+
+  let total = 0;
+  for (const propertyName of ["padding-top", "padding-bottom", "border-top-width", "border-bottom-width"]) {
+    const value = readCssPixelLength(styles.getPropertyValue(propertyName));
+    if (value === null) {
+      return null;
+    }
+    total += value;
+  }
+  return total;
+}
+
+function readCssPixelLength(raw: string): number | null {
+  const value = raw.trim();
+  if (value === "" || value === "0") {
+    return 0;
+  }
+  if (!value.endsWith("px")) {
+    return null;
+  }
+
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function readContainIntrinsicBlockSizePx(element: HTMLElement): number | null {

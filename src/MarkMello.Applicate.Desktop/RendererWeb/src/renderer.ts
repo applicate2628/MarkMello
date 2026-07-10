@@ -44,6 +44,7 @@ import {
 import {
   buildDocumentWindowModelsFromLiveBlocks,
   collectLiveDocumentSectionElements,
+  readLiveBlockOffsetMeasuredHeights,
   type DocumentWindowModel,
   type MeasuredHeightUpdateResult,
 } from "./documentWindow";
@@ -2077,6 +2078,7 @@ function resetVirtualizedDocumentWindow(resetCalibrator = true): void {
   cancelVirtualizedCalibration();
   virtualizedWindowMathController?.cancel();
   virtualizedWindowMathController = null;
+  virtualizedDocumentWindowController?.dispose();
   virtualizedDocumentWindowController = null;
   virtualizedDocumentWindowModel = null;
   virtualizedMeasureFrameRequested = false;
@@ -2162,6 +2164,10 @@ function initializeVirtualizedDocumentWindow(): void {
     model: virtualizedDocumentWindowModel,
     ownerWindow: window,
     prepareInsertedContent: prepareVirtualizedInsertedContent,
+    readMeasuredHeights: readLiveBlockOffsetMeasuredHeights,
+    // The delegated contentvisibilityautostatechange listener is installed only
+    // by this flag-on controller path.
+    realization: { enabled: true },
     root,
   });
 

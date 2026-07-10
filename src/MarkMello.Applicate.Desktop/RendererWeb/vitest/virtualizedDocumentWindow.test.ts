@@ -10,7 +10,7 @@ import {
   createVirtualizedDocumentWindowController,
   type VirtualizedDocumentWindowController,
 } from "../src/virtualizedDocumentWindow";
-import type { IntrinsicSizeMetrics } from "../src/sectionIntrinsicSize";
+import type { IntrinsicSizeMetrics, SectionKind } from "../src/sectionIntrinsicSize";
 
 const metrics: IntrinsicSizeMetrics = {
   charsPerLine: 40,
@@ -18,7 +18,12 @@ const metrics: IntrinsicSizeMetrics = {
   lineHeightPx: 30,
 };
 
-function entry(sectionIndex: number, blockIndex: number, estimatedHeight: number): SectionModelEntry {
+function entry(
+  sectionIndex: number,
+  blockIndex: number,
+  estimatedHeight: number,
+  options: Partial<SectionModelEntry> = {}
+): SectionModelEntry {
   return {
     blockIndex,
     cumulativeTop: 0,
@@ -28,6 +33,7 @@ function entry(sectionIndex: number, blockIndex: number, estimatedHeight: number
     kind: "paragraph",
     measuredHeight: undefined,
     sectionIndex,
+    ...options,
   };
 }
 
@@ -87,6 +93,7 @@ function makeController(input: {
   root: HTMLElement;
   measure?: () => MeasuredHeightUpdate[];
   prepare?: (root: ParentNode) => void;
+  realization?: unknown;
 }): VirtualizedDocumentWindowController {
   const main = document.querySelector<HTMLElement>("main.mm-document")!;
   return createVirtualizedDocumentWindowController({
@@ -95,6 +102,7 @@ function makeController(input: {
     ownerWindow: window,
     prepareInsertedContent: input.prepare,
     readMeasuredHeights: input.measure,
+    realization: input.realization,
     renderAhead: {
       aboveViewports: 0,
       belowViewports: 0,
@@ -102,7 +110,54 @@ function makeController(input: {
       minBelowPx: 0,
     },
     root: input.root,
+  } as Parameters<typeof createVirtualizedDocumentWindowController>[0]);
+}
+
+function installFrameQueue(): { flush: (count?: number) => void; pending: () => number; restore: () => void } {
+  const original = window.requestAnimationFrame;
+  const callbacks: FrameRequestCallback[] = [];
+  window.requestAnimationFrame = ((callback: FrameRequestCallback): number => {
+    callbacks.push(callback);
+    return callbacks.length;
+  }) as typeof window.requestAnimationFrame;
+  return {
+    flush: (count = 1) => {
+      for (let index = 0; index < count; index++) {
+        const callback = callbacks.shift();
+        if (callback === undefined) {
+          throw new Error("Expected a queued requestAnimationFrame callback");
+        }
+        callback(performance.now());
+      }
+    },
+    pending: () => callbacks.length,
+    restore: () => {
+      window.requestAnimationFrame = original;
+    },
+  };
+}
+
+function setElementLayout(
+  element: HTMLElement,
+  input: { top?: () => number; height?: () => number }
+): void {
+  Object.defineProperty(element, "offsetTop", {
+    configurable: true,
+    get: () => input.top?.() ?? 0,
   });
+  Object.defineProperty(element, "offsetHeight", {
+    configurable: true,
+    get: () => input.height?.() ?? 0,
+  });
+}
+
+function dispatchContentVisibilityState(element: HTMLElement, skipped: boolean): void {
+  const event = new Event("contentvisibilityautostatechange", { bubbles: false });
+  Object.defineProperty(event, "skipped", {
+    configurable: true,
+    value: skipped,
+  });
+  element.dispatchEvent(event);
 }
 
 describe("virtualized document window", () => {
@@ -118,19 +173,27 @@ describe("virtualized document window", () => {
     ]);
   });
 
-  it("stamps full model fragments with model effective heights before cache cloning", () => {
-    const measured = entry(0, 10, 120);
+  it("stamps full model fragments with model occupied height minus non-content metadata", () => {
+    const measured = entry(0, 10, 120, { occupiedNonContentHeight: 16 });
     measured.measuredHeight = 210;
-    const estimated = entry(1, 11, 140);
+    const estimated = entry(1, 11, 140, { occupiedNonContentHeight: 24 });
     const model = new DocumentWindowModel([measured, estimated]);
 
     const fragment = createFullDocumentFragmentFromWindowModel(document, model);
     const nodes = Array.from(fragment.children) as HTMLElement[];
 
     expect(nodes.map(node => node.style.containIntrinsicSize)).toEqual([
-      "auto 210px",
-      "auto 140px",
+      "auto 194px",
+      "auto 116px",
     ]);
+  });
+
+  it("does not stamp unresolved non-content metadata", () => {
+    const model = new DocumentWindowModel([entry(0, 12, 120)]);
+
+    const fragment = createFullDocumentFragmentFromWindowModel(document, model);
+
+    expect((fragment.firstElementChild as HTMLElement).style.containIntrinsicSize).toBe("");
   });
 
   it("replaces off-window sections with top and bottom spacers sized by the model", () => {
@@ -155,6 +218,65 @@ describe("virtualized document window", () => {
     expect(main.textContent).not.toContain("Block 20");
     expect(main.textContent).not.toContain("Block 23");
     expect(prepare).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses E-minus-K stamps while spacers keep the occupied model height", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 500, 300);
+    const model = new DocumentWindowModel([
+      entry(0, 24, 165, { occupiedNonContentHeight: 18 }),
+      entry(1, 25, 96, { occupiedNonContentHeight: 11 }),
+    ]);
+    const controller = makeController({ model, root });
+
+    controller.updateWindowForScroll();
+
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>("[data-mm-block-index]"));
+    expect(nodes.map(node => node.style.containIntrinsicSize)).toEqual([
+      "auto 147px",
+      "auto 85px",
+    ]);
+    expect(document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")?.style.height)
+      .toBe("0px");
+    expect(model.getTotalHeight()).toBe(261);
+  });
+
+  it.each<SectionKind>(["heading", "paragraph", "quote", "list", "rule", "code", "table", "image", "math", "unknown"])(
+    "stamps top-level %s sections through the same occupied metadata path",
+    kind => {
+      document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+      const { root } = setScrollRoot(0, 500, 100);
+      const model = new DocumentWindowModel([
+        entry(0, 240, 70, {
+          html: `<section data-mm-block-index="240" data-mm-block-kind="${kind}">${kind}</section>`,
+          kind,
+          occupiedNonContentHeight: 13,
+        }),
+      ]);
+      const controller = makeController({ model, root });
+
+      controller.updateWindowForScroll();
+
+      expect(document.querySelector<HTMLElement>("[data-mm-block-index='240']")?.style.containIntrinsicSize)
+        .toBe("auto 57px");
+    }
+  );
+
+  it("keeps box sizing out of the intrinsic stamp and in occupied metadata", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 500, 100);
+    const model = new DocumentWindowModel([
+      entry(0, 241, 165, {
+        html: '<pre data-mm-block-index="241" data-mm-block-kind="code">code</pre>',
+        kind: "code",
+        occupiedNonContentHeight: 54,
+      }),
+    ]);
+    const controller = makeController({ model, root });
+
+    controller.updateWindowForScroll();
+
+    expect(document.querySelector<HTMLElement>("pre")?.style.containIntrinsicSize).toBe("auto 111px");
   });
 
   it("keeps the same offset anchor when a scroll changes the live window", () => {
@@ -346,6 +468,314 @@ describe("virtualized document window", () => {
         delete (window.HTMLElement.prototype as HTMLElement & { offsetHeight?: number }).offsetHeight;
       }
     }
+  });
+
+  it("promotes only visible event-realized geometry after two stable delivered frames", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 180);
+    const frames = installFrameQueue();
+    let blockHeight = 122;
+    let occupied = 144;
+    const model = new DocumentWindowModel([
+      entry(0, 242, 104, {
+        html: '<section data-mm-block-index="242" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 242</section>',
+        occupiedNonContentHeight: 22,
+      }),
+    ]);
+    const controller = makeController({
+      model,
+      realization: { enabled: true },
+      root,
+    });
+
+    try {
+      controller.updateWindowForScroll();
+      const blockNode = document.querySelector<HTMLElement>("[data-mm-block-index='242']")!;
+      const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(blockNode, { height: () => blockHeight, top: () => 0 });
+      setElementLayout(bottomSpacer, { top: () => occupied });
+
+      dispatchContentVisibilityState(blockNode, false);
+      frames.flush(2);
+      const adopted = controller.adoptRenderedHeights();
+
+      expect(adopted.updatedCount).toBe(1);
+      expect(model.getEntryByBlockIndex(242)?.measuredHeight).toBe(144);
+    } finally {
+      frames.restore();
+    }
+  });
+
+  it("keeps event-realized geometry fail-closed when occupied adjacency is unresolved", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 180);
+    const frames = installFrameQueue();
+    const model = new DocumentWindowModel([
+      entry(0, 250, 104, {
+        html: '<section data-mm-block-index="250" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 250</section>',
+        occupiedNonContentHeight: 22,
+      }),
+    ]);
+    const controller = makeController({
+      model,
+      realization: { enabled: true },
+      root,
+    });
+
+    try {
+      controller.updateWindowForScroll();
+      const blockNode = document.querySelector<HTMLElement>("[data-mm-block-index='250']")!;
+      setElementLayout(blockNode, { height: () => 122, top: () => 0 });
+
+      dispatchContentVisibilityState(blockNode, false);
+      frames.flush(2);
+
+      expect(controller.adoptRenderedHeights().updatedCount).toBe(0);
+      expect(model.getEntryByBlockIndex(250)?.measuredHeight).toBeUndefined();
+    } finally {
+      frames.restore();
+    }
+  });
+
+  it("matches filtered measured updates to the same current realized node", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 500, 240);
+    const frames = installFrameQueue();
+    let firstHeight = 150;
+    const model = new DocumentWindowModel([
+      entry(0, 251, 104, {
+        html: '<section data-mm-block-index="251" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 251</section>',
+        occupiedNonContentHeight: 22,
+      }),
+      entry(1, 252, 104, {
+        html: '<section data-mm-block-index="252" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 252</section>',
+        occupiedNonContentHeight: 22,
+      }),
+    ]);
+    const controller = makeController({
+      model,
+      realization: { enabled: true },
+      root,
+    });
+
+    try {
+      controller.updateWindowForScroll();
+      const firstNode = document.querySelector<HTMLElement>("[data-mm-block-index='251']")!;
+      const secondNode = document.querySelector<HTMLElement>("[data-mm-block-index='252']")!;
+      const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(firstNode, { height: () => firstHeight, top: () => 0 });
+      setElementLayout(secondNode, { height: () => 133, top: () => 180 });
+      setElementLayout(bottomSpacer, { top: () => 333 });
+
+      dispatchContentVisibilityState(firstNode, false);
+      frames.flush(2);
+      firstHeight = 0;
+      const adopted = controller.adoptRenderedHeights();
+
+      expect(adopted.updatedCount).toBe(0);
+      expect(model.getEntryByBlockIndex(252)?.measuredHeight).toBeUndefined();
+    } finally {
+      frames.restore();
+    }
+  });
+
+  it("keeps equal-fallback event geometry diagnostic-only", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 180);
+    const frames = installFrameQueue();
+    const model = new DocumentWindowModel([
+      entry(0, 243, 104, {
+        html: '<section data-mm-block-index="243" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 243</section>',
+        occupiedNonContentHeight: 22,
+      }),
+    ]);
+    const controller = makeController({
+      model,
+      realization: { enabled: true },
+      root,
+    });
+
+    try {
+      controller.updateWindowForScroll();
+      const blockNode = document.querySelector<HTMLElement>("[data-mm-block-index='243']")!;
+      const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(blockNode, { height: () => 82, top: () => 0 });
+      setElementLayout(bottomSpacer, { top: () => 104 });
+
+      dispatchContentVisibilityState(blockNode, false);
+      frames.flush(2);
+
+      expect(controller.adoptRenderedHeights().updatedCount).toBe(0);
+      expect(model.getEntryByBlockIndex(243)?.measuredHeight).toBeUndefined();
+    } finally {
+      frames.restore();
+    }
+  });
+
+  it("does not consume a realization budget until animation frames are delivered", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 180);
+    const frames = installFrameQueue();
+    const model = new DocumentWindowModel([
+      entry(0, 244, 104, {
+        html: '<section data-mm-block-index="244" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 244</section>',
+        occupiedNonContentHeight: 22,
+      }),
+    ]);
+    const controller = makeController({
+      model,
+      realization: { enabled: true },
+      root,
+    });
+
+    try {
+      controller.updateWindowForScroll();
+      const blockNode = document.querySelector<HTMLElement>("[data-mm-block-index='244']")!;
+      const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(blockNode, { height: () => 122, top: () => 0 });
+      setElementLayout(bottomSpacer, { top: () => 144 });
+
+      dispatchContentVisibilityState(blockNode, false);
+
+      expect(controller.adoptRenderedHeights().updatedCount).toBe(0);
+      expect(frames.pending()).toBe(1);
+      frames.flush(2);
+      expect(controller.adoptRenderedHeights().updatedCount).toBe(1);
+    } finally {
+      frames.restore();
+    }
+  });
+
+  it("preserves false-event state when the event precedes strict intersection", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root, setScrollTop } = setScrollRoot(0, 1400, 100);
+    const frames = installFrameQueue();
+    const model = new DocumentWindowModel([
+      entry(0, 245, 104, {
+        html: '<section data-mm-block-index="245" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 245</section>',
+        occupiedNonContentHeight: 22,
+      }),
+    ]);
+    const controller = makeController({
+      model,
+      realization: { enabled: true },
+      root,
+    });
+
+    try {
+      controller.updateWindowForScroll();
+      const blockNode = document.querySelector<HTMLElement>("[data-mm-block-index='245']")!;
+      const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(blockNode, { height: () => 122, top: () => 1000 });
+      setElementLayout(bottomSpacer, { top: () => 1144 });
+
+      dispatchContentVisibilityState(blockNode, false);
+      setScrollTop(960);
+      frames.flush(2);
+
+      expect(controller.adoptRenderedHeights().updatedCount).toBe(1);
+      expect(model.getEntryByBlockIndex(245)?.measuredHeight).toBe(144);
+    } finally {
+      frames.restore();
+    }
+  });
+
+  it("keeps non-convergent event geometry fail-closed after the delivered-frame budget", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 180);
+    const frames = installFrameQueue();
+    let frame = 0;
+    const model = new DocumentWindowModel([
+      entry(0, 246, 104, {
+        html: '<section data-mm-block-index="246" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 246</section>',
+        occupiedNonContentHeight: 22,
+      }),
+    ]);
+    const controller = makeController({
+      model,
+      realization: { enabled: true },
+      root,
+    });
+
+    try {
+      controller.updateWindowForScroll();
+      const blockNode = document.querySelector<HTMLElement>("[data-mm-block-index='246']")!;
+      const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(blockNode, { height: () => 120 + frame * 3, top: () => 0 });
+      setElementLayout(bottomSpacer, { top: () => 142 + frame * 3 });
+
+      dispatchContentVisibilityState(blockNode, false);
+      for (let index = 0; index < 120; index++) {
+        frame++;
+        frames.flush();
+      }
+
+      expect(controller.adoptRenderedHeights().updatedCount).toBe(0);
+      expect(model.getEntryByBlockIndex(246)?.measuredHeight).toBeUndefined();
+    } finally {
+      frames.restore();
+    }
+  });
+
+  it("cleans realized watches on eviction and controller disposal", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root, setScrollTop } = setScrollRoot(0, 600, 100);
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    const addSpy = vi.spyOn(main, "addEventListener");
+    const removeSpy = vi.spyOn(main, "removeEventListener");
+    const model = new DocumentWindowModel([
+      entry(0, 247, 100, {
+        html: '<section data-mm-block-index="247" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 247</section>',
+        occupiedNonContentHeight: 20,
+      }),
+      entry(1, 248, 100, {
+        html: '<section data-mm-block-index="248" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 248</section>',
+        occupiedNonContentHeight: 20,
+      }),
+    ]);
+    const controller = makeController({
+      model,
+      realization: { enabled: true },
+      root,
+    });
+
+    controller.updateWindowForScroll();
+    const firstNode = document.querySelector<HTMLElement>("[data-mm-block-index='247']")!;
+    setScrollTop(140);
+    controller.updateWindowForScroll({ force: true });
+    dispatchContentVisibilityState(firstNode, false);
+    controller.dispose();
+
+    expect(model.getEntryByBlockIndex(247)?.measuredHeight).toBeUndefined();
+    expect(addSpy).toHaveBeenCalledWith(
+      "contentvisibilityautostatechange",
+      expect.any(Function),
+      expect.objectContaining({ capture: true })
+    );
+    expect(removeSpy).toHaveBeenCalledWith(
+      "contentvisibilityautostatechange",
+      expect.any(Function),
+      expect.objectContaining({ capture: true })
+    );
+  });
+
+  it("reaches an occupied fixed point across ten remount cycles", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 600, 100);
+    const model = new DocumentWindowModel([
+      entry(0, 249, 165, { occupiedNonContentHeight: 18 }),
+    ]);
+    const controller = makeController({ model, root });
+    const totals: number[] = [];
+
+    for (let index = 0; index < 10; index++) {
+      expect(controller.updateWindowForScroll({ force: true })).toBe(true);
+      totals.push(model.getTotalHeight());
+      expect(document.querySelector<HTMLElement>("[data-mm-block-index='249']")?.style.containIntrinsicSize)
+        .toBe("auto 147px");
+    }
+
+    expect(new Set(totals)).toEqual(new Set([165]));
   });
 
   it("does no DOM work when scroll stays inside the current model window", () => {

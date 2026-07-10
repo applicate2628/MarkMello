@@ -75,4 +75,11 @@ describe("renderer virtualization flags", () => {
       storageName: "MARKMELLO_EXAMPLE",
     })).toBe(true);
   });
+
+  it("keeps virtualization disabled by default so flag-off installs no controller machinery", () => {
+    expect(readVirtualizationFlag(window, document)).toBe(false);
+    expect(document.documentElement.dataset.markmelloVirtualization).toBeUndefined();
+    expect((window as Window & { MARKMELLO_VIRTUALIZATION?: unknown }).MARKMELLO_VIRTUALIZATION)
+      .toBeUndefined();
+  });
 });

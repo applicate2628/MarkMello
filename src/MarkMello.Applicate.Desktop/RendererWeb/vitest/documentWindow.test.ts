@@ -11,7 +11,10 @@ import {
   summarizeEstimateHeightErrors,
   type SectionModelEntry,
 } from "../src/documentWindow";
-import type { IntrinsicSizeMetrics } from "../src/sectionIntrinsicSize";
+import {
+  createSectionIntrinsicCalibrator,
+  type IntrinsicSizeMetrics,
+} from "../src/sectionIntrinsicSize";
 
 const metrics: IntrinsicSizeMetrics = {
   charsPerLine: 40,
@@ -31,8 +34,8 @@ function entry(sectionIndex: number, blockIndex: number, estimatedHeight: number
   };
 }
 
-function block(index: number, top: number, height: number, kind = "paragraph"): HTMLElement {
-  const element = document.createElement("p");
+function block(index: number, top: number, height: number, kind = "paragraph", tagName = "p"): HTMLElement {
+  const element = document.createElement(tagName);
   element.dataset.mmBlockIndex = String(index);
   element.dataset.mmBlockKind = kind;
   element.textContent = `block ${index}`;
@@ -61,6 +64,28 @@ function setDocumentScrollRoot(scrollTop: number, clientHeight: number): void {
     configurable: true,
     get: () => clientHeight,
   });
+}
+
+function setComputedBoxStyle(
+  element: HTMLElement,
+  styles: Partial<Record<"paddingTop" | "paddingBottom" | "borderTopWidth" | "borderBottomWidth", string>>
+): void {
+  const current = window.getComputedStyle;
+  const style = {
+    borderBottomWidth: "",
+    borderTopWidth: "",
+    paddingBottom: "",
+    paddingTop: "",
+    ...styles,
+    getPropertyValue(propertyName: string): string {
+      const camelName = propertyName.replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase());
+      return (this as Record<string, string>)[propertyName]
+        ?? (this as Record<string, string>)[camelName]
+        ?? "";
+    },
+  };
+  window.getComputedStyle = ((target: Element) =>
+    target === element ? style : current.call(window, target)) as typeof window.getComputedStyle;
 }
 
 function mermaidBlock(index: number, top: number, height: number): HTMLElement {
@@ -161,10 +186,78 @@ describe("document window model", () => {
     main.append(first, second, third, bottomSpacer);
 
     expect(readLiveBlockOffsetMeasuredHeights([first, second, third])).toEqual([
-      { blockIndex: 33, measuredHeight: 60 },
-      { blockIndex: 34, measuredHeight: 80 },
-      { blockIndex: 35, measuredHeight: 90 },
+      { blockIndex: 33, measuredHeight: 60, occupiedNonContentHeight: 20 },
+      { blockIndex: 34, measuredHeight: 80, occupiedNonContentHeight: 30 },
+      { blockIndex: 35, measuredHeight: 90, occupiedNonContentHeight: 30 },
     ]);
+  });
+
+  it("derives occupied non-content metadata as occupied minus content box", () => {
+    const padded = block(36, 20, 90, "code");
+    const next = block(37, 155, 40);
+    setComputedBoxStyle(padded, {
+      borderBottomWidth: "2px",
+      borderTopWidth: "3px",
+      paddingBottom: "12px",
+      paddingTop: "18px",
+    });
+
+    const models = buildDocumentWindowModelsFromLiveBlocks([padded, next], metrics, 220);
+
+    expect(models.measuredModel.sections[0]).toMatchObject({
+      blockIndex: 36,
+      measuredHeight: 135,
+      occupiedNonContentHeight: 80,
+    });
+    expect(readLiveBlockOffsetMeasuredHeights([padded, next])[0]).toMatchObject({
+      blockIndex: 36,
+      measuredHeight: 135,
+      occupiedNonContentHeight: 80,
+    });
+  });
+
+  it("keeps padded offscreen pre placeholder height out of the durable model and calibrator", () => {
+    setDocumentScrollRoot(0, 240);
+    const placeholder = block(78, 1000, 126, "code", "pre");
+    placeholder.style.setProperty("content-visibility", "auto");
+    placeholder.style.setProperty("contain-intrinsic-size", "auto 80px");
+    setComputedBoxStyle(placeholder, {
+      borderBottomWidth: "4px",
+      borderTopWidth: "2px",
+      paddingBottom: "18px",
+      paddingTop: "22px",
+    });
+    const next = block(79, 1165, 90, "paragraph");
+
+    const models = buildDocumentWindowModelsFromLiveBlocks([placeholder, next], metrics, 1300);
+    const placeholderEntry = models.measuredModel.sections[0]!;
+
+    expect(placeholderEntry).toMatchObject({
+      blockIndex: 78,
+      measuredHeight: undefined,
+      measuredHeightPlaceholder: true,
+      occupiedNonContentHeight: 85,
+    });
+    expect(models.measuredModel.computeSpacerHeights({ start: 0, end: 0 }).windowHeight)
+      .toBe(placeholderEntry.estimatedHeight);
+
+    const calibrator = createSectionIntrinsicCalibrator({ minSamplesPerBucket: 1 });
+    expect(models.measuredModel.recordIntrinsicSizeCalibrationSamples(calibrator)).toBe(1);
+    expect(models.measuredModel.getEntryByBlockIndex(78)?.measuredHeight).toBeUndefined();
+    expect(calibrator.getSummary().sampleCount).toBe(1);
+  });
+
+  it("fails closed for non-px box terms when deriving occupied non-content metadata", () => {
+    const nonPx = block(92, 10, 80, "paragraph");
+    const next = block(93, 130, 60, "paragraph");
+    setComputedBoxStyle(nonPx, { paddingTop: "1.5em" });
+
+    expect(readLiveBlockOffsetMeasuredHeights([nonPx, next])[0]).toEqual({
+      blockIndex: 92,
+      measuredHeight: 120,
+    });
+    expect(buildDocumentWindowModelFromLiveBlocks([nonPx, next], metrics, 210)
+      .getEntryByBlockIndex(92)).not.toHaveProperty("occupiedNonContentHeight");
   });
 
   it("keeps the document leading offset out of virtual DOM spacer heights", () => {
@@ -236,7 +329,7 @@ describe("document window model", () => {
 
     expect(models.measuredModel.sections[0]).toMatchObject({
       blockIndex: 74,
-      measuredHeight: 164,
+      measuredHeight: undefined,
       measuredHeightPlaceholder: true,
     });
     expect(models.estimateHeightError.placeholderCount).toBe(1);
@@ -284,8 +377,8 @@ describe("document window model", () => {
     expect(models.measuredModel.sectionEffectiveHeight(0)).toBe(260);
     expect(models.measuredModel.getTotalHeight()).toBe(360);
     expect(updates).toEqual([
-      { blockIndex: 80, measuredHeight: 260 },
-      { blockIndex: 82, measuredHeight: 100 },
+      { blockIndex: 80, measuredHeight: 260, occupiedNonContentHeight: 160 },
+      { blockIndex: 82, measuredHeight: 100, occupiedNonContentHeight: 20 },
     ]);
     expect(computeLiveBlockWindowRange(blocks, 280, 40, {
       ...DEFAULT_RENDER_AHEAD,
