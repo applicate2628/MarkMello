@@ -468,6 +468,45 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
+    public async Task FlagOnDimensionlessSvgCarriesMountStableIntrinsicRatio()
+    {
+        var renderer = CreateRendererForVirtualization(enabled: true);
+        var source = new MarkdownSource("docs/sample.md", "sample.md", "![vector](diagram.svg)");
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            new ByteImageSourceResolver(DimensionlessSvg),
+            CancellationToken.None);
+
+        Assert.Contains("<img src=\"data:image/svg&#x2B;xml;base64,", document.Html, StringComparison.Ordinal);
+        Assert.Contains(" alt=\"vector\" width=\"640\" height=\"360\"", document.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain("class=\"image-placeholder\"", document.Html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlagOffDimensionlessSvgMarkupRemainsByteIdentical()
+    {
+        var renderer = CreateRendererForVirtualization(enabled: false);
+        var source = new MarkdownSource("docs/sample.md", "sample.md", "![vector](diagram.svg)");
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            new ByteImageSourceResolver(DimensionlessSvg),
+            CancellationToken.None);
+
+        var encodedBytes = HtmlEncoder.Default.Encode(Convert.ToBase64String(DimensionlessSvg));
+        var expected = "<figure data-mm-block-index=\"0\" data-mm-block-kind=\"image\" data-mm-source-line=\"0\" data-mm-source-end-line=\"0\">"
+            + $"<img src=\"data:image/svg&#x2B;xml;base64,{encodedBytes}\" alt=\"vector\">"
+            + "<figcaption>vector</figcaption></figure>"
+            + Environment.NewLine;
+        Assert.Contains(expected, document.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain(" alt=\"vector\" width=", document.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain(" alt=\"vector\" height=", document.Html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task FlagOnUndecodableImageUsesExistingPlaceholderWithoutSecondFetch()
     {
         var renderer = CreateRendererForVirtualization(enabled: true);
@@ -718,6 +757,8 @@ public sealed class ApplicateHtmlMarkdownRendererTests
 
     private static readonly byte[] OnePixelPng = Convert.FromBase64String(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+
+    private static readonly byte[] DimensionlessSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 640 360\"><rect width=\"640\" height=\"360\"/></svg>"u8.ToArray();
 
     private static ApplicateHtmlMarkdownRenderer CreateRendererForVirtualization(bool enabled)
     {

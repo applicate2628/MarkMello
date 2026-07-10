@@ -1,6 +1,9 @@
+using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Encodings.Web;
+using System.Xml;
+using System.Xml.Linq;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Math;
 using MarkMello.Domain;
@@ -544,6 +547,12 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
 
     private static (double Width, double Height)? ReadIntrinsicImageSize(byte[] bytes)
     {
+        var svgSize = ReadIntrinsicSvgSize(bytes);
+        if (svgSize is not null)
+        {
+            return svgSize;
+        }
+
         try
         {
             using var stream = new MemoryStream(bytes, writable: false);
@@ -557,6 +566,105 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         {
             return null;
         }
+    }
+
+    private static (double Width, double Height)? ReadIntrinsicSvgSize(byte[] bytes)
+    {
+        var firstContentByte = 0;
+        while (firstContentByte < bytes.Length && char.IsWhiteSpace((char)bytes[firstContentByte]))
+        {
+            firstContentByte++;
+        }
+        if (firstContentByte >= bytes.Length || bytes[firstContentByte] != '<')
+        {
+            return null;
+        }
+
+        try
+        {
+            using var stream = new MemoryStream(bytes, writable: false);
+            var settings = new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                IgnoreComments = true,
+                IgnoreProcessingInstructions = true,
+                MaxCharactersInDocument = MaxInlineImageBytes,
+                XmlResolver = null,
+            };
+            using var reader = XmlReader.Create(stream, settings);
+            var root = XDocument.Load(reader, LoadOptions.None).Root;
+            if (root is null || !string.Equals(root.Name.LocalName, "svg", StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var width = ParseSvgLength(root.Attribute("width")?.Value);
+            var height = ParseSvgLength(root.Attribute("height")?.Value);
+            var viewBoxSize = ParseSvgViewBoxSize(root.Attribute("viewBox")?.Value);
+            if (width is not null && height is not null)
+            {
+                return (width.Value, height.Value);
+            }
+            if (viewBoxSize is null)
+            {
+                return null;
+            }
+
+            var ratio = viewBoxSize.Value.Width / viewBoxSize.Value.Height;
+            if (width is not null)
+            {
+                return (width.Value, width.Value / ratio);
+            }
+            if (height is not null)
+            {
+                return (height.Value * ratio, height.Value);
+            }
+            return viewBoxSize;
+        }
+        catch (Exception exception) when (exception is XmlException or InvalidOperationException or FormatException)
+        {
+            return null;
+        }
+    }
+
+    private static double? ParseSvgLength(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        var value = raw.Trim();
+        if (value.EndsWith("px", StringComparison.OrdinalIgnoreCase))
+        {
+            value = value[..^2].TrimEnd();
+        }
+        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+        {
+            return null;
+        }
+        return parsed > 0 && double.IsFinite(parsed) ? parsed : null;
+    }
+
+    private static (double Width, double Height)? ParseSvgViewBoxSize(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        var parts = raw.Replace(',', ' ').Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length != 4
+            || !double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var width)
+            || !double.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out var height)
+            || width <= 0
+            || height <= 0
+            || !double.IsFinite(width)
+            || !double.IsFinite(height))
+        {
+            return null;
+        }
+        return (width, height);
     }
 
     private static bool IsUsableImageDimension(double? value)
