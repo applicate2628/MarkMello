@@ -98,8 +98,9 @@ describe("renderer virtualization wiring", () => {
     expect(source).not.toContain("document.addEventListener(\"contentvisibilityautostatechange\"");
   });
 
-  it("keeps the realization tracker as the sole virtualized height adoption authority", () => {
+  it("realization tracker is the sole placeholder and realization authority", () => {
     const source = readRendererSource();
+    const windowSource = readFileSync("RendererWeb/src/virtualizedDocumentWindow.ts", "utf8");
     const createStart = source.indexOf("createVirtualizedDocumentWindowController({");
     const createEnd = source.indexOf("});", createStart);
     const controllerDeps = source.slice(createStart, createEnd);
@@ -108,6 +109,9 @@ describe("renderer virtualization wiring", () => {
     expect(controllerDeps).toContain("realization:");
     expect(source).not.toContain("offsetHeight !==");
     expect(source).not.toContain("Math.abs(item.height - intrinsicSize) > CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX");
+    expect(windowSource).toContain("const filterRealizedUpdates = (");
+    expect(windowSource).toContain("watch.state !== \"real-ready\"");
+    expect(windowSource).toContain("realizationTracker?.filterRealizedUpdates(blocks, updates) ?? updates");
   });
 
   it("enables Mermaid proxy lifecycle ownership only through the virtualization flag", () => {
@@ -340,11 +344,17 @@ describe("renderer virtualization wiring", () => {
 
   it("flag-on resolved images carry mount-stable intrinsic ratio", () => {
     const source = readFileSync("Rendering/ApplicateHtmlMarkdownRenderer.cs", "utf8");
+    const tests = readFileSync("../../tests/MarkMello.Applicate.Tests/ApplicateHtmlMarkdownRendererTests.cs", "utf8");
 
     expect(source).toContain("ReadIntrinsicImageSize");
     expect(source).toContain("virtualizationEnabled");
     expect(source).toContain("resolved.Bytes");
     expect(source).toContain("RenderImagePlaceholder");
+    expect(source).toContain("TryResolveReservedImageSize(resolved.Bytes, width, height");
+    expect(source).toContain("AppendImageAttributes(context.Html, altText, title, reservedWidth, reservedHeight)");
+    expect(tests).toContain("FlagOnResolvedBlockImagesCarryMountStableIntrinsicRatio");
+    expect(tests).toContain("Assert.Contains(\" width=\\\"1\\\"\"");
+    expect(tests).toContain("Assert.Contains(\" height=\\\"1\\\"\"");
   });
 
   it("keeps the H3 diagnostic observer test-only and out of production", () => {

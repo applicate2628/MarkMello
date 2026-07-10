@@ -131,10 +131,45 @@ describe("renderer virtualization flags", () => {
       "const queuePostScroll"
     );
 
-    expect(currentShared).toContain("if (!virtualizationEnabled)");
-    expect(currentShared).toContain("runLegacyResizeObserverWork");
-    expect(currentShared).toContain("runLegacyDocumentFontsReadyWork");
-    expect(baselineShared).toContain("queueMinimapRefreshAfterLayoutSettles");
-    expect(baselineShared).toContain("scheduleVirtualizedMeasuredHeightAdoption");
+    const currentResizeOwner = sliceBetween(
+      current,
+      "function runLegacyResizeObserverWork",
+      "function runLegacyDocumentFontsReadyWork"
+    );
+    const currentFontsOwner = sliceBetween(
+      current,
+      "function runLegacyDocumentFontsReadyWork",
+      "document.addEventListener(\"DOMContentLoaded\""
+    );
+    const orderedSignature = (source: string, statements: readonly string[]) => {
+      let cursor = -1;
+      return statements.map(statement => {
+        cursor = source.indexOf(statement, cursor + 1);
+        expect(cursor).toBeGreaterThanOrEqual(0);
+        return statement;
+      });
+    };
+    const resizeStatements = [
+      "queueMinimapRefreshAfterLayoutSettles();",
+      "scheduleResizeReactions(documentEpoch);",
+      "invalidateSourceLineAnchors({",
+      "scheduleVirtualizedMeasuredHeightAdoption();",
+      "window.requestAnimationFrame(() => {",
+      "postScroll();",
+    ] as const;
+    const fontStatements = [
+      "queueMinimapRefreshAfterLayoutSettles();",
+      "invalidateSourceLineAnchors({",
+      "scheduleVirtualizedMeasuredHeightAdoption();",
+    ] as const;
+
+    expect(orderedSignature(currentResizeOwner, resizeStatements))
+      .toEqual(orderedSignature(baselineShared, resizeStatements));
+    expect(orderedSignature(currentFontsOwner, fontStatements))
+      .toEqual(orderedSignature(baselineShared, fontStatements));
+    expect(currentShared).toContain("if (!virtualizationEnabled) {\n        runLegacyResizeObserverWork(documentEpoch);");
+    expect(currentShared).toContain("if (!virtualizationEnabled) {\n      runLegacyDocumentFontsReadyWork(fontsDocumentEpoch);");
+    expect(current.match(/virtualizationEnabled \? \{ manageVirtualizedProxyLifecycle: true \} : undefined/g))
+      .toEqual(baseline.match(/virtualizationEnabled \? \{ manageVirtualizedProxyLifecycle: true \} : undefined/g));
   });
 });

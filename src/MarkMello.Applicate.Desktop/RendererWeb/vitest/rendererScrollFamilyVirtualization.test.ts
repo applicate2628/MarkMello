@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createH3DiagnosticMonitor } from "./h3DiagnosticMonitor";
 
 type HostBridge = (msg: unknown) => void;
 
@@ -2751,16 +2752,12 @@ describe("renderer scroll-family virtualization integration", () => {
   });
 
   it("H3 diagnostic fails an unregistered late mover", () => {
-    const causalGeometryEpochs = new Set<number>([0]);
-    let previousHeight = 100;
-    const sample = (height: number, geometryEpoch: number): void => {
-      if (Math.abs(height - previousHeight) > 1 && !causalGeometryEpochs.has(geometryEpoch)) {
-        throw new Error("unregistered late geometry mover");
-      }
-      previousHeight = height;
-    };
-
-    expect(() => sample(128, 1)).toThrow("unregistered late geometry mover");
+    const monitor = createH3DiagnosticMonitor(100);
+    monitor.registerCausalEpoch(1);
+    expect(() => monitor.sample(128, 1)).not.toThrow();
+    expect(() => monitor.sample(156, 2)).toThrow("unregistered late geometry mover at epoch 2");
+    monitor.dispose();
+    expect(() => monitor.sample(200, 3)).not.toThrow();
   });
 
   it("registers leased calibration at schedule time and performs it once", async () => {

@@ -312,7 +312,7 @@ describe("virtualized document window", () => {
     }
   );
 
-  it("keeps box sizing out of the intrinsic stamp and in occupied metadata", () => {
+  it("ordinary code pre remains in generic E-minus-K stamp", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { root } = setScrollRoot(0, 500, 100);
     const model = new DocumentWindowModel([
@@ -327,6 +327,43 @@ describe("virtualized document window", () => {
     controller.updateWindowForScroll();
 
     expect(document.querySelector<HTMLElement>("pre")?.style.containIntrinsicSize).toBe("auto 111px");
+  });
+
+  it("top-level block box sizing is compatible with content-box stamping", () => {
+    const kinds: SectionKind[] = [
+      "heading", "paragraph", "quote", "list", "rule", "code", "table", "image", "math", "unknown",
+    ];
+    const isCompatible = (element: HTMLElement): boolean => {
+      const style = window.getComputedStyle(element);
+      if (style.boxSizing === "content-box") return true;
+      if (style.boxSizing !== "border-box") return false;
+      return [style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth]
+        .every(value => value === "" || value === "0" || value === "0px");
+    };
+
+    const fixtures = kinds.map(kind => {
+      const element = document.createElement("section");
+      element.dataset.mmBlockKind = kind;
+      element.style.boxSizing = "content-box";
+      document.body.append(element);
+      return element;
+    });
+    const mermaidProxy = document.createElement("div");
+    mermaidProxy.className = "mm-mermaid-svg";
+    mermaidProxy.style.boxSizing = "border-box";
+    mermaidProxy.style.paddingTop = "0px";
+    mermaidProxy.style.paddingBottom = "0px";
+    mermaidProxy.style.borderTopWidth = "0px";
+    mermaidProxy.style.borderBottomWidth = "0px";
+    document.body.append(mermaidProxy);
+    fixtures.push(mermaidProxy);
+
+    expect(fixtures.every(isCompatible)).toBe(true);
+
+    const invalid = document.createElement("pre");
+    invalid.style.boxSizing = "border-box";
+    invalid.style.paddingTop = "8px";
+    expect(isCompatible(invalid)).toBe(false);
   });
 
   it("keeps the same offset anchor when a scroll changes the live window", () => {
@@ -767,6 +804,7 @@ describe("virtualized document window", () => {
 
       expect(controller.adoptRenderedHeights().updatedCount).toBe(0);
       expect(model.getEntryByBlockIndex(246)?.measuredHeight).toBeUndefined();
+      expect(controller.recensusRealizationWatches()).toBe(false);
     } finally {
       frames.restore();
     }
@@ -1255,12 +1293,26 @@ describe("virtualized document window", () => {
     ]);
     const controller = makeController({ model, root });
     controller.updateWindowForScroll();
+    const figure = document.querySelector<HTMLElement>("figure")!;
     const image = document.querySelector<HTMLImageElement>("img")!;
-    const reservedHeight = Number(image.getAttribute("height"));
-    const decodedHeight = Number(image.getAttribute("width")) / (160 / 90);
+    let decoded = false;
+    const occupiedHeight = () => {
+      if (decoded) return 160 / (160 / 90);
+      const reserved = image.getAttribute("height");
+      return reserved === null ? Number.NaN : Number(reserved);
+    };
+    setElementLayout(figure, { height: occupiedHeight, top: () => 0 });
+    const beforeDecode = figure.offsetHeight;
+    decoded = true;
+    image.dispatchEvent(new Event("load"));
+    const afterDecode = figure.offsetHeight;
 
     expect(image.getAttribute("width")).toBe("160");
     expect(image.getAttribute("height")).toBe("90");
-    expect(Math.abs(decodedHeight - reservedHeight)).toBeLessThanOrEqual(1);
+    expect(Math.abs(afterDecode - beforeDecode)).toBeLessThanOrEqual(1);
+
+    image.removeAttribute("height");
+    decoded = false;
+    expect(Number.isFinite(occupiedHeight())).toBe(false);
   });
 });

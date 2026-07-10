@@ -410,7 +410,7 @@ describe("document window model", () => {
     });
   });
 
-  it("keeps padded offscreen pre placeholder height out of the durable model and calibrator", () => {
+  it("placeholder-flagged height contributes to layout but not calibration", () => {
     setDocumentScrollRoot(0, 240);
     const placeholder = block(78, 1000, 126, "code", "pre");
     placeholder.style.setProperty("content-visibility", "auto");
@@ -449,9 +449,24 @@ describe("document window model", () => {
     expect(readLiveBlockOffsetMeasuredHeights([nonPx, next])[0]).toEqual({
       blockIndex: 92,
       measuredHeight: 120,
+      measuredHeightPlaceholder: true,
     });
     expect(buildDocumentWindowModelFromLiveBlocks([nonPx, next], metrics, 210)
-      .getEntryByBlockIndex(92)).not.toHaveProperty("occupiedNonContentHeight");
+      .getEntryByBlockIndex(92)).toMatchObject({
+        measuredHeight: undefined,
+        measuredHeightPlaceholder: true,
+      });
+  });
+
+  it("image and rule kinds retain explicit stamp and realization classification", () => {
+    const image = block(94, 0, 80, "image", "figure");
+    const rule = block(95, 80, 2, "rule", "hr");
+    const next = block(96, 82, 40, "paragraph");
+
+    const model = buildDocumentWindowModelFromLiveBlocks([image, rule, next], metrics, 122);
+
+    expect(model.getEntryByBlockIndex(94)).toMatchObject({ kind: "image", measuredHeight: 80 });
+    expect(model.getEntryByBlockIndex(95)).toMatchObject({ kind: "rule", measuredHeight: 2 });
   });
 
   it("keeps the document leading offset out of virtual DOM spacer heights", () => {
