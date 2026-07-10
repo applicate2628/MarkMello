@@ -131,6 +131,33 @@
     }
     return proxy;
   }
+  function reclaimClonedMermaidProxyLifecycles(root) {
+    const sources = root.querySelectorAll("pre.mm-mermaid.is-rendered");
+    for (const source of sources) {
+      if (readReadyMermaidProxy(source) !== null) {
+        continue;
+      }
+      const proxy = source.nextElementSibling;
+      const hasValidAdjacency = proxy instanceof HTMLElement && proxy.parentElement === source.parentElement && proxy.classList.contains("mm-mermaid-svg") && !proxy.hasAttribute("data-mm-block-index") && !proxy.nextElementSibling?.classList.contains("mm-mermaid-svg");
+      if (hasValidAdjacency) {
+        const claim = {
+          proxy,
+          source,
+          state: "ready"
+        };
+        source[MERMAID_PROXY_LIFECYCLE_OWNER] = claim;
+        proxy[MERMAID_PROXY_LIFECYCLE_OWNER] = claim;
+        continue;
+      }
+      source.classList.remove("is-rendered");
+      let sibling = source.nextElementSibling;
+      while (sibling instanceof HTMLElement && sibling.classList.contains("mm-mermaid-svg")) {
+        const nextSibling = sibling.nextElementSibling;
+        sibling.remove();
+        sibling = nextSibling;
+      }
+    }
+  }
   function claimProxyLifecycle(node) {
     const previousClaim = node[MERMAID_PROXY_LIFECYCLE_OWNER];
     if (previousClaim !== void 0) {
@@ -2731,6 +2758,9 @@
         }
         if (watch.element !== block || watch.blockIndex !== update.blockIndex || watch.mountGeneration !== currentMountGeneration || !deps.main.contains(block) || watch.state !== "real-ready" || watch.readyMeasuredHeight === null) {
           continue;
+        }
+        if (isStrictlyIntersecting(block)) {
+          watch.readyMeasuredHeight = Math.max(0, update.measuredHeight);
         }
         const acceptedUpdate = {
           ...update,
@@ -5737,11 +5767,15 @@
     }
   }
   function scheduleProgressiveDeferredEnhancements(message) {
-    cancelProgressiveDeferredEnhancements();
+    if (virtualizationEnabled) {
+      cancelProgressiveDeferredEnhancements();
+    }
     const renderId = message.renderId;
     const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
     const run = () => {
-      progressiveDeferredEnhancementHandle = null;
+      if (virtualizationEnabled) {
+        progressiveDeferredEnhancementHandle = null;
+      }
       if (documentEpoch !== void 0 && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
         return;
       }
@@ -5764,16 +5798,16 @@
     };
     const requestIdle = window.requestIdleCallback;
     if (requestIdle) {
-      progressiveDeferredEnhancementHandle = {
-        kind: "idle",
-        id: requestIdle(run, { timeout: 4e3 })
-      };
+      const id2 = requestIdle(run, { timeout: 4e3 });
+      if (virtualizationEnabled) {
+        progressiveDeferredEnhancementHandle = { kind: "idle", id: id2 };
+      }
       return;
     }
-    progressiveDeferredEnhancementHandle = {
-      kind: "timeout",
-      id: window.setTimeout(run, 800)
-    };
+    const id = window.setTimeout(run, 800);
+    if (virtualizationEnabled) {
+      progressiveDeferredEnhancementHandle = { kind: "timeout", id };
+    }
   }
   function getViewportHeightForMermaid() {
     const root = document.scrollingElement ?? document.documentElement;
@@ -9961,7 +9995,9 @@
     ++processedDocumentCacheCloneGeneration;
     ++progressiveMinimapRefreshGeneration;
     cancelProcessedDocumentCacheClone();
-    cancelProgressiveDeferredEnhancements();
+    if (virtualizationEnabled) {
+      cancelProgressiveDeferredEnhancements();
+    }
     cancelDeferredMinimapContentRefresh(false);
     cancelMinimapRefreshAfterLayoutSettles();
     cancelHeavyLiveUpdate();
@@ -10020,6 +10056,12 @@
     ensureMinimap();
     ensureWidthHandle();
     ensureDropOverlay();
+    if (useCachedDocumentState && virtualizationEnabled) {
+      const main = document.querySelector("main.mm-document");
+      if (main !== null) {
+        reclaimClonedMermaidProxyLifecycles(main);
+      }
+    }
     if (options.allowVirtualization === false) {
       resetVirtualizedDocumentWindow(false);
     } else {
