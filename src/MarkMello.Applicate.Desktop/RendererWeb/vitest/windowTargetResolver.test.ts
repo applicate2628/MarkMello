@@ -107,7 +107,34 @@ describe("window target resolver", () => {
       },
       root,
     });
-    controller.updateWindowForScroll();
+    const operation = {
+      documentEpoch: 1,
+      operationEpoch: 1,
+      isCurrent: () => true,
+      requestScrollTop: (target: number) => {
+        root.scrollTop = target;
+      },
+      scheduleFrameTransaction: (work: () => void) => {
+        frames.push(time => {
+          tickCount++;
+          work();
+        });
+        return true;
+      },
+    };
+    controller.updateWindowForScroll({ operation });
+    const originalElement = main.querySelector<HTMLElement>('[data-mm-block-index="20"]')!;
+    vi.spyOn(originalElement, "getBoundingClientRect").mockReturnValue({
+      bottom: 85,
+      height: 100,
+      left: 0,
+      right: 0,
+      top: -15,
+      width: 0,
+      x: 0,
+      y: -15,
+      toJSON() { return this; },
+    } as DOMRect);
 
     const action = vi.fn(({ targetElement }) => {
       expect(tickCount).toBe(1);
@@ -123,17 +150,24 @@ describe("window target resolver", () => {
       legacyAction: () => "legacy",
       main,
       model,
+      operation,
       ownerWindow: window,
       root,
       virtualizationEnabled: true,
     });
 
     expect(action).not.toHaveBeenCalled();
+    expect(controller.getCurrentRange()).toEqual({ start: 0, end: 0 });
+    frames.shift()?.(0);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(action).toHaveBeenCalledTimes(1);
     expect(controller.getCurrentRange()).toEqual({ start: 2, end: 2 });
+    expect(frames).toHaveLength(1);
     frames.shift()?.(0);
     await expect(pending).resolves.toBe("done");
 
-    expect(action).toHaveBeenCalledTimes(1);
     expect(controller.getCurrentRange()).toEqual({ start: 0, end: 0 });
     expect(root.scrollTop).toBe(15);
     expect(prepareSnapshots).toEqual([
@@ -141,5 +175,101 @@ describe("window target resolver", () => {
       [22, 222],
       [20],
     ]);
+  });
+
+  it("drops a queued target action when its document epoch is invalidated before delivery", async () => {
+    const model = new DocumentWindowModel([entry(0, 30, 100)]);
+    const action = vi.fn(() => "stale");
+    const legacyAction = vi.fn(() => "legacy");
+    const frames: Array<() => void> = [];
+    let current = true;
+    const operation = {
+      documentEpoch: 7,
+      operationEpoch: 11,
+      isCurrent: () => current,
+      requestScrollTop: vi.fn(),
+      scheduleFrameTransaction: (work: () => void) => {
+        frames.push(work);
+        return true;
+      },
+    };
+    const controller = {
+      ensureSectionRangeRendered: vi.fn(() => false),
+      ensureSectionRendered: vi.fn(() => false),
+      getCurrentRange: vi.fn(() => ({ start: 0, end: 0 })),
+      isSectionRendered: vi.fn(() => true),
+    };
+
+    const pending = renderWindowTargetThenAct({
+      action,
+      actionKind: "navigate",
+      controller,
+      descriptor: { blockIndex: 30, kind: "block" },
+      legacyAction,
+      main: document.body,
+      model,
+      operation,
+      ownerWindow: window,
+      root: document.documentElement,
+      virtualizationEnabled: true,
+    });
+
+    expect(action).not.toHaveBeenCalled();
+    expect(frames).toHaveLength(1);
+    current = false;
+    frames.shift()?.();
+    await expect(pending).resolves.toBeUndefined();
+    expect(action).not.toHaveBeenCalled();
+    expect(legacyAction).not.toHaveBeenCalled();
+    expect(operation.requestScrollTop).not.toHaveBeenCalled();
+  });
+
+  it("does not restore a query anchor after the operation is superseded during its action", async () => {
+    const model = new DocumentWindowModel([entry(0, 40, 100)]);
+    const frames: Array<() => void> = [];
+    let current = true;
+    let resolveAction!: (value: string) => void;
+    const actionResult = new Promise<string>(resolve => { resolveAction = resolve; });
+    const action = vi.fn(() => actionResult);
+    const operation = {
+      documentEpoch: 9,
+      operationEpoch: 12,
+      isCurrent: () => current,
+      requestScrollTop: vi.fn(),
+      scheduleFrameTransaction: (work: () => void) => {
+        frames.push(work);
+        return true;
+      },
+    };
+    const controller = {
+      ensureSectionRangeRendered: vi.fn(() => true),
+      ensureSectionRendered: vi.fn(() => true),
+      getCurrentRange: vi.fn(() => ({ start: 0, end: 0 })),
+      isSectionRendered: vi.fn(() => false),
+    };
+
+    const pending = renderWindowTargetThenAct({
+      action,
+      actionKind: "query",
+      controller,
+      descriptor: { blockIndex: 40, kind: "block" },
+      legacyAction: () => "legacy",
+      main: document.body,
+      model,
+      operation,
+      ownerWindow: window,
+      root: document.documentElement,
+      virtualizationEnabled: true,
+    });
+
+    frames.shift()?.();
+    await Promise.resolve();
+    expect(action).toHaveBeenCalledTimes(1);
+    current = false;
+    resolveAction("done");
+    await expect(pending).resolves.toBeUndefined();
+    expect(frames).toEqual([]);
+    expect(operation.requestScrollTop).toHaveBeenCalledTimes(1);
+    expect(operation.requestScrollTop).toHaveBeenCalledWith(0, "query-anchor-preserve");
   });
 });

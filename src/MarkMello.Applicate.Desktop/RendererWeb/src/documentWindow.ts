@@ -454,7 +454,14 @@ export class DocumentWindowModel {
 
     const byBlock = anchor.blockIndex >= 0 ? this.getEntryByBlockIndex(anchor.blockIndex) : undefined;
     const entry = byBlock ?? this.sections[anchor.sectionIndex];
-    return (entry?.cumulativeTop ?? this.leadingOffset) + anchor.intraOffset;
+    if (entry === undefined) {
+      return this.leadingOffset;
+    }
+    const intraOffset = Math.max(
+      0,
+      Math.min(anchor.intraOffset, Math.max(0, effectiveHeight(entry) - 0.5))
+    );
+    return entry.cumulativeTop + intraOffset;
   }
 
   computeSpacerHeights(range: WindowRange): SpacerHeights {

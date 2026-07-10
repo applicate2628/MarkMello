@@ -54,9 +54,13 @@ import {
 } from "./sectionIntrinsicSize";
 import { readVirtualizationFlag } from "./virtualizationFlags";
 import {
+  captureReadingAnchor,
   createFullDocumentFragmentFromWindowModel,
   createVirtualizedDocumentWindowController,
+  scrollTopForReadingAnchor,
+  type ReadingAnchor,
   type VirtualizedDocumentWindowController,
+  type VirtualizedWindowOperation,
 } from "./virtualizedDocumentWindow";
 import {
   createVirtualizationShadowValidator,
@@ -69,7 +73,16 @@ import {
   readWindowTargetContext,
   type WindowTargetContext,
   type WindowTargetDescriptor,
+  type WindowTargetOperation,
 } from "./windowTargetResolver";
+import {
+  createScrollOwnershipControlPlane,
+  GEOMETRY_SETTLED_EVENT,
+  type ScrollAcquirePolicy,
+  type ScrollLease,
+  type ScrollOwnershipControlPlane,
+  type ScrollWriteReceipt,
+} from "./scrollOwnershipControlPlane";
 
 type KatexApi = {
   render: (
@@ -255,6 +268,7 @@ let minimapViewportFrameRequested = false;
 let minimapRefreshTimer: number | undefined;
 let minimapContentRefreshTimer: number | undefined;
 let minimapDeferredContentRefreshHandle: { kind: "idle" | "timeout"; id: number } | null = null;
+let progressiveDeferredEnhancementHandle: { kind: "idle" | "timeout"; id: number } | null = null;
 let progressiveMinimapRefreshGeneration = 0;
 let cachedGeometryRefreshTimer: number | undefined;
 let mermaidCacheResumeTimer: number | undefined;
@@ -362,6 +376,48 @@ let lastPostedPreviewSourceLine: number | null = null;
 let liveDocumentBlockElements: HTMLElement[] = [];
 let liveDocumentBlockElementsStale = true;
 const virtualizationEnabled = readVirtualizationFlag(window, document);
+const scrollOwnershipControlPlane: ScrollOwnershipControlPlane | null = virtualizationEnabled
+  ? createScrollOwnershipControlPlane({
+    cancelFrame: handle => window.cancelAnimationFrame(handle),
+    emitGeometrySettled: payload => {
+      document.dispatchEvent(new CustomEvent(GEOMETRY_SETTLED_EVENT, { detail: payload }));
+    },
+    requestFrame: callback => window.requestAnimationFrame(callback),
+    root: getDocumentScrollRoot(),
+    trace: event => postPerfMark(event.id, {
+      ...event.details,
+      documentEpoch: event.documentEpoch,
+      frame: event.frame,
+      geometryEpoch: event.geometryEpoch,
+      operationEpoch: event.operationEpoch,
+    }),
+  })
+  : null;
+if (scrollOwnershipControlPlane !== null) {
+  const virtualizationRoot = getDocumentScrollRoot();
+  if (virtualizationRoot instanceof HTMLElement) {
+    virtualizationRoot.dataset.mmVirtualizationActive = "true";
+  } else {
+    virtualizationRoot.setAttribute("data-mm-virtualization-active", "true");
+  }
+  window.addEventListener("pagehide", () => {
+    finishMinimapScrollOperation();
+    cancelPendingVirtualizedMaintenance("teardown");
+    finishCachedScrollRestore?.("canceled", "teardown");
+    cancelProcessedDocumentCacheClone();
+    cancelProgressiveDeferredEnhancements();
+    cancelDeferredMinimapContentRefresh(false);
+    cancelMinimapRefreshAfterLayoutSettles();
+    cancelHeavyLiveUpdate();
+    if (minimapContentRefreshTimer !== undefined) {
+      window.clearTimeout(minimapContentRefreshTimer);
+      minimapContentRefreshTimer = undefined;
+    }
+    resetVirtualizedDocumentWindow(false);
+    scrollOwnershipControlPlane.dispose();
+    getDocumentScrollRoot().removeAttribute("data-mm-virtualization-active");
+  }, { once: true });
+}
 const virtualizationShadowEnabled = readVirtualizationShadowFlag(window, document);
 let virtualizationShadowValidator: VirtualizationShadowValidator | null = null;
 let virtualizationShadowDocumentFinal = true;
@@ -373,12 +429,16 @@ let virtualizedMeasureFrameRequested = false;
 let virtualizedCalibrationHandle: { kind: "idle" | "timeout"; id: number } | null = null;
 let virtualizedProgrammaticNavigationInProgress = false;
 let virtualizedProgrammaticNavigationGeneration = 0;
-let virtualizedProgrammaticNavigationExpectedScrollTop: number | null = null;
 let virtualizedProgrammaticNavigationExternalShiftCount = 0;
 let virtualizedProgrammaticNavigationPostSettleTarget: {
   descriptor: WindowTargetDescriptor;
   viewportOffsetY: number;
 } | null = null;
+let virtualizedProgrammaticNavigationOperation: VirtualizedScrollOperation | null = null;
+let minimapScrollOperation: VirtualizedScrollOperation | null = null;
+const virtualizedWriteReceipts = new Map<number, ScrollWriteReceipt>();
+let cachedScrollRestoreCompletion: Promise<void> | null = null;
+let finishCachedScrollRestore: ((status: "canceled" | "committed" | "failed", reason: string) => void) | null = null;
 let virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
 let virtualizedCalibrationDeferredDuringNavigation = false;
 let virtualizedWindowMathController: MathReadinessController | null = null;
@@ -417,6 +477,8 @@ type CachedLayoutState = {
   scrollHeight: number;
   clientHeight: number;
   topBlockIndex: number | null;
+  readingAnchor?: ReadingAnchor | null;
+  settledGeometryEpoch?: number;
 };
 
 const processedDocumentCache = new Map<string, ProcessedDocumentCacheEntry>();
@@ -549,7 +611,13 @@ function captureCurrentProcessedDocumentCacheEntry(mode: "clone" | "move"): Proc
   return {
     fragment,
     nodeCount: sourceNodes.length,
-    layoutState: { ...lastKnownLayoutState },
+    layoutState: virtualizationEnabled
+      ? {
+        ...lastKnownLayoutState,
+        readingAnchor: captureCurrentVirtualizedReadingAnchor(),
+        settledGeometryEpoch: scrollOwnershipControlPlane!.captureGeometryEpoch(),
+      }
+      : { ...lastKnownLayoutState },
     headings: lastExtractedHeadings.map(cloneHeadingPayload),
     minimapSnapshot,
   };
@@ -607,7 +675,13 @@ function refreshProcessedDocumentCacheState(cacheKey: string, markName: string):
   processedDocumentCache.delete(cacheKey);
   processedDocumentCache.set(cacheKey, {
     ...cached,
-    layoutState: { ...lastKnownLayoutState },
+    layoutState: virtualizationEnabled
+      ? {
+        ...lastKnownLayoutState,
+        readingAnchor: captureCurrentVirtualizedReadingAnchor(),
+        settledGeometryEpoch: scrollOwnershipControlPlane!.captureGeometryEpoch(),
+      }
+      : { ...lastKnownLayoutState },
     headings: lastExtractedHeadings.map(cloneHeadingPayload),
     minimapSnapshot,
   });
@@ -625,10 +699,18 @@ function scheduleCurrentProcessedDocumentCacheClone(delayMs = 240): void {
   }
 
   const generation = ++processedDocumentCacheCloneGeneration;
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   cancelProcessedDocumentCacheClone();
 
   const run = () => {
-    if (generation !== processedDocumentCacheCloneGeneration || currentDocumentCacheKey !== cacheKey) {
+    if (
+      generation !== processedDocumentCacheCloneGeneration
+      || currentDocumentCacheKey !== cacheKey
+      || (
+        documentEpoch !== undefined
+        && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+      )
+    ) {
       return;
     }
 
@@ -697,7 +779,13 @@ function applyDocumentScrollState(): void {
     // When the host owns scroll (viewer mode forwarding wheel to the outer
     // Avalonia ScrollViewer), force the document to position 0 so the host
     // and renderer agree on the starting offset.
-    window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior });
+    if (virtualizationEnabled) {
+      scheduleVirtualizedStandaloneOperation("scroll-disabled-reset", "supersede-as-user", operation => {
+        operation.requestScrollTop(0, "scroll-disabled-reset");
+      });
+    } else {
+      window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior });
+    }
   }
 }
 
@@ -996,6 +1084,7 @@ function renderMath(): MathReadinessController {
   emitMark("mm-render-math-start", { mathCount: getLiveDocumentMathCount() });
   const katex = hostWindow.katex ?? undefined;
   const controller = renderMathInit({ katex, documentRoot: getLiveDocumentRoot() ?? document });
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   // Phase B fires after allMathRendered to re-clone the minimap when the
   // document height genuinely drifted (>=100px). The staleness guard must key
   // off document IDENTITY (currentDocumentCacheKey — same token used by
@@ -1007,7 +1096,12 @@ function renderMath(): MathReadinessController {
   const phaseBDocumentCacheKey = currentDocumentCacheKey;
   const initialVisualSettleReady = virtualizationEnabled
     ? controller.allMathRendered.then(() => {
-        if (phaseBDocumentCacheKey !== currentDocumentCacheKey || controller.isCancelled()) {
+        if (
+          (documentEpoch !== undefined
+            && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true)
+          || phaseBDocumentCacheKey !== currentDocumentCacheKey
+          || controller.isCancelled()
+        ) {
           return;
         }
 
@@ -1037,6 +1131,12 @@ function renderMath(): MathReadinessController {
   // source of truth — no duplicate classification). For all-math, walk all
   // [data-tex] nodes since IO may have rendered nodes outside the frozen set.
   controller.initialVisibleReady.then(() => {
+    if (
+      documentEpoch !== undefined
+      && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+    ) {
+      return;
+    }
     emitMark("mm-initial-visible-ready", {
       visibleCount: controller.initialVisibleNodes.size,
       failedCount: countFailedInSet(controller.initialVisibleNodes),
@@ -1062,6 +1162,12 @@ function renderMath(): MathReadinessController {
     invalidateSourceLineAnchors();
   });
   controller.allMathRendered.then(() => {
+    if (
+      documentEpoch !== undefined
+      && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+    ) {
+      return;
+    }
     // Full math pass settled — anchor tops may all have shifted.
     invalidateSourceLineAnchors();
     const allMathNodes = readLiveDocumentMathNodes();
@@ -1185,9 +1291,31 @@ function scheduleCachedMermaidResume(hasMermaid?: boolean): void {
   }, 0);
 }
 
+function cancelProgressiveDeferredEnhancements(): void {
+  const handle = progressiveDeferredEnhancementHandle;
+  progressiveDeferredEnhancementHandle = null;
+  if (handle === null) {
+    return;
+  }
+  if (handle.kind === "idle") {
+    (window as Window & { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback?.(handle.id);
+  } else {
+    window.clearTimeout(handle.id);
+  }
+}
+
 function scheduleProgressiveDeferredEnhancements(message: Extract<HostMessage, { type: "append-document" }>): void {
+  cancelProgressiveDeferredEnhancements();
   const renderId = message.renderId;
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   const run = () => {
+    progressiveDeferredEnhancementHandle = null;
+    if (
+      documentEpoch !== undefined
+      && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+    ) {
+      return;
+    }
     if (
       renderId !== undefined
       && currentDocumentRenderId !== null
@@ -1215,11 +1343,17 @@ function scheduleProgressiveDeferredEnhancements(message: Extract<HostMessage, {
     requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
   }).requestIdleCallback;
   if (requestIdle) {
-    requestIdle(run, { timeout: 4000 });
+    progressiveDeferredEnhancementHandle = {
+      kind: "idle",
+      id: requestIdle(run, { timeout: 4000 }),
+    };
     return;
   }
 
-  window.setTimeout(run, 800);
+  progressiveDeferredEnhancementHandle = {
+    kind: "timeout",
+    id: window.setTimeout(run, 800),
+  };
 }
 
 function getViewportHeightForMermaid(): number {
@@ -1543,8 +1677,617 @@ function getDocumentScrollRoot(): Element & { scrollTop: number; scrollHeight: n
   };
 }
 
+type VirtualizedScrollOperation = WindowTargetOperation & {
+  lease: ScrollLease;
+};
+
+type VirtualizedMaintenancePhase = "executing" | "frame-scheduled" | "pending" | "retry-pending" | "terminal";
+
+type VirtualizedMaintenanceRequestId = Readonly<{
+  documentEpoch: number;
+  requestSerial: number;
+}>;
+
+type VirtualizedMaintenanceBinding = Readonly<{
+  operation: VirtualizedScrollOperation;
+  operationEpoch: number;
+  ownsLease: boolean;
+}>;
+
+type VirtualizedMaintenanceTerminal = Readonly<{
+  reason: string;
+  status: "canceled" | "completed" | "failed";
+}>;
+
+type VirtualizedMaintenanceRequest = {
+  binding: VirtualizedMaintenanceBinding | null;
+  documentEpoch: number;
+  executionCount: 0 | 1;
+  owner: string;
+  phase: VirtualizedMaintenancePhase;
+  requestId: VirtualizedMaintenanceRequestId;
+  retryFrame: number | null;
+  terminal: VirtualizedMaintenanceTerminal | null;
+  work: (operation: VirtualizedScrollOperation) => void;
+  workRevision: number;
+};
+
+type VirtualizedMaintenanceOwnerSlot = {
+  active: VirtualizedMaintenanceRequest | null;
+  successor: VirtualizedMaintenanceRequest | null;
+};
+
+type VirtualizedMaintenanceReleaseHold = {
+  operation: VirtualizedScrollOperation;
+  releaseRequested: boolean;
+  requestSerials: Set<number>;
+};
+
+const virtualizedMaintenanceByOwner = new Map<string, VirtualizedMaintenanceOwnerSlot>();
+const virtualizedMaintenanceReleaseHolds = new Map<number, VirtualizedMaintenanceReleaseHold>();
+const virtualizedMaintenanceDeferredPromotionOwners = new Set<string>();
+let virtualizedMaintenanceCancellationBatchDepth = 0;
+let virtualizedMaintenanceRequestSerial = 0;
+let pendingInitialVirtualizedWindowWork: ((operation: VirtualizedScrollOperation) => void) | null = null;
+
+function consumePendingInitialVirtualizedWindow(operation: VirtualizedScrollOperation): boolean {
+  const work = pendingInitialVirtualizedWindowWork;
+  pendingInitialVirtualizedWindowWork = null;
+  if (work === null || !operation.isCurrent()) {
+    return false;
+  }
+  work(operation);
+  return true;
+}
+
+function createVirtualizedScrollOperation(lease: ScrollLease): VirtualizedScrollOperation | null {
+  const plane = scrollOwnershipControlPlane;
+  if (plane === null) {
+    return null;
+  }
+  return {
+    documentEpoch: lease.documentEpoch,
+    operationEpoch: lease.operationEpoch,
+    lease,
+    isCurrent: () => plane.isCurrentDocumentEpoch(lease.documentEpoch) && plane.holds(lease),
+    requestScrollTop: (target, writer) => {
+      if (!plane.isCurrentDocumentEpoch(lease.documentEpoch) || !plane.holds(lease)) {
+        return;
+      }
+      const receipt = plane.write(lease, { target, writer });
+      virtualizedWriteReceipts.set(lease.operationEpoch, receipt);
+      void receipt.result.then(() => {
+        if (virtualizedWriteReceipts.get(lease.operationEpoch) === receipt) {
+          virtualizedWriteReceipts.delete(lease.operationEpoch);
+        }
+      });
+    },
+    scheduleFrameTransaction: work => plane.scheduleFrameTransaction(lease, work),
+  };
+}
+
+function acquireVirtualizedScrollOperation(
+  owner: string,
+  policy: ScrollAcquirePolicy
+): VirtualizedScrollOperation | null {
+  const maintenanceCutoff = virtualizedMaintenanceRequestSerial;
+  const acquired = scrollOwnershipControlPlane?.acquire(owner, policy);
+  if (acquired?.status !== "acquired") {
+    return null;
+  }
+  const operation = createVirtualizedScrollOperation(acquired.lease);
+  if (operation !== null && policy !== "defer") {
+    cancelVirtualizedMaintenanceThrough(
+      maintenanceCutoff,
+      policy === "supersede-as-user" ? "user-supersession" : "programmatic-supersession"
+    );
+  }
+  return operation;
+}
+
+function releaseVirtualizedScrollOperationAfterWrite(operation: VirtualizedScrollOperation): void {
+  const plane = scrollOwnershipControlPlane;
+  if (plane === null) {
+    return;
+  }
+  const receipt = virtualizedWriteReceipts.get(operation.operationEpoch);
+  if (receipt === undefined) {
+    if (operation.isCurrent()) {
+      releaseVirtualizedScrollOperation(operation);
+    }
+    return;
+  }
+  void receipt.result.then(() => {
+    if (operation.isCurrent()) {
+      releaseVirtualizedScrollOperation(operation);
+    }
+  });
+}
+
+function releaseVirtualizedScrollOperation(operation: VirtualizedScrollOperation): boolean {
+  const plane = scrollOwnershipControlPlane;
+  const hold = virtualizedMaintenanceReleaseHolds.get(operation.operationEpoch);
+  if (hold !== undefined && hold.requestSerials.size > 0) {
+    hold.releaseRequested = true;
+    return true;
+  }
+  if (plane === null || !plane.release(operation.lease)) {
+    return false;
+  }
+  return true;
+}
+
+function scheduleVirtualizedStandaloneOperation(
+  owner: string,
+  policy: ScrollAcquirePolicy,
+  work: (operation: VirtualizedScrollOperation) => void
+): VirtualizedScrollOperation | null {
+  const operation = acquireVirtualizedScrollOperation(owner, policy);
+  if (operation === null) {
+    return null;
+  }
+  const scheduled = operation.scheduleFrameTransaction(() => {
+    if (!operation.isCurrent()) {
+      return;
+    }
+    work(operation);
+    releaseVirtualizedScrollOperationAfterWrite(operation);
+  });
+  if (!scheduled) {
+    releaseVirtualizedScrollOperation(operation);
+    return null;
+  }
+  return operation;
+}
+
+function scheduleExistingVirtualizedOperation(
+  operation: VirtualizedScrollOperation,
+  work: () => void,
+  releaseAfterWrite = false
+): boolean {
+  const scheduled = operation.scheduleFrameTransaction(() => {
+    if (!operation.isCurrent()) {
+      return;
+    }
+    work();
+    if (releaseAfterWrite) {
+      releaseVirtualizedScrollOperationAfterWrite(operation);
+    }
+  });
+  if (!scheduled && releaseAfterWrite && operation.isCurrent()) {
+    releaseVirtualizedScrollOperation(operation);
+  }
+  return scheduled;
+}
+
+function scheduleVirtualizedElementLanding(
+  operation: VirtualizedScrollOperation,
+  element: HTMLElement | null,
+  writer: string,
+  viewportOffsetY = 0
+): boolean {
+  if (element === null) {
+    if (operation.isCurrent()) {
+      releaseVirtualizedScrollOperation(operation);
+    }
+    return false;
+  }
+  return scheduleExistingVirtualizedOperation(operation, () => {
+    const target = readElementDocumentTop(element) - Math.max(0, viewportOffsetY);
+    operation.requestScrollTop(target, writer);
+  }, true);
+}
+
+function virtualizedMaintenanceDetail(request: VirtualizedMaintenanceRequest): Record<string, unknown> {
+  return {
+    documentEpoch: request.documentEpoch,
+    owner: request.owner,
+    requestId: request.requestId,
+    requestSerial: request.requestId.requestSerial,
+    workRevision: request.workRevision,
+  };
+}
+
+function postVirtualizedMaintenanceEvent(
+  name: "mm-virt-maintenance-bound"
+    | "mm-virt-maintenance-coalesced"
+    | "mm-virt-maintenance-requested"
+    | "mm-virt-maintenance-retry",
+  request: VirtualizedMaintenanceRequest,
+  detail: Record<string, unknown> = {}
+): void {
+  postPerfMark(name, {
+    ...virtualizedMaintenanceDetail(request),
+    ...detail,
+  });
+}
+
+function isLiveVirtualizedMaintenanceRequest(request: VirtualizedMaintenanceRequest): boolean {
+  if (request.terminal !== null || request.phase === "terminal") {
+    return false;
+  }
+  const slot = virtualizedMaintenanceByOwner.get(request.owner);
+  return slot?.active === request || slot?.successor === request;
+}
+
+function isActiveVirtualizedMaintenanceRequest(request: VirtualizedMaintenanceRequest): boolean {
+  return isLiveVirtualizedMaintenanceRequest(request)
+    && virtualizedMaintenanceByOwner.get(request.owner)?.active === request;
+}
+
+function createVirtualizedMaintenanceRequest(
+  owner: string,
+  documentEpoch: number,
+  work: (operation: VirtualizedScrollOperation) => void
+): VirtualizedMaintenanceRequest {
+  const requestSerial = ++virtualizedMaintenanceRequestSerial;
+  return {
+    binding: null,
+    documentEpoch,
+    executionCount: 0,
+    owner,
+    phase: "pending",
+    requestId: Object.freeze({ documentEpoch, requestSerial }),
+    retryFrame: null,
+    terminal: null,
+    work,
+    workRevision: 1,
+  };
+}
+
+function postVirtualizedMaintenanceRequested(request: VirtualizedMaintenanceRequest): void {
+  postVirtualizedMaintenanceEvent("mm-virt-maintenance-requested", request);
+}
+
+function coalesceVirtualizedMaintenanceRequest(
+  request: VirtualizedMaintenanceRequest,
+  work: (operation: VirtualizedScrollOperation) => void
+): void {
+  if (!isLiveVirtualizedMaintenanceRequest(request)) {
+    return;
+  }
+  request.work = work;
+  request.workRevision++;
+  postVirtualizedMaintenanceEvent("mm-virt-maintenance-coalesced", request);
+}
+
+function registerVirtualizedMaintenanceReleaseHold(
+  request: VirtualizedMaintenanceRequest,
+  binding: VirtualizedMaintenanceBinding
+): void {
+  let hold = virtualizedMaintenanceReleaseHolds.get(binding.operationEpoch);
+  if (hold === undefined) {
+    hold = {
+      operation: binding.operation,
+      releaseRequested: false,
+      requestSerials: new Set<number>(),
+    };
+    virtualizedMaintenanceReleaseHolds.set(binding.operationEpoch, hold);
+  }
+  hold.requestSerials.add(request.requestId.requestSerial);
+}
+
+type VirtualizedMaintenanceReleaseAction = {
+  afterWrite: boolean;
+  operation: VirtualizedScrollOperation;
+};
+
+function detachVirtualizedMaintenanceBinding(
+  request: VirtualizedMaintenanceRequest,
+  terminal: VirtualizedMaintenanceTerminal
+): VirtualizedMaintenanceReleaseAction | null {
+  const binding = request.binding;
+  if (binding === null) {
+    return null;
+  }
+  if (binding.ownsLease) {
+    if (terminal.status === "completed") {
+      return { afterWrite: true, operation: binding.operation };
+    }
+    if (terminal.status === "canceled" && binding.operation.isCurrent()) {
+      return { afterWrite: false, operation: binding.operation };
+    }
+    return null;
+  }
+
+  const hold = virtualizedMaintenanceReleaseHolds.get(binding.operationEpoch);
+  if (hold === undefined) {
+    return null;
+  }
+  hold.requestSerials.delete(request.requestId.requestSerial);
+  if (hold.requestSerials.size > 0) {
+    return null;
+  }
+  virtualizedMaintenanceReleaseHolds.delete(binding.operationEpoch);
+  return hold.releaseRequested && hold.operation.isCurrent()
+    ? { afterWrite: true, operation: hold.operation }
+    : null;
+}
+
+function promoteVirtualizedMaintenanceSuccessor(owner: string): void {
+  const slot = virtualizedMaintenanceByOwner.get(owner);
+  if (slot === undefined || slot.active !== null) {
+    return;
+  }
+  const successor = slot.successor;
+  slot.successor = null;
+  if (successor === null) {
+    virtualizedMaintenanceByOwner.delete(owner);
+    return;
+  }
+  slot.active = successor;
+  attemptVirtualizedMaintenance(successor);
+}
+
+function flushVirtualizedMaintenancePromotions(): void {
+  if (virtualizedMaintenanceCancellationBatchDepth !== 0) {
+    return;
+  }
+  const owners = [...virtualizedMaintenanceDeferredPromotionOwners];
+  virtualizedMaintenanceDeferredPromotionOwners.clear();
+  for (const owner of owners) {
+    promoteVirtualizedMaintenanceSuccessor(owner);
+  }
+}
+
+function finishVirtualizedMaintenance(
+  request: VirtualizedMaintenanceRequest,
+  status: "canceled" | "completed" | "failed",
+  reason: string
+): boolean {
+  if (request.terminal !== null || request.phase === "terminal") {
+    return false;
+  }
+  const terminal = Object.freeze({ reason, status });
+  request.terminal = terminal;
+  request.phase = "terminal";
+  if (request.retryFrame !== null) {
+    window.cancelAnimationFrame(request.retryFrame);
+    request.retryFrame = null;
+  }
+  const releaseAction = detachVirtualizedMaintenanceBinding(request, terminal);
+  const slot = virtualizedMaintenanceByOwner.get(request.owner);
+  if (slot?.active === request) {
+    slot.active = null;
+  } else if (slot?.successor === request) {
+    slot.successor = null;
+  }
+  if (slot !== undefined && slot.active === null && slot.successor === null) {
+    virtualizedMaintenanceByOwner.delete(request.owner);
+  }
+
+  postPerfMark("mm-virt-maintenance-terminal", {
+    ...virtualizedMaintenanceDetail(request),
+    executionCount: request.executionCount,
+    reason,
+    status,
+  });
+
+  if (releaseAction !== null) {
+    if (releaseAction.afterWrite) {
+      releaseVirtualizedScrollOperationAfterWrite(releaseAction.operation);
+    } else {
+      releaseVirtualizedScrollOperation(releaseAction.operation);
+    }
+  }
+
+  if (slot?.active === null && slot.successor !== null) {
+    if (status === "failed") {
+      finishVirtualizedMaintenance(slot.successor, "canceled", reason);
+    } else if (virtualizedMaintenanceCancellationBatchDepth === 0) {
+      promoteVirtualizedMaintenanceSuccessor(request.owner);
+    } else {
+      virtualizedMaintenanceDeferredPromotionOwners.add(request.owner);
+    }
+  }
+  return true;
+}
+
+function cancelVirtualizedMaintenanceRequests(
+  predicate: (request: VirtualizedMaintenanceRequest) => boolean,
+  reason: string
+): void {
+  const selected: VirtualizedMaintenanceRequest[] = [];
+  for (const slot of virtualizedMaintenanceByOwner.values()) {
+    for (const request of [slot.active, slot.successor]) {
+      if (request !== null && isLiveVirtualizedMaintenanceRequest(request) && predicate(request)) {
+        selected.push(request);
+      }
+    }
+  }
+  virtualizedMaintenanceCancellationBatchDepth++;
+  try {
+    for (const request of selected) {
+      finishVirtualizedMaintenance(request, "canceled", reason);
+    }
+  } finally {
+    virtualizedMaintenanceCancellationBatchDepth--;
+    flushVirtualizedMaintenancePromotions();
+  }
+}
+
+function cancelPendingVirtualizedMaintenance(reason: string): void {
+  cancelVirtualizedMaintenanceRequests(() => true, reason);
+}
+
+function cancelVirtualizedMaintenanceThrough(cutoff: number, reason: string): void {
+  cancelVirtualizedMaintenanceRequests(
+    request => request.requestId.requestSerial <= cutoff,
+    reason
+  );
+}
+
+function scheduleVirtualizedMaintenanceRetry(request: VirtualizedMaintenanceRequest): void {
+  if (
+    request.retryFrame !== null
+    || !isActiveVirtualizedMaintenanceRequest(request)
+    || request.phase === "terminal"
+  ) {
+    return;
+  }
+  request.phase = "retry-pending";
+  request.retryFrame = window.requestAnimationFrame(() => {
+    request.retryFrame = null;
+    if (!isActiveVirtualizedMaintenanceRequest(request)) {
+      return;
+    }
+    if (scrollOwnershipControlPlane?.isCurrentDocumentEpoch(request.documentEpoch) !== true) {
+      finishVirtualizedMaintenance(request, "canceled", "stale-document");
+      return;
+    }
+    request.phase = "pending";
+    attemptVirtualizedMaintenance(request);
+  });
+  postVirtualizedMaintenanceEvent("mm-virt-maintenance-retry", request, {
+    reason: "frame-transaction-occupied",
+  });
+}
+
+function deliverVirtualizedMaintenance(
+  request: VirtualizedMaintenanceRequest,
+  operation: VirtualizedScrollOperation
+): void {
+  const binding = request.binding;
+  if (
+    !isActiveVirtualizedMaintenanceRequest(request)
+    || request.phase !== "frame-scheduled"
+    || binding === null
+    || binding.operation !== operation
+  ) {
+    return;
+  }
+  if (!operation.isCurrent() || operation.documentEpoch !== request.documentEpoch) {
+    finishVirtualizedMaintenance(request, "canceled", "stale-operation");
+    return;
+  }
+  if (request.executionCount !== 0) {
+    finishVirtualizedMaintenance(request, "failed", "execution-count-invariant");
+    return;
+  }
+  request.phase = "executing";
+  request.executionCount = 1;
+  const work = request.work;
+  try {
+    work(operation);
+  } catch (error) {
+    finishVirtualizedMaintenance(request, "failed", "frame-work-failed");
+    throw error;
+  }
+  finishVirtualizedMaintenance(request, "completed", "delivered");
+}
+
+function attemptVirtualizedMaintenance(request: VirtualizedMaintenanceRequest): void {
+  const plane = scrollOwnershipControlPlane;
+  if (
+    plane === null
+    || !isActiveVirtualizedMaintenanceRequest(request)
+    || !plane.isCurrentDocumentEpoch(request.documentEpoch)
+  ) {
+    if (isLiveVirtualizedMaintenanceRequest(request)) {
+      finishVirtualizedMaintenance(request, "canceled", "stale-document");
+    }
+    return;
+  }
+  const joined = plane.joinMaintenance(request.owner);
+  if (joined === null) {
+    finishVirtualizedMaintenance(request, "canceled", "lease-unavailable");
+    return;
+  }
+  const operation = createVirtualizedScrollOperation(joined.lease);
+  if (operation === null) {
+    finishVirtualizedMaintenance(request, "canceled", "operation-unavailable");
+    return;
+  }
+  const scheduled = operation.scheduleFrameTransaction(() => {
+    deliverVirtualizedMaintenance(request, operation);
+  });
+  if (!scheduled) {
+    if (joined.ownsLease && operation.isCurrent()) {
+      releaseVirtualizedScrollOperation(operation);
+    }
+    scheduleVirtualizedMaintenanceRetry(request);
+    return;
+  }
+
+  const binding = Object.freeze({
+    operation,
+    operationEpoch: operation.operationEpoch,
+    ownsLease: joined.ownsLease,
+  });
+  request.binding = binding;
+  request.phase = "frame-scheduled";
+  if (!binding.ownsLease) {
+    registerVirtualizedMaintenanceReleaseHold(request, binding);
+  }
+  postVirtualizedMaintenanceEvent("mm-virt-maintenance-bound", request, {
+    operationEpoch: binding.operationEpoch,
+    ownsLease: binding.ownsLease,
+  });
+}
+
+function scheduleVirtualizedMaintenance(
+  owner: string,
+  work: (operation: VirtualizedScrollOperation) => void
+): boolean {
+  const plane = scrollOwnershipControlPlane;
+  if (plane === null) {
+    return false;
+  }
+  const documentEpoch = plane.captureDocumentEpoch();
+  const staleSlot = virtualizedMaintenanceByOwner.get(owner);
+  if (
+    staleSlot !== undefined
+    && [staleSlot.active, staleSlot.successor].some(request =>
+      request !== null && request.documentEpoch !== documentEpoch)
+  ) {
+    cancelVirtualizedMaintenanceRequests(
+      request => request.owner === owner && request.documentEpoch !== documentEpoch,
+      "stale-document"
+    );
+  }
+
+  let slot = virtualizedMaintenanceByOwner.get(owner);
+  if (slot?.active !== null && slot?.active !== undefined) {
+    if (slot.active.phase === "executing") {
+      if (slot.successor !== null) {
+        coalesceVirtualizedMaintenanceRequest(slot.successor, work);
+        return true;
+      }
+      const successor = createVirtualizedMaintenanceRequest(owner, documentEpoch, work);
+      slot.successor = successor;
+      postVirtualizedMaintenanceRequested(successor);
+      return true;
+    }
+    coalesceVirtualizedMaintenanceRequest(slot.active, work);
+    return true;
+  }
+
+  const request = createVirtualizedMaintenanceRequest(owner, documentEpoch, work);
+  if (slot === undefined) {
+    slot = { active: request, successor: null };
+    virtualizedMaintenanceByOwner.set(owner, slot);
+  } else {
+    slot.active = request;
+  }
+  postVirtualizedMaintenanceRequested(request);
+  attemptVirtualizedMaintenance(request);
+  return true;
+}
+
+function captureCurrentVirtualizedReadingAnchor(): ReadingAnchor | null {
+  const main = document.querySelector<HTMLElement>("main.mm-document");
+  return main === null ? null : captureReadingAnchor(collectLiveDocumentSectionElements(main));
+}
+
 function readVirtualizedFindContext(): import("./virtualizedFindProvider").VirtualizedFindContext {
   return {
+    beginNavigationOperation: () => acquireVirtualizedScrollOperation(
+      "find-navigation",
+      "supersede-programmatic"
+    ),
+    completeNavigationOperation: operation => {
+      releaseVirtualizedScrollOperationAfterWrite(operation as VirtualizedScrollOperation);
+    },
     controller: virtualizedDocumentWindowController,
     main: document.querySelector<HTMLElement>("main.mm-document"),
     model: virtualizedDocumentWindowModel,
@@ -1556,37 +2299,17 @@ function readVirtualizedFindContext(): import("./virtualizedFindProvider").Virtu
 }
 
 function isVirtualizedProgrammaticNavigationInProgress(): boolean {
-  return virtualizationEnabled && virtualizedProgrammaticNavigationInProgress;
+  return virtualizationEnabled
+    && virtualizedProgrammaticNavigationInProgress
+    && virtualizedProgrammaticNavigationOperation?.isCurrent() === true;
 }
 
 function writeVirtualizedProgrammaticNavigationScrollTop(
-  root: Element & { scrollTop: number },
-  scrollTop: number
+  operation: VirtualizedScrollOperation,
+  scrollTop: number,
+  writer: string
 ): void {
-  const nextScrollTop = Math.max(0, scrollTop);
-  root.scrollTop = nextScrollTop;
-  virtualizedProgrammaticNavigationExpectedScrollTop = root.scrollTop;
-}
-
-function recordVirtualizedProgrammaticNavigationExternalShift(root: Element & { scrollTop: number }): void {
-  const expected = virtualizedProgrammaticNavigationExpectedScrollTop;
-  if (expected === null) {
-    return;
-  }
-
-  const actual = root.scrollTop;
-  const delta = actual - expected;
-  if (Math.abs(delta) <= VIRTUALIZED_NAVIGATION_SETTLE_TOLERANCE_PX) {
-    return;
-  }
-
-  virtualizedProgrammaticNavigationExternalShiftCount++;
-  virtualizedProgrammaticNavigationExpectedScrollTop = actual;
-  postPerfMark("mm-virt-navigation-external-shift", {
-    actualScrollTop: actual,
-    delta,
-    expectedScrollTop: expected,
-  });
+  operation.requestScrollTop(Math.max(0, scrollTop), writer);
 }
 
 function resolveVirtualizedNavigationTargetSectionIndex(descriptor: WindowTargetDescriptor): number | null {
@@ -1621,7 +2344,10 @@ function resolveVirtualizedNavigationTargetSectionIndex(descriptor: WindowTarget
   return sectionIndex < 0 ? null : sectionIndex;
 }
 
-function forceRenderVirtualizedNavigationTarget(descriptor: WindowTargetDescriptor): boolean {
+function forceRenderVirtualizedNavigationTarget(
+  descriptor: WindowTargetDescriptor,
+  operation?: VirtualizedWindowOperation
+): boolean {
   const controller = virtualizedDocumentWindowController;
   if (controller === null) {
     return false;
@@ -1634,6 +2360,7 @@ function forceRenderVirtualizedNavigationTarget(descriptor: WindowTargetDescript
 
   return controller.ensureSectionRendered(sectionIndex, {
     force: true,
+    ...(operation === undefined ? {} : { operation }),
     preserveAnchor: false,
   });
 }
@@ -1702,32 +2429,20 @@ function computeVirtualizedProgrammaticNavigationScrollTop(
 function applyVirtualizedProgrammaticNavigationContext(
   context: WindowTargetContext,
   descriptor: WindowTargetDescriptor,
-  viewportOffsetY: number
+  viewportOffsetY: number,
+  operation: VirtualizedScrollOperation
 ): boolean {
   if (descriptor.kind === "source-line") {
     pendingSourceLineTarget = descriptor.sourceLine;
     suppressPreviewSourceLinePost();
   }
-  const root = getDocumentScrollRoot();
   const scrollTop = computeVirtualizedProgrammaticNavigationScrollTop(
     context,
     descriptor,
     viewportOffsetY
   );
-  writeVirtualizedProgrammaticNavigationScrollTop(root, scrollTop);
+  writeVirtualizedProgrammaticNavigationScrollTop(operation, scrollTop, "navigation-initial");
   return true;
-}
-
-function applyVirtualizedProgrammaticNavigationTarget(input: {
-  descriptor: WindowTargetDescriptor;
-  viewportOffsetY: number;
-}): boolean {
-  const context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
-  if (context === null) {
-    return false;
-  }
-
-  return applyVirtualizedProgrammaticNavigationContext(context, input.descriptor, input.viewportOffsetY);
 }
 
 function readVirtualizedProgrammaticNavigationResidual(
@@ -1750,6 +2465,7 @@ function readVirtualizedProgrammaticNavigationResidual(
 
 function correctVirtualizedProgrammaticNavigationResidual(input: {
   descriptor: WindowTargetDescriptor;
+  operation: VirtualizedScrollOperation;
   viewportOffsetY: number;
 }): boolean {
   const context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
@@ -1765,11 +2481,7 @@ function correctVirtualizedProgrammaticNavigationResidual(input: {
   if (Math.abs(residual) > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
     const root = getDocumentScrollRoot();
     const nextScrollTop = Math.max(0, root.scrollTop + residual);
-    if (isVirtualizedProgrammaticNavigationInProgress()) {
-      writeVirtualizedProgrammaticNavigationScrollTop(root, nextScrollTop);
-    } else {
-      root.scrollTop = nextScrollTop;
-    }
+    writeVirtualizedProgrammaticNavigationScrollTop(input.operation, nextScrollTop, "navigation-residual");
   }
 
   return true;
@@ -1784,7 +2496,9 @@ function applyVirtualizedRenderedHeightAdoptionEffects(
   }
 
   invalidateTopVisibleBlockIndexCache();
-  invalidateSourceLineAnchors();
+  invalidateSourceLineAnchors({
+    reassertPendingTarget: options.alignPostSettleTarget !== false,
+  });
   refreshVirtualizedFindHighlights();
   if (getModelMinimapSource() !== null && minimapSourceReady) {
     syncModelMinimapCloneMetadata();
@@ -1804,28 +2518,56 @@ function applyVirtualizedRenderedHeightAdoptionEffects(
   });
 }
 
-function adoptVirtualizedProgrammaticNavigationRenderedHeights(context: WindowTargetContext): void {
+function adoptVirtualizedProgrammaticNavigationRenderedHeights(
+  context: WindowTargetContext,
+  operation: VirtualizedScrollOperation
+): void {
   const controller = virtualizedDocumentWindowController;
   if (!virtualizationEnabled || controller === null) {
     return;
   }
 
-  const result = controller.adoptRenderedHeights({ preserveSectionIndex: context.sectionIndex, reanchor: false });
+  const result = controller.adoptRenderedHeights({
+    operation,
+    preserveSectionIndex: context.sectionIndex,
+    reanchor: false,
+  });
   applyVirtualizedRenderedHeightAdoptionEffects(result, {
     alignPostSettleTarget: false,
     scheduleCalibration: false,
   });
 }
 
+function releaseVirtualizedProgrammaticNavigationOperation(
+  operation: VirtualizedScrollOperation,
+  clearPostSettleTarget = false
+): void {
+  virtualizedProgrammaticNavigationInProgress = false;
+  virtualizedProgrammaticNavigationOperation = null;
+  if (clearPostSettleTarget) {
+    virtualizedProgrammaticNavigationPostSettleTarget = null;
+  }
+  releaseVirtualizedScrollOperation(operation);
+  if (virtualizedMeasuredHeightAdoptionDeferredDuringNavigation) {
+    virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
+    scheduleVirtualizedMeasuredHeightAdoption();
+  }
+  if (virtualizedCalibrationDeferredDuringNavigation) {
+    virtualizedCalibrationDeferredDuringNavigation = false;
+    scheduleVirtualizedCalibration();
+  }
+}
+
 function finishVirtualizedProgrammaticNavigationCorrection(
   generation: number,
+  operation: VirtualizedScrollOperation,
   input: {
     descriptor: WindowTargetDescriptor;
     passCount: number;
     residual: number | null;
   }
 ): void {
-  if (generation !== virtualizedProgrammaticNavigationGeneration) {
+  if (generation !== virtualizedProgrammaticNavigationGeneration || !operation.isCurrent()) {
     return;
   }
 
@@ -1838,17 +2580,8 @@ function finishVirtualizedProgrammaticNavigationCorrection(
   updateMinimapViewport({ skipVisibilityUpdate: true });
   postScroll();
   window.requestAnimationFrame(() => {
-    if (generation === virtualizedProgrammaticNavigationGeneration) {
-      virtualizedProgrammaticNavigationInProgress = false;
-      virtualizedProgrammaticNavigationExpectedScrollTop = null;
-      if (virtualizedMeasuredHeightAdoptionDeferredDuringNavigation) {
-        virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
-        scheduleVirtualizedMeasuredHeightAdoption();
-      }
-      if (virtualizedCalibrationDeferredDuringNavigation) {
-        virtualizedCalibrationDeferredDuringNavigation = false;
-        scheduleVirtualizedCalibration();
-      }
+    if (generation === virtualizedProgrammaticNavigationGeneration && operation.isCurrent()) {
+      releaseVirtualizedProgrammaticNavigationOperation(operation);
     }
   });
 }
@@ -1859,34 +2592,35 @@ function settleVirtualizedProgrammaticNavigationTarget(
     viewportOffsetY: number;
   },
   generation: number,
+  operation: VirtualizedScrollOperation,
   pass = 0,
   previousResidualAbs = Number.POSITIVE_INFINITY
 ): void {
-  if (generation !== virtualizedProgrammaticNavigationGeneration) {
+  if (generation !== virtualizedProgrammaticNavigationGeneration || !operation.isCurrent()) {
     return;
   }
 
   const root = getDocumentScrollRoot();
-  recordVirtualizedProgrammaticNavigationExternalShift(root);
-  updateVirtualizedWindowForScroll({ force: true });
+  const controller = virtualizedDocumentWindowController;
+  controller?.updateWindowForScroll({ force: true });
   forceRenderVirtualizedNavigationTarget(input.descriptor);
   let context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
   if (context === null) {
-    virtualizedProgrammaticNavigationInProgress = false;
+    releaseVirtualizedProgrammaticNavigationOperation(operation, true);
     return;
   }
 
-  adoptVirtualizedProgrammaticNavigationRenderedHeights(context);
+  adoptVirtualizedProgrammaticNavigationRenderedHeights(context, operation);
   forceRenderVirtualizedNavigationTarget(input.descriptor);
   context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
   if (context === null) {
-    virtualizedProgrammaticNavigationInProgress = false;
+    releaseVirtualizedProgrammaticNavigationOperation(operation, true);
     return;
   }
 
   const residual = readVirtualizedProgrammaticNavigationResidual(context, input.viewportOffsetY);
   if (residual === null) {
-    virtualizedProgrammaticNavigationInProgress = false;
+    releaseVirtualizedProgrammaticNavigationOperation(operation, true);
     return;
   }
 
@@ -1896,7 +2630,7 @@ function settleVirtualizedProgrammaticNavigationTarget(
     || pass >= VIRTUALIZED_NAVIGATION_CORRECTION_MAX_PASSES
     || (pass > 0 && residualAbs >= previousResidualAbs - VIRTUALIZED_NAVIGATION_CORRECTION_MIN_SHRINK_PX)
   ) {
-    finishVirtualizedProgrammaticNavigationCorrection(generation, {
+    finishVirtualizedProgrammaticNavigationCorrection(generation, operation, {
       descriptor: input.descriptor,
       passCount: pass,
       residual,
@@ -1904,29 +2638,89 @@ function settleVirtualizedProgrammaticNavigationTarget(
     return;
   }
 
-  writeVirtualizedProgrammaticNavigationScrollTop(root, root.scrollTop + residual);
-  window.requestAnimationFrame(() => {
-    settleVirtualizedProgrammaticNavigationTarget(input, generation, pass + 1, residualAbs);
+  writeVirtualizedProgrammaticNavigationScrollTop(
+    operation,
+    root.scrollTop + residual,
+    "navigation-residual"
+  );
+  const receipt = virtualizedWriteReceipts.get(operation.operationEpoch);
+  void (receipt?.result ?? Promise.resolve()).then(() => {
+    window.requestAnimationFrame(() => {
+      if (!operation.isCurrent() || generation !== virtualizedProgrammaticNavigationGeneration) {
+        return;
+      }
+      scheduleVirtualizedProgrammaticNavigationCorrection(
+        input,
+        generation,
+        operation,
+        pass + 1,
+        residualAbs
+      );
+    });
   });
+}
+
+function scheduleVirtualizedProgrammaticNavigationCorrection(
+  input: { descriptor: WindowTargetDescriptor; viewportOffsetY: number },
+  generation: number,
+  operation: VirtualizedScrollOperation,
+  pass = 0,
+  previousResidualAbs = Number.POSITIVE_INFINITY
+): void {
+  if (!operation.isCurrent() || generation !== virtualizedProgrammaticNavigationGeneration) {
+    return;
+  }
+  const scheduled = operation.scheduleFrameTransaction(() => {
+    if (!operation.isCurrent() || generation !== virtualizedProgrammaticNavigationGeneration) {
+      return;
+    }
+    settleVirtualizedProgrammaticNavigationTarget(
+      input,
+      generation,
+      operation,
+      pass,
+      previousResidualAbs
+    );
+  });
+  if (!scheduled && operation.isCurrent() && generation === virtualizedProgrammaticNavigationGeneration) {
+    window.requestAnimationFrame(() => {
+      scheduleVirtualizedProgrammaticNavigationCorrection(
+        input,
+        generation,
+        operation,
+        pass,
+        previousResidualAbs
+      );
+    });
+  }
 }
 
 function landVirtualizedProgrammaticNavigation(input: {
   context: WindowTargetContext;
   descriptor: WindowTargetDescriptor;
+  operation: VirtualizedScrollOperation;
   viewportOffsetY: number;
 }): void {
   startVirtualizedProgrammaticNavigationSettle({
     descriptor: input.descriptor,
     initialContext: input.context,
+    operation: input.operation,
     viewportOffsetY: input.viewportOffsetY,
   });
 }
 
-function tryLandVirtualizedBlockAtViewportTop(blockIndex: number | null): boolean {
+function tryRestoreVirtualizedReadingAnchor(
+  readingAnchor: ReadingAnchor | null,
+  fallbackBlockIndex: number | null
+): boolean {
+  const anchor = readingAnchor ?? (
+    fallbackBlockIndex !== null && Number.isFinite(fallbackBlockIndex)
+      ? { blockIndex: fallbackBlockIndex, intraOffsetPx: 0 }
+      : null
+  );
   if (
     !virtualizationEnabled
-    || blockIndex === null
-    || !Number.isFinite(blockIndex)
+    || anchor === null
     || virtualizedDocumentWindowModel === null
     || virtualizedDocumentWindowController === null
   ) {
@@ -1937,40 +2731,40 @@ function tryLandVirtualizedBlockAtViewportTop(blockIndex: number | null): boolea
   if (main === null) {
     return false;
   }
+  const operation = acquireVirtualizedScrollOperation("cache-restore", "supersede-programmatic");
+  if (operation === null) {
+    return false;
+  }
 
-  const descriptor: WindowTargetDescriptor = { kind: "block", blockIndex };
+  const descriptor: WindowTargetDescriptor = { kind: "block", blockIndex: anchor.blockIndex };
   void renderWindowTargetThenAct({
-    action: context => {
-      landVirtualizedProgrammaticNavigation({
-        context,
-        descriptor,
-        viewportOffsetY: 0,
-      });
+    action: () => {
+      operation.requestScrollTop(
+        scrollTopForReadingAnchor(virtualizedDocumentWindowModel!, anchor) ?? 0,
+        "cache-restore-retry"
+      );
+      return true;
     },
     actionKind: "navigate",
     controller: virtualizedDocumentWindowController,
     descriptor,
     legacyAction: () => {
-      const block = main.querySelector<HTMLElement>(`[data-mm-block-index="${blockIndex}"]`);
-      if (block === null) {
-        return;
-      }
-
-      window.scrollTo({
-        behavior: "instant" as ScrollBehavior,
-        left: 0,
-        top: readElementDocumentTop(block),
-      });
+      operation.requestScrollTop(0, "cache-restore-retry-anchor-missing");
+      return true;
     },
     main,
     model: virtualizedDocumentWindowModel,
+    operation,
     ownerWindow: window,
     root: getDocumentScrollRoot(),
     virtualizationEnabled,
+  }).then(() => {
+    releaseVirtualizedScrollOperationAfterWrite(operation);
   }).catch(error => {
-    postPerfMark("mm-virt-cache-restore-target-error", {
+    postPerfMark("mm-virt-cache-restore-retry-error", {
       message: error instanceof Error ? error.message : String(error),
     });
+    releaseVirtualizedScrollOperationAfterWrite(operation);
   });
   return true;
 }
@@ -1986,20 +2780,34 @@ function clearVirtualizedProgrammaticNavigationPostSettleTarget(): void {
   virtualizedProgrammaticNavigationPostSettleTarget = null;
 }
 
+function cancelVirtualizedProgrammaticNavigationState(): void {
+  virtualizedProgrammaticNavigationInProgress = false;
+  virtualizedProgrammaticNavigationGeneration++;
+  virtualizedProgrammaticNavigationOperation = null;
+  virtualizedProgrammaticNavigationPostSettleTarget = null;
+  virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
+  virtualizedCalibrationDeferredDuringNavigation = false;
+}
+
 function reassertVirtualizedProgrammaticNavigationPostSettleTarget(): void {
   const target = virtualizedProgrammaticNavigationPostSettleTarget;
   if (target === null) {
     return;
   }
 
+  const operation = virtualizedProgrammaticNavigationOperation;
+  if (operation === null || !operation.isCurrent()) {
+    return;
+  }
   forceRenderVirtualizedNavigationTarget(target.descriptor);
-  correctVirtualizedProgrammaticNavigationResidual(target);
+  correctVirtualizedProgrammaticNavigationResidual({ ...target, operation });
 }
 
 function alignVirtualizedProgrammaticNavigationPostSettleTarget(): void {
   const target = virtualizedProgrammaticNavigationPostSettleTarget;
-  if (target !== null) {
-    correctVirtualizedProgrammaticNavigationResidual(target);
+  const operation = virtualizedProgrammaticNavigationOperation;
+  if (target !== null && operation !== null && operation.isCurrent()) {
+    correctVirtualizedProgrammaticNavigationResidual({ ...target, operation });
   }
 }
 
@@ -2011,6 +2819,7 @@ function getVirtualizedProgrammaticNavigationPostSettleSectionIndex(): number | 
 function startVirtualizedProgrammaticNavigationSettle(input: {
   descriptor: WindowTargetDescriptor;
   initialContext?: WindowTargetContext;
+  operation: VirtualizedScrollOperation;
   viewportOffsetY: number;
 }): void {
   if (!virtualizationEnabled || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
@@ -2019,21 +2828,26 @@ function startVirtualizedProgrammaticNavigationSettle(input: {
 
   const generation = ++virtualizedProgrammaticNavigationGeneration;
   virtualizedProgrammaticNavigationInProgress = true;
-  virtualizedProgrammaticNavigationExpectedScrollTop = null;
+  virtualizedProgrammaticNavigationOperation = input.operation;
   virtualizedProgrammaticNavigationExternalShiftCount = 0;
   virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
   virtualizedCalibrationDeferredDuringNavigation = false;
   cancelVirtualizedCalibration();
-  const root = getDocumentScrollRoot();
   if (input.initialContext !== undefined) {
-    applyVirtualizedProgrammaticNavigationContext(input.initialContext, input.descriptor, input.viewportOffsetY);
+    applyVirtualizedProgrammaticNavigationContext(
+      input.initialContext,
+      input.descriptor,
+      input.viewportOffsetY,
+      input.operation
+    );
   }
+  const root = getDocumentScrollRoot();
   let lastScrollTop = root.scrollTop;
   let stableFrames = 0;
   let frameCount = 0;
 
   const finish = (): void => {
-    if (generation !== virtualizedProgrammaticNavigationGeneration) {
+    if (generation !== virtualizedProgrammaticNavigationGeneration || !input.operation.isCurrent()) {
       return;
     }
 
@@ -2043,16 +2857,15 @@ function startVirtualizedProgrammaticNavigationSettle(input: {
     }
 
     rememberVirtualizedProgrammaticNavigationPostSettleTarget(input);
-    settleVirtualizedProgrammaticNavigationTarget(input, generation);
+    scheduleVirtualizedProgrammaticNavigationCorrection(input, generation, input.operation);
   };
 
   const tick = (): void => {
-    if (generation !== virtualizedProgrammaticNavigationGeneration) {
+    if (generation !== virtualizedProgrammaticNavigationGeneration || !input.operation.isCurrent()) {
       return;
     }
 
     const currentScrollTop = root.scrollTop;
-    recordVirtualizedProgrammaticNavigationExternalShift(root);
     if (Math.abs(currentScrollTop - lastScrollTop) <= VIRTUALIZED_NAVIGATION_SETTLE_TOLERANCE_PX) {
       stableFrames++;
     } else {
@@ -2098,7 +2911,7 @@ function resetVirtualizedDocumentWindow(resetCalibrator = true): void {
   virtualizedMeasureFrameRequested = false;
   virtualizedProgrammaticNavigationInProgress = false;
   virtualizedProgrammaticNavigationGeneration++;
-  virtualizedProgrammaticNavigationExpectedScrollTop = null;
+  virtualizedProgrammaticNavigationOperation = null;
   virtualizedProgrammaticNavigationExternalShiftCount = 0;
   virtualizedProgrammaticNavigationPostSettleTarget = null;
   virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
@@ -2113,6 +2926,7 @@ function refreshVirtualizedFindHighlights(): void {
 }
 
 function prepareVirtualizedInsertedContent(root: ParentNode): void {
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   renderCodeBlocks(root);
 
   virtualizedWindowMathController?.cancel();
@@ -2123,11 +2937,18 @@ function prepareVirtualizedInsertedContent(root: ParentNode): void {
   virtualizedWindowMathController = mathController;
 
   const scheduleAfterRichContent = () => {
-    if (virtualizedWindowMathController !== mathController || mathController.isCancelled()) {
+    if (
+      virtualizedWindowMathController !== mathController
+      || mathController.isCancelled()
+      || documentEpoch === undefined
+      || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+    ) {
       return;
     }
 
-    invalidateSourceLineAnchors();
+    invalidateSourceLineAnchors({
+      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
+    });
     refreshVirtualizedFindHighlights();
     scheduleVirtualizedMeasuredHeightAdoption();
   };
@@ -2173,7 +2994,10 @@ function initializeVirtualizedDocumentWindow(): void {
     root.scrollHeight,
     { intrinsicSizeCalibrator: virtualizedIntrinsicCalibrator });
   virtualizedDocumentWindowModel = models.estimateOnlyModel;
+  const documentEpoch = scrollOwnershipControlPlane!.captureDocumentEpoch();
   virtualizedDocumentWindowController = createVirtualizedDocumentWindowController({
+    documentEpoch,
+    isCurrentDocumentEpoch: epoch => scrollOwnershipControlPlane?.isCurrentDocumentEpoch(epoch) === true,
     main,
     model: virtualizedDocumentWindowModel,
     ownerWindow: window,
@@ -2185,15 +3009,30 @@ function initializeVirtualizedDocumentWindow(): void {
     root,
   });
 
-  virtualizedDocumentWindowController.updateWindowForScroll();
-  refreshVirtualizedFindHighlights();
-  invalidateTopVisibleBlockIndexCache();
+  const initialOperation = acquireVirtualizedScrollOperation("initial-window", "supersede-programmatic");
+  if (initialOperation !== null) {
+    const controller = virtualizedDocumentWindowController;
+    pendingInitialVirtualizedWindowWork = operation => {
+      if (!operation.isCurrent() || controller !== virtualizedDocumentWindowController) {
+        return;
+      }
+      controller.updateWindowForScroll({ operation });
+      refreshVirtualizedFindHighlights();
+      invalidateTopVisibleBlockIndexCache();
+      scheduleVirtualizedMeasuredHeightAdoption();
+    };
+    if (!initialOperation.scheduleFrameTransaction(() => {
+      consumePendingInitialVirtualizedWindow(initialOperation);
+      releaseVirtualizedScrollOperationAfterWrite(initialOperation);
+    })) {
+      releaseVirtualizedScrollOperation(initialOperation);
+    }
+  }
   postPerfMark("mm-virt-window-built", {
     estimateMeanAbsError: models.estimateHeightError.meanAbsError,
     sectionCount: virtualizedDocumentWindowModel.getSectionCount(),
     totalHeight: virtualizedDocumentWindowModel.getTotalHeight(),
   });
-  scheduleVirtualizedMeasuredHeightAdoption();
 }
 
 function updateVirtualizedWindowForScroll(options: { force?: boolean } = {}): void {
@@ -2205,12 +3044,20 @@ function updateVirtualizedWindowForScroll(options: { force?: boolean } = {}): vo
     return;
   }
 
-  if (virtualizedDocumentWindowController.updateWindowForScroll(options)) {
-    invalidateTopVisibleBlockIndexCache();
-    invalidateSourceLineAnchors();
-    refreshVirtualizedFindHighlights();
-    scheduleVirtualizedMeasuredHeightAdoption();
-  }
+  const controller = virtualizedDocumentWindowController;
+  scheduleVirtualizedMaintenance("scroll-window", operation => {
+    if (controller !== virtualizedDocumentWindowController) {
+      return;
+    }
+    if (controller.updateWindowForScroll({ ...options, operation })) {
+      invalidateTopVisibleBlockIndexCache();
+      invalidateSourceLineAnchors({
+        reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
+      });
+      refreshVirtualizedFindHighlights();
+      scheduleVirtualizedMeasuredHeightAdoption();
+    }
+  });
 }
 
 function scheduleVirtualizedMeasuredHeightAdoption(): void {
@@ -2228,8 +3075,12 @@ function scheduleVirtualizedMeasuredHeightAdoption(): void {
   }
 
   virtualizedMeasureFrameRequested = true;
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   window.requestAnimationFrame(() => {
     virtualizedMeasureFrameRequested = false;
+    if (documentEpoch === undefined || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
+      return;
+    }
     adoptVirtualizedRenderedHeights();
   });
 }
@@ -2244,11 +3095,36 @@ function adoptVirtualizedRenderedHeights(): void {
     return;
   }
 
-  const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
-  const result = virtualizedDocumentWindowController.adoptRenderedHeights(
-    preserveSectionIndex === null ? undefined : { preserveSectionIndex }
-  );
-  applyVirtualizedRenderedHeightAdoptionEffects(result);
+  const controller = virtualizedDocumentWindowController;
+  scheduleVirtualizedMaintenance("measured-height-adoption", operation => {
+    if (isVirtualizedProgrammaticNavigationInProgress()) {
+      virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = true;
+      return;
+    }
+    if (controller !== virtualizedDocumentWindowController) {
+      return;
+    }
+    const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
+    const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
+    const result = controller.adoptRenderedHeights(
+      preserveSectionIndex === null
+        ? { operation }
+        : {
+          operation,
+          preserveSectionIndex,
+          ...(postSettleTarget === null ? {} : { reanchor: false }),
+        }
+    );
+    applyVirtualizedRenderedHeightAdoptionEffects(result, {
+      alignPostSettleTarget: postSettleTarget === null,
+    });
+    if (postSettleTarget !== null && operation.isCurrent()) {
+      correctVirtualizedProgrammaticNavigationResidual({
+        ...postSettleTarget,
+        operation,
+      });
+    }
+  });
 }
 
 function scheduleVirtualizedCalibration(): void {
@@ -2265,9 +3141,13 @@ function scheduleVirtualizedCalibration(): void {
     return;
   }
 
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   const run = () => {
     virtualizedCalibrationHandle = null;
-    runVirtualizedCalibration();
+    if (documentEpoch === undefined || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
+      return;
+    }
+    runVirtualizedCalibration(documentEpoch);
   };
   const requestIdle = (window as Window & {
     requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
@@ -2280,7 +3160,7 @@ function scheduleVirtualizedCalibration(): void {
   virtualizedCalibrationHandle = { kind: "timeout", id: window.setTimeout(run, 250) };
 }
 
-function runVirtualizedCalibration(): void {
+function runVirtualizedCalibration(documentEpoch: number): void {
   const model = virtualizedDocumentWindowModel;
   const controller = virtualizedDocumentWindowController;
   if (!virtualizationEnabled || model === null || controller === null) {
@@ -2292,38 +3172,50 @@ function runVirtualizedCalibration(): void {
     return;
   }
 
-  const root = getDocumentScrollRoot();
-  const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
-  const anchor = preserveSectionIndex === null ? model.captureAnchor(root.scrollTop) : null;
-  const recordedCount = model.recordIntrinsicSizeCalibrationSamples(virtualizedIntrinsicCalibrator);
-  if (recordedCount === 0) {
-    return;
-  }
-
-  const result = model.updateEstimatedHeightsFromCalibration(virtualizedIntrinsicCalibrator);
-  if (result.updatedCount === 0) {
-    return;
-  }
-
-  if (preserveSectionIndex !== null) {
-    root.scrollTop = model.sectionTop(preserveSectionIndex);
-  } else {
-    root.scrollTop = model.scrollTopForAnchor(anchor!);
-  }
-  controller.updateWindowForScroll({ force: true });
-  if (preserveSectionIndex !== null) {
-    root.scrollTop = model.sectionTop(preserveSectionIndex);
-    alignVirtualizedProgrammaticNavigationPostSettleTarget();
-  } else {
-    root.scrollTop = model.scrollTopForAnchor(anchor!);
-  }
-  invalidateTopVisibleBlockIndexCache();
-  invalidateSourceLineAnchors();
-  postPerfMark("mm-virt-window-calibrated", {
-    maxAbsDelta: result.maxAbsDelta,
-    recordedCount,
-    totalDelta: result.totalDelta,
-    updatedCount: result.updatedCount,
+  scheduleVirtualizedMaintenance("calibration", operation => {
+    if (isVirtualizedProgrammaticNavigationInProgress()) {
+      virtualizedCalibrationDeferredDuringNavigation = true;
+      return;
+    }
+    if (
+      !operation.isCurrent()
+      || operation.documentEpoch !== documentEpoch
+      || model !== virtualizedDocumentWindowModel
+      || controller !== virtualizedDocumentWindowController
+    ) {
+      return;
+    }
+    const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
+    const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
+    const anchor = preserveSectionIndex === null ? captureCurrentVirtualizedReadingAnchor() : null;
+    const recordedCount = model.recordIntrinsicSizeCalibrationSamples(virtualizedIntrinsicCalibrator);
+    if (recordedCount === 0) {
+      return;
+    }
+    const result = model.updateEstimatedHeightsFromCalibration(virtualizedIntrinsicCalibrator);
+    if (result.updatedCount === 0) {
+      return;
+    }
+    const target = preserveSectionIndex !== null
+      ? model.sectionTop(preserveSectionIndex)
+      : scrollTopForReadingAnchor(model, anchor) ?? 0;
+    controller.updateWindowForScroll({ desiredScrollTop: target, force: true });
+    if (postSettleTarget === null) {
+      operation.requestScrollTop(target, "calibration");
+    } else {
+      correctVirtualizedProgrammaticNavigationResidual({
+        ...postSettleTarget,
+        operation,
+      });
+    }
+    invalidateTopVisibleBlockIndexCache();
+    invalidateSourceLineAnchors({ reassertPendingTarget: postSettleTarget === null });
+    postPerfMark("mm-virt-window-calibrated", {
+      maxAbsDelta: result.maxAbsDelta,
+      recordedCount,
+      totalDelta: result.totalDelta,
+      updatedCount: result.updatedCount,
+    });
   });
 }
 function postScroll(): void {
@@ -2379,6 +3271,28 @@ function scrollToSourceLineInCurrentWindow(sourceLine: number): void {
   });
 }
 
+function scheduleVirtualizedSourceLineLanding(
+  operation: VirtualizedScrollOperation,
+  sourceLine: number
+): boolean {
+  if (sourceLineAnchors.length === 0) {
+    refreshSourceLineAnchors();
+  }
+  const scrollTop = findScrollTopForSourceLine(sourceLineAnchors, sourceLine);
+  if (scrollTop === null) {
+    releaseVirtualizedScrollOperation(operation);
+    return false;
+  }
+  pendingSourceLineTarget = sourceLine;
+  suppressPreviewSourceLinePost();
+  return scheduleExistingVirtualizedOperation(operation, () => {
+    operation.requestScrollTop(
+      Math.max(0, scrollTop - getViewportAnchorY()),
+      "source-line-live-fallback"
+    );
+  }, true);
+}
+
 function scrollToSourceLine(sourceLine: number): void {
   if (!Number.isFinite(sourceLine) || sourceLine < 0) {
     return;
@@ -2388,10 +3302,14 @@ function scrollToSourceLine(sourceLine: number): void {
     scrollToSourceLineInCurrentWindow(sourceLine);
     return;
   }
+  const operation = acquireVirtualizedScrollOperation("source-line-navigation", "supersede-programmatic");
+  if (operation === null) {
+    return;
+  }
 
   const main = document.querySelector<HTMLElement>("main.mm-document");
   if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-    scrollToSourceLineInCurrentWindow(sourceLine);
+    scheduleVirtualizedSourceLineLanding(operation, sourceLine);
     return;
   }
 
@@ -2402,17 +3320,18 @@ function scrollToSourceLine(sourceLine: number): void {
       landVirtualizedProgrammaticNavigation({
         context,
         descriptor: { kind: "source-line", sourceLine },
+        operation,
         viewportOffsetY: getViewportAnchorY(),
       });
+      return true;
     },
     actionKind: "navigate",
     controller: virtualizedDocumentWindowController,
     descriptor: { kind: "source-line", sourceLine },
-    legacyAction: () => {
-      scrollToSourceLineInCurrentWindow(sourceLine);
-    },
+    legacyAction: () => scheduleVirtualizedSourceLineLanding(operation, sourceLine),
     main,
     model: virtualizedDocumentWindowModel,
+    operation,
     ownerWindow: window,
     root: getDocumentScrollRoot(),
     virtualizationEnabled: true,
@@ -2423,21 +3342,29 @@ function scrollToSourceLine(sourceLine: number): void {
 // (math/mermaid inflation, resize, fonts) must invalidate so the next lookup
 // re-reads REAL geometry — positions never come from stale or estimated
 // heights (the reload-viewport contract philosophy).
-function invalidateSourceLineAnchors(): void {
+function invalidateSourceLineAnchors(
+  options: { reassertPendingTarget?: boolean } = {}
+): void {
   sourceLineAnchors = [];
   // Geometry changed under a live programmatic target: re-assert it so the
   // target line returns to the anchor with FRESH measurements (idempotent —
   // re-suppresses its own echo; a real user scroll cleared the target).
-  if (pendingSourceLineTarget !== null) {
+  if (pendingSourceLineTarget !== null && options.reassertPendingTarget !== false) {
     const target = pendingSourceLineTarget;
     if (virtualizationEnabled) {
       if (isVirtualizedProgrammaticNavigationInProgress()) {
         return;
       }
+      const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
       window.requestAnimationFrame(() => {
-        if (pendingSourceLineTarget === target) {
-          alignVirtualizedProgrammaticNavigationPostSettleTarget();
+        if (
+          pendingSourceLineTarget !== target
+          || documentEpoch === undefined
+          || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+        ) {
+          return;
         }
+        scrollToSourceLine(target);
       });
       return;
     }
@@ -2452,10 +3379,17 @@ function invalidateSourceLineAnchors(): void {
 
 function suppressPreviewSourceLinePost(): void {
   const sequence = ++suppressPreviewSourceLineSequence;
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   suppressPreviewSourceLineEmit = true;
   window.requestAnimationFrame(() => {
     window.requestAnimationFrame(() => {
-      if (sequence === suppressPreviewSourceLineSequence) {
+      if (
+        sequence === suppressPreviewSourceLineSequence
+        && (
+          documentEpoch === undefined
+          || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) === true
+        )
+      ) {
         suppressPreviewSourceLineEmit = false;
       }
     });
@@ -2468,8 +3402,12 @@ function queuePreviewSourceLinePost(): void {
   }
 
   previewSourceLineFrameRequested = true;
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   window.requestAnimationFrame(() => {
     previewSourceLineFrameRequested = false;
+    if (documentEpoch !== undefined && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
+      return;
+    }
     if (suppressPreviewSourceLineEmit || !documentScrollEnabled) {
       return;
     }
@@ -2545,7 +3483,9 @@ function postCachedLayoutReady(): void {
   const cachedLayoutState = restoredCachedLayoutState;
   restoredCachedLayoutState = null;
   const layoutState = cachedLayoutState !== null
-    ? { ...cachedLayoutState }
+    ? virtualizationEnabled
+      ? { ...getScrollState(), topBlockIndex: findTopVisibleBlockIndex() }
+      : { ...cachedLayoutState }
     : { ...getScrollState(), topBlockIndex: findTopVisibleBlockIndex() };
   lastKnownLayoutState = { ...layoutState };
   recordScrollIpc();
@@ -2567,20 +3507,33 @@ function postCachedLayoutReady(): void {
   postPerfMark("mm-layout-ready", { cached: true });
   flushPostLayoutReadyWork();
   if (cachedLayoutState !== null) {
-    queueCachedGeometryRefresh(cachedLayoutState.topBlockIndex);
+    queueCachedGeometryRefresh(
+      cachedLayoutState.readingAnchor ?? null,
+      cachedLayoutState.topBlockIndex
+    );
   }
 }
 
-function queueCachedGeometryRefresh(topBlockIndex: number | null): void {
+function queueCachedGeometryRefresh(
+  readingAnchor: ReadingAnchor | null,
+  topBlockIndex: number | null
+): void {
   const cacheKey = currentDocumentCacheKey;
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   window.clearTimeout(cachedGeometryRefreshTimer);
   cachedGeometryRefreshTimer = window.setTimeout(() => {
     cachedGeometryRefreshTimer = undefined;
-    if (cacheKey !== currentDocumentCacheKey) {
+    if (
+      cacheKey !== currentDocumentCacheKey
+      || (
+        documentEpoch !== undefined
+        && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+      )
+    ) {
       return;
     }
 
-    if (tryLandVirtualizedBlockAtViewportTop(topBlockIndex)) {
+    if (tryRestoreVirtualizedReadingAnchor(readingAnchor, topBlockIndex)) {
       return;
     }
 
@@ -2604,6 +3557,7 @@ function flushPostLayoutReadyWork(): void {
   }
 
   const flushGeneration = layoutReadyGeneration;
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   const workItems = postLayoutReadyWorkQueue.filter(item => item.generation === flushGeneration);
   postLayoutReadyWorkQueue = postLayoutReadyWorkQueue.filter(item => item.generation !== flushGeneration);
   const delayMs = viewerChromeEnabled ? 0 : POST_LAYOUT_READY_EDIT_PREVIEW_DELAY_MS;
@@ -2611,7 +3565,13 @@ function flushPostLayoutReadyWork(): void {
     postPerfMark("post-ready-enhancements-deferred", { delayMs, viewerChromeEnabled });
   }
   window.setTimeout(() => {
-    if (flushGeneration !== layoutReadyGeneration) {
+    if (
+      flushGeneration !== layoutReadyGeneration
+      || (
+        documentEpoch !== undefined
+        && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+      )
+    ) {
       return;
     }
 
@@ -2623,20 +3583,98 @@ function flushPostLayoutReadyWork(): void {
 
 function restoreCachedScrollPosition(): void {
   const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
-  if (tryLandVirtualizedBlockAtViewportTop(layoutState.topBlockIndex)) {
+  if (!virtualizationEnabled) {
+    window.scrollTo({
+      left: 0,
+      top: layoutState.scrollTop,
+      behavior: "instant" as ScrollBehavior,
+    });
+    updateVirtualizedWindowForScroll({ force: true });
     return;
   }
-
-  window.scrollTo({
-    left: 0,
-    top: layoutState.scrollTop,
-    behavior: "instant" as ScrollBehavior,
+  const operation = acquireVirtualizedScrollOperation("cache-restore", "supersede-programmatic");
+  if (operation === null) {
+    postPerfMark("mm-virt-cache-restore-terminal", {
+      reason: "lease-unavailable",
+      status: "canceled",
+    });
+    cachedScrollRestoreCompletion = Promise.resolve();
+    return;
+  }
+  const documentEpoch = operation.documentEpoch;
+  cachedScrollRestoreCompletion = new Promise(resolve => {
+    let completed = false;
+    const finish = (
+      status: "canceled" | "committed" | "failed",
+      reason: string
+    ): void => {
+      if (completed) {
+        return;
+      }
+      completed = true;
+      if (finishCachedScrollRestore === finish) {
+        finishCachedScrollRestore = null;
+      }
+      if (operation.isCurrent()) {
+        releaseVirtualizedScrollOperation(operation);
+      }
+      postPerfMark("mm-virt-cache-restore-terminal", {
+        documentEpoch,
+        reason,
+        status,
+      });
+      resolve();
+    };
+    finishCachedScrollRestore = finish;
+    const scheduled = operation.scheduleFrameTransaction(() => {
+      if (!operation.isCurrent()) {
+        finish("canceled", "stale-operation");
+        return;
+      }
+      try {
+        consumePendingInitialVirtualizedWindow(operation);
+        const model = virtualizedDocumentWindowModel;
+        const controller = virtualizedDocumentWindowController;
+        const anchor = layoutState.readingAnchor ?? null;
+        const entry = anchor === null ? undefined : model?.getEntryByBlockIndex(anchor.blockIndex);
+        if (model !== null && controller !== null && entry !== undefined) {
+          controller.ensureSectionRendered(entry.sectionIndex, {
+            force: true,
+            preserveAnchor: false,
+          });
+        }
+        const target = model === null ? 0 : scrollTopForReadingAnchor(model, anchor) ?? 0;
+        operation.requestScrollTop(target, entry === undefined ? "cache-anchor-missing" : "cache-restore");
+      } catch {
+        finish("failed", "frame-work-failed");
+        return;
+      }
+      const receipt = virtualizedWriteReceipts.get(operation.operationEpoch);
+      if (receipt === undefined) {
+        finish("failed", "missing-write-receipt");
+        return;
+      }
+      void receipt.result.then(outcome => {
+        if (outcome.status === "committed") {
+          finish("committed", "write-committed");
+        } else {
+          finish("failed", outcome.reason);
+        }
+      }).catch(() => {
+        finish("failed", "write-result-failed");
+      });
+    });
+    if (!scheduled) {
+      finish("canceled", "frame-transaction-rejected");
+    }
   });
-  updateVirtualizedWindowForScroll({ force: true });
 }
 
 function scheduleLayoutReady(skipFrameWait = false): void {
   const generation = ++layoutReadyGeneration;
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+  const isCurrentLayoutDocument = () => documentEpoch === undefined
+    || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) === true;
   // Capture the render this layout-ready belongs to NOW, so the host can gate a
   // stale layout-ready by renderId even when a later render mutated the global
   // currentDocumentRenderId before this scheduled callback fired.
@@ -2649,7 +3687,7 @@ function scheduleLayoutReady(skipFrameWait = false): void {
   }
 
   const post = (path: "skip-frame-wait" | "raf" | "frame-fallback") => {
-    if (posted || generation !== layoutReadyGeneration) {
+    if (posted || generation !== layoutReadyGeneration || !isCurrentLayoutDocument()) {
       return;
     }
 
@@ -2666,7 +3704,7 @@ function scheduleLayoutReady(skipFrameWait = false): void {
   };
 
   const complete = () => {
-    if (completed || generation !== layoutReadyGeneration) {
+    if (completed || generation !== layoutReadyGeneration || !isCurrentLayoutDocument()) {
       return;
     }
 
@@ -2692,7 +3730,7 @@ function scheduleLayoutReady(skipFrameWait = false): void {
     }, 120);
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
-        if (generation === layoutReadyGeneration) {
+        if (generation === layoutReadyGeneration && isCurrentLayoutDocument()) {
           post("raf");
         } else {
           postPerfMark("mm-layout-ready-frame-stale", { generation, current: layoutReadyGeneration });
@@ -3787,7 +4825,14 @@ function rebuildActiveHeadingObserver(headingNodes: HTMLHeadingElement[]): void 
 
   // Emit an initial active-heading guess so the TOC highlights the right
   // row before the user scrolls.
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   window.requestAnimationFrame(() => {
+    if (
+      documentEpoch !== undefined
+      && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+    ) {
+      return;
+    }
     let active: HTMLHeadingElement | null = null;
     for (const node of headingNodes) {
       const rect = node.getBoundingClientRect();
@@ -4203,15 +5248,29 @@ function scrollFromMinimapClientY(clientY: number): void {
     const cloneYTarget = (minimapY - currentMinimapLayout.contentTranslateY) / currentMinimapLayout.scale;
     const firstTarget = docScrollTopForCloneY(root, cloneYTarget);
     if (firstTarget !== null) {
-      window.scrollTo({ top: firstTarget, behavior: "instant" as ScrollBehavior });
+      if (!virtualizationEnabled) {
+        window.scrollTo({ top: firstTarget, behavior: "instant" as ScrollBehavior });
+      } else {
+        requestMinimapScrollTarget(firstTarget, "minimap-click");
+      }
       let attempts = 0;
       const refine = () => {
-        if (++attempts > 3) return;
+        const operation = minimapScrollOperation;
+        if (++attempts > 3 || (virtualizationEnabled && operation?.isCurrent() !== true)) {
+          finishMinimapScrollOperation();
+          return;
+        }
         const next = docScrollTopForCloneY(root, cloneYTarget);
         if (next !== null && Math.abs(next - root.scrollTop) > 2) {
-          window.scrollTo({ top: next, behavior: "instant" as ScrollBehavior });
+          if (virtualizationEnabled) {
+            requestMinimapScrollTarget(next, "minimap-refine");
+          } else {
+            window.scrollTo({ top: next, behavior: "instant" as ScrollBehavior });
+          }
           window.requestAnimationFrame(refine);
+          return;
         }
+        finishMinimapScrollOperation();
       };
       window.requestAnimationFrame(refine);
       return;
@@ -4225,14 +5284,43 @@ function scrollFromMinimapClientY(clientY: number): void {
   const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
   const targetScrollTop = (Math.min(minimapY, thumbTravel) / thumbTravel) * maxScrollTop;
   const clamped = Math.max(0, Math.min(maxScrollTop, targetScrollTop));
-  window.scrollTo({ top: clamped, behavior: "instant" as ScrollBehavior });
+  if (virtualizationEnabled) {
+    requestMinimapScrollTarget(clamped, "minimap-click-fallback");
+    finishMinimapScrollOperation();
+  } else {
+    window.scrollTo({ top: clamped, behavior: "instant" as ScrollBehavior });
+  }
 }
 
 function scrollToProgress(progressPercent: number): void {
   const root = document.scrollingElement ?? document.documentElement;
   const maximum = Math.max(0, root.scrollHeight - root.clientHeight);
   const progress = Number.isFinite(progressPercent) ? Math.max(0, Math.min(100, progressPercent)) : 0;
-  window.scrollTo({ top: maximum * (progress / 100), behavior: "instant" as ScrollBehavior });
+  if (virtualizationEnabled) {
+    scheduleVirtualizedStandaloneOperation("host-progress", "supersede-as-user", operation => {
+      operation.requestScrollTop(maximum * (progress / 100), "host-progress");
+    });
+  } else {
+    window.scrollTo({ top: maximum * (progress / 100), behavior: "instant" as ScrollBehavior });
+  }
+}
+
+function requestMinimapScrollTarget(target: number, writer: string): boolean {
+  const operation = minimapScrollOperation;
+  if (operation === null || !operation.isCurrent()) {
+    return false;
+  }
+  operation.requestScrollTop(target, writer);
+  operation.scheduleFrameTransaction(() => undefined);
+  return true;
+}
+
+function finishMinimapScrollOperation(): void {
+  const operation = minimapScrollOperation;
+  minimapScrollOperation = null;
+  if (operation !== null) {
+    releaseVirtualizedScrollOperationAfterWrite(operation);
+  }
 }
 
 // Pointer-down records start state but does NOT scroll yet. Tap-vs-drag is
@@ -4244,6 +5332,9 @@ function scrollToProgress(progressPercent: number): void {
 //   point under the cursor stays anchored. Pan/grab UX, like dragging a
 //   paper map under a fixed crosshair. Opposite direction from a scrollbar.
 function handleMinimapPointerDown(event: PointerEvent): void {
+  if (virtualizationEnabled) {
+    minimapScrollOperation = acquireVirtualizedScrollOperation("minimap-gesture", "supersede-as-user");
+  }
   minimapDragging = true;
   minimapDragStartClientY = event.clientY;
   const root = document.scrollingElement ?? document.documentElement;
@@ -4290,7 +5381,11 @@ function handleMinimapPointerMove(event: PointerEvent): void {
     const cloneY = desiredThumbTop / currentMinimapLayout.thumbSlope;
     const target = docScrollTopForCloneY(root, cloneY);
     if (target !== null) {
-      window.scrollTo({ top: Math.max(0, Math.min(maxScrollTop, target)), behavior: "instant" as ScrollBehavior });
+      if (virtualizationEnabled) {
+        requestMinimapScrollTarget(Math.max(0, Math.min(maxScrollTop, target)), "minimap-drag");
+      } else {
+        window.scrollTo({ top: Math.max(0, Math.min(maxScrollTop, target)), behavior: "instant" as ScrollBehavior });
+      }
       // Optimistic pin: paint the indicator at the cursor's clamped position THIS frame
       // so a fast flick has no one-frame lag. The scroll-driven updateMinimapViewport
       // reconciles it to the canonical thumbTop next frame (≈ identical — the slope is
@@ -4306,7 +5401,11 @@ function handleMinimapPointerMove(event: PointerEvent): void {
   const thumbTravel = getCurrentMinimapThumbTravel();
   const scrollDelta = delta * (maxScrollTop / thumbTravel);
   const clampedScrollTop = Math.max(0, Math.min(maxScrollTop, minimapDragStartScrollTop + scrollDelta));
-  window.scrollTo({ top: clampedScrollTop, behavior: "instant" as ScrollBehavior });
+  if (virtualizationEnabled) {
+    requestMinimapScrollTarget(clampedScrollTop, "minimap-drag-fallback");
+  } else {
+    window.scrollTo({ top: clampedScrollTop, behavior: "instant" as ScrollBehavior });
+  }
   event.preventDefault();
 }
 
@@ -4326,6 +5425,8 @@ function handleMinimapPointerUp(event: PointerEvent): void {
   if (wasTap) {
     // Below drag threshold — treat as click → centered jump.
     scrollFromMinimapClientY(event.clientY);
+  } else {
+    finishMinimapScrollOperation();
   }
 }
 
@@ -4335,8 +5436,12 @@ function queueMinimapViewportUpdate(perfMarkName?: string): void {
   }
 
   minimapViewportFrameRequested = true;
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   window.requestAnimationFrame(() => {
     minimapViewportFrameRequested = false;
+    if (documentEpoch !== undefined && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
+      return;
+    }
     updateMinimapVisibility();
     updateMinimapViewport();
     if (perfMarkName) {
@@ -4345,9 +5450,24 @@ function queueMinimapViewportUpdate(perfMarkName?: string): void {
   });
 }
 
+function cancelMinimapRefreshAfterLayoutSettles(): void {
+  if (minimapRefreshTimer !== undefined) {
+    window.clearTimeout(minimapRefreshTimer);
+    minimapRefreshTimer = undefined;
+  }
+}
+
 function queueMinimapRefreshAfterLayoutSettles(): void {
-  window.clearTimeout(minimapRefreshTimer);
+  cancelMinimapRefreshAfterLayoutSettles();
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   minimapRefreshTimer = window.setTimeout(() => {
+    minimapRefreshTimer = undefined;
+    if (
+      documentEpoch !== undefined
+      && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+    ) {
+      return;
+    }
     // Stage 2 decoupling: only viewport update on resize; content rebuild
     // is driven by content-change OR Phase B (Task 15) — not by layout settling.
     queueMinimapViewportUpdate();
@@ -4449,7 +5569,9 @@ function queueProgressiveMinimapAppendRefresh(message: Extract<HostMessage, { ty
 // minimap viewport update is itself rAF-coalesced via queueMinimapViewportUpdate
 // (single token); coalescing the synchronous-layout reads here is the missing
 // piece for stable chrome positions during drag.
-function scheduleResizeReactions(): void {
+function scheduleResizeReactions(
+  documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch()
+): void {
   if (resizeReactFrameRequested) {
     return;
   }
@@ -4461,6 +5583,12 @@ function scheduleResizeReactions(): void {
   resizeReactFrameRequested = true;
   window.requestAnimationFrame(() => {
     resizeReactFrameRequested = false;
+    if (
+      documentEpoch !== undefined
+      && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+    ) {
+      return;
+    }
     if (widthHandleDragging) {
       // The drag pipeline owns width preview during pointer drag and performs
       // canonical handle/minimap reconciliation on release.
@@ -4680,22 +5808,30 @@ function flushPendingReadingPreferences(): void {
   // updates, so re-emitting it would only add per-frame IPC noise.
 }
 
-function scheduleHeavyLiveUpdate(): void {
+function cancelHeavyLiveUpdate(): void {
   if (heavyLiveUpdateTimer !== undefined) {
     window.clearTimeout(heavyLiveUpdateTimer);
+    heavyLiveUpdateTimer = undefined;
   }
+}
+
+function scheduleHeavyLiveUpdate(): void {
+  cancelHeavyLiveUpdate();
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   heavyLiveUpdateTimer = window.setTimeout(() => {
     heavyLiveUpdateTimer = undefined;
+    if (
+      documentEpoch !== undefined
+      && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+    ) {
+      return;
+    }
     queueMinimapViewportUpdate();
   }, HEAVY_LIVE_UPDATE_DEBOUNCE_MS);
 }
 
 function scrollLegacyHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): void {
   document.getElementById(anchor)?.scrollIntoView(options);
-}
-
-function scrollLiveHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): void {
-  findLiveDocumentElementById(anchor)?.scrollIntoView(options);
 }
 
 function scrollToHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): void {
@@ -4707,10 +5843,18 @@ function scrollToHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): 
     scrollLegacyHeadingAnchor(anchor, options);
     return;
   }
+  const operation = acquireVirtualizedScrollOperation("heading-navigation", "supersede-programmatic");
+  if (operation === null) {
+    return;
+  }
 
   const main = getLiveDocumentRoot();
   if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-    scrollLiveHeadingAnchor(anchor, options);
+    scheduleVirtualizedElementLanding(
+      operation,
+      findLiveDocumentElementById(anchor),
+      "heading-live-fallback"
+    );
     return;
   }
 
@@ -4720,17 +5864,22 @@ function scrollToHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): 
       landVirtualizedProgrammaticNavigation({
         context,
         descriptor,
+        operation,
         viewportOffsetY: 0,
       });
+      return true;
     },
     actionKind: "navigate",
     controller: virtualizedDocumentWindowController,
     descriptor,
-    legacyAction: () => {
-      scrollLiveHeadingAnchor(anchor, options);
-    },
+    legacyAction: () => scheduleVirtualizedElementLanding(
+      operation,
+      findLiveDocumentElementById(anchor),
+      "heading-resolver-fallback"
+    ),
     main,
     model: virtualizedDocumentWindowModel,
+    operation,
     ownerWindow: window,
     root: getDocumentScrollRoot(),
     virtualizationEnabled: true,
@@ -4839,7 +5988,14 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "scroll-by") {
-    window.scrollBy({ top: message.deltaY, behavior: "instant" as ScrollBehavior });
+    if (virtualizationEnabled) {
+      const root = getDocumentScrollRoot();
+      scheduleVirtualizedStandaloneOperation("host-scroll-by", "supersede-as-user", operation => {
+        operation.requestScrollTop(root.scrollTop + message.deltaY, "host-scroll-by");
+      });
+    } else {
+      window.scrollBy({ top: message.deltaY, behavior: "instant" as ScrollBehavior });
+    }
     return;
   }
 
@@ -4853,13 +6009,18 @@ function handleHostMessage(raw: unknown): void {
       }
       return;
     }
+    const operation = acquireVirtualizedScrollOperation("block-navigation", "supersede-programmatic");
+    if (operation === null) {
+      return;
+    }
 
     const main = document.querySelector<HTMLElement>("main.mm-document");
     if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-      const target = findLiveDocumentBlockElement(message.blockIndex);
-      if (target) {
-        target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
-      }
+      scheduleVirtualizedElementLanding(
+        operation,
+        findLiveDocumentBlockElement(message.blockIndex),
+        "block-live-fallback"
+      );
       return;
     }
 
@@ -4869,20 +6030,22 @@ function handleHostMessage(raw: unknown): void {
         landVirtualizedProgrammaticNavigation({
           context,
           descriptor,
+          operation,
           viewportOffsetY: 0,
         });
+        return true;
       },
       actionKind: "navigate",
       controller: virtualizedDocumentWindowController,
       descriptor,
-      legacyAction: () => {
-        const target = findLiveDocumentBlockElement(message.blockIndex);
-        if (target) {
-          target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
-        }
-      },
+      legacyAction: () => scheduleVirtualizedElementLanding(
+        operation,
+        findLiveDocumentBlockElement(message.blockIndex),
+        "block-resolver-fallback"
+      ),
       main,
       model: virtualizedDocumentWindowModel,
+      operation,
       ownerWindow: window,
       root: getDocumentScrollRoot(),
       virtualizationEnabled: true,
@@ -5018,7 +6181,12 @@ function handleHostMessage(raw: unknown): void {
     modeToggleProbeFrameRequested = true;
     modeToggleProbeTransactionGeneration = transactionGeneration;
     const settleSequence = ++modeToggleSettleSequence;
-    const isCurrentProbe = () => settleSequence === modeToggleSettleSequence;
+    const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+    const isCurrentProbe = () => settleSequence === modeToggleSettleSequence
+      && (
+        documentEpoch === undefined
+        || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) === true
+      );
     const postModeToggleSettleAck = () => {
       if (!isCurrentProbe()) {
         return;
@@ -5200,11 +6368,22 @@ function applyModeSettleProbePreferences(message: Extract<HostMessage, { type: "
 }
 
 function resetModuleGlobalsForLoadDocument(): void {
+  finishCachedScrollRestore?.("canceled", "stale-document");
+  cancelPendingVirtualizedMaintenance("stale-document");
+  scrollOwnershipControlPlane?.invalidateDocument();
+  virtualizedWriteReceipts.clear();
+  pendingInitialVirtualizedWindowWork = null;
+  cachedScrollRestoreCompletion = null;
+  minimapScrollOperation = null;
   ++initialRenderPipelineGeneration;
   ++processedDocumentCacheCloneGeneration;
   ++progressiveMinimapRefreshGeneration;
   cancelProcessedDocumentCacheClone();
+  cancelProgressiveDeferredEnhancements();
   cancelDeferredMinimapContentRefresh(false);
+  cancelMinimapRefreshAfterLayoutSettles();
+  cancelHeavyLiveUpdate();
+  resizeReactFrameRequested = false;
   initialRenderPipelineCompleted = false;
   firstPrefsBootstrapSuppressedByLoadGeneration = null;
   postReadyEnhancementsCompleted = false;
@@ -5375,7 +6554,14 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
       // resetModuleGlobals cleared the flag earlier in this load, so
       // re-suppress right before the write.
       suppressPreviewSourceLinePost();
-      window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior });
+      if (virtualizationEnabled) {
+        scheduleVirtualizedStandaloneOperation("cold-load-reset", "supersede-programmatic", operation => {
+          consumePendingInitialVirtualizedWindow(operation);
+          operation.requestScrollTop(0, "cold-load-reset");
+        });
+      } else {
+        window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior });
+      }
     },
     // Mirror selected renderer-side perf marks into the host's
     // [renderer-perf] stream. Only `mm-load-document` is bridged from this
@@ -5403,16 +6589,32 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
         return;
       }
 
-      initialRenderPipelineCompleted = true;
-      hasInitialLayoutSettled = true;
-      postReadyEnhancementsCompleted = true;
-      postHostMessage({
-        type: "document-ready",
-        mathCount: getLiveDocumentMathCount()
-      });
-      postCachedLayoutReady();
-      postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
-      scheduleCachedMermaidResume(hasMermaid);
+      const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+      const complete = () => {
+        if (
+          documentEpoch !== undefined
+          && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+        ) {
+          return;
+        }
+        initialRenderPipelineCompleted = true;
+        hasInitialLayoutSettled = true;
+        postReadyEnhancementsCompleted = true;
+        postHostMessage({
+          type: "document-ready",
+          mathCount: getLiveDocumentMathCount()
+        });
+        postCachedLayoutReady();
+        postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
+        scheduleCachedMermaidResume(hasMermaid);
+      };
+      const restoreCompletion = cachedScrollRestoreCompletion;
+      cachedScrollRestoreCompletion = null;
+      if (restoreCompletion === null) {
+        complete();
+      } else {
+        void restoreCompletion.then(complete);
+      }
     },
     notifyDocumentCacheMiss: (renderId, cacheKey) => {
       const message: RendererMessage = {
@@ -5851,6 +7053,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const documentElement = document.querySelector<HTMLElement>(".mm-document");
   if (documentElement) {
     const resizeObserver = new ResizeObserver(() => {
+      const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
       if (widthHandleDragging) {
         return;
       }
@@ -5860,18 +7063,36 @@ document.addEventListener("DOMContentLoaded", () => {
       // getBoundingClientRect) plus the viewport refresh are coalesced into
       // a single rAF via scheduleResizeReactions, so a fast window-edge drag
       // does not snap the chrome on every observer tick.
-      scheduleResizeReactions();
-      invalidateSourceLineAnchors();
+      scheduleResizeReactions(documentEpoch);
+      invalidateSourceLineAnchors({
+        reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
+      });
       scheduleVirtualizedMeasuredHeightAdoption();
-      window.requestAnimationFrame(postScroll);
+      window.requestAnimationFrame(() => {
+        if (
+          documentEpoch === undefined
+          || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) === true
+        ) {
+          postScroll();
+        }
+      });
     });
     resizeObserver.observe(documentElement);
     resizeObserver.observe(document.body);
   }
 
+  const fontsDocumentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   document.fonts?.ready.then(() => {
+    if (
+      fontsDocumentEpoch !== undefined
+      && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(fontsDocumentEpoch) !== true
+    ) {
+      return;
+    }
     queueMinimapRefreshAfterLayoutSettles();
-    invalidateSourceLineAnchors();
+    invalidateSourceLineAnchors({
+      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
+    });
     scheduleVirtualizedMeasuredHeightAdoption();
   }).catch(() => undefined);
 });
@@ -5882,16 +7103,45 @@ const queuePostScroll = createScrollCoalescer({
     postScroll();
     queueMinimapViewportUpdate();
   },
-  schedule: (cb) => { window.requestAnimationFrame(cb); },
+  schedule: (cb) => {
+    const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+    window.requestAnimationFrame(() => {
+      if (
+        documentEpoch !== undefined
+        && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+      ) {
+        return;
+      }
+      cb();
+    });
+  },
 });
 
 document.addEventListener("scroll", () => {
-  const programmaticNavigationScroll = isVirtualizedProgrammaticNavigationInProgress();
-  if (!programmaticNavigationScroll) {
-    clearVirtualizedProgrammaticNavigationPostSettleTarget();
+  if (scrollOwnershipControlPlane !== null) {
+    const classification = scrollOwnershipControlPlane.classifyNativeScroll(
+      getDocumentScrollRoot().scrollTop,
+      "native-scroll"
+    );
+    if (classification.kind === "user-supersession") {
+      cancelPendingVirtualizedMaintenance("user-supersession");
+      cancelVirtualizedProgrammaticNavigationState();
+      queuePreviewSourceLinePost();
+    } else if (classification.kind === "unattributed-failure") {
+      cancelPendingVirtualizedMaintenance("unattributed-failure");
+      virtualizedProgrammaticNavigationExternalShiftCount++;
+      cancelVirtualizedProgrammaticNavigationState();
+    }
+  } else {
+    const programmaticNavigationScroll = isVirtualizedProgrammaticNavigationInProgress();
+    if (!programmaticNavigationScroll) {
+      clearVirtualizedProgrammaticNavigationPostSettleTarget();
+    }
+    queuePostScroll();
+    queuePreviewSourceLinePost();
+    return;
   }
   queuePostScroll();
-  queuePreviewSourceLinePost();
 }, { passive: true });
 
 window.addEventListener("hashchange", handleCurrentHashNavigation);

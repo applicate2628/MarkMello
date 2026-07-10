@@ -8,16 +8,29 @@ type ScrollCall = {
 };
 
 type RendererHarness = {
+  flushAnimationFrame: () => Promise<void>;
+  flushCanceledRafs: () => Promise<void>;
   flushNextRaf: () => Promise<void>;
   flushQueuedRafs: () => Promise<void>;
   flushRafsUntil: (predicate: () => boolean, maxFrames?: number) => Promise<void>;
+  flushResizeRafsSynchronously: () => void;
   highlights: Map<string, Range[]>;
   load: HostBridge;
   messages: unknown[];
   root: HTMLElement;
   scrollCalls: ScrollCall[];
   scrollWrites: number[];
+  setRenderedSectionHeight: (height: number) => void;
   triggerResize: () => void;
+};
+
+let readPendingRendererRafCount: (() => number) | null = null;
+let clearPendingRendererRafs: (() => void) | null = null;
+
+type ControllerFaults = {
+  adoptRenderedHeights?: boolean;
+  ensureSectionRendered?: boolean;
+  onAdoptRenderedHeights?: () => void;
 };
 
 const SECTION_HEIGHT = 80;
@@ -53,12 +66,47 @@ const makeReadingPreferences = (
 });
 
 async function loadRendererHarness(options: {
+  controllerFaults?: ControllerFaults;
   rectTopShiftByBlockIndex?: Record<number, number>;
   renderedSectionHeight?: number;
   sectionCount: number;
   virtualization: boolean;
 }): Promise<RendererHarness> {
   vi.resetModules();
+  vi.doUnmock("../src/virtualizedDocumentWindow");
+  if (options.controllerFaults !== undefined) {
+    const controllerFaults = options.controllerFaults;
+    vi.doMock("../src/virtualizedDocumentWindow", async () => {
+      const actual = await vi.importActual<typeof import("../src/virtualizedDocumentWindow")>(
+        "../src/virtualizedDocumentWindow"
+      );
+      return {
+        ...actual,
+        createVirtualizedDocumentWindowController: (
+          deps: Parameters<typeof actual.createVirtualizedDocumentWindowController>[0]
+        ) => {
+          const controller = actual.createVirtualizedDocumentWindowController(deps);
+          const adoptRenderedHeights = controller.adoptRenderedHeights.bind(controller);
+          const ensureSectionRendered = controller.ensureSectionRendered.bind(controller);
+          controller.adoptRenderedHeights = adoptOptions => {
+            if (controllerFaults.adoptRenderedHeights === true) {
+              throw new Error("injected adoptRenderedHeights failure");
+            }
+            const result = adoptRenderedHeights(adoptOptions);
+            controllerFaults.onAdoptRenderedHeights?.();
+            return result;
+          };
+          controller.ensureSectionRendered = (sectionIndex, ensureOptions) => {
+            if (controllerFaults.ensureSectionRendered === true) {
+              throw new Error("injected ensureSectionRendered failure");
+            }
+            return ensureSectionRendered(sectionIndex, ensureOptions);
+          };
+          return controller;
+        },
+      };
+    });
+  }
   document.documentElement.innerHTML = `<body><main class="mm-document"></main></body>`;
   trackRendererEventListeners();
 
@@ -73,15 +121,32 @@ async function loadRendererHarness(options: {
     webview: { postMessage: (message: unknown) => messages.push(message) },
   };
 
-  const rafCallbacks: FrameRequestCallback[] = [];
+  const rafCallbacks: Array<{ callback: FrameRequestCallback; id: number }> = [];
+  const canceledRafCallbacks: FrameRequestCallback[] = [];
+  readPendingRendererRafCount = () => rafCallbacks.length;
+  clearPendingRendererRafs = () => { rafCallbacks.splice(0, rafCallbacks.length); };
+  let nextRafId = 1;
   const requestAnimationFrameStub = (callback: FrameRequestCallback) => {
-    rafCallbacks.push(callback);
-    return rafCallbacks.length;
+    const id = nextRafId++;
+    rafCallbacks.push({ callback, id });
+    return id;
+  };
+  const cancelAnimationFrameStub = (id: number) => {
+    const index = rafCallbacks.findIndex(frame => frame.id === id);
+    if (index >= 0) {
+      canceledRafCallbacks.push(rafCallbacks[index]!.callback);
+      rafCallbacks.splice(index, 1);
+    }
   };
   vi.stubGlobal("requestAnimationFrame", requestAnimationFrameStub);
+  vi.stubGlobal("cancelAnimationFrame", cancelAnimationFrameStub);
   Object.defineProperty(window, "requestAnimationFrame", {
     configurable: true,
     value: requestAnimationFrameStub,
+  });
+  Object.defineProperty(window, "cancelAnimationFrame", {
+    configurable: true,
+    value: cancelAnimationFrameStub,
   });
 
   class TestIntersectionObserver implements IntersectionObserver {
@@ -112,18 +177,31 @@ async function loadRendererHarness(options: {
   }
   vi.stubGlobal("ResizeObserver", TestResizeObserver);
 
+  const renderedLayout = {
+    height: options.renderedSectionHeight ?? SECTION_HEIGHT,
+  };
   const root = installVirtualizedDocumentLayout(
     options.sectionCount,
-    options.renderedSectionHeight ?? SECTION_HEIGHT
+    renderedLayout
   );
+  delete root.dataset.mmVirtualizationActive;
   const scrollWrites: number[] = [];
+  let scrollEventQueued = false;
   const scrollTopDescriptor = Object.getOwnPropertyDescriptor(root, "scrollTop");
   Object.defineProperty(root, "scrollTop", {
     configurable: true,
     get: () => scrollTopDescriptor?.get?.call(root) as number,
     set: value => {
+      const previous = scrollTopDescriptor?.get?.call(root) as number;
       scrollWrites.push(value);
       scrollTopDescriptor?.set?.call(root, value);
+      if (value !== previous && !scrollEventQueued) {
+        scrollEventQueued = true;
+        queueMicrotask(() => {
+          scrollEventQueued = false;
+          document.dispatchEvent(new Event("scroll"));
+        });
+      }
     },
   });
   vi.spyOn(window.HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
@@ -185,20 +263,43 @@ async function loadRendererHarness(options: {
   const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
 
   const flushNextRaf = async (): Promise<void> => {
-    const callback = rafCallbacks.shift();
-    if (!callback) {
+    const frame = rafCallbacks.shift();
+    if (!frame) {
       throw new Error("Expected a queued requestAnimationFrame callback");
     }
 
-    callback(0);
+    frame.callback(0);
+    await Promise.resolve();
+  };
+
+  const flushAnimationFrame = async (): Promise<void> => {
+    const callbacks = rafCallbacks.splice(0, rafCallbacks.length);
+    if (callbacks.length === 0) {
+      throw new Error("Expected queued requestAnimationFrame callbacks for a frame");
+    }
+    for (const frame of callbacks) {
+      frame.callback(0);
+      await Promise.resolve();
+    }
+    await Promise.resolve();
+  };
+
+  const flushCanceledRafs = async (): Promise<void> => {
+    const callbacks = canceledRafCallbacks.splice(0, canceledRafCallbacks.length);
+    for (const callback of callbacks) {
+      callback(0);
+      await Promise.resolve();
+    }
     await Promise.resolve();
   };
 
   const flushQueuedRafs = async (): Promise<void> => {
     for (let i = 0; i < 160 && rafCallbacks.length > 0; i++) {
-      const callback = rafCallbacks.shift()!;
-      callback(i * 16);
-      await Promise.resolve();
+      const callbacks = rafCallbacks.splice(0, rafCallbacks.length);
+      for (const frame of callbacks) {
+        frame.callback(i * 16);
+        await Promise.resolve();
+      }
     }
     if (rafCallbacks.length > 0) {
       throw new Error("requestAnimationFrame queue did not settle");
@@ -208,9 +309,11 @@ async function loadRendererHarness(options: {
 
   const flushRafsUntil = async (predicate: () => boolean, maxFrames = 40): Promise<void> => {
     for (let i = 0; i < maxFrames && !predicate() && rafCallbacks.length > 0; i++) {
-      const callback = rafCallbacks.shift()!;
-      callback(i * 16);
-      await Promise.resolve();
+      const callbacks = rafCallbacks.splice(0, rafCallbacks.length);
+      for (const frame of callbacks) {
+        frame.callback(i * 16);
+        await Promise.resolve();
+      }
     }
     await Promise.resolve();
   };
@@ -221,12 +324,40 @@ async function loadRendererHarness(options: {
     }
   };
 
-  return { flushNextRaf, flushQueuedRafs, flushRafsUntil, highlights, load, messages, root, scrollCalls, scrollWrites, triggerResize };
+  const flushResizeRafsSynchronously = (): void => {
+    const existingIds = new Set(rafCallbacks.map(frame => frame.id));
+    triggerResize();
+    const callbacks = rafCallbacks.filter(frame => !existingIds.has(frame.id));
+    for (const frame of callbacks) {
+      const index = rafCallbacks.findIndex(candidate => candidate.id === frame.id);
+      if (index >= 0) {
+        rafCallbacks.splice(index, 1);
+      }
+      frame.callback(0);
+    }
+  };
+
+  return {
+    flushAnimationFrame,
+    flushCanceledRafs,
+    flushNextRaf,
+    flushQueuedRafs,
+    flushRafsUntil,
+    flushResizeRafsSynchronously,
+    highlights,
+    load,
+    messages,
+    root,
+    scrollCalls,
+    scrollWrites,
+    setRenderedSectionHeight: height => { renderedLayout.height = height; },
+    triggerResize,
+  };
 }
 
 function installVirtualizedDocumentLayout(
   sectionCount: number,
-  renderedSectionHeight = SECTION_HEIGHT
+  renderedLayout: { height: number }
 ): HTMLElement {
   const root = document.documentElement;
   let mutableScrollTop = 0;
@@ -295,7 +426,7 @@ function installVirtualizedDocumentLayout(
       return Number.parseFloat(this.style.height) || 0;
     }
 
-    return this.hasAttribute("data-mm-block-index") ? renderedSectionHeight : 0;
+    return this.hasAttribute("data-mm-block-index") ? renderedLayout.height : 0;
   });
   vi.spyOn(window, "scrollTo").mockImplementation((options?: ScrollToOptions | number, y?: number) => {
     root.scrollTop = typeof options === "number" ? (y ?? 0) : (options?.top ?? 0);
@@ -438,6 +569,57 @@ function latestPerfDetail<T extends Record<string, unknown>>(
       && (message as { name?: unknown }).name === name)
     .at(-1);
   return mark?.detail ? JSON.parse(mark.detail) as T : undefined;
+}
+
+function perfDetails<T extends Record<string, unknown>>(
+  messages: readonly unknown[],
+  name: string
+): T[] {
+  return messages
+    .filter((message): message is { type: "perf-mark"; name: string; detail?: string } =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: unknown }).type === "perf-mark"
+      && (message as { name?: unknown }).name === name)
+    .flatMap(message => message.detail ? [JSON.parse(message.detail) as T] : []);
+}
+
+function expectCommittedWriterOwned(
+  messages: readonly unknown[],
+  writer: string,
+  owner: string
+): void {
+  const commit = perfDetails<{ operationEpoch: number; writer?: string }>(
+    messages,
+    "mm-virt-scroll-write-committed"
+  ).filter(detail => detail.writer === writer).at(-1);
+  expect(commit, `missing committed writer ${writer}`).toBeDefined();
+  expect(perfDetails<{ operationEpoch: number; owner?: string }>(
+    messages,
+    "mm-virt-scroll-lease-acquired"
+  )).toContainEqual(expect.objectContaining({
+    operationEpoch: commit!.operationEpoch,
+    owner,
+  }));
+}
+
+function expectCommittedWriterFamilyOwned(
+  messages: readonly unknown[],
+  writerPrefix: string,
+  owner: string
+): void {
+  const commit = perfDetails<{ operationEpoch: number; writer?: string }>(
+    messages,
+    "mm-virt-scroll-write-committed"
+  ).filter(detail => detail.writer?.startsWith(writerPrefix) === true).at(-1);
+  expect(commit, `missing committed writer family ${writerPrefix}`).toBeDefined();
+  expect(perfDetails<{ operationEpoch: number; owner?: string }>(
+    messages,
+    "mm-virt-scroll-lease-acquired"
+  )).toContainEqual(expect.objectContaining({
+    operationEpoch: commit!.operationEpoch,
+    owner,
+  }));
 }
 
 function highestRenderedHeadingIndex(): number {
@@ -588,8 +770,265 @@ function expectMinimapCloneTextRetained(needle: string, minimumMatches = 1): voi
   expect(occurrences).toBeGreaterThanOrEqual(minimumMatches);
 }
 
+async function settleFakeTimedRenderer(harness: RendererHarness): Promise<void> {
+  for (let pass = 0; pass < 6; pass++) {
+    await harness.flushQueuedRafs();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await Promise.resolve();
+  }
+  await harness.flushQueuedRafs();
+}
+
+function terminalCacheRestoreDetails(messages: readonly unknown[]): Array<{
+  reason?: string;
+  status?: string;
+}> {
+  return perfDetails<{ reason?: string; status?: string }>(messages, "mm-virt-cache-restore-terminal");
+}
+
+function maintenanceTerminalDetails(messages: readonly unknown[]): Array<{
+  owner?: string;
+  reason?: string;
+  status?: string;
+}> {
+  return perfDetails<{
+    owner?: string;
+    reason?: string;
+    status?: string;
+  }>(messages, "mm-virt-maintenance-terminal");
+}
+
+const maintenanceLifecycleEventNames = [
+  "mm-virt-maintenance-requested",
+  "mm-virt-maintenance-coalesced",
+  "mm-virt-maintenance-bound",
+  "mm-virt-maintenance-retry",
+  "mm-virt-maintenance-terminal",
+] as const;
+
+type MaintenanceLifecycleEventName = typeof maintenanceLifecycleEventNames[number];
+
+type MaintenanceLifecycleDetail = {
+  [key: string]: unknown;
+  documentEpoch?: number;
+  executionCount?: number;
+  operationEpoch?: number;
+  owner?: string;
+  ownsLease?: boolean;
+  reason?: string;
+  requestId?: {
+    documentEpoch?: number;
+    requestSerial?: number;
+  };
+  requestSerial?: number;
+  status?: string;
+  workRevision?: number;
+};
+
+type MaintenanceLifecycleEvent = {
+  detail: MaintenanceLifecycleDetail;
+  name: MaintenanceLifecycleEventName;
+};
+
+function maintenanceLifecycleEvents(messages: readonly unknown[]): MaintenanceLifecycleEvent[] {
+  return messages.flatMap(message => {
+    if (
+      typeof message !== "object"
+      || message === null
+      || (message as { type?: unknown }).type !== "perf-mark"
+    ) {
+      return [];
+    }
+    const mark = message as { detail?: string; name?: string };
+    if (!maintenanceLifecycleEventNames.includes(mark.name as MaintenanceLifecycleEventName)) {
+      return [];
+    }
+    return [{
+      detail: mark.detail ? JSON.parse(mark.detail) as MaintenanceLifecycleDetail : {},
+      name: mark.name as MaintenanceLifecycleEventName,
+    }];
+  });
+}
+
+function perfMarkMessageIndex(
+  messages: readonly unknown[],
+  name: string,
+  predicate: (detail: Record<string, unknown>) => boolean = () => true
+): number {
+  return messages.findIndex(message => {
+    if (
+      typeof message !== "object"
+      || message === null
+      || (message as { type?: unknown }).type !== "perf-mark"
+      || (message as { name?: unknown }).name !== name
+    ) {
+      return false;
+    }
+    const detail = (message as { detail?: string }).detail;
+    return predicate(detail ? JSON.parse(detail) as Record<string, unknown> : {});
+  });
+}
+
+function maintenanceRequestKey(detail: MaintenanceLifecycleDetail): string {
+  return `${detail.documentEpoch}:${detail.requestSerial}`;
+}
+
+function maintenanceRequestsForOwner(
+  messages: readonly unknown[],
+  owner: string
+): MaintenanceLifecycleDetail[] {
+  return maintenanceLifecycleEvents(messages)
+    .filter(event => event.name === "mm-virt-maintenance-requested" && event.detail.owner === owner)
+    .map(event => event.detail);
+}
+
+function maintenanceEventsForRequest(
+  messages: readonly unknown[],
+  request: MaintenanceLifecycleDetail
+): MaintenanceLifecycleEvent[] {
+  const key = maintenanceRequestKey(request);
+  return maintenanceLifecycleEvents(messages)
+    .filter(event => maintenanceRequestKey(event.detail) === key);
+}
+
+function expectExactMaintenanceLifecycle(
+  messages: readonly unknown[],
+  request: MaintenanceLifecycleDetail,
+  terminal: {
+    executionCount: 0 | 1;
+    reason: string;
+    status: "canceled" | "completed" | "failed";
+  }
+): void {
+  expect(request.requestId).toEqual({
+    documentEpoch: request.documentEpoch,
+    requestSerial: request.requestSerial,
+  });
+  const events = maintenanceEventsForRequest(messages, request);
+  expect(events.filter(event => event.name === "mm-virt-maintenance-requested")).toHaveLength(1);
+  expect(events.filter(event => event.name === "mm-virt-maintenance-bound").length).toBeLessThanOrEqual(1);
+  const coalescedRevisions = events
+    .filter(event => event.name === "mm-virt-maintenance-coalesced")
+    .map(event => event.detail.workRevision);
+  for (let index = 1; index < coalescedRevisions.length; index++) {
+    expect(coalescedRevisions[index]).toBeGreaterThan(coalescedRevisions[index - 1]!);
+  }
+  expect(events.filter(event => event.name === "mm-virt-maintenance-terminal")).toEqual([
+    expect.objectContaining({
+      detail: expect.objectContaining(terminal),
+      name: "mm-virt-maintenance-terminal",
+    }),
+  ]);
+  expect(events.at(0)?.name).toBe("mm-virt-maintenance-requested");
+  expect(events.at(-1)?.name).toBe("mm-virt-maintenance-terminal");
+}
+
+async function loadMaintenanceLifecycleHarness(
+  controllerFaults: ControllerFaults = {}
+): Promise<RendererHarness> {
+  const harness = await loadRendererHarness({
+    controllerFaults,
+    sectionCount: 120,
+    virtualization: true,
+  });
+  document.dispatchEvent(new Event("DOMContentLoaded"));
+  document.documentElement.style.setProperty("--mm-minimap-width", "136px");
+  setMinimapViewportHeight(592);
+  harness.load({ type: "reading-preferences", ...makeReadingPreferences("on") });
+  loadMinimapPolicy(harness.load);
+  harness.load({
+    type: "load-document",
+    html: buildHeadingDocument(120),
+    hasMermaid: false,
+    hasHljs: false,
+    renderId: 60,
+  });
+  await harness.flushQueuedRafs();
+  harness.messages.length = 0;
+  return harness;
+}
+
+function beginMinimapMaintenanceLease(harness: RendererHarness): HTMLElement {
+  const minimap = document.querySelector<HTMLElement>(".mm-minimap")!;
+  Object.defineProperty(minimap, "setPointerCapture", { configurable: true, value: vi.fn() });
+  Object.defineProperty(minimap, "releasePointerCapture", { configurable: true, value: vi.fn() });
+  vi.spyOn(minimap, "getBoundingClientRect").mockReturnValue({
+    bottom: 592,
+    height: 592,
+    left: 0,
+    right: 136,
+    top: 0,
+    width: 136,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  } as DOMRect);
+  minimap.dispatchEvent(pointerEvent("pointerdown", 12));
+  expect(harness.messages).toBeDefined();
+  return minimap;
+}
+
+async function flushNextRafsUntil(
+  harness: RendererHarness,
+  predicate: () => boolean,
+  maxCallbacks = 80
+): Promise<void> {
+  for (let callback = 0; callback < maxCallbacks && !predicate(); callback++) {
+    if ((readPendingRendererRafCount?.() ?? 0) === 0) {
+      break;
+    }
+    await harness.flushNextRaf();
+  }
+  expect(predicate()).toBe(true);
+}
+
+type MaintenanceTestState = "joined" | "owned" | "retry-pending";
+
+async function startMeasuredMaintenanceInState(
+  harness: RendererHarness,
+  state: MaintenanceTestState,
+  height = SECTION_HEIGHT + 40
+): Promise<MaintenanceLifecycleDetail> {
+  if (state === "joined") {
+    beginMinimapMaintenanceLease(harness);
+    harness.setRenderedSectionHeight(height);
+    harness.triggerResize();
+    await flushNextRafsUntil(harness, () => perfDetails<MaintenanceLifecycleDetail>(
+      harness.messages,
+      "mm-virt-maintenance-bound"
+    ).some(detail => detail.owner === "measured-height-adoption" && detail.ownsLease === false));
+  } else if (state === "owned") {
+    harness.setRenderedSectionHeight(height);
+    harness.triggerResize();
+    await flushNextRafsUntil(harness, () => perfDetails<MaintenanceLifecycleDetail>(
+      harness.messages,
+      "mm-virt-maintenance-bound"
+    ).some(detail => detail.owner === "measured-height-adoption" && detail.ownsLease === true));
+  } else {
+    harness.setRenderedSectionHeight(height);
+    harness.triggerResize();
+    await harness.flushNextRaf();
+    const minimap = beginMinimapMaintenanceLease(harness);
+    minimap.dispatchEvent(pointerEvent("pointermove", 588));
+    await flushNextRafsUntil(harness, () => perfDetails<MaintenanceLifecycleDetail>(
+      harness.messages,
+      "mm-virt-maintenance-retry"
+    ).some(detail => detail.owner === "measured-height-adoption"));
+  }
+  const requests = maintenanceRequestsForOwner(harness.messages, "measured-height-adoption");
+  expect(requests).toHaveLength(1);
+  return requests[0]!;
+}
+
 afterEach(() => {
+  window.dispatchEvent(new Event("pagehide"));
+  clearPendingRendererRafs?.();
+  expect(readPendingRendererRafCount?.() ?? 0).toBe(0);
+  clearPendingRendererRafs = null;
+  readPendingRendererRafCount = null;
   removeRendererEventListeners();
+  vi.useRealTimers();
+  vi.doUnmock("../src/virtualizedDocumentWindow");
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", window.location.pathname);
@@ -598,14 +1037,102 @@ afterEach(() => {
 });
 
 describe("renderer scroll-family virtualization integration", () => {
+  it("keeps initial virtual-window DOM and root state unchanged until the owning frame", async () => {
+    const sectionCount = 120;
+    const { flushAnimationFrame, load, root, scrollWrites } = await loadRendererHarness({
+      sectionCount,
+      virtualization: true,
+    });
+
+    load({ type: "load-document", html: buildHeadingDocument(sectionCount), hasMermaid: false, hasHljs: false });
+
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    expect(main.querySelectorAll("[data-mm-block-index]")).toHaveLength(sectionCount);
+    expect(scrollWrites).toEqual([]);
+
+    await flushAnimationFrame();
+
+    expect(main.querySelectorAll("[data-mm-block-index]").length).toBeLessThan(sectionCount);
+    expect(scrollWrites).toHaveLength(1);
+    expect(root.scrollTop).toBe(scrollWrites[0]);
+  });
+
+  it.each([
+    { ensureThrows: false, expectedStatus: "committed" },
+    { ensureThrows: true, expectedStatus: "failed" },
+  ])("terminates cache restoration after frame work with status $expectedStatus", async ({
+    ensureThrows,
+    expectedStatus,
+  }) => {
+    vi.useFakeTimers();
+    const controllerFaults: ControllerFaults = {};
+    const harness = await loadRendererHarness({
+      controllerFaults,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    const firstHtml = buildHeadingDocument(120);
+    const secondHtml = buildHeadingDocument(8);
+
+    harness.load({ type: "load-document", html: firstHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 1 });
+    await settleFakeTimedRenderer(harness);
+    harness.load({ type: "load-document", html: secondHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 2 });
+    await settleFakeTimedRenderer(harness);
+
+    harness.messages.length = 0;
+    controllerFaults.ensureSectionRendered = ensureThrows;
+    harness.load({ type: "load-document", html: firstHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 3 });
+    await settleFakeTimedRenderer(harness);
+
+    expect(latestPerfDetail(harness.messages, "mm-load-document-cache-hit")).toBeDefined();
+    expect(terminalCacheRestoreDetails(harness.messages)).toEqual([
+      expect.objectContaining({ status: expectedStatus }),
+    ]);
+    expect(harness.messages).toContainEqual(expect.objectContaining({
+      type: "post-ready-enhancements-complete",
+      renderId: 3,
+    }));
+  });
+
+  it("terminates a stale cache restore once without publishing the stale document", async () => {
+    vi.useFakeTimers();
+    const harness = await loadRendererHarness({ sectionCount: 120, virtualization: true });
+    const firstHtml = buildHeadingDocument(120);
+    const secondHtml = buildHeadingDocument(8);
+    const successorHtml = buildHeadingDocument(12);
+
+    harness.load({ type: "load-document", html: firstHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 1 });
+    await settleFakeTimedRenderer(harness);
+    harness.load({ type: "load-document", html: secondHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 2 });
+    await settleFakeTimedRenderer(harness);
+
+    harness.messages.length = 0;
+    harness.load({ type: "load-document", html: firstHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 3 });
+    harness.load({ type: "load-document", html: successorHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 4 });
+    await settleFakeTimedRenderer(harness);
+
+    expect(terminalCacheRestoreDetails(harness.messages)).toEqual([
+      expect.objectContaining({ reason: "stale-document", status: "canceled" }),
+    ]);
+    expect(harness.messages).not.toContainEqual(expect.objectContaining({
+      type: "post-ready-enhancements-complete",
+      renderId: 3,
+    }));
+    expect(harness.messages).toContainEqual(expect.objectContaining({
+      type: "post-ready-enhancements-complete",
+      renderId: 4,
+    }));
+  });
+
   it("posts all model headings to the TOC when virtualization has rendered only the first window", async () => {
     const headingCount = 1_005;
-    const { load, messages } = await loadRendererHarness({
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
       sectionCount: headingCount,
       virtualization: true,
     });
 
     load({ type: "load-document", html: buildHeadingDocument(headingCount), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
 
     const headings = latestHeadingsUpdated(messages)?.headings ?? [];
     expect(document.getElementById("heading-999")).toBeNull();
@@ -614,7 +1141,7 @@ describe("renderer scroll-family virtualization integration", () => {
   });
 
   it("renders an off-window anchor target before handling a scroll-to anchor message", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
+    const { flushNextRaf, flushQueuedRafs, load, messages, root, scrollCalls } = await loadRendererHarness({
       sectionCount: 120,
       virtualization: true,
     });
@@ -632,7 +1159,7 @@ describe("renderer scroll-family virtualization integration", () => {
   });
 
   it("renders an off-window TOC target before smooth scrolling the heading", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
+    const { flushNextRaf, flushQueuedRafs, load, messages, root, scrollCalls } = await loadRendererHarness({
       sectionCount: 120,
       virtualization: true,
     });
@@ -647,6 +1174,7 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(document.getElementById("heading-95")).not.toBeNull();
     expect(scrollCalls).toEqual([]);
     expect(root.scrollTop).toBeGreaterThan(0);
+    expectCommittedWriterOwned(messages, "navigation-initial", "heading-navigation");
   });
 
   it("routes hash navigation through the virtualized heading landing owner", async () => {
@@ -702,7 +1230,7 @@ describe("renderer scroll-family virtualization integration", () => {
   });
 
   it("renders the containing section and scrolls the nested block descendant", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
+    const { flushNextRaf, flushQueuedRafs, load, messages, root, scrollCalls } = await loadRendererHarness({
       sectionCount: 120,
       virtualization: true,
     });
@@ -722,9 +1250,10 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(document.querySelector<HTMLElement>('[data-mm-block-index="8801"]')).not.toBeNull();
     expect(scrollCalls).toEqual([]);
     expect(root.scrollTop).toBeGreaterThan(0);
+    expectCommittedWriterOwned(messages, "navigation-initial", "block-navigation");
   });
 
-  it("reasserts a nested scroll-to-block target after a post-navigation window shift", async () => {
+  it("lets native user scroll supersede a nested programmatic block target", async () => {
     const land = async (shiftDuringNavigation: boolean): Promise<number> => {
       const { flushNextRaf, flushQueuedRafs, load, root } = await loadRendererHarness({
         sectionCount: 120,
@@ -754,11 +1283,11 @@ describe("renderer scroll-family virtualization integration", () => {
     };
 
     expect(await land(false)).toBeCloseTo(0, 0);
-    expect(await land(true)).toBeCloseTo(0, 0);
+    expect(Math.abs(await land(true))).toBeGreaterThan(100);
   });
 
   it("corrects a deep block landing after estimated and rendered heights diverge", async () => {
-    const { flushQueuedRafs, load } = await loadRendererHarness({
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
       rectTopShiftByBlockIndex: { 90: -64 },
       renderedSectionHeight: SECTION_PITCH,
       sectionCount: 120,
@@ -773,6 +1302,19 @@ describe("renderer scroll-family virtualization integration", () => {
     const target = document.querySelector<HTMLElement>('body > main.mm-document [data-mm-block-index="90"]');
     expect(target).not.toBeNull();
     expect(target!.getBoundingClientRect().top).toBeCloseTo(0, 0);
+    const blockOperation = perfDetails<{ operationEpoch: number; owner?: string }>(
+      messages,
+      "mm-virt-scroll-lease-acquired"
+    ).find(detail => detail.owner === "block-navigation");
+    expect(blockOperation).toBeDefined();
+    expect(perfDetails<{ operationEpoch: number; writer?: string }>(
+      messages,
+      "mm-virt-scroll-write-committed"
+    ).filter(detail => detail.operationEpoch === blockOperation!.operationEpoch).map(detail => detail.writer))
+      .toEqual(expect.arrayContaining(["navigation-initial", "navigation-residual"]));
+    const committedFrames = perfDetails<{ frame: number }>(messages, "mm-virt-scroll-write-committed")
+      .map(detail => detail.frame);
+    expect(new Set(committedFrames).size).toBe(committedFrames.length);
   });
 
   it("terminates correction when a deep block landing estimate remains imperfect", async () => {
@@ -795,7 +1337,7 @@ describe("renderer scroll-family virtualization integration", () => {
   });
 
   it("leaves invalid virtualized anchor and block targets as no-ops", async () => {
-    const { flushQueuedRafs, load, scrollCalls } = await loadRendererHarness({
+    const { flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
       sectionCount: 20,
       virtualization: true,
     });
@@ -811,8 +1353,56 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(scrollCalls).toEqual([]);
   });
 
+  it("marks only the actual flag-on scroll root as virtualization active", async () => {
+    const on = await loadRendererHarness({ sectionCount: 4, virtualization: true });
+
+    expect(on.root.dataset.mmVirtualizationActive).toBe("true");
+  });
+
+  it("routes the flag-on model-less block fallback without scrollIntoView", async () => {
+    const { flushQueuedRafs, load, root, scrollCalls, scrollWrites } = await loadRendererHarness({
+      sectionCount: 8,
+      virtualization: true,
+    });
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    const target = document.createElement("section");
+    target.dataset.mmBlockIndex = "7";
+    target.textContent = "Live fallback";
+    main.append(target);
+    scrollWrites.length = 0;
+
+    load({ type: "scroll-to-block", blockIndex: 7 });
+    await flushQueuedRafs();
+
+    expect(scrollCalls).toEqual([]);
+    expect(scrollWrites).toHaveLength(1);
+    expect(root.scrollTop).toBeGreaterThan(0);
+  });
+
+  it("routes the flag-on resolver-null block fallback through the existing operation", async () => {
+    const { flushQueuedRafs, load, root, scrollCalls, scrollWrites } = await loadRendererHarness({
+      sectionCount: 8,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildHeadingDocument(8), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    const target = document.createElement("section");
+    target.dataset.mmBlockIndex = "900";
+    target.textContent = "Unmodeled live fallback";
+    main.append(target);
+    scrollWrites.length = 0;
+
+    load({ type: "scroll-to-block", blockIndex: 900 });
+    await flushQueuedRafs();
+
+    expect(scrollCalls).toEqual([]);
+    expect(scrollWrites).toHaveLength(1);
+    expect(root.scrollTop).toBeGreaterThan(0);
+  });
+
   it("keeps flag-off scroll messages on the existing live-DOM paths", async () => {
-    const { flushQueuedRafs, load, scrollCalls } = await loadRendererHarness({
+    const { flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
       sectionCount: 3,
       virtualization: false,
     });
@@ -839,11 +1429,46 @@ describe("renderer scroll-family virtualization integration", () => {
       { element: heading, options: { behavior: "smooth", block: "start" } },
       { element: block!, options: { block: "start", behavior: "instant" } },
     ]);
+    expect(root.dataset.mmVirtualizationActive).toBeUndefined();
+  });
+
+  it("routes cold policy and host scroll commands through traced lease owners", async () => {
+    const { flushQueuedRafs, load, messages, root } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    expectCommittedWriterOwned(messages, "cold-load-reset", "cold-load-reset");
+    expectCommittedWriterOwned(messages, "measured-height-adoption", "measured-height-adoption");
+
+    messages.length = 0;
+    load({ type: "scroll-to-progress", progressPercent: 50 });
+    await flushQueuedRafs();
+    expect(root.scrollTop).toBeGreaterThan(0);
+    expectCommittedWriterOwned(messages, "host-progress", "host-progress");
+
+    messages.length = 0;
+    const beforeScrollBy = root.scrollTop;
+    load({ type: "scroll-by", deltaY: 45 });
+    await flushQueuedRafs();
+    expect(root.scrollTop).toBeGreaterThan(beforeScrollBy);
+    expectCommittedWriterOwned(messages, "host-scroll-by", "host-scroll-by");
+
+    messages.length = 0;
+    load({
+      ...makeReadingPreferences("off"),
+      documentScrollEnabled: false,
+    });
+    await flushQueuedRafs();
+    expect(root.scrollTop).toBe(0);
+    expectCommittedWriterOwned(messages, "scroll-disabled-reset", "scroll-disabled-reset");
   });
 
   it("renders an off-window source line before applying the 38 percent preview anchor", async () => {
     const land = async (): Promise<number> => {
-      const { flushQueuedRafs, load } = await loadRendererHarness({
+      const { flushQueuedRafs, load, messages } = await loadRendererHarness({
         renderedSectionHeight: SECTION_PITCH,
         sectionCount: 120,
         virtualization: true,
@@ -855,6 +1480,7 @@ describe("renderer scroll-family virtualization integration", () => {
       await flushQueuedRafs();
       const target = document.querySelector<HTMLElement>('[data-mm-source-line="900"]');
       expect(target).not.toBeNull();
+      expectCommittedWriterOwned(messages, "navigation-initial", "source-line-navigation");
       return target!.getBoundingClientRect().top;
     };
 
@@ -926,10 +1552,11 @@ describe("renderer scroll-family virtualization integration", () => {
         && (message as { type?: unknown }).type === "preview-source-line")
       .map(message => message.sourceLine)
       .filter(sourceLine => sourceLine > 0);
-    expect(postedLines).toHaveLength(3);
+    expect(postedLines.length).toBeGreaterThanOrEqual(3);
     expect(new Set(postedLines).size).toBe(postedLines.length);
-    expect(postedLines[0]).toBeLessThan(postedLines[1]!);
-    expect(postedLines[1]).toBeLessThan(postedLines[2]!);
+    for (let index = 1; index < postedLines.length; index++) {
+      expect(postedLines[index - 1]).toBeLessThan(postedLines[index]!);
+    }
   });
 
   it("sanitizes the model-fragment minimap clone so global document lookups only see the live window", async () => {
@@ -995,11 +1622,13 @@ describe("renderer scroll-family virtualization integration", () => {
     for (let run = 0; run < 3; run++) {
       root.scrollTop += 47;
       document.dispatchEvent(new Event("scroll"));
+      await Promise.resolve();
       load({ type: "scroll-to-block", blockIndex: 8801 });
       await flushNextRaf();
       await flushQueuedRafs();
-      expect(document.querySelector<HTMLElement>('body > main.mm-document [data-mm-block-index="8801"]')?.getBoundingClientRect().top)
-        .toBeCloseTo(0, 0);
+      const nestedTarget = document.querySelector<HTMLElement>('body > main.mm-document [data-mm-block-index="8801"]');
+      expect(nestedTarget).not.toBeNull();
+      expect(nestedTarget!.getBoundingClientRect().top).toBeCloseTo(0, 0);
     }
 
     expect(scrollCalls).toEqual([]);
@@ -1137,7 +1766,8 @@ describe("renderer scroll-family virtualization integration", () => {
     const firstTarget = document.querySelector<HTMLElement>('[data-mm-block-index="90"]');
     expect(firstTarget).not.toBeNull();
     expect(findBarCount().textContent).toBe("1 of 2");
-    expect(firstTarget!.getBoundingClientRect().top).toBeCloseTo(0, 0);
+    expect(firstTarget!.getBoundingClientRect().top).toBeCloseTo((VIEWPORT_HEIGHT - SECTION_HEIGHT) / 2, 0);
+    expectCommittedWriterOwned(messages, "find-navigation", "find-navigation");
     expect(highlights.get("mm-find-all")?.map(range => range.toString())).toEqual(["needle"]);
     expect(highlights.get("mm-find-current")?.map(range => range.toString())).toEqual(["needle"]);
 
@@ -1147,7 +1777,7 @@ describe("renderer scroll-family virtualization integration", () => {
     const secondTarget = document.querySelector<HTMLElement>('[data-mm-block-index="95"]');
     expect(secondTarget).not.toBeNull();
     expect(findBarCount().textContent).toBe("2 of 2");
-    expect(secondTarget!.getBoundingClientRect().top).toBeCloseTo(0, 0);
+    expect(secondTarget!.getBoundingClientRect().top).toBeCloseTo((VIEWPORT_HEIGHT - SECTION_HEIGHT) / 2, 0);
 
     findButton("prev").click();
     await flushRafsUntil(() => document.querySelector('[data-mm-block-index="90"]') !== null);
@@ -1155,7 +1785,47 @@ describe("renderer scroll-family virtualization integration", () => {
     const previousTarget = document.querySelector<HTMLElement>('[data-mm-block-index="90"]');
     expect(previousTarget).not.toBeNull();
     expect(findBarCount().textContent).toBe("1 of 2");
-    expect(previousTarget!.getBoundingClientRect().top).toBeCloseTo(0, 0);
+    expect(previousTarget!.getBoundingClientRect().top).toBeCloseTo((VIEWPORT_HEIGHT - SECTION_HEIGHT) / 2, 0);
+  });
+
+  it("releases an obsolete find lease without restoring or writing", async () => {
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    load({ type: "load-document", html: buildFindDocument(120, [90]), hasMermaid: false, hasHljs: false, renderId: 8 });
+    await flushQueuedRafs();
+    messages.length = 0;
+
+    load({ type: "open-find-bar" });
+    submitFindQuery("needle");
+    const request = findQueryMessages(messages).at(-1)!;
+    load({
+      type: "find-results",
+      requestId: request.requestId,
+      query: "needle",
+      renderId: 8,
+      totalCount: 1,
+      matches: [descriptorForBlock(90, 1)],
+    });
+    load({ type: "open-find-bar" });
+    await flushQueuedRafs();
+
+    const acquired = perfDetails<{ operationEpoch: number; owner?: string }>(
+      messages,
+      "mm-virt-scroll-lease-acquired"
+    ).find(detail => detail.owner === "find-navigation");
+    expect(acquired).toBeDefined();
+    expect(perfDetails<{ operationEpoch: number; owner?: string }>(
+      messages,
+      "mm-virt-scroll-lease-released"
+    )).toContainEqual(expect.objectContaining({
+      operationEpoch: acquired!.operationEpoch,
+      owner: "find-navigation",
+    }));
+    expect(perfDetails<{ writer?: string }>(messages, "mm-virt-scroll-write-committed"))
+      .not.toContainEqual(expect.objectContaining({ writer: "find-navigation" }));
   });
 
   it("does not re-query the host index when virtual window replacement changes the live DOM", async () => {
@@ -1333,9 +2003,576 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(scrollWrites.length).toBeGreaterThan(0);
   });
 
+  it.each(["minimap", "find", "navigation"] as const)(
+    "retains measured-height adoption while a %s transaction owns the current frame",
+    async owner => {
+      const sectionCount = 120;
+      const harness = await loadRendererHarness({ sectionCount, virtualization: true });
+      if (owner === "find" || owner === "minimap") {
+        document.dispatchEvent(new Event("DOMContentLoaded"));
+      }
+      if (owner === "minimap") {
+        document.documentElement.style.setProperty("--mm-minimap-width", "136px");
+        setMinimapViewportHeight(592);
+        harness.load({ type: "reading-preferences", ...makeReadingPreferences("on") });
+        loadMinimapPolicy(harness.load);
+      }
+      const html = owner === "find"
+        ? buildFindDocument(sectionCount, [90])
+        : buildHeadingDocument(sectionCount);
+      harness.load({ type: "load-document", html, hasMermaid: false, hasHljs: false, renderId: 21 });
+      await harness.flushQueuedRafs();
+      harness.messages.length = 0;
+      harness.setRenderedSectionHeight(SECTION_HEIGHT + 40);
+
+      // Queue maintenance first, then occupy Task 3's current frame before
+      // that maintenance callback is delivered.
+      harness.triggerResize();
+      let minimap: HTMLElement | null = null;
+      if (owner === "navigation") {
+        harness.load({ type: "scroll-to-block", blockIndex: 90 });
+      } else if (owner === "find") {
+        harness.load({ type: "open-find-bar" });
+        submitFindQuery("needle");
+        const request = findQueryMessages(harness.messages).at(-1)!;
+        harness.load({
+          type: "find-results",
+          requestId: request.requestId,
+          query: "needle",
+          renderId: 21,
+          totalCount: 1,
+          matches: [descriptorForBlock(90, 1)],
+        });
+      } else {
+        await harness.flushNextRaf();
+        minimap = document.querySelector<HTMLElement>(".mm-minimap")!;
+        Object.defineProperty(minimap, "setPointerCapture", { configurable: true, value: vi.fn() });
+        Object.defineProperty(minimap, "releasePointerCapture", { configurable: true, value: vi.fn() });
+        vi.spyOn(minimap, "getBoundingClientRect").mockReturnValue({
+          bottom: 592,
+          height: 592,
+          left: 0,
+          right: 136,
+          top: 0,
+          width: 136,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        } as DOMRect);
+        minimap.dispatchEvent(pointerEvent("pointerdown", 12));
+        minimap.dispatchEvent(pointerEvent("pointermove", 588));
+      }
+
+      if (owner === "minimap") {
+        await harness.flushRafsUntil(() => perfDetails(
+          harness.messages,
+          "mm-virt-maintenance-retry"
+        ).some(detail => detail["owner"] === "measured-height-adoption"));
+        expect(perfDetails(harness.messages, "mm-virt-maintenance-retry")).toContainEqual(
+          expect.objectContaining({ owner: "measured-height-adoption" })
+        );
+        minimap!.dispatchEvent(pointerEvent("pointerup", 588));
+      }
+      await harness.flushQueuedRafs();
+
+      expect(perfDetails(harness.messages, "mm-virt-window-height-adopted").length).toBeGreaterThan(0);
+      expect(maintenanceTerminalDetails(harness.messages)).toContainEqual(expect.objectContaining({
+        owner: "measured-height-adoption",
+        status: "completed",
+      }));
+    }
+  );
+
+  it("attached maintenance emits one programmatic terminal for its request and one later same-owner request delivers once", async () => {
+    const harness = await loadMaintenanceLifecycleHarness();
+    const oldRequest = await startMeasuredMaintenanceInState(harness, "joined");
+
+    harness.load({ type: "scroll-to-block", blockIndex: 90 });
+    expectExactMaintenanceLifecycle(harness.messages, oldRequest, {
+      executionCount: 0,
+      reason: "programmatic-supersession",
+      status: "canceled",
+    });
+    expect(perfDetails(harness.messages, "mm-virt-window-height-adopted")).toEqual([]);
+
+    harness.setRenderedSectionHeight(SECTION_HEIGHT + 80);
+    harness.triggerResize();
+    await harness.flushQueuedRafs();
+    const requests = maintenanceRequestsForOwner(harness.messages, "measured-height-adoption");
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    expect(requests[1]!.requestSerial).toBeGreaterThan(requests[0]!.requestSerial!);
+    for (const laterRequest of requests.slice(1)) {
+      expectExactMaintenanceLifecycle(harness.messages, laterRequest, {
+        executionCount: 1,
+        reason: "delivered",
+        status: "completed",
+      });
+    }
+
+    const eventCount = maintenanceLifecycleEvents(harness.messages).length;
+    await harness.flushQueuedRafs();
+    expect(maintenanceLifecycleEvents(harness.messages)).toHaveLength(eventCount);
+  });
+
+  it("maintenance-owned scheduled request emits one programmatic terminal before its frame can run", async () => {
+    const harness = await loadMaintenanceLifecycleHarness();
+    const request = await startMeasuredMaintenanceInState(harness, "owned");
+    expect(perfDetails<MaintenanceLifecycleDetail>(harness.messages, "mm-virt-maintenance-bound")
+      .filter(detail => maintenanceRequestKey(detail) === maintenanceRequestKey(request))).toEqual([
+      expect.objectContaining({ ownsLease: true }),
+    ]);
+
+    harness.load({ type: "scroll-to-block", blockIndex: 90 });
+    expectExactMaintenanceLifecycle(harness.messages, request, {
+      executionCount: 0,
+      reason: "programmatic-supersession",
+      status: "canceled",
+    });
+    expect(perfDetails(harness.messages, "mm-virt-window-height-adopted")).toEqual([]);
+    const eventCount = maintenanceEventsForRequest(harness.messages, request).length;
+    await harness.flushQueuedRafs();
+    expect(maintenanceEventsForRequest(harness.messages, request)).toHaveLength(eventCount);
+  });
+
+  it("same-owner producer updates coalesce to one request id and execute only the latest work once", async () => {
+    const harness = await loadMaintenanceLifecycleHarness();
+    const request = await startMeasuredMaintenanceInState(harness, "owned");
+    harness.setRenderedSectionHeight(SECTION_HEIGHT + 80);
+    harness.flushResizeRafsSynchronously();
+    harness.setRenderedSectionHeight(SECTION_HEIGHT + 120);
+    harness.flushResizeRafsSynchronously();
+
+    expect(maintenanceRequestsForOwner(harness.messages, "measured-height-adoption")).toHaveLength(1);
+    expect(maintenanceEventsForRequest(harness.messages, request)
+      .filter(event => event.name === "mm-virt-maintenance-coalesced")
+      .map(event => event.detail.workRevision)).toEqual([2, 3]);
+    await harness.flushQueuedRafs();
+    expectExactMaintenanceLifecycle(harness.messages, request, {
+      executionCount: 1,
+      reason: "delivered",
+      status: "completed",
+    });
+    expect(maintenanceEventsForRequest(harness.messages, request).at(-1)?.detail.workRevision).toBe(3);
+  });
+
+  it("frame-transaction rejection is the only retry edge and retains the request id", async () => {
+    const harness = await loadMaintenanceLifecycleHarness();
+    const request = await startMeasuredMaintenanceInState(harness, "retry-pending");
+    expect(maintenanceEventsForRequest(harness.messages, request)
+      .filter(event => event.name === "mm-virt-maintenance-retry")).toEqual([
+      expect.objectContaining({
+        detail: expect.objectContaining({ reason: "frame-transaction-occupied" }),
+      }),
+    ]);
+
+    document.querySelector<HTMLElement>(".mm-minimap")!
+      .dispatchEvent(pointerEvent("pointerup", 588));
+    await harness.flushQueuedRafs();
+    expectExactMaintenanceLifecycle(harness.messages, request, {
+      executionCount: 1,
+      reason: "delivered",
+      status: "completed",
+    });
+    expect(maintenanceEventsForRequest(harness.messages, request)
+      .filter(event => event.name === "mm-virt-maintenance-retry")
+      .every(event => event.detail.reason === "frame-transaction-occupied")).toBe(true);
+  });
+
+  it("joined scheduled maintenance defers lease release and delivers without a joined-release retry", async () => {
+    const harness = await loadMaintenanceLifecycleHarness();
+    const request = await startMeasuredMaintenanceInState(harness, "joined");
+    const binding = maintenanceEventsForRequest(harness.messages, request)
+      .find(event => event.name === "mm-virt-maintenance-bound")!.detail;
+    const minimap = document.querySelector<HTMLElement>(".mm-minimap")!;
+    minimap.dispatchEvent(pointerEvent("pointermove", 588));
+    minimap.dispatchEvent(pointerEvent("pointerup", 588));
+    await harness.flushQueuedRafs();
+
+    expectExactMaintenanceLifecycle(harness.messages, request, {
+      executionCount: 1,
+      reason: "delivered",
+      status: "completed",
+    });
+    expect(maintenanceEventsForRequest(harness.messages, request)
+      .filter(event => event.name === "mm-virt-maintenance-retry")).toEqual([]);
+    expect(perfDetails<MaintenanceLifecycleDetail>(harness.messages, "mm-virt-maintenance-retry")
+      .some(detail => detail.reason === "joined-lease-released")).toBe(false);
+    const terminalIndex = perfMarkMessageIndex(harness.messages, "mm-virt-maintenance-terminal", detail =>
+      detail["requestSerial"] === request.requestSerial);
+    const releaseIndex = perfMarkMessageIndex(harness.messages, "mm-virt-scroll-lease-released", detail =>
+      detail["operationEpoch"] === binding.operationEpoch);
+    expect(terminalIndex).toBeGreaterThanOrEqual(0);
+    expect(releaseIndex).toBeGreaterThan(terminalIndex);
+  });
+
+  it("programmatic supersession cancels retry-pending maintenance without migration", async () => {
+    const harness = await loadMaintenanceLifecycleHarness();
+    const request = await startMeasuredMaintenanceInState(harness, "retry-pending");
+    harness.load({ type: "scroll-to-block", blockIndex: 90 });
+    expectExactMaintenanceLifecycle(harness.messages, request, {
+      executionCount: 0,
+      reason: "programmatic-supersession",
+      status: "canceled",
+    });
+    expect(perfDetails(harness.messages, "mm-virt-window-height-adopted")).toEqual([]);
+    await harness.flushQueuedRafs();
+    await harness.flushCanceledRafs();
+    expect(maintenanceEventsForRequest(harness.messages, request).at(-1)?.name)
+      .toBe("mm-virt-maintenance-terminal");
+  });
+
+  it.each(["joined", "owned"] as const)(
+    "user supersession terminalizes joined and maintenance-owned requests exactly once (%s)",
+    async state => {
+      const harness = await loadMaintenanceLifecycleHarness();
+      const request = await startMeasuredMaintenanceInState(harness, state);
+      harness.root.scrollTop += 17;
+      document.dispatchEvent(new Event("scroll"));
+      await harness.flushQueuedRafs();
+      expectExactMaintenanceLifecycle(harness.messages, request, {
+        executionCount: 0,
+        reason: "user-supersession",
+        status: "canceled",
+      });
+    }
+  );
+
+  it.each(["joined", "owned", "retry-pending"] as const)(
+    "document replacement terminalizes joined owned and retry-pending requests exactly once (%s)",
+    async state => {
+      const harness = await loadMaintenanceLifecycleHarness();
+      const request = await startMeasuredMaintenanceInState(harness, state);
+      harness.load({
+        type: "load-document",
+        html: buildHeadingDocument(12),
+        hasMermaid: false,
+        hasHljs: false,
+        renderId: 61,
+      });
+      await harness.flushQueuedRafs();
+      await harness.flushCanceledRafs();
+      expectExactMaintenanceLifecycle(harness.messages, request, {
+        executionCount: 0,
+        reason: "stale-document",
+        status: "canceled",
+      });
+    }
+  );
+
+  it.each(["joined", "owned", "retry-pending"] as const)(
+    "pagehide terminalizes joined owned and retry-pending requests exactly once (%s)",
+    async state => {
+      const harness = await loadMaintenanceLifecycleHarness();
+      const request = await startMeasuredMaintenanceInState(harness, state);
+      window.dispatchEvent(new Event("pagehide"));
+      await harness.flushQueuedRafs();
+      await harness.flushCanceledRafs();
+      expectExactMaintenanceLifecycle(harness.messages, request, {
+        executionCount: 0,
+        reason: "teardown",
+        status: "canceled",
+      });
+    }
+  );
+
+  it.each(["owned", "retry-pending"] as const)(
+    "stale frame and retry callbacks cannot execute or emit a second terminal (%s)",
+    async state => {
+      const harness = await loadMaintenanceLifecycleHarness();
+      const request = await startMeasuredMaintenanceInState(harness, state);
+      harness.load({ type: "scroll-to-block", blockIndex: 90 });
+      const eventsAtTerminal = maintenanceEventsForRequest(harness.messages, request);
+      await harness.flushQueuedRafs();
+      await harness.flushCanceledRafs();
+      expect(maintenanceEventsForRequest(harness.messages, request)).toEqual(eventsAtTerminal);
+      expectExactMaintenanceLifecycle(harness.messages, request, {
+        executionCount: 0,
+        reason: "programmatic-supersession",
+        status: "canceled",
+      });
+    }
+  );
+
+  it.each(["completed", "failed", "canceled"] as const)(
+    "later same-owner request after completed failed or canceled terminal receives a new id and delivers (%s)",
+    async terminalKind => {
+      const faults: ControllerFaults = {};
+      const harness = await loadMaintenanceLifecycleHarness(faults);
+      if (terminalKind === "failed") {
+        faults.adoptRenderedHeights = true;
+      }
+      const oldRequest = await startMeasuredMaintenanceInState(harness, "owned");
+      if (terminalKind === "canceled") {
+        harness.load({ type: "scroll-to-block", blockIndex: 90 });
+      }
+      await harness.flushQueuedRafs();
+      if (terminalKind === "failed") {
+        faults.adoptRenderedHeights = false;
+      }
+      expectExactMaintenanceLifecycle(harness.messages, oldRequest, terminalKind === "completed"
+        ? { executionCount: 1, reason: "delivered", status: "completed" }
+        : terminalKind === "failed"
+          ? { executionCount: 1, reason: "frame-work-failed", status: "failed" }
+          : { executionCount: 0, reason: "programmatic-supersession", status: "canceled" });
+
+      const requestCount = maintenanceRequestsForOwner(harness.messages, "measured-height-adoption").length;
+      harness.setRenderedSectionHeight(SECTION_HEIGHT + 160);
+      harness.triggerResize();
+      await harness.flushQueuedRafs();
+      const requests = maintenanceRequestsForOwner(harness.messages, "measured-height-adoption");
+      expect(requests).toHaveLength(requestCount + 1);
+      const laterRequest = requests.at(-1)!;
+      expect(laterRequest.requestSerial).toBeGreaterThan(oldRequest.requestSerial!);
+      expectExactMaintenanceLifecycle(harness.messages, laterRequest, {
+        executionCount: 1,
+        reason: "delivered",
+        status: "completed",
+      });
+    }
+  );
+
+  it("same-owner request during execution queues one coalesced successor and delivers it after terminal", async () => {
+    const faults: ControllerFaults = {};
+    let harness!: RendererHarness;
+    let injectSuccessor = false;
+    let injected = false;
+    faults.onAdoptRenderedHeights = () => {
+      if (!injectSuccessor || injected) {
+        return;
+      }
+      injected = true;
+      harness.setRenderedSectionHeight(SECTION_HEIGHT + 80);
+      harness.flushResizeRafsSynchronously();
+      harness.setRenderedSectionHeight(SECTION_HEIGHT + 120);
+      harness.flushResizeRafsSynchronously();
+    };
+    harness = await loadMaintenanceLifecycleHarness(faults);
+    injectSuccessor = true;
+    const activeRequest = await startMeasuredMaintenanceInState(harness, "owned");
+    await harness.flushQueuedRafs();
+
+    const requests = maintenanceRequestsForOwner(harness.messages, "measured-height-adoption");
+    expect(requests).toHaveLength(2);
+    const successor = requests[1]!;
+    expect(successor.requestSerial).toBeGreaterThan(activeRequest.requestSerial!);
+    expect(maintenanceEventsForRequest(harness.messages, successor)
+      .filter(event => event.name === "mm-virt-maintenance-coalesced")
+      .map(event => event.detail.workRevision)).toEqual([2]);
+    expectExactMaintenanceLifecycle(harness.messages, activeRequest, {
+      executionCount: 1,
+      reason: "delivered",
+      status: "completed",
+    });
+    expectExactMaintenanceLifecycle(harness.messages, successor, {
+      executionCount: 1,
+      reason: "delivered",
+      status: "completed",
+    });
+    const activeTerminalIndex = perfMarkMessageIndex(harness.messages, "mm-virt-maintenance-terminal", detail =>
+      detail["requestSerial"] === activeRequest.requestSerial);
+    const successorBoundIndex = perfMarkMessageIndex(harness.messages, "mm-virt-maintenance-bound", detail =>
+      detail["requestSerial"] === successor.requestSerial);
+    expect(successorBoundIndex).toBeGreaterThan(activeTerminalIndex);
+  });
+
+  it("same-owner successor queued during throwing work terminally cancels exactly once", async () => {
+    const faults: ControllerFaults = {};
+    let harness!: RendererHarness;
+    let injectSuccessor = false;
+    let injected = false;
+    faults.onAdoptRenderedHeights = () => {
+      if (!injectSuccessor || injected) {
+        return;
+      }
+      injected = true;
+      harness.setRenderedSectionHeight(SECTION_HEIGHT + 80);
+      harness.flushResizeRafsSynchronously();
+      throw new Error("injected active maintenance failure after successor admission");
+    };
+    harness = await loadMaintenanceLifecycleHarness(faults);
+    injectSuccessor = true;
+    const activeRequest = await startMeasuredMaintenanceInState(harness, "owned");
+    await harness.flushQueuedRafs();
+
+    const requests = maintenanceRequestsForOwner(harness.messages, "measured-height-adoption");
+    expect(requests).toHaveLength(2);
+    const successor = requests[1]!;
+    expect(successor.requestSerial).toBeGreaterThan(activeRequest.requestSerial!);
+    expectExactMaintenanceLifecycle(harness.messages, activeRequest, {
+      executionCount: 1,
+      reason: "frame-work-failed",
+      status: "failed",
+    });
+    expectExactMaintenanceLifecycle(harness.messages, successor, {
+      executionCount: 0,
+      reason: "frame-work-failed",
+      status: "canceled",
+    });
+    expect(maintenanceEventsForRequest(harness.messages, successor)
+      .filter(event => event.name === "mm-virt-maintenance-bound")).toEqual([]);
+
+    const eventsAtTerminal = maintenanceLifecycleEvents(harness.messages);
+    await harness.flushQueuedRafs();
+    await harness.flushCanceledRafs();
+    expect(maintenanceLifecycleEvents(harness.messages)).toEqual(eventsAtTerminal);
+  });
+
+  it("flag off emits no maintenance request binding retry or terminal events", async () => {
+    const harness = await loadRendererHarness({ sectionCount: 12, virtualization: false });
+    harness.load({
+      type: "load-document",
+      html: buildHeadingDocument(12),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 62,
+    });
+    harness.triggerResize();
+    harness.load({ type: "scroll-to-block", blockIndex: 7 });
+    await harness.flushQueuedRafs();
+    expect(maintenanceLifecycleEvents(harness.messages)).toEqual([]);
+  });
+
+  it("retries calibration after an occupied minimap frame and performs it once", async () => {
+    vi.useFakeTimers();
+    const sectionCount = 120;
+    const harness = await loadRendererHarness({ sectionCount, virtualization: true });
+    document.documentElement.style.setProperty("--mm-minimap-width", "136px");
+    setMinimapViewportHeight(592);
+    harness.load({ type: "reading-preferences", ...makeReadingPreferences("on") });
+    loadMinimapPolicy(harness.load);
+    harness.load({
+      type: "load-document",
+      html: buildHeadingDocument(sectionCount),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 31,
+    });
+    await harness.flushQueuedRafs();
+    harness.messages.length = 0;
+
+    const minimap = document.querySelector<HTMLElement>(".mm-minimap")!;
+    Object.defineProperty(minimap, "setPointerCapture", { configurable: true, value: vi.fn() });
+    vi.spyOn(minimap, "getBoundingClientRect").mockReturnValue({
+      bottom: 592,
+      height: 592,
+      left: 0,
+      right: 136,
+      top: 0,
+      width: 136,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+    minimap.dispatchEvent(pointerEvent("pointerdown", 12));
+    minimap.dispatchEvent(pointerEvent("pointermove", 588));
+    await vi.advanceTimersByTimeAsync(250);
+    await harness.flushQueuedRafs();
+
+    expect(perfDetails(harness.messages, "mm-virt-window-calibrated")).toHaveLength(1);
+    expect(maintenanceTerminalDetails(harness.messages)).toContainEqual(expect.objectContaining({
+      owner: "calibration",
+      status: "completed",
+    }));
+  });
+
+  it("cancels occupied maintenance retry on user supersession and document teardown", async () => {
+    const sectionCount = 120;
+    const harness = await loadRendererHarness({ sectionCount, virtualization: true });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    harness.load({
+      type: "load-document",
+      html: buildFindDocument(sectionCount, [90]),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 41,
+    });
+    await harness.flushQueuedRafs();
+    await harness.flushQueuedRafs();
+
+    let collisionHeight = SECTION_HEIGHT + 40;
+    const collide = async (renderId = 41): Promise<void> => {
+      harness.setRenderedSectionHeight(collisionHeight);
+      collisionHeight += 20;
+      harness.triggerResize();
+      harness.load({ type: "open-find-bar" });
+      submitFindQuery("needle");
+      const request = findQueryMessages(harness.messages).at(-1)!;
+      harness.load({
+        type: "find-results",
+        requestId: request.requestId,
+        query: "needle",
+        renderId,
+        totalCount: 1,
+        matches: [descriptorForBlock(90, 1)],
+      });
+      await harness.flushRafsUntil(() => perfDetails<{
+        owner?: string;
+        reason?: string;
+      }>(harness.messages, "mm-virt-maintenance-retry").some(detail =>
+        detail.owner === "measured-height-adoption"
+        && detail.reason === "frame-transaction-occupied"));
+      expect(perfDetails<{
+        owner?: string;
+        reason?: string;
+      }>(harness.messages, "mm-virt-maintenance-retry")).toContainEqual(expect.objectContaining({
+        owner: "measured-height-adoption",
+        reason: "frame-transaction-occupied",
+      }));
+    };
+
+    harness.messages.length = 0;
+    await collide();
+    const terminalCountBeforeUserSupersession = maintenanceTerminalDetails(harness.messages).length;
+    harness.root.scrollTop += 17;
+    document.dispatchEvent(new Event("scroll"));
+    await harness.flushQueuedRafs();
+    expect(maintenanceTerminalDetails(harness.messages)
+      .slice(terminalCountBeforeUserSupersession)
+      .filter(detail => detail.owner === "measured-height-adoption"
+        && detail.reason === "user-supersession"
+        && detail.status === "canceled")).toHaveLength(1);
+
+    harness.messages.length = 0;
+    await collide();
+    const terminalCountBeforeDocumentReplacement = maintenanceTerminalDetails(harness.messages).length;
+    harness.load({ type: "load-document", html: buildHeadingDocument(12), hasMermaid: false, hasHljs: false });
+    await harness.flushQueuedRafs();
+    expect(maintenanceTerminalDetails(harness.messages)
+      .slice(terminalCountBeforeDocumentReplacement)
+      .filter(detail => detail.owner === "measured-height-adoption"
+        && detail.reason === "stale-document"
+        && detail.status === "canceled")).toHaveLength(1);
+
+    harness.load({
+      type: "load-document",
+      html: buildFindDocument(sectionCount, [90]),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 42,
+    });
+    await harness.flushQueuedRafs();
+    harness.messages.length = 0;
+    await collide(42);
+    const terminalCountBeforeTeardown = maintenanceTerminalDetails(harness.messages).length;
+    window.dispatchEvent(new Event("pagehide"));
+    expect(maintenanceTerminalDetails(harness.messages)
+      .slice(terminalCountBeforeTeardown)
+      .filter(detail => detail.owner === "measured-height-adoption"
+        && detail.reason === "teardown"
+        && detail.status === "canceled")).toHaveLength(1);
+    const adoptionCountAtTeardown = perfDetails(
+      harness.messages,
+      "mm-virt-window-height-adopted"
+    ).length;
+    await harness.flushQueuedRafs();
+    expect(perfDetails(harness.messages, "mm-virt-window-height-adopted")).toHaveLength(
+      adoptionCountAtTeardown
+    );
+  });
+
   it("clicks and drags the model-fragment minimap clone to off-window sections", async () => {
     const sectionCount = 120;
-    const { flushQueuedRafs, load, root } = await loadRendererHarness({
+    const { flushQueuedRafs, load, messages, root } = await loadRendererHarness({
       sectionCount,
       virtualization: true,
     });
@@ -1367,11 +2604,13 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(highestRenderedHeadingIndex()).toBeLessThan(sectionCount - 25);
     minimap!.dispatchEvent(pointerEvent("pointerdown", 588));
     minimap!.dispatchEvent(pointerEvent("pointerup", 588));
+    await flushQueuedRafs();
 
     const clickedScrollTop = root.scrollTop;
     const clickedHighest = highestRenderedHeadingIndex();
     expect(clickedScrollTop).toBeGreaterThan(0);
     expect(clickedHighest).toBeGreaterThan(25);
+    expectCommittedWriterFamilyOwned(messages, "minimap-", "minimap-gesture");
 
     root.scrollTop = 0;
     document.dispatchEvent(new Event("scroll"));
@@ -1380,6 +2619,7 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(highestRenderedHeadingIndex()).toBeLessThan(sectionCount - 25);
     minimap!.dispatchEvent(pointerEvent("pointerdown", 12));
     minimap!.dispatchEvent(pointerEvent("pointermove", 588));
+    await flushQueuedRafs();
 
     expect(root.scrollTop).toBeGreaterThanOrEqual(clickedScrollTop);
     expect(highestRenderedHeadingIndex()).toBeGreaterThanOrEqual(clickedHighest);

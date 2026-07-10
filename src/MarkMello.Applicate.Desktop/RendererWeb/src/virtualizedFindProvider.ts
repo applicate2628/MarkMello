@@ -12,6 +12,7 @@ import {
   renderWindowTargetThenAct,
   type WindowTargetDescriptor,
   type WindowTargetController,
+  type WindowTargetOperation,
 } from "./windowTargetResolver";
 
 export type FindMatchDescriptor = {
@@ -43,6 +44,8 @@ export type FindResultsMessage = {
 };
 
 export type VirtualizedFindContext = {
+  beginNavigationOperation: () => WindowTargetOperation | null;
+  completeNavigationOperation: (operation: WindowTargetOperation) => void;
   virtualizationEnabled: boolean;
   model: DocumentWindowModel | null;
   controller: WindowTargetController | null;
@@ -200,17 +203,15 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
 
   const renderMatchThenAct = async (match: FindMatchDescriptor, sequence: number): Promise<void> => {
     const context = deps.readContext();
+    const operation = context.virtualizationEnabled ? context.beginNavigationOperation() : null;
     if (
       !context.virtualizationEnabled
-      || context.model === null
-      || context.controller === null
-      || context.main === null
+      || operation === null
     ) {
       if (sequence !== navigationSequence) {
         return;
       }
       const currentRange = paintVisibleHighlights();
-      scrollRangeIntoView(currentRange, null);
       updateStatus();
       return;
     }
@@ -229,39 +230,41 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
 
     const pendingRender = renderWindowTargetThenAct({
       action: ({ element, targetElement }) => {
-        if (sequence !== navigationSequence) {
+        if (sequence !== navigationSequence || !operation.isCurrent()) {
           return;
         }
         const currentRange = paintVisibleHighlights();
-        scrollRangeIntoView(currentRange, targetElement ?? element);
+        requestRangeLanding(context, operation, currentRange, targetElement ?? element);
       },
       actionKind: "navigate",
       controller: context.controller,
       descriptor,
       legacyAction: () => {
-        if (sequence !== navigationSequence) {
+        if (sequence !== navigationSequence || !operation.isCurrent()) {
           return;
         }
         const currentRange = paintVisibleHighlights();
-        scrollRangeIntoView(currentRange, null);
+        operation.scheduleFrameTransaction(() => {
+          if (sequence === navigationSequence && operation.isCurrent()) {
+            requestRangeLanding(context, operation, currentRange, findLiveBlockElement(match.blockIndex));
+          }
+        });
       },
-      main: context.main,
+      main: context.main ?? document.body,
       model: context.model,
+      operation,
       ownerWindow: context.ownerWindow,
       root: context.root,
       virtualizationEnabled: context.virtualizationEnabled,
     });
-    if (sequence === navigationSequence) {
-      const currentRange = paintVisibleHighlights();
-      scrollRangeIntoView(currentRange, findLiveBlockElement(match.blockIndex));
-      updateStatus();
-    }
     await pendingRender;
+    if (!operation.isCurrent()) {
+      return;
+    }
     if (sequence === navigationSequence) {
-      const currentRange = paintVisibleHighlights();
-      scrollRangeIntoView(currentRange, findLiveBlockElement(match.blockIndex));
       updateStatus();
     }
+    context.completeNavigationOperation(operation);
   };
 
   return {
@@ -414,7 +417,19 @@ function visibleTextNodes(root: HTMLElement): Text[] {
   return out;
 }
 
-function scrollRangeIntoView(range: Range | null, fallback: HTMLElement | null): void {
+function requestRangeLanding(
+  context: VirtualizedFindContext,
+  operation: WindowTargetOperation,
+  range: Range | null,
+  fallback: HTMLElement | null
+): void {
   const host = range?.startContainer.parentElement?.closest<HTMLElement>("[data-mm-block-index]") ?? fallback;
-  host?.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+  if (host === null || !operation.isCurrent()) {
+    return;
+  }
+  const rect = host.getBoundingClientRect();
+  const target = context.root.scrollTop
+    + rect.top
+    - Math.max(0, (context.root.clientHeight - Math.max(0, rect.height)) / 2);
+  operation.requestScrollTop(Math.max(0, target), "find-navigation");
 }

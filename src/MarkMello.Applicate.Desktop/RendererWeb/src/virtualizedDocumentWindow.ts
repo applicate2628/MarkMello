@@ -18,6 +18,8 @@ const BOTTOM_SPACER = "bottom";
 const SPACER_CLASS = "mm-virtual-spacer";
 
 export type VirtualizedDocumentWindowDeps = {
+  documentEpoch?: number;
+  isCurrentDocumentEpoch?: (epoch: number) => boolean;
   ownerWindow: Window;
   main: HTMLElement;
   root: Element & { scrollTop: number; scrollHeight: number; clientHeight: number };
@@ -43,22 +45,30 @@ export type VirtualizedRealizationOptions = {
 };
 
 export type UpdateWindowForScrollOptions = {
+  desiredScrollTop?: number;
   force?: boolean;
+  operation?: VirtualizedWindowOperation;
 };
 
 export type EnsureSectionRenderedOptions = {
   force?: boolean;
+  operation?: VirtualizedWindowOperation;
   preserveAnchor?: boolean;
 };
 
 export type AdoptRenderedHeightsOptions = {
+  operation?: VirtualizedWindowOperation;
   preserveSectionIndex?: number;
   reanchor?: boolean;
 };
 
-type LiveBlockAnchor = {
+export type ReadingAnchor = {
   blockIndex: number;
-  viewportTop: number;
+  intraOffsetPx: number;
+};
+
+export type VirtualizedWindowOperation = {
+  requestScrollTop: (target: number, writer: string) => void;
 };
 
 type ContentVisibilityAutoStateChangeLike = Event & {
@@ -154,8 +164,8 @@ export function createVirtualizedDocumentWindowController(
     }
   };
 
-  const computeRange = (): WindowRange =>
-    deps.model.computeWindowRange(deps.root.scrollTop, deps.root.clientHeight, renderAhead);
+  const computeRange = (scrollTop = deps.root.scrollTop): WindowRange =>
+    deps.model.computeWindowRange(scrollTop, deps.root.clientHeight, renderAhead);
 
   const isSectionRendered = (sectionIndex: number): boolean =>
     currentRange !== null && sectionIndex >= currentRange.start && sectionIndex <= currentRange.end;
@@ -176,7 +186,10 @@ export function createVirtualizedDocumentWindowController(
     const anchor = options.preserveAnchor === false ? null : deps.model.captureAnchor(deps.root.scrollTop);
     renderRange(range);
     if (anchor !== null) {
-      deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
+      options.operation?.requestScrollTop(
+        deps.model.scrollTopForAnchor(anchor),
+        "target-window-reanchor"
+      );
     }
     return true;
   };
@@ -187,7 +200,7 @@ export function createVirtualizedDocumentWindowController(
       const reanchor = options.reanchor !== false;
       const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(deps.root.scrollTop) : null;
       const blocks = collectLiveDocumentSectionElements(deps.main);
-      const liveAnchor = preserveSectionIndex === null ? captureFirstVisibleLiveBlockAnchor(blocks) : null;
+      const liveAnchor = preserveSectionIndex === null ? captureReadingAnchor(blocks) : null;
       const updates = deps.readMeasuredHeights
         ? deps.readMeasuredHeights(blocks)
         : readLiveBlockOffsetMeasuredHeights(blocks);
@@ -198,25 +211,13 @@ export function createVirtualizedDocumentWindowController(
         return EMPTY_HEIGHT_UPDATE;
       }
 
-      if (preserveSectionIndex !== null) {
-        if (reanchor) {
-          deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
-        }
-        renderRange(computeRange());
-        if (reanchor) {
-          deps.root.scrollTop = deps.model.sectionTop(preserveSectionIndex);
-        }
-        return result;
-      }
-
+      const desiredScrollTop = preserveSectionIndex !== null
+        ? deps.model.sectionTop(preserveSectionIndex)
+        : scrollTopForReadingAnchor(deps.model, liveAnchor)
+          ?? deps.model.scrollTopForAnchor(anchor!);
+      renderRange(computeRange(desiredScrollTop));
       if (reanchor) {
-        restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor)
-          || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!));
-      }
-      renderRange(computeRange());
-      if (reanchor) {
-        restoreLiveBlockAnchor(deps.model, deps.root, liveAnchor)
-          || (deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor!));
+        options.operation?.requestScrollTop(desiredScrollTop, "measured-height-adoption");
       }
       return result;
     },
@@ -230,14 +231,17 @@ export function createVirtualizedDocumentWindowController(
     getCurrentRange: () => currentRange === null ? null : { ...currentRange },
     isSectionRendered,
     updateWindowForScroll: (options = {}) => {
-      const nextRange = computeRange();
+      const nextRange = computeRange(options.desiredScrollTop ?? deps.root.scrollTop);
       if (options.force !== true && currentRange !== null && rangesEqual(currentRange, nextRange)) {
         return false;
       }
 
-      const anchor = deps.model.captureAnchor(deps.root.scrollTop);
+      const anchor = deps.model.captureAnchor(options.desiredScrollTop ?? deps.root.scrollTop);
       renderRange(nextRange);
-      deps.root.scrollTop = deps.model.scrollTopForAnchor(anchor);
+      options.operation?.requestScrollTop(
+        deps.model.scrollTopForAnchor(anchor),
+        "scroll-window-reanchor"
+      );
       return true;
     },
   };
@@ -294,7 +298,7 @@ function appendSectionUnit(
   return true;
 }
 
-function captureFirstVisibleLiveBlockAnchor(blocks: readonly HTMLElement[]): LiveBlockAnchor | null {
+export function captureReadingAnchor(blocks: readonly HTMLElement[]): ReadingAnchor | null {
   for (const block of blocks) {
     const blockIndex = readBlockIndex(block);
     if (blockIndex === null) {
@@ -303,31 +307,42 @@ function captureFirstVisibleLiveBlockAnchor(blocks: readonly HTMLElement[]): Liv
 
     const boxElement = readReadyMermaidProxy(block) ?? block;
     const rect = boxElement.getBoundingClientRect();
-    if (!Number.isFinite(rect.height) || rect.height <= 0 || !Number.isFinite(rect.bottom) || rect.bottom < 0) {
+    if (
+      !Number.isFinite(rect.top)
+      || !Number.isFinite(rect.height)
+      || rect.height <= 0
+      || !Number.isFinite(rect.bottom)
+      || rect.bottom <= 0
+    ) {
       continue;
     }
 
-    return { blockIndex, viewportTop: rect.top };
+    return {
+      blockIndex,
+      intraOffsetPx: Math.max(0, Math.min(-rect.top, Math.max(0, rect.height - 0.5))),
+    };
   }
   return null;
 }
 
-function restoreLiveBlockAnchor(
+export function scrollTopForReadingAnchor(
   model: DocumentWindowModel,
-  root: Element & { scrollTop: number },
-  anchor: LiveBlockAnchor | null
-): boolean {
-  if (anchor === null || !Number.isFinite(anchor.viewportTop)) {
-    return false;
+  anchor: ReadingAnchor | null
+): number | null {
+  if (anchor === null || !Number.isFinite(anchor.intraOffsetPx)) {
+    return null;
   }
 
   const entry = model.getEntryByBlockIndex(anchor.blockIndex);
   if (entry === undefined) {
-    return false;
+    return 0;
   }
 
-  root.scrollTop = Math.max(0, model.sectionTop(entry.sectionIndex) - anchor.viewportTop);
-  return true;
+  return model.scrollTopForAnchor({
+    blockIndex: entry.blockIndex,
+    intraOffset: anchor.intraOffsetPx,
+    sectionIndex: entry.sectionIndex,
+  });
 }
 
 function readBlockIndex(element: HTMLElement): number | null {
@@ -438,8 +453,15 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
   let disposed = false;
 
   const eventOptions: AddEventListenerOptions = { capture: true };
+  const documentEpoch = deps.documentEpoch;
+  const isCurrentDocument = (): boolean => documentEpoch === undefined
+    || deps.isCurrentDocumentEpoch === undefined
+    || deps.isCurrentDocumentEpoch(documentEpoch);
 
   const handleContentVisibilityStateChange = (event: Event): void => {
+    if (!isCurrentDocument()) {
+      return;
+    }
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
       return;
@@ -599,6 +621,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
       watch.frameRequested = false;
       if (
         disposed
+        || !isCurrentDocument()
         || watch.mountGeneration !== expectedGeneration
         || watches.get(watch.element) !== watch
         || !deps.main.contains(watch.element)

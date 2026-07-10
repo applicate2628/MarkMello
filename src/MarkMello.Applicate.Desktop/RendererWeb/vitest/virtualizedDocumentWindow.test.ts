@@ -6,6 +6,7 @@ import {
   type SectionModelEntry,
 } from "../src/documentWindow";
 import {
+  captureReadingAnchor,
   createFullDocumentFragmentFromWindowModel,
   createVirtualizedDocumentWindowController,
   type VirtualizedDocumentWindowController,
@@ -373,7 +374,9 @@ describe("virtualized document window", () => {
     });
 
     controller.updateWindowForScroll();
-    const adopted = controller.adoptRenderedHeights();
+    const adopted = controller.adoptRenderedHeights({
+      operation: { requestScrollTop: target => { root.scrollTop = target; } },
+    });
 
     expect(adopted.updatedCount).toBe(1);
     expect(getScrollTop()).toBe(300);
@@ -438,12 +441,15 @@ describe("virtualized document window", () => {
       controller.updateWindowForScroll();
       const anchorBefore = document.querySelector<HTMLElement>('[data-mm-block-index="81"]')!;
       const anchorTopBefore = anchorBefore.getBoundingClientRect().top;
-      const adopted = controller.adoptRenderedHeights();
+      const adopted = controller.adoptRenderedHeights({
+        operation: { requestScrollTop: target => { root.scrollTop = target; } },
+      });
       const anchorAfter = document.querySelector<HTMLElement>('[data-mm-block-index="81"]')!;
 
       expect(adopted.updatedCount).toBe(2);
-      expect(anchorAfter.getBoundingClientRect().top).toBeCloseTo(anchorTopBefore);
-      expect(getScrollTop()).toBe(140);
+      expect(anchorTopBefore).toBe(10);
+      expect(anchorAfter.getBoundingClientRect().top).toBeCloseTo(0);
+      expect(getScrollTop()).toBe(150);
     } finally {
       rectSpy.mockRestore();
     }
@@ -1112,5 +1118,73 @@ describe("virtualized document window", () => {
     expect(controller.ensureSectionRangeRendered(1, 2)).toBe(true);
     expect(controller.getCurrentRange()).toEqual({ start: 1, end: 2 });
     expect(controller.ensureSectionRangeRendered(1, 2)).toBe(false);
+  });
+
+  it("captures the strict containing semantic block and clamps its intra offset", () => {
+    const boundary = block(90, 0, 100);
+    const containing = block(91, 0, 100);
+    boundary.getBoundingClientRect = () => ({
+      bottom: 0,
+      height: 100,
+      left: 0,
+      right: 0,
+      top: -100,
+      width: 0,
+      x: 0,
+      y: -100,
+      toJSON: () => ({}),
+    } as DOMRect);
+    containing.getBoundingClientRect = () => ({
+      bottom: 10,
+      height: 100,
+      left: 0,
+      right: 0,
+      top: -120,
+      width: 0,
+      x: 0,
+      y: -120,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    expect(captureReadingAnchor([boundary, containing])).toEqual({
+      blockIndex: 91,
+      intraOffsetPx: 99.5,
+    });
+
+    const model = new DocumentWindowModel([entry(0, 91, 100)]);
+    expect(model.scrollTopForAnchor({
+      blockIndex: 91,
+      intraOffset: 500,
+      sectionIndex: 0,
+    })).toBe(99.5);
+  });
+
+  it("requests one terminal re-anchor after measured adoption without moving the root directly", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { getScrollTop, root } = setScrollRoot(120, 400, 50);
+    const model = new DocumentWindowModel([
+      entry(0, 100, 100),
+      entry(1, 101, 100),
+      entry(2, 102, 100),
+    ]);
+    const controller = makeController({
+      measure: () => [{ blockIndex: 100, measuredHeight: 160 }],
+      model,
+      root,
+    });
+    const requestScrollTop = vi.fn();
+    const operation = { requestScrollTop };
+    controller.updateWindowForScroll({ operation });
+    requestScrollTop.mockClear();
+
+    const result = controller.adoptRenderedHeights({
+      operation,
+      preserveSectionIndex: 1,
+    });
+
+    expect(result.updatedCount).toBe(1);
+    expect(requestScrollTop).toHaveBeenCalledOnce();
+    expect(requestScrollTop).toHaveBeenCalledWith(160, "measured-height-adoption");
+    expect(getScrollTop()).toBe(120);
   });
 });

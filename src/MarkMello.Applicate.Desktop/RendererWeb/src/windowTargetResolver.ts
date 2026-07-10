@@ -1,10 +1,16 @@
 import {
+  collectLiveDocumentSectionElements,
   type DocumentWindowModel,
-  type ScrollAnchor,
   type SectionModelEntry,
   type WindowRange,
 } from "./documentWindow";
-import type { EnsureSectionRenderedOptions, VirtualizedDocumentWindowController } from "./virtualizedDocumentWindow";
+import {
+  captureReadingAnchor,
+  scrollTopForReadingAnchor,
+  type EnsureSectionRenderedOptions,
+  type VirtualizedDocumentWindowController,
+  type VirtualizedWindowOperation,
+} from "./virtualizedDocumentWindow";
 
 export type WindowTargetDescriptor =
   | { kind: "section"; sectionIndex: number }
@@ -40,6 +46,7 @@ export type WindowTargetController = Pick<
 export type RenderWindowTargetThenActInput<T> = {
   virtualizationEnabled: boolean;
   model: DocumentWindowModel | null;
+  operation?: WindowTargetOperation;
   controller: WindowTargetController | null;
   main: HTMLElement;
   root: Element & { scrollTop: number };
@@ -49,6 +56,13 @@ export type RenderWindowTargetThenActInput<T> = {
   action: (context: WindowTargetContext) => T | Promise<T>;
   legacyAction: () => T | Promise<T>;
   layoutTicks?: 1 | 2;
+};
+
+export type WindowTargetOperation = VirtualizedWindowOperation & {
+  documentEpoch: number;
+  operationEpoch: number;
+  isCurrent: () => boolean;
+  scheduleFrameTransaction: (work: () => void) => boolean;
 };
 
 export type ReadWindowTargetContextInput = {
@@ -65,10 +79,14 @@ type WindowTargetResolution = {
   descriptor: WindowTargetDescriptor;
 };
 
-export async function renderWindowTargetThenAct<T>(input: RenderWindowTargetThenActInput<T>): Promise<T> {
+export async function renderWindowTargetThenAct<T>(input: RenderWindowTargetThenActInput<T>): Promise<T | undefined> {
   const model = input.model;
   const controller = input.controller;
-  if (!input.virtualizationEnabled || model === null || controller === null) {
+  if (!input.virtualizationEnabled) {
+    return input.legacyAction();
+  }
+  const operation = input.operation;
+  if (model === null || controller === null || operation === undefined) {
     return input.legacyAction();
   }
 
@@ -77,23 +95,43 @@ export async function renderWindowTargetThenAct<T>(input: RenderWindowTargetThen
     return input.legacyAction();
   }
 
-  const originalAnchor = input.actionKind === "query" ? model.captureAnchor(input.root.scrollTop) : null;
+  const originalAnchor = input.actionKind === "query"
+    ? captureReadingAnchor(collectLiveDocumentSectionElements(input.main))
+    : null;
   const originalRange = input.actionKind === "query" ? controller.getCurrentRange() : null;
-  const didRender = ensureResolutionRendered(controller, resolution);
-  if (didRender) {
-    await waitForLayoutTicks(input.ownerWindow, input.layoutTicks ?? 1);
-  }
+  let didRender = false;
+  let actionResult: T | Promise<T> | undefined;
 
   try {
-    return await input.action(readWindowTargetContext(input, resolution));
+    const delivered = await deliverOperationFrame(operation, () => {
+      didRender = ensureResolutionRendered(controller, resolution, operation);
+      if (!operation.isCurrent()) {
+        return;
+      }
+      actionResult = input.action(readWindowTargetContext(input, resolution));
+      if (input.actionKind === "query" && didRender) {
+        operation.requestScrollTop(
+          scrollTopForReadingAnchor(model, originalAnchor) ?? 0,
+          "query-anchor-preserve"
+        );
+      }
+    });
+    if (!delivered || !operation.isCurrent()) {
+      return undefined;
+    }
+    const result = await actionResult;
+    if (!operation.isCurrent()) {
+      return undefined;
+    }
+    return result;
   } finally {
-    if (input.actionKind === "query" && didRender && originalAnchor !== null) {
-      restoreReadingAnchor({
+    if (input.actionKind === "query" && didRender && operation.isCurrent()) {
+      await restoreReadingAnchor({
         controller,
         model,
+        operation,
         originalAnchor,
         originalRange,
-        root: input.root,
       });
     }
   }
@@ -204,7 +242,8 @@ function resolutionForEntry(
 
 function ensureResolutionRendered(
   controller: WindowTargetController,
-  resolution: WindowTargetResolution
+  resolution: WindowTargetResolution,
+  operation: WindowTargetOperation
 ): boolean {
   if (
     resolution.range.start === resolution.range.end
@@ -213,7 +252,7 @@ function ensureResolutionRendered(
     return false;
   }
 
-  const options: EnsureSectionRenderedOptions = { preserveAnchor: true };
+  const options: EnsureSectionRenderedOptions = { operation, preserveAnchor: false };
   return resolution.range.start === resolution.range.end
     ? controller.ensureSectionRendered(resolution.range.start, options)
     : controller.ensureSectionRangeRendered(resolution.range.start, resolution.range.end, options);
@@ -320,39 +359,62 @@ function findSourceLineElement(sectionElement: HTMLElement, sourceLine: number):
   return null;
 }
 
-function restoreReadingAnchor(input: {
+async function restoreReadingAnchor(input: {
   controller: WindowTargetController;
   model: DocumentWindowModel;
-  originalAnchor: ScrollAnchor;
+  operation: WindowTargetOperation;
+  originalAnchor: ReturnType<typeof captureReadingAnchor>;
   originalRange: WindowRange | null;
-  root: Element & { scrollTop: number };
-}): void {
-  if (input.originalRange !== null) {
-    input.controller.ensureSectionRangeRendered(input.originalRange.start, input.originalRange.end, {
-      force: true,
-      preserveAnchor: false,
-    });
-  } else if (input.originalAnchor.sectionIndex >= 0) {
-    input.controller.ensureSectionRendered(input.originalAnchor.sectionIndex, {
-      force: true,
-      preserveAnchor: false,
-    });
-  }
-
-  input.root.scrollTop = input.model.scrollTopForAnchor(input.originalAnchor);
+}): Promise<void> {
+  await deliverOperationFrame(input.operation, () => {
+    if (input.originalRange !== null) {
+      input.controller.ensureSectionRangeRendered(input.originalRange.start, input.originalRange.end, {
+        force: true,
+        operation: input.operation,
+        preserveAnchor: false,
+      });
+    } else if (input.originalAnchor !== null) {
+      const entry = input.model.getEntryByBlockIndex(input.originalAnchor.blockIndex);
+      if (entry !== undefined) {
+        input.controller.ensureSectionRendered(entry.sectionIndex, {
+          force: true,
+          operation: input.operation,
+          preserveAnchor: false,
+        });
+      }
+    }
+    input.operation.requestScrollTop(
+      scrollTopForReadingAnchor(input.model, input.originalAnchor) ?? 0,
+      "query-anchor-restore"
+    );
+  });
 }
 
-function waitForLayoutTicks(ownerWindow: Window & typeof globalThis, count: 1 | 2): Promise<void> {
-  const tick = (): Promise<void> => new Promise(resolve => {
-    if (typeof ownerWindow.requestAnimationFrame === "function") {
-      ownerWindow.requestAnimationFrame(() => resolve());
-      return;
+function deliverOperationFrame(
+  operation: WindowTargetOperation,
+  work: () => void
+): Promise<boolean> {
+  if (!operation.isCurrent()) {
+    return Promise.resolve(false);
+  }
+  return new Promise<boolean>((resolve, reject) => {
+    const scheduled = operation.scheduleFrameTransaction(() => {
+      if (!operation.isCurrent()) {
+        resolve(false);
+        return;
+      }
+      try {
+        work();
+        resolve(true);
+      } catch (error) {
+        reject(error);
+        throw error;
+      }
+    });
+    if (!scheduled) {
+      resolve(false);
     }
-
-    ownerWindow.setTimeout(() => resolve(), 0);
   });
-
-  return count === 1 ? tick() : tick().then(tick);
 }
 
 function findSectionArrayIndex(model: DocumentWindowModel, entry: SectionModelEntry): number {

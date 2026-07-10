@@ -60,6 +60,10 @@ body.mm-saving div.mm-width-handle {
   --mm-scrollbar-thumb-active: color-mix(in srgb, var(--mm-document-text) 52%, transparent);
 }
 
+[data-mm-virtualization-active="true"] {
+  overflow-anchor: none;
+}
+
 :root[data-theme="dark"] {
   --mm-accent: #E38A67;
   --mm-accent-soft: #432519;
