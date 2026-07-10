@@ -371,7 +371,11 @@ describe("renderer chrome race handling", () => {
       reservedWidth: 168,
     });
     expect(document.body.classList.contains("mm-has-minimap")).toBe(true);
-    expect(document.querySelector(".mm-minimap-content .mm-document")).not.toBeNull();
+    const heavyClone = document.querySelector<HTMLElement>(".mm-minimap-content .mm-document");
+    expect(heavyClone).not.toBeNull();
+    expect(heavyClone!.style.maxHeight).toBe("1000px");
+    expect(heavyClone!.style.overflowY).toBe("hidden");
+    expect(heavyClone!.style.contain).toContain("paint");
     expect(document.querySelector(".mm-minimap-content svg")).toBeNull();
   });
 

@@ -458,7 +458,7 @@ describe("renderer document cache", () => {
       minimapPolicy: {
         minHostWidth: 0,
         minScrollableViewportRatio: 1,
-        maxDetailedDocumentHeight: 10000,
+        maxDetailedDocumentHeight: 1000,
       },
     });
 
@@ -481,6 +481,10 @@ describe("renderer document cache", () => {
     expect(perfMarks).toContain("mm-load-document-cache-hit");
     expect(perfMarks).toContain("mm-minimap-cache-hit");
     expect(perfMarks).not.toContain("mm-minimap-refresh-start");
+    const restoredClone = document.querySelector<HTMLElement>(".mm-minimap-content .mm-document");
+    expect(restoredClone).not.toBeNull();
+    expect(restoredClone!.style.maxHeight).toBe("1000px");
+    expect(restoredClone!.style.overflowY).toBe("hidden");
   });
 
   it("reuses post-ready mermaid documents from the processed document cache", async () => {

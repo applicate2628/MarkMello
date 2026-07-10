@@ -20,7 +20,7 @@
       return null;
     }
     const minimumThumbHeight = input.minimumThumbHeight ?? DEFAULT_MINIMUM_THUMB_HEIGHT;
-    const scale = Math.min(1, input.minimapWidth / input.documentWidth, input.minimapHeight / input.documentHeight);
+    const scale = Math.min(1, input.minimapWidth / input.documentWidth);
     const projectedDocumentHeight = input.documentHeight * scale;
     const maximumScrollTop = Math.max(0, input.documentHeight - input.viewportHeight);
     const scrollProgress = maximumScrollTop > 0 ? Math.max(0, Math.min(1, input.scrollTop / maximumScrollTop)) : 0;
@@ -8410,9 +8410,6 @@
         continue;
       }
       const topLevelMetric = topLevelMetrics.get(cloneBlock);
-      if (topLevelMetric) {
-        cloneBlock.style.minHeight = `${topLevelMetric.height}px`;
-      }
       const record = {
         blockIndex,
         element: cloneBlock,
@@ -8471,7 +8468,21 @@
       }
     });
   }
-  function cloneDocumentElementForMinimap(source, sourceStyle) {
+  function applyMinimapClonePaintHeightLimit(clone, documentHeight) {
+    const maximumPaintHeight = minimapPolicy?.maxDetailedDocumentHeight;
+    if (maximumPaintHeight === void 0 || documentHeight <= maximumPaintHeight) {
+      return false;
+    }
+    const nextMaximumHeight = `${maximumPaintHeight}px`;
+    if (clone.style.maxHeight === nextMaximumHeight && clone.style.overflowY === "hidden" && clone.style.contain.includes("paint")) {
+      return false;
+    }
+    clone.style.maxHeight = nextMaximumHeight;
+    clone.style.overflowY = "hidden";
+    clone.style.contain = "paint";
+    return true;
+  }
+  function cloneDocumentElementForMinimap(source, sourceStyle, documentHeight) {
     const clone = source.cloneNode(true);
     minimapSourceReady = true;
     clone.removeAttribute("id");
@@ -8481,19 +8492,20 @@
     clone.style.paddingRight = "0";
     clone.style.paddingBottom = sourceStyle.paddingBottom;
     clone.style.paddingLeft = "0";
+    applyMinimapClonePaintHeightLimit(clone, documentHeight);
     registerMinimapCloneMetadata(source, clone);
     sanitizeMinimapCloneTree(clone);
     return clone;
   }
-  function cloneDocumentForMinimap() {
+  function cloneDocumentForMinimap(documentHeight) {
     const source = document.querySelector(".mm-document");
     if (!source) {
       minimapSourceReady = false;
       return null;
     }
-    return cloneDocumentElementForMinimap(source, getComputedStyle(source));
+    return cloneDocumentElementForMinimap(source, getComputedStyle(source), documentHeight);
   }
-  function cloneModelDocumentForMinimap(model) {
+  function cloneModelDocumentForMinimap(model, documentHeight) {
     const liveSource = document.querySelector(".mm-document");
     if (!liveSource) {
       minimapSourceReady = false;
@@ -8505,7 +8517,7 @@
     source.dataset["mmModelMinimapSectionCount"] = String(model.getSectionCount());
     source.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
     source.append(createFullDocumentFragmentFromWindowModel(document, model));
-    const clone = cloneDocumentElementForMinimap(source, getComputedStyle(liveSource));
+    const clone = cloneDocumentElementForMinimap(source, getComputedStyle(liveSource), documentHeight);
     return clone;
   }
   function refreshMinimapContent(phase = "A") {
@@ -8539,7 +8551,7 @@
     }
     currentMinimapLayout = null;
     const model = getModelMinimapSource();
-    const clone = model === null ? cloneDocumentForMinimap() : cloneModelDocumentForMinimap(model);
+    const clone = model === null ? cloneDocumentForMinimap(buildDecision.documentHeight) : cloneModelDocumentForMinimap(model, buildDecision.documentHeight);
     if (!clone) {
       emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
       postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
@@ -8613,6 +8625,10 @@
     }
     minimapDocumentHeight = restored.documentHeight;
     minimapSourceReady = true;
+    const restoredClone = minimapContent?.firstElementChild;
+    if (restoredClone instanceof HTMLElement) {
+      applyMinimapClonePaintHeightLimit(restoredClone, restored.documentHeight);
+    }
     postCachedMinimapState(restored.lastPostedState);
     emitMark("mm-minimap-cache-hit", {
       documentHeight: restored.documentHeight,
@@ -9046,7 +9062,11 @@
     if (minimapContent.style.width !== nextContentWidth) {
       minimapContent.style.width = nextContentWidth;
     }
-    const measuredContentHeight = minimapContent.scrollHeight;
+    let measuredContentHeight = minimapContent.scrollHeight;
+    const renderedClone = minimapContent.firstElementChild;
+    if (renderedClone instanceof HTMLElement && applyMinimapClonePaintHeightLimit(renderedClone, measuredContentHeight)) {
+      measuredContentHeight = minimapContent.scrollHeight;
+    }
     const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
     let layout;
     const anchorTopY = getDocumentViewportTopCloneY(minimapContent);

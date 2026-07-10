@@ -38,19 +38,38 @@ describe("calculateMinimapViewportLayout", () => {
     expect(layout!.thumbTravel).toBeCloseTo((1200 - 900) * (136 / 820));
   });
 
-  it("fits a very tall model-fragment clone to the minimap rail height", () => {
+  it("keeps a very tall model-fragment clone width-fit and scrolls it inside the rail", () => {
     const layout = calculateMinimapViewportLayout({
       minimapWidth: 136,
       minimapHeight: 709,
       documentWidth: 756,
       documentHeight: 3_892_435,
       viewportHeight: 709,
-      scrollTop: 0,
+      scrollTop: (3_892_435 - 709) / 2,
     });
 
     expect(layout).not.toBeNull();
-    expect(layout!.scale).toBeCloseTo(709 / 3_892_435);
-    expect(3_892_435 * layout!.scale).toBeCloseTo(709);
-    expect(layout!.thumbTop + layout!.thumbTravel).toBeCloseTo(709 - layout!.thumbHeight);
+    expect(layout!.scale).toBeCloseTo(136 / 756);
+    expect(layout!.contentWidth * layout!.scale).toBeCloseTo(136);
+    expect(layout!.contentTranslateY).toBeLessThan(0);
+    expect(3_892_435 * layout!.scale).toBeGreaterThan(709);
+    expect(layout!.thumbTop).toBeCloseTo(layout!.thumbTravel / 2);
+  });
+
+  it("keeps a realistic 50k document at shipped full-rail width", () => {
+    const layout = calculateMinimapViewportLayout({
+      minimapWidth: 136,
+      minimapHeight: 635,
+      documentWidth: 726,
+      documentHeight: 50_000,
+      viewportHeight: 900,
+      scrollTop: 24_550,
+    });
+
+    expect(layout).not.toBeNull();
+    expect(layout!.scale).toBeCloseTo(136 / 726);
+    expect(layout!.scale).toBeCloseTo(0.1873, 3);
+    expect(layout!.contentWidth * layout!.scale).toBeCloseTo(136);
+    expect(layout!.contentTranslateY).toBeLessThan(0);
   });
 });

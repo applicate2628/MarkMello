@@ -1774,6 +1774,22 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(findBarCount().textContent).toBe(`1 of ${sectionCount}`);
   });
 
+  it("keeps legacy minimap clone blocks at their natural rendered height", async () => {
+    const sectionCount = 20;
+    const { flushQueuedRafs, load } = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: false,
+    });
+    await enableDetailedMinimap(load, flushQueuedRafs);
+    load({ type: "load-document", html: buildClonePollutionDocument(sectionCount), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    const cloneBlocks = Array.from(document.querySelectorAll<HTMLElement>(".mm-minimap-content .mm-document > *"));
+    expect(cloneBlocks).toHaveLength(sectionCount);
+    expect(cloneBlocks.map(block => block.style.minHeight)).toEqual(Array(sectionCount).fill(""));
+  });
+
   it("reasserts a pending programmatic source-line target after geometry invalidation", async () => {
     const { flushNextRaf, flushQueuedRafs, flushRafsUntil, load, root, triggerResize } = await loadRendererHarness({
       sectionCount: 120,

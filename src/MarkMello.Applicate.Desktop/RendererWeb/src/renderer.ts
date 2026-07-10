@@ -4757,10 +4757,6 @@ function registerMinimapCloneMetadata(source: HTMLElement, clone: HTMLElement): 
     }
 
     const topLevelMetric = topLevelMetrics.get(cloneBlock);
-    if (topLevelMetric) {
-      cloneBlock.style.minHeight = `${topLevelMetric.height}px`;
-    }
-
     const record: MinimapCloneBlockRecord = {
       blockIndex,
       element: cloneBlock,
@@ -4833,7 +4829,33 @@ function sanitizeMinimapCloneTree(root: ParentNode): void {
   });
 }
 
-function cloneDocumentElementForMinimap(source: HTMLElement, sourceStyle: CSSStyleDeclaration): HTMLElement {
+function applyMinimapClonePaintHeightLimit(clone: HTMLElement, documentHeight: number): boolean {
+  const maximumPaintHeight = minimapPolicy?.maxDetailedDocumentHeight;
+  if (maximumPaintHeight === undefined || documentHeight <= maximumPaintHeight) {
+    return false;
+  }
+
+  const nextMaximumHeight = `${maximumPaintHeight}px`;
+  if (clone.style.maxHeight === nextMaximumHeight
+    && clone.style.overflowY === "hidden"
+    && clone.style.contain.includes("paint")) {
+    return false;
+  }
+
+  // Explicit-on mode may request detail above the automatic policy bound, and
+  // a width-matched clone may also reflow taller than its source measurement.
+  // Bound the painted layer at that policy seam instead of shrinking width.
+  clone.style.maxHeight = nextMaximumHeight;
+  clone.style.overflowY = "hidden";
+  clone.style.contain = "paint";
+  return true;
+}
+
+function cloneDocumentElementForMinimap(
+  source: HTMLElement,
+  sourceStyle: CSSStyleDeclaration,
+  documentHeight: number
+): HTMLElement {
   const clone = source.cloneNode(true) as HTMLElement;
   minimapSourceReady = true;
   clone.removeAttribute("id");
@@ -4843,6 +4865,7 @@ function cloneDocumentElementForMinimap(source: HTMLElement, sourceStyle: CSSSty
   clone.style.paddingRight = "0";
   clone.style.paddingBottom = sourceStyle.paddingBottom;
   clone.style.paddingLeft = "0";
+  applyMinimapClonePaintHeightLimit(clone, documentHeight);
   registerMinimapCloneMetadata(source, clone);
   // Minimap clone invariant: no node inside `.mm-minimap-content` may carry
   // lookup-visible identity (`id`, `data-mm-*`, `data-tex`). Text stays intact
@@ -4852,16 +4875,16 @@ function cloneDocumentElementForMinimap(source: HTMLElement, sourceStyle: CSSSty
   return clone;
 }
 
-function cloneDocumentForMinimap(): HTMLElement | null {
+function cloneDocumentForMinimap(documentHeight: number): HTMLElement | null {
   const source = document.querySelector<HTMLElement>(".mm-document");
   if (!source) {
     minimapSourceReady = false;
     return null;
   }
-  return cloneDocumentElementForMinimap(source, getComputedStyle(source));
+  return cloneDocumentElementForMinimap(source, getComputedStyle(source), documentHeight);
 }
 
-function cloneModelDocumentForMinimap(model: DocumentWindowModel): HTMLElement | null {
+function cloneModelDocumentForMinimap(model: DocumentWindowModel, documentHeight: number): HTMLElement | null {
   const liveSource = document.querySelector<HTMLElement>(".mm-document");
   if (!liveSource) {
     minimapSourceReady = false;
@@ -4874,7 +4897,7 @@ function cloneModelDocumentForMinimap(model: DocumentWindowModel): HTMLElement |
   source.dataset["mmModelMinimapSectionCount"] = String(model.getSectionCount());
   source.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
   source.append(createFullDocumentFragmentFromWindowModel(document, model));
-  const clone = cloneDocumentElementForMinimap(source, getComputedStyle(liveSource));
+  const clone = cloneDocumentElementForMinimap(source, getComputedStyle(liveSource), documentHeight);
   return clone;
 }
 
@@ -4909,7 +4932,9 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   }
   currentMinimapLayout = null;
   const model = getModelMinimapSource();
-  const clone = model === null ? cloneDocumentForMinimap() : cloneModelDocumentForMinimap(model);
+  const clone = model === null
+    ? cloneDocumentForMinimap(buildDecision.documentHeight)
+    : cloneModelDocumentForMinimap(model, buildDecision.documentHeight);
   if (!clone) {
     emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
     postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
@@ -4992,6 +5017,10 @@ function restoreCachedMinimapContent(): boolean {
 
   minimapDocumentHeight = restored.documentHeight;
   minimapSourceReady = true;
+  const restoredClone = minimapContent?.firstElementChild;
+  if (restoredClone instanceof HTMLElement) {
+    applyMinimapClonePaintHeightLimit(restoredClone, restored.documentHeight);
+  }
   postCachedMinimapState(restored.lastPostedState);
   emitMark("mm-minimap-cache-hit", {
     documentHeight: restored.documentHeight,
@@ -5616,7 +5645,12 @@ function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void
   if (minimapContent.style.width !== nextContentWidth) {
     minimapContent.style.width = nextContentWidth;
   }
-  const measuredContentHeight = minimapContent.scrollHeight;
+  let measuredContentHeight = minimapContent.scrollHeight;
+  const renderedClone = minimapContent.firstElementChild;
+  if (renderedClone instanceof HTMLElement
+    && applyMinimapClonePaintHeightLimit(renderedClone, measuredContentHeight)) {
+    measuredContentHeight = minimapContent.scrollHeight;
+  }
   const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
 
   // Map document→clone position through the BLOCK INDEX (identical in document
