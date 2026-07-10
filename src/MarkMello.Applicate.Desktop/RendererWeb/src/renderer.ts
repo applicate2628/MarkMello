@@ -1351,11 +1351,15 @@ function cancelProgressiveDeferredEnhancements(): void {
 }
 
 function scheduleProgressiveDeferredEnhancements(message: Extract<HostMessage, { type: "append-document" }>): void {
-  cancelProgressiveDeferredEnhancements();
+  if (virtualizationEnabled) {
+    cancelProgressiveDeferredEnhancements();
+  }
   const renderId = message.renderId;
   const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   const run = () => {
-    progressiveDeferredEnhancementHandle = null;
+    if (virtualizationEnabled) {
+      progressiveDeferredEnhancementHandle = null;
+    }
     if (
       documentEpoch !== undefined
       && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
@@ -1389,17 +1393,17 @@ function scheduleProgressiveDeferredEnhancements(message: Extract<HostMessage, {
     requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
   }).requestIdleCallback;
   if (requestIdle) {
-    progressiveDeferredEnhancementHandle = {
-      kind: "idle",
-      id: requestIdle(run, { timeout: 4000 }),
-    };
+    const id = requestIdle(run, { timeout: 4000 });
+    if (virtualizationEnabled) {
+      progressiveDeferredEnhancementHandle = { kind: "idle", id };
+    }
     return;
   }
 
-  progressiveDeferredEnhancementHandle = {
-    kind: "timeout",
-    id: window.setTimeout(run, 800),
-  };
+  const id = window.setTimeout(run, 800);
+  if (virtualizationEnabled) {
+    progressiveDeferredEnhancementHandle = { kind: "timeout", id };
+  }
 }
 
 function getViewportHeightForMermaid(): number {
@@ -6877,7 +6881,9 @@ function resetModuleGlobalsForLoadDocument(): void {
   ++processedDocumentCacheCloneGeneration;
   ++progressiveMinimapRefreshGeneration;
   cancelProcessedDocumentCacheClone();
-  cancelProgressiveDeferredEnhancements();
+  if (virtualizationEnabled) {
+    cancelProgressiveDeferredEnhancements();
+  }
   cancelDeferredMinimapContentRefresh(false);
   cancelMinimapRefreshAfterLayoutSettles();
   cancelHeavyLiveUpdate();

@@ -1116,6 +1116,41 @@ afterEach(() => {
 });
 
 describe("renderer scroll-family virtualization integration", () => {
+  it("keeps progressive enhancement scheduling fire-and-forget when virtualization is off", async () => {
+    let nextIdleId = 1;
+    const requestIdleCallback = vi.fn(() => nextIdleId++);
+    const cancelIdleCallback = vi.fn();
+    vi.stubGlobal("requestIdleCallback", requestIdleCallback);
+    vi.stubGlobal("cancelIdleCallback", cancelIdleCallback);
+    const { load } = await loadRendererHarness({ sectionCount: 2, virtualization: false });
+    requestIdleCallback.mockClear();
+    cancelIdleCallback.mockClear();
+
+    load({ type: "append-document", html: "<p>first</p>", renderId: 1, hasMermaid: false, hasHljs: false });
+    const firstProgressiveHandle = requestIdleCallback.mock.results.at(-1)?.value;
+    load({ type: "append-document", html: "<p>second</p>", renderId: 1, hasMermaid: false, hasHljs: false });
+
+    expect(requestIdleCallback).toHaveBeenCalled();
+    expect(cancelIdleCallback).not.toHaveBeenCalledWith(firstProgressiveHandle);
+  });
+
+  it("cancels superseded progressive enhancement work when virtualization is on", async () => {
+    let nextIdleId = 1;
+    const requestIdleCallback = vi.fn(() => nextIdleId++);
+    const cancelIdleCallback = vi.fn();
+    vi.stubGlobal("requestIdleCallback", requestIdleCallback);
+    vi.stubGlobal("cancelIdleCallback", cancelIdleCallback);
+    const { load } = await loadRendererHarness({ sectionCount: 2, virtualization: true });
+    requestIdleCallback.mockClear();
+    cancelIdleCallback.mockClear();
+
+    load({ type: "append-document", html: buildHeadingDocument(1), renderId: 1, hasMermaid: false, hasHljs: false });
+    const firstProgressiveHandle = requestIdleCallback.mock.results.at(-1)?.value;
+    load({ type: "append-document", html: buildHeadingDocument(1), renderId: 1, hasMermaid: false, hasHljs: false });
+
+    expect(cancelIdleCallback).toHaveBeenCalledWith(firstProgressiveHandle);
+  });
+
   it("keeps initial virtual-window DOM and root state unchanged until the owning frame", async () => {
     const sectionCount = 120;
     const { flushAnimationFrame, load, root, scrollWrites } = await loadRendererHarness({
