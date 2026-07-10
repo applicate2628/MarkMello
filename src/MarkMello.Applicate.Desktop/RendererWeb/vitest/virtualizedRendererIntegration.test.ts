@@ -218,6 +218,11 @@ describe("renderer virtualization wiring", () => {
       'document.addEventListener("DOMContentLoaded"',
       "const queuePostScroll"
     );
+    const resizeOwner = sliceBetween(
+      source,
+      "function runLegacyResizeObserverWork",
+      "function runLegacyDocumentFontsReadyWork"
+    );
     const reset = sliceBetween(source, "function resetModuleGlobalsForLoadDocument", "type EnsureChromeNodesOptions");
 
     expect(renderMath.match(/captureDocumentEpoch/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
@@ -231,7 +236,9 @@ describe("renderer virtualization wiring", () => {
     expect(minimapSettle).toContain("isCurrentDocumentEpoch");
     expect(resizeReactions).toContain("documentEpoch");
     expect(resizeReactions).toContain("isCurrentDocumentEpoch");
-    expect(domReady).toContain("scheduleResizeReactions(documentEpoch)");
+    expect(domReady).toContain("runLegacyResizeObserverWork(documentEpoch)");
+    expect(resizeOwner).toContain("scheduleResizeReactions(documentEpoch)");
+    expect(resizeOwner).toContain("isCurrentDocumentEpoch(documentEpoch)");
     expect(heavyLive).toContain("captureDocumentEpoch");
     expect(heavyLive).toContain("isCurrentDocumentEpoch");
     expect(reset).toContain("cancelProgressiveDeferredEnhancements()");
@@ -269,7 +276,7 @@ describe("renderer virtualization wiring", () => {
     expect(initialize).toContain("initialOperation.scheduleFrameTransaction(() => {");
     expect(initialize).toContain("consumePendingInitialVirtualizedWindow(initialOperation);");
     expect(cacheRestore.indexOf("consumePendingInitialVirtualizedWindow(operation)"))
-      .toBeLessThan(cacheRestore.indexOf("controller.ensureSectionRendered"));
+      .toBeLessThan(cacheRestore.indexOf("controller?.ensureSectionRendered"));
     expect(coldLoad.indexOf("consumePendingInitialVirtualizedWindow(operation)"))
       .toBeLessThan(coldLoad.indexOf('operation.requestScrollTop(0, "cold-load-reset")'));
   });
@@ -287,5 +294,62 @@ describe("renderer virtualization wiring", () => {
     expect(getComputedStyle(root).overflowAnchor).toBe("none");
     delete root.dataset.mmVirtualizationActive;
     expect(getComputedStyle(root).overflowAnchor).not.toBe("none");
+  });
+
+  it("tickets every admitted geometry producer at scheduling and recensuses before quiet candidates", () => {
+    const renderer = readRendererSource();
+    const plane = readSource("scrollOwnershipControlPlane.ts");
+    const windowController = readSource("virtualizedDocumentWindow.ts");
+    const insertedContent = sliceBetween(
+      renderer,
+      "function prepareVirtualizedInsertedContent",
+      "function scheduleVirtualizedWindowFontReadiness"
+    );
+
+    for (const source of [
+      "window-render",
+      "measured-height-adoption",
+      "calibration",
+      "window-math",
+      "window-fonts",
+      "resize-observer",
+    ]) {
+      expect(renderer).toContain(`beginVirtualizedGeometryWork("${source}"`);
+    }
+    expect(insertedContent).toContain('"window-mermaid",');
+    expect(insertedContent).toContain("mountGeneration\n  )");
+    expect(insertedContent).toContain("mountGeneration === virtualizedWindowMountGeneration");
+    expect(insertedContent).toContain("virtualizedWindowMathController === mathController");
+    expect(renderer).toContain("beginVirtualizedGeometryWork(geometrySource, geometryMountGeneration)");
+    expect(renderer).toContain("geometryMutated(ticket)");
+    expect(plane).toContain("prepareGeometrySettleCandidate");
+    expect(windowController).toContain("recensusRealizationWatches");
+  });
+
+  it("navigation cache and minimap consume same-epoch confirmation settlement", () => {
+    const source = readRendererSource();
+    const cacheRestore = sliceBetween(source, "function restoreCachedScrollPosition", "function scheduleLayoutReady");
+    const cachedReady = sliceBetween(source, "function postCachedLayoutReady", "function flushPostLayoutReadyWork");
+
+    expect(source).toContain("awaitConfirmedVirtualizedGeometry");
+    expect(source).toContain("waitForGeometrySettled(documentEpoch, afterEmission)");
+    expect(source).toContain("plane.holds(operation.lease, confirmation.payload.geometryEpoch)");
+    expect(cacheRestore).not.toContain("queueCachedGeometryRefresh(");
+    expect(cachedReady).toContain("if (!virtualizationEnabled && cachedLayoutState !== null)");
+  });
+
+  it("flag-on resolved images carry mount-stable intrinsic ratio", () => {
+    const source = readFileSync("Rendering/ApplicateHtmlMarkdownRenderer.cs", "utf8");
+
+    expect(source).toContain("ReadIntrinsicImageSize");
+    expect(source).toContain("virtualizationEnabled");
+    expect(source).toContain("resolved.Bytes");
+    expect(source).toContain("RenderImagePlaceholder");
+  });
+
+  it("keeps the H3 diagnostic observer test-only and out of production", () => {
+    const source = readRendererSource();
+    expect(source).not.toContain("H3DiagnosticObserver");
+    expect(source).not.toContain("mm-virt-h3-unregistered-mover");
   });
 });

@@ -154,11 +154,24 @@ describe("handleHostMessage(load-document)", () => {
     const renderStart = source.indexOf("async function renderMermaidNodes(");
     const renderEnd = source.indexOf("function renderCodeBlocks", renderStart);
     const renderMermaidNodes = source.slice(renderStart, renderEnd);
+    const enqueueStart = source.indexOf("function enqueueLazyMermaidRender(", renderStart);
+    const enqueueEnd = source.indexOf("function renderCodeBlocks", enqueueStart);
+    const enqueueLazyMermaidRender = source.slice(enqueueStart, enqueueEnd);
 
     expect(renderStart).toBeGreaterThanOrEqual(0);
     expect(renderEnd).toBeGreaterThan(renderStart);
+    expect(enqueueStart).toBeGreaterThan(renderStart);
+    expect(enqueueEnd).toBeGreaterThan(enqueueStart);
     expect(renderMermaidNodes).toContain("isMermaidNodeNearViewport");
-    expect(renderMermaidNodes).toContain("installLazyMermaidObserver(lazyNodes, generation, mermaid);");
+    expect(renderMermaidNodes).toContain(
+      "installLazyMermaidObserver(lazyNodes, generation, mermaid, geometryMountGeneration);",
+    );
+    expect(enqueueLazyMermaidRender).toContain(
+      "mountGeneration !== undefined && mountGeneration !== virtualizedWindowMountGeneration",
+    );
+    expect(enqueueLazyMermaidRender).toContain(
+      "mountGeneration === undefined || mountGeneration === virtualizedWindowMountGeneration",
+    );
     expect(renderMermaidNodes).toContain("mm-mermaid-visible-first");
     expect(renderMermaidNodes).toContain("mm-mermaid-lazy-observe");
     expect(renderMermaidNodes).not.toContain("allNodes.slice");

@@ -1159,6 +1159,27 @@ describe("virtualized document window", () => {
     })).toBe(99.5);
   });
 
+  it("rejects a mounted block that is wholly below the viewport as a reading anchor", () => {
+    const belowViewport = block(90, 0, 100);
+    belowViewport.getBoundingClientRect = () => ({
+      bottom: 420,
+      height: 100,
+      left: 0,
+      right: 0,
+      top: 320,
+      width: 0,
+      x: 0,
+      y: 320,
+      toJSON: () => ({}),
+    } as DOMRect);
+    Object.defineProperty(document.documentElement, "clientHeight", {
+      configurable: true,
+      value: 200,
+    });
+
+    expect(captureReadingAnchor([belowViewport])).toBeNull();
+  });
+
   it("requests one terminal re-anchor after measured adoption without moving the root directly", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { getScrollTop, root } = setScrollRoot(120, 400, 50);
@@ -1186,5 +1207,60 @@ describe("virtualized document window", () => {
     expect(requestScrollTop).toHaveBeenCalledOnce();
     expect(requestScrollTop).toHaveBeenCalledWith(160, "measured-height-adoption");
     expect(getScrollTop()).toBe(120);
+  });
+
+  it("recensuses realization watches before a geometry quiet candidate", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 50);
+    const model = new DocumentWindowModel([
+      {
+        ...entry(0, 110, 100),
+        html: '<p data-mm-block-index="110" style="content-visibility:auto">pending</p>',
+      },
+    ]);
+    const controller = makeController({ model, realization: { enabled: true }, root });
+    controller.updateWindowForScroll();
+    const block = document.querySelector<HTMLElement>("[data-mm-block-index='110']")!;
+    Object.defineProperty(block, "offsetHeight", {
+      configurable: true,
+      value: 80,
+    });
+    vi.spyOn(block, "getBoundingClientRect").mockReturnValue({
+      bottom: 80,
+      height: 80,
+      left: 0,
+      right: 400,
+      top: 0,
+      width: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+    const recensus = (controller as unknown as {
+      recensusRealizationWatches?: () => boolean;
+    }).recensusRealizationWatches;
+
+    expect(typeof recensus).toBe("function");
+    expect(recensus?.()).toBe(false);
+  });
+
+  it("delayed image decode changes occupied delta by at most one pixel", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 50);
+    const model = new DocumentWindowModel([
+      {
+        ...entry(0, 120, 100),
+        html: '<figure data-mm-block-index="120"><img src="data:image/png;base64,x" width="160" height="90"></figure>',
+      },
+    ]);
+    const controller = makeController({ model, root });
+    controller.updateWindowForScroll();
+    const image = document.querySelector<HTMLImageElement>("img")!;
+    const reservedHeight = Number(image.getAttribute("height"));
+    const decodedHeight = Number(image.getAttribute("width")) / (160 / 90);
+
+    expect(image.getAttribute("width")).toBe("160");
+    expect(image.getAttribute("height")).toBe("90");
+    expect(Math.abs(decodedHeight - reservedHeight)).toBeLessThanOrEqual(1);
   });
 });

@@ -43,6 +43,7 @@ export type ScrollLease = Readonly<{
 export type GeometryWorkTicket = Readonly<{
   documentEpoch: number;
   id: number;
+  mountGeneration: number | null;
   source: string;
   [GEOMETRY_TICKET_BRAND]: true;
 }>;
@@ -112,6 +113,7 @@ export type ScrollOwnershipControlPlaneDeps = {
   cancelFrame: (handle: number) => void;
   deliveredFrameBudget?: number;
   emitGeometrySettled: (payload: GeometrySettledPayload) => void;
+  prepareGeometrySettleCandidate?: () => boolean;
   requestFrame: (callback: FrameRequestCallback) => number;
   root: ScrollRootPort;
   trace?: (event: ScrollOwnershipTraceEvent) => void;
@@ -119,7 +121,11 @@ export type ScrollOwnershipControlPlaneDeps = {
 
 export type ScrollOwnershipControlPlane = {
   acquire: (owner: string, policy: ScrollAcquirePolicy) => LeaseAcquisition;
-  beginGeometryWork: (source: string, documentEpoch?: number) => GeometryWorkTicket | null;
+  beginGeometryWork: (
+    source: string,
+    documentEpoch?: number,
+    mountGeneration?: number
+  ) => GeometryWorkTicket | null;
   captureDocumentEpoch: () => number;
   captureGeometryEpoch: () => number;
   classifyNativeScroll: (value: number, source?: string) => NativeScrollClassification;
@@ -485,11 +491,28 @@ export function createScrollOwnershipControlPlane(
     });
   };
 
-  const hasSettlementBlocker = (): boolean =>
-    geometryTickets.size > 0
-    || pendingWrite !== null
-    || frameTransaction !== null
-    || expectedEcho !== null;
+  const hasSettlementBlocker = (): boolean => {
+    if (
+      geometryTickets.size > 0
+      || pendingWrite !== null
+      || frameTransaction !== null
+      || expectedEcho !== null
+    ) {
+      return true;
+    }
+    if (deps.prepareGeometrySettleCandidate === undefined) {
+      return false;
+    }
+    try {
+      return deps.prepareGeometrySettleCandidate() !== true;
+    } catch {
+      trace(SCROLL_OWNERSHIP_TRACE_IDS.observerDeliveryFailed, {
+        channel: "geometry-settle-census",
+        failures: 1,
+      });
+      return true;
+    }
+  };
 
   const needsSettlementProgress = (): boolean =>
     hasSettlementBlocker()
@@ -892,7 +915,8 @@ export function createScrollOwnershipControlPlane(
 
   const beginGeometryWork = (
     source: string,
-    capturedDocumentEpoch = documentEpoch
+    capturedDocumentEpoch = documentEpoch,
+    capturedMountGeneration?: number
   ): GeometryWorkTicket | null => {
     if (disposed || !isCurrentDocumentEpoch(capturedDocumentEpoch)) {
       trace(SCROLL_OWNERSHIP_TRACE_IDS.staleTicket, {
@@ -905,11 +929,18 @@ export function createScrollOwnershipControlPlane(
       [GEOMETRY_TICKET_BRAND]: true as const,
       documentEpoch: capturedDocumentEpoch,
       id: nextGeometryTicketId++,
+      mountGeneration: Number.isSafeInteger(capturedMountGeneration)
+        ? capturedMountGeneration!
+        : null,
       source,
     });
     geometryTickets.set(ticket.id, ticket);
     invalidateSettleCandidate();
-    trace(SCROLL_OWNERSHIP_TRACE_IDS.geometryWorkStart, { source, ticket: ticket.id });
+    trace(SCROLL_OWNERSHIP_TRACE_IDS.geometryWorkStart, {
+      mountGeneration: ticket.mountGeneration,
+      source,
+      ticket: ticket.id,
+    });
     ensureFrame();
     return ticket;
   };
@@ -940,6 +971,7 @@ export function createScrollOwnershipControlPlane(
     geometryEpoch++;
     invalidateSettleCandidate();
     trace(SCROLL_OWNERSHIP_TRACE_IDS.geometryMutated, {
+      mountGeneration: current.mountGeneration,
       source: current.source,
       ticket: current.id,
     });
@@ -954,6 +986,7 @@ export function createScrollOwnershipControlPlane(
     }
     geometryTickets.delete(current.id);
     trace(SCROLL_OWNERSHIP_TRACE_IDS.geometryWorkEnd, {
+      mountGeneration: current.mountGeneration,
       source: current.source,
       ticket: current.id,
     });

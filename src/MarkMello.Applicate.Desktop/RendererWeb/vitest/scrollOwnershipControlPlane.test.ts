@@ -560,6 +560,51 @@ describe("scroll ownership control plane", () => {
     expect(plane.holds(lease)).toBe(true);
   });
 
+  it("consumer nominal zero waits for confirmation and retries on epoch bump", async () => {
+    const { events, frames, plane } = createHarness();
+    const lease = acquired(plane.acquire("navigation", "defer"));
+    const firstWait = plane.waitForGeometrySettled(lease.documentEpoch);
+    frames.deliverFrame();
+    frames.deliverFrame();
+    const nominal = await firstWait;
+    expect(nominal).toMatchObject({ emission: 1, status: "settled" });
+    if (nominal.status !== "settled") {
+      throw new Error("Expected nominal settlement");
+    }
+
+    const confirmation = plane.waitForGeometrySettled(
+      lease.documentEpoch,
+      nominal.emission
+    );
+    const lateTicket = plane.beginGeometryWork("late-font", lease.documentEpoch)!;
+    expect(plane.geometryMutated(lateTicket)).toBe(true);
+    expect(plane.endGeometryWork(lateTicket)).toBe(true);
+    frames.deliverFrame();
+    frames.deliverFrame();
+    const changed = await confirmation;
+    expect(changed).toMatchObject({
+      emission: 2,
+      payload: { geometryEpoch: 1 },
+      status: "settled",
+    });
+    if (changed.status !== "settled") {
+      throw new Error("Expected changed settlement");
+    }
+    expect(plane.holds(lease, nominal.payload.geometryEpoch)).toBe(false);
+
+    const retry = plane.waitForGeometrySettled(lease.documentEpoch, changed.emission);
+    frames.deliverFrame();
+    frames.deliverFrame();
+    const confirmed = await retry;
+    expect(confirmed).toMatchObject({
+      emission: 3,
+      payload: { geometryEpoch: 1 },
+      status: "settled",
+    });
+    expect(plane.holds(lease, 1)).toBe(true);
+    expect(events.map(event => event.geometryEpoch)).toEqual([0, 1, 1]);
+  });
+
   it("pauses watchdog when zero animation frame callbacks are delivered", async () => {
     const { events, plane, traces } = createHarness(2);
     const lease = acquired(plane.acquire("navigation", "defer"));

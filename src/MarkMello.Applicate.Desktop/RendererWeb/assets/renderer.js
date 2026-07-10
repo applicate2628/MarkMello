@@ -2346,9 +2346,12 @@
   };
   function createVirtualizedDocumentWindowController(deps) {
     let currentRange = null;
+    let windowMountGeneration = 0;
     const renderAhead = deps.renderAhead ?? DEFAULT_RENDER_AHEAD;
     const realizationTracker = deps.realization?.enabled === true ? createRealizationTracker(deps) : null;
     const renderRange = (range) => {
+      const mountGeneration = ++windowMountGeneration;
+      const geometryWork = deps.beginWindowGeometryWork?.(mountGeneration) ?? null;
       const existingByBlockIndex = collectExistingSections(deps.main);
       const nodes = [];
       let insertedCount = 0;
@@ -2380,13 +2383,19 @@
         }
       }
       nodes.push(bottomSpacer);
-      deps.main.replaceChildren(...nodes);
-      currentRange = { ...range };
-      const mountedBlocks = collectLiveDocumentSectionElements(deps.main);
-      reconcileMountedNonContentMetadata(deps.model, mountedBlocks, repairedMermaidBlockIndexes);
-      realizationTracker?.syncMountedSections(mountedBlocks);
-      if (insertedCount > 0 || repairedMermaidCount > 0) {
-        deps.prepareInsertedContent?.(deps.main);
+      try {
+        deps.main.replaceChildren(...nodes);
+        geometryWork?.mutated();
+        currentRange = { ...range };
+        const mountedBlocks = collectLiveDocumentSectionElements(deps.main);
+        reconcileMountedNonContentMetadata(deps.model, mountedBlocks, repairedMermaidBlockIndexes);
+        realizationTracker?.syncMountedSections(mountedBlocks, mountGeneration);
+        deps.onWindowMounted?.(mountGeneration);
+        if (insertedCount > 0 || repairedMermaidCount > 0) {
+          deps.prepareInsertedContent?.(deps.main, mountGeneration);
+        }
+      } finally {
+        geometryWork?.end();
       }
     };
     const computeRange = (scrollTop = deps.root.scrollTop) => deps.model.computeWindowRange(scrollTop, deps.root.clientHeight, renderAhead);
@@ -2423,6 +2432,9 @@
         if (result.updatedCount === 0) {
           return EMPTY_HEIGHT_UPDATE;
         }
+        if (result.maxAbsDelta <= Number.EPSILON && Math.abs(result.totalDelta) <= Number.EPSILON) {
+          return result;
+        }
         const desiredScrollTop = preserveSectionIndex !== null ? deps.model.sectionTop(preserveSectionIndex) : scrollTopForReadingAnchor(deps.model, liveAnchor) ?? deps.model.scrollTopForAnchor(anchor);
         renderRange(computeRange(desiredScrollTop));
         if (reanchor) {
@@ -2437,6 +2449,7 @@
       ensureSectionRendered: (sectionIndex, options = {}) => ensureRangeRendered({ end: sectionIndex, start: sectionIndex }, options),
       getCurrentRange: () => currentRange === null ? null : { ...currentRange },
       isSectionRendered,
+      recensusRealizationWatches: () => realizationTracker?.recensusRealizationWatches() ?? true,
       updateWindowForScroll: (options = {}) => {
         const nextRange = computeRange(options.desiredScrollTop ?? deps.root.scrollTop);
         if (options.force !== true && currentRange !== null && rangesEqual(currentRange, nextRange)) {
@@ -2498,7 +2511,9 @@
       }
       const boxElement = readReadyMermaidProxy(block) ?? block;
       const rect = boxElement.getBoundingClientRect();
-      if (!Number.isFinite(rect.top) || !Number.isFinite(rect.height) || rect.height <= 0 || !Number.isFinite(rect.bottom) || rect.bottom <= 0) {
+      const ownerDocument = boxElement.ownerDocument;
+      const viewportHeight = ownerDocument.scrollingElement?.clientHeight || ownerDocument.defaultView?.innerHeight || 0;
+      if (!Number.isFinite(rect.top) || !Number.isFinite(rect.height) || rect.height <= 0 || !Number.isFinite(rect.bottom) || rect.bottom <= 0 || Number.isFinite(viewportHeight) && viewportHeight > 0 && rect.top >= viewportHeight) {
         continue;
       }
       return {
@@ -2598,7 +2613,7 @@
   }
   function createRealizationTracker(deps) {
     const watches = /* @__PURE__ */ new Map();
-    let mountGeneration = 0;
+    let currentMountGeneration = 0;
     let disposed = false;
     const eventOptions = { capture: true };
     const documentEpoch = deps.documentEpoch;
@@ -2643,11 +2658,11 @@
       watches.clear();
       deps.main.removeEventListener("contentvisibilityautostatechange", handleContentVisibilityStateChange, eventOptions);
     };
-    const syncMountedSections = (blocks) => {
+    const syncMountedSections = (blocks, mountGeneration) => {
       if (disposed) {
         return;
       }
-      mountGeneration++;
+      currentMountGeneration = mountGeneration;
       for (const block of blocks) {
         if (readReadyMermaidProxy(block) !== null) {
           watches.delete(block);
@@ -2664,8 +2679,8 @@
         const existing = watches.get(block);
         if (existing !== void 0) {
           existing.blockIndex = blockIndex;
-          existing.mountGeneration = mountGeneration;
-          if (existing.state !== "real-ready" && existing.state !== "event-equal-fallback-noop") {
+          existing.mountGeneration = currentMountGeneration;
+          if (existing.state === "placeholder-not-intersecting" || existing.state === "realized-then-skipped") {
             existing.state = isStrictlyIntersecting(block) ? "intersecting-await-event" : "placeholder-not-intersecting";
           }
           continue;
@@ -2677,7 +2692,7 @@
           frameRequested: false,
           lastOccupiedHeight: null,
           lastOffsetHeight: null,
-          mountGeneration,
+          mountGeneration: currentMountGeneration,
           readyMeasuredHeight: null,
           skipped: true,
           stableFrameCount: 0,
@@ -2685,7 +2700,7 @@
         });
       }
       for (const [element, watch] of watches) {
-        if (watch.mountGeneration !== mountGeneration || !deps.main.contains(element)) {
+        if (watch.mountGeneration !== currentMountGeneration || !deps.main.contains(element)) {
           watches.delete(element);
         }
       }
@@ -2710,7 +2725,7 @@
           accepted.push(update);
           continue;
         }
-        if (watch.element !== block || watch.blockIndex !== update.blockIndex || watch.mountGeneration !== mountGeneration || !deps.main.contains(block) || watch.state !== "real-ready" || watch.readyMeasuredHeight === null) {
+        if (watch.element !== block || watch.blockIndex !== update.blockIndex || watch.mountGeneration !== currentMountGeneration || !deps.main.contains(block) || watch.state !== "real-ready" || watch.readyMeasuredHeight === null) {
           continue;
         }
         const acceptedUpdate = {
@@ -2754,11 +2769,13 @@
         if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) <= 1) {
           watch.state = "event-equal-fallback-noop";
           watch.readyMeasuredHeight = null;
+          deps.onRealizationReady?.(watch.mountGeneration);
           return;
         }
         if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) > 1) {
           watch.state = "real-ready";
           watch.readyMeasuredHeight = Math.max(0, sample.occupiedHeight);
+          deps.onRealizationReady?.(watch.mountGeneration);
           return;
         }
       }
@@ -2773,7 +2790,29 @@
       }
       scheduleSample(watch);
     }
-    return { dispose, filterRealizedUpdates, syncMountedSections };
+    const recensusRealizationWatches = () => {
+      if (disposed || !isCurrentDocument()) {
+        return false;
+      }
+      syncMountedSections(collectLiveDocumentSectionElements(deps.main), currentMountGeneration);
+      let ready = true;
+      for (const watch of watches.values()) {
+        const intersecting = isStrictlyIntersecting(watch.element);
+        if (intersecting && watch.state !== "real-ready" && watch.state !== "event-equal-fallback-noop") {
+          if (watch.state === "placeholder-not-intersecting" || watch.state === "realized-then-skipped") {
+            watch.state = "intersecting-await-event";
+          }
+          ready = false;
+        }
+      }
+      return ready;
+    };
+    return {
+      dispose,
+      filterRealizedUpdates,
+      recensusRealizationWatches,
+      syncMountedSections
+    };
   }
   function mapBlocksByBlockIndex(blocks) {
     const blocksByBlockIndex = /* @__PURE__ */ new Map();
@@ -4297,7 +4336,23 @@
         status: "acquired"
       });
     };
-    const hasSettlementBlocker = () => geometryTickets.size > 0 || pendingWrite !== null || frameTransaction !== null || expectedEcho !== null;
+    const hasSettlementBlocker = () => {
+      if (geometryTickets.size > 0 || pendingWrite !== null || frameTransaction !== null || expectedEcho !== null) {
+        return true;
+      }
+      if (deps.prepareGeometrySettleCandidate === void 0) {
+        return false;
+      }
+      try {
+        return deps.prepareGeometrySettleCandidate() !== true;
+      } catch {
+        trace(SCROLL_OWNERSHIP_TRACE_IDS.observerDeliveryFailed, {
+          channel: "geometry-settle-census",
+          failures: 1
+        });
+        return true;
+      }
+    };
     const needsSettlementProgress = () => hasSettlementBlocker() || waiters.size > 0 || settleRevision > lastEmittedRevision;
     const ensureFrame = () => {
       if (disposed || scheduledFrame !== null || !needsSettlementProgress()) {
@@ -4668,7 +4723,7 @@
       supersedeByUser(source);
       return { kind: "user-supersession", value };
     };
-    const beginGeometryWork = (source, capturedDocumentEpoch = documentEpoch) => {
+    const beginGeometryWork = (source, capturedDocumentEpoch = documentEpoch, capturedMountGeneration) => {
       if (disposed || !isCurrentDocumentEpoch(capturedDocumentEpoch)) {
         trace(SCROLL_OWNERSHIP_TRACE_IDS.staleTicket, {
           capturedDocumentEpoch,
@@ -4680,11 +4735,16 @@
         [GEOMETRY_TICKET_BRAND]: true,
         documentEpoch: capturedDocumentEpoch,
         id: nextGeometryTicketId++,
+        mountGeneration: Number.isSafeInteger(capturedMountGeneration) ? capturedMountGeneration : null,
         source
       });
       geometryTickets.set(ticket.id, ticket);
       invalidateSettleCandidate();
-      trace(SCROLL_OWNERSHIP_TRACE_IDS.geometryWorkStart, { source, ticket: ticket.id });
+      trace(SCROLL_OWNERSHIP_TRACE_IDS.geometryWorkStart, {
+        mountGeneration: ticket.mountGeneration,
+        source,
+        ticket: ticket.id
+      });
       ensureFrame();
       return ticket;
     };
@@ -4708,6 +4768,7 @@
       geometryEpoch++;
       invalidateSettleCandidate();
       trace(SCROLL_OWNERSHIP_TRACE_IDS.geometryMutated, {
+        mountGeneration: current.mountGeneration,
         source: current.source,
         ticket: current.id
       });
@@ -4721,6 +4782,7 @@
       }
       geometryTickets.delete(current.id);
       trace(SCROLL_OWNERSHIP_TRACE_IDS.geometryWorkEnd, {
+        mountGeneration: current.mountGeneration,
         source: current.source,
         ticket: current.id
       });
@@ -4863,9 +4925,6 @@
   var MODE_REVEAL_EASING = "cubic-bezier(0.215, 0.61, 0.355, 1)";
   var MODE_SETTLE_VIEWPORT_TOLERANCE = 2;
   var MODE_SETTLE_VIEWPORT_MAX_FRAMES = 18;
-  var VIRTUALIZED_NAVIGATION_SETTLE_TOLERANCE_PX = 0.5;
-  var VIRTUALIZED_NAVIGATION_SETTLE_STABLE_FRAMES = 2;
-  var VIRTUALIZED_NAVIGATION_SETTLE_MAX_FRAMES = 120;
   var VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX = 2;
   var VIRTUALIZED_NAVIGATION_CORRECTION_MAX_PASSES = 3;
   var VIRTUALIZED_NAVIGATION_CORRECTION_MIN_SHRINK_PX = 0.5;
@@ -4957,6 +5016,7 @@
     emitGeometrySettled: (payload) => {
       document.dispatchEvent(new CustomEvent(GEOMETRY_SETTLED_EVENT, { detail: payload }));
     },
+    prepareGeometrySettleCandidate: () => virtualizedDocumentWindowController?.recensusRealizationWatches() ?? true,
     requestFrame: (callback) => window.requestAnimationFrame(callback),
     root: getDocumentScrollRoot(),
     trace: (event) => postPerfMark(event.id, {
@@ -5000,7 +5060,12 @@
   var virtualizedFindProvider = null;
   var virtualizedIntrinsicCalibrator = createSectionIntrinsicCalibrator();
   var virtualizedMeasureFrameRequested = false;
+  var virtualizedMeasuredHeightGeometryTicket = null;
+  var virtualizedMeasuredHeightTerminalSubscribers = /* @__PURE__ */ new Set();
   var virtualizedCalibrationHandle = null;
+  var virtualizedCalibrationGeometryTicket = null;
+  var virtualizedWindowMountGeneration = 0;
+  var virtualizedWindowFontGeometryTicket = null;
   var virtualizedProgrammaticNavigationInProgress = false;
   var virtualizedProgrammaticNavigationGeneration = 0;
   var virtualizedProgrammaticNavigationExternalShiftCount = 0;
@@ -5010,8 +5075,6 @@
   var virtualizedWriteReceipts = /* @__PURE__ */ new Map();
   var cachedScrollRestoreCompletion = null;
   var finishCachedScrollRestore = null;
-  var virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
-  var virtualizedCalibrationDeferredDuringNavigation = false;
   var virtualizedWindowMathController = null;
   var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
   function cloneHeadingPayload(heading) {
@@ -5078,6 +5141,10 @@
     if (!main || main.childNodes.length === 0) {
       return null;
     }
+    const virtualizedLayoutState = virtualizationEnabled ? {
+      readingAnchor: captureCurrentVirtualizedReadingAnchor(),
+      settledGeometryEpoch: scrollOwnershipControlPlane.captureGeometryEpoch()
+    } : null;
     const virtualizedFullFragment = virtualizationEnabled && virtualizedDocumentWindowModel !== null ? createFullDocumentFragmentFromWindowModel(document, virtualizedDocumentWindowModel) : null;
     const sourceNodes = Array.from(virtualizedFullFragment?.childNodes ?? main.childNodes);
     const fragment = document.createDocumentFragment();
@@ -5115,10 +5182,9 @@
     return {
       fragment,
       nodeCount: sourceNodes.length,
-      layoutState: virtualizationEnabled ? {
+      layoutState: virtualizedLayoutState !== null ? {
         ...lastKnownLayoutState,
-        readingAnchor: captureCurrentVirtualizedReadingAnchor(),
-        settledGeometryEpoch: scrollOwnershipControlPlane.captureGeometryEpoch()
+        ...virtualizedLayoutState
       } : { ...lastKnownLayoutState },
       headings: lastExtractedHeadings.map(cloneHeadingPayload),
       minimapSnapshot
@@ -5497,8 +5563,9 @@
   function renderMath2() {
     emitMark("mm-render-math-start", { mathCount: getLiveDocumentMathCount() });
     const katex = hostWindow.katex ?? void 0;
-    const controller = renderMath({ katex, documentRoot: getLiveDocumentRoot() ?? document });
     const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+    const geometryTicket = virtualizationEnabled ? beginVirtualizedGeometryWork("document-math") : null;
+    const controller = renderMath({ katex, documentRoot: getLiveDocumentRoot() ?? document });
     const phaseBDocumentCacheKey = currentDocumentCacheKey;
     const initialVisualSettleReady = virtualizationEnabled ? controller.allMathRendered.then(() => {
       if (documentEpoch !== void 0 && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true || phaseBDocumentCacheKey !== currentDocumentCacheKey || controller.isCancelled()) {
@@ -5553,6 +5620,14 @@
         cancelled: controller.isCancelled()
       });
     });
+    const finishGeometryWork = () => {
+      if (geometryTicket !== null && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(geometryTicket.documentEpoch) === true) {
+        mutateVirtualizedGeometry(geometryTicket);
+        scheduleVirtualizedMeasuredHeightAdoption();
+      }
+      endVirtualizedGeometryWork(geometryTicket);
+    };
+    void controller.allMathRendered.then(finishGeometryWork, finishGeometryWork);
     return readinessController;
   }
   function getCurrentTheme() {
@@ -5570,7 +5645,7 @@
       maxTextSize: 1e5
     });
   }
-  async function renderMermaidNodes(allNodes, mermaid, perfMarkName = "mm-mermaid-visible-first") {
+  async function renderMermaidNodes(allNodes, mermaid, perfMarkName = "mm-mermaid-visible-first", geometrySource = "mermaid-eager", geometryMountGeneration) {
     if (allNodes.length === 0) return;
     const generation = ++mermaidRenderGeneration;
     mermaidLazyRenderQueue = Promise.resolve();
@@ -5583,8 +5658,9 @@
       eager: eagerNodes.length,
       lazy: lazyNodes.length
     });
-    installLazyMermaidObserver(lazyNodes, generation, mermaid);
+    installLazyMermaidObserver(lazyNodes, generation, mermaid, geometryMountGeneration);
     if (eagerNodes.length === 0) return;
+    const geometryTicket = virtualizationEnabled ? beginVirtualizedGeometryWork(geometrySource, geometryMountGeneration) : null;
     let eagerBudgetExpired = false;
     const watchdog = window.setTimeout(() => {
       eagerBudgetExpired = true;
@@ -5603,6 +5679,11 @@
       }
     } finally {
       window.clearTimeout(watchdog);
+      if (geometryTicket !== null && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(geometryTicket.documentEpoch) === true && (geometryMountGeneration === void 0 || geometryMountGeneration === virtualizedWindowMountGeneration)) {
+        mutateVirtualizedGeometry(geometryTicket);
+        scheduleVirtualizedMeasuredHeightAdoption();
+      }
+      endVirtualizedGeometryWork(geometryTicket);
     }
   }
   async function renderMermaid() {
@@ -5698,7 +5779,7 @@
     mermaidLazyObserver?.disconnect();
     mermaidLazyObserver = null;
   }
-  function installLazyMermaidObserver(nodes, generation, mermaid) {
+  function installLazyMermaidObserver(nodes, generation, mermaid, mountGeneration) {
     if (nodes.length === 0) return;
     postPerfMark("mm-mermaid-lazy-observe", {
       total: nodes.length,
@@ -5706,7 +5787,7 @@
     });
     if (typeof window.IntersectionObserver !== "function") {
       for (const node of nodes) {
-        enqueueLazyMermaidRender(node, generation, mermaid);
+        enqueueLazyMermaidRender(node, generation, mermaid, mountGeneration);
       }
       return;
     }
@@ -5715,7 +5796,7 @@
         if (!entry.isIntersecting) continue;
         const node = entry.target;
         mermaidLazyObserver?.unobserve(node);
-        enqueueLazyMermaidRender(node, generation, mermaid);
+        enqueueLazyMermaidRender(node, generation, mermaid, mountGeneration);
       }
     }, {
       root: null,
@@ -5726,25 +5807,32 @@
       mermaidLazyObserver.observe(node);
     }
   }
-  function enqueueLazyMermaidRender(node, generation, mermaid) {
-    if (generation !== mermaidRenderGeneration) return;
+  function enqueueLazyMermaidRender(node, generation, mermaid, mountGeneration) {
+    if (generation !== mermaidRenderGeneration || mountGeneration !== void 0 && mountGeneration !== virtualizedWindowMountGeneration) return;
     const marker = String(generation);
     if (node.dataset.mmMermaidRenderQueued === marker) return;
     node.dataset.mmMermaidRenderQueued = marker;
+    const geometryTicket = virtualizationEnabled ? beginVirtualizedGeometryWork("lazy-mermaid", mountGeneration) : null;
     mermaidLazyRenderQueue = mermaidLazyRenderQueue.catch(() => void 0).then(async () => {
-      if (generation !== mermaidRenderGeneration) return;
-      postPerfMark("mm-mermaid-lazy-render-start");
-      await renderMermaidNode(
-        node,
-        generation,
-        () => mermaidRenderGeneration,
-        mermaid,
-        MERMAID_PER_DIAGRAM_TIMEOUT_MS,
-        virtualizationEnabled ? { manageVirtualizedProxyLifecycle: true } : void 0
-      );
-      if (generation === mermaidRenderGeneration) {
-        postPerfMark("mm-mermaid-lazy-render-end");
-        scheduleCurrentProcessedDocumentCacheClone();
+      try {
+        if (generation !== mermaidRenderGeneration || mountGeneration !== void 0 && mountGeneration !== virtualizedWindowMountGeneration) return;
+        postPerfMark("mm-mermaid-lazy-render-start");
+        await renderMermaidNode(
+          node,
+          generation,
+          () => mermaidRenderGeneration,
+          mermaid,
+          MERMAID_PER_DIAGRAM_TIMEOUT_MS,
+          virtualizationEnabled ? { manageVirtualizedProxyLifecycle: true } : void 0
+        );
+        if (generation === mermaidRenderGeneration && (mountGeneration === void 0 || mountGeneration === virtualizedWindowMountGeneration)) {
+          postPerfMark("mm-mermaid-lazy-render-end");
+          scheduleCurrentProcessedDocumentCacheClone();
+          mutateVirtualizedGeometry(geometryTicket);
+          scheduleVirtualizedMeasuredHeightAdoption();
+        }
+      } finally {
+        endVirtualizedGeometryWork(geometryTicket);
       }
     });
   }
@@ -5952,6 +6040,42 @@
   var virtualizedMaintenanceCancellationBatchDepth = 0;
   var virtualizedMaintenanceRequestSerial = 0;
   var pendingInitialVirtualizedWindowWork = null;
+  function beginVirtualizedGeometryWork(source, mountGeneration = virtualizedWindowMountGeneration) {
+    const plane = scrollOwnershipControlPlane;
+    if (plane === null) {
+      return null;
+    }
+    return plane.beginGeometryWork(source, plane.captureDocumentEpoch(), mountGeneration);
+  }
+  function mutateVirtualizedGeometry(ticket) {
+    return ticket !== null && scrollOwnershipControlPlane?.geometryMutated(ticket) === true;
+  }
+  function endVirtualizedGeometryWork(ticket) {
+    return ticket !== null && scrollOwnershipControlPlane?.endGeometryWork(ticket) === true;
+  }
+  async function waitForCurrentVirtualizedGeometry(operation, afterEmission) {
+    const plane = scrollOwnershipControlPlane;
+    if (plane === null || !operation.isCurrent()) {
+      return { reason: "programmatic-supersession", status: "canceled" };
+    }
+    return plane.waitForGeometrySettled(operation.documentEpoch, afterEmission);
+  }
+  async function awaitConfirmedVirtualizedGeometry(operation, nominal) {
+    const plane = scrollOwnershipControlPlane;
+    if (plane === null || !operation.isCurrent()) {
+      return { reason: "programmatic-supersession", status: "canceled" };
+    }
+    const documentEpoch = operation.documentEpoch;
+    const afterEmission = nominal.emission;
+    const confirmation = await plane.waitForGeometrySettled(documentEpoch, afterEmission);
+    if (confirmation.status === "canceled") {
+      return confirmation;
+    }
+    if (confirmation.payload.geometryEpoch === nominal.payload.geometryEpoch && plane.holds(operation.lease, confirmation.payload.geometryEpoch)) {
+      return { confirmation, status: "confirmed" };
+    }
+    return { settlement: confirmation, status: "changed" };
+  }
   function consumePendingInitialVirtualizedWindow(operation) {
     const work = pendingInitialVirtualizedWindowWork;
     pendingInitialVirtualizedWindowWork = null;
@@ -6101,13 +6225,14 @@
   function isActiveVirtualizedMaintenanceRequest(request) {
     return isLiveVirtualizedMaintenanceRequest(request) && virtualizedMaintenanceByOwner.get(request.owner)?.active === request;
   }
-  function createVirtualizedMaintenanceRequest(owner, documentEpoch, work) {
+  function createVirtualizedMaintenanceRequest(owner, documentEpoch, work, onTerminal) {
     const requestSerial = ++virtualizedMaintenanceRequestSerial;
     return {
       binding: null,
       documentEpoch,
       executionCount: 0,
       owner,
+      onTerminal,
       phase: "pending",
       requestId: Object.freeze({ documentEpoch, requestSerial }),
       retryFrame: null,
@@ -6119,12 +6244,15 @@
   function postVirtualizedMaintenanceRequested(request) {
     postVirtualizedMaintenanceEvent("mm-virt-maintenance-requested", request);
   }
-  function coalesceVirtualizedMaintenanceRequest(request, work) {
+  function coalesceVirtualizedMaintenanceRequest(request, work, onTerminal) {
     if (!isLiveVirtualizedMaintenanceRequest(request)) {
       return;
     }
+    const replacedTerminal = request.onTerminal;
+    request.onTerminal = onTerminal;
     request.work = work;
     request.workRevision++;
+    replacedTerminal?.({ reason: "coalesced", status: "canceled" });
     postVirtualizedMaintenanceEvent("mm-virt-maintenance-coalesced", request);
   }
   function registerVirtualizedMaintenanceReleaseHold(request, binding) {
@@ -6195,6 +6323,8 @@
     const terminal = Object.freeze({ reason, status });
     request.terminal = terminal;
     request.phase = "terminal";
+    const onTerminal = request.onTerminal;
+    request.onTerminal = null;
     if (request.retryFrame !== null) {
       window.cancelAnimationFrame(request.retryFrame);
       request.retryFrame = null;
@@ -6215,6 +6345,7 @@
       reason,
       status
     });
+    onTerminal?.(terminal);
     if (releaseAction !== null) {
       if (releaseAction.afterWrite) {
         releaseVirtualizedScrollOperationAfterWrite(releaseAction.operation);
@@ -6349,7 +6480,7 @@
       ownsLease: binding.ownsLease
     });
   }
-  function scheduleVirtualizedMaintenance(owner, work) {
+  function scheduleVirtualizedMaintenance(owner, work, onTerminal = null) {
     const plane = scrollOwnershipControlPlane;
     if (plane === null) {
       return false;
@@ -6366,18 +6497,18 @@
     if (slot?.active !== null && slot?.active !== void 0) {
       if (slot.active.phase === "executing") {
         if (slot.successor !== null) {
-          coalesceVirtualizedMaintenanceRequest(slot.successor, work);
+          coalesceVirtualizedMaintenanceRequest(slot.successor, work, onTerminal);
           return true;
         }
-        const successor = createVirtualizedMaintenanceRequest(owner, documentEpoch, work);
+        const successor = createVirtualizedMaintenanceRequest(owner, documentEpoch, work, onTerminal);
         slot.successor = successor;
         postVirtualizedMaintenanceRequested(successor);
         return true;
       }
-      coalesceVirtualizedMaintenanceRequest(slot.active, work);
+      coalesceVirtualizedMaintenanceRequest(slot.active, work, onTerminal);
       return true;
     }
-    const request = createVirtualizedMaintenanceRequest(owner, documentEpoch, work);
+    const request = createVirtualizedMaintenanceRequest(owner, documentEpoch, work, onTerminal);
     if (slot === void 0) {
       slot = { active: request, successor: null };
       virtualizedMaintenanceByOwner.set(owner, slot);
@@ -6442,21 +6573,6 @@
     }
     const sectionIndex = model.sections.findIndex((candidate) => candidate.blockIndex === entry.blockIndex);
     return sectionIndex < 0 ? null : sectionIndex;
-  }
-  function forceRenderVirtualizedNavigationTarget(descriptor, operation) {
-    const controller = virtualizedDocumentWindowController;
-    if (controller === null) {
-      return false;
-    }
-    const sectionIndex = resolveVirtualizedNavigationTargetSectionIndex(descriptor);
-    if (sectionIndex === null) {
-      return false;
-    }
-    return controller.ensureSectionRendered(sectionIndex, {
-      force: true,
-      ...operation === void 0 ? {} : { operation },
-      preserveAnchor: false
-    });
   }
   function readVirtualizedProgrammaticNavigationTargetContext(descriptor) {
     const model = virtualizedDocumentWindowModel;
@@ -6544,7 +6660,7 @@
     return true;
   }
   function applyVirtualizedRenderedHeightAdoptionEffects(result, options = {}) {
-    if (result.updatedCount === 0) {
+    if (!hasMeasuredHeightGeometryDelta(result)) {
       return;
     }
     invalidateTopVisibleBlockIndexCache();
@@ -6569,20 +6685,32 @@
       updatedCount: result.updatedCount
     });
   }
+  function hasMeasuredHeightGeometryDelta(result) {
+    return result.maxAbsDelta > Number.EPSILON || Math.abs(result.totalDelta) > Number.EPSILON;
+  }
   function adoptVirtualizedProgrammaticNavigationRenderedHeights(context, operation) {
     const controller = virtualizedDocumentWindowController;
     if (!virtualizationEnabled || controller === null) {
-      return;
+      return false;
     }
-    const result = controller.adoptRenderedHeights({
-      operation,
-      preserveSectionIndex: context.sectionIndex,
-      reanchor: false
-    });
-    applyVirtualizedRenderedHeightAdoptionEffects(result, {
-      alignPostSettleTarget: false,
-      scheduleCalibration: false
-    });
+    const ticket = beginVirtualizedGeometryWork("measured-height-adoption");
+    try {
+      const result = controller.adoptRenderedHeights({
+        operation,
+        preserveSectionIndex: context.sectionIndex,
+        reanchor: false
+      });
+      if (hasMeasuredHeightGeometryDelta(result)) {
+        mutateVirtualizedGeometry(ticket);
+      }
+      applyVirtualizedRenderedHeightAdoptionEffects(result, {
+        alignPostSettleTarget: false,
+        scheduleCalibration: false
+      });
+      return hasMeasuredHeightGeometryDelta(result);
+    } finally {
+      endVirtualizedGeometryWork(ticket);
+    }
   }
   function releaseVirtualizedProgrammaticNavigationOperation(operation, clearPostSettleTarget = false) {
     virtualizedProgrammaticNavigationInProgress = false;
@@ -6591,14 +6719,6 @@
       virtualizedProgrammaticNavigationPostSettleTarget = null;
     }
     releaseVirtualizedScrollOperation(operation);
-    if (virtualizedMeasuredHeightAdoptionDeferredDuringNavigation) {
-      virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
-      scheduleVirtualizedMeasuredHeightAdoption();
-    }
-    if (virtualizedCalibrationDeferredDuringNavigation) {
-      virtualizedCalibrationDeferredDuringNavigation = false;
-      scheduleVirtualizedCalibration();
-    }
   }
   function finishVirtualizedProgrammaticNavigationCorrection(generation, operation, input) {
     if (generation !== virtualizedProgrammaticNavigationGeneration || !operation.isCurrent()) {
@@ -6612,93 +6732,155 @@
     });
     updateMinimapViewport({ skipVisibilityUpdate: true });
     postScroll();
-    window.requestAnimationFrame(() => {
-      if (generation === virtualizedProgrammaticNavigationGeneration && operation.isCurrent()) {
-        releaseVirtualizedProgrammaticNavigationOperation(operation);
-      }
-    });
+    releaseVirtualizedProgrammaticNavigationOperation(operation);
   }
-  function settleVirtualizedProgrammaticNavigationTarget(input, generation, operation, pass = 0, previousResidualAbs = Number.POSITIVE_INFINITY) {
-    if (generation !== virtualizedProgrammaticNavigationGeneration || !operation.isCurrent()) {
-      return;
-    }
-    const root = getDocumentScrollRoot();
-    const controller = virtualizedDocumentWindowController;
-    controller?.updateWindowForScroll({ force: true });
-    forceRenderVirtualizedNavigationTarget(input.descriptor);
-    let context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
-    if (context === null) {
-      releaseVirtualizedProgrammaticNavigationOperation(operation, true);
-      return;
-    }
-    adoptVirtualizedProgrammaticNavigationRenderedHeights(context, operation);
-    forceRenderVirtualizedNavigationTarget(input.descriptor);
-    context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
-    if (context === null) {
-      releaseVirtualizedProgrammaticNavigationOperation(operation, true);
-      return;
-    }
-    const residual = readVirtualizedProgrammaticNavigationResidual(context, input.viewportOffsetY);
-    if (residual === null) {
-      releaseVirtualizedProgrammaticNavigationOperation(operation, true);
-      return;
-    }
-    const residualAbs = Math.abs(residual);
-    if (residualAbs <= VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX || pass >= VIRTUALIZED_NAVIGATION_CORRECTION_MAX_PASSES || pass > 0 && residualAbs >= previousResidualAbs - VIRTUALIZED_NAVIGATION_CORRECTION_MIN_SHRINK_PX) {
-      finishVirtualizedProgrammaticNavigationCorrection(generation, operation, {
-        descriptor: input.descriptor,
-        passCount: pass,
-        residual
-      });
-      return;
-    }
-    writeVirtualizedProgrammaticNavigationScrollTop(
-      operation,
-      root.scrollTop + residual,
-      "navigation-residual"
-    );
-    const receipt = virtualizedWriteReceipts.get(operation.operationEpoch);
-    void (receipt?.result ?? Promise.resolve()).then(() => {
-      window.requestAnimationFrame(() => {
+  function scheduleVirtualizedProgrammaticNavigationFrame(input, generation, operation, settlement, pass, previousResidualAbs = Number.POSITIVE_INFINITY) {
+    return new Promise((resolve) => {
+      const attempt = () => {
         if (!operation.isCurrent() || generation !== virtualizedProgrammaticNavigationGeneration) {
+          resolve({ kind: "canceled" });
           return;
         }
-        scheduleVirtualizedProgrammaticNavigationCorrection(
-          input,
-          generation,
-          operation,
-          pass + 1,
-          residualAbs
-        );
-      });
+        const scheduled = operation.scheduleFrameTransaction(() => {
+          if (!operation.isCurrent() || generation !== virtualizedProgrammaticNavigationGeneration) {
+            resolve({ kind: "canceled" });
+            return;
+          }
+          const root = getDocumentScrollRoot();
+          let context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
+          if (context === null) {
+            resolve({ kind: "missing-target" });
+            return;
+          }
+          adoptVirtualizedProgrammaticNavigationRenderedHeights(context, operation);
+          context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
+          if (context === null) {
+            resolve({ kind: "missing-target" });
+            return;
+          }
+          const plane = scrollOwnershipControlPlane;
+          if (plane === null || !plane.holds(operation.lease, settlement.payload.geometryEpoch)) {
+            resolve({ kind: "geometry-changed" });
+            return;
+          }
+          const residual = readVirtualizedProgrammaticNavigationResidual(context, input.viewportOffsetY);
+          if (residual === null) {
+            resolve({ kind: "missing-target" });
+            return;
+          }
+          postPerfMark("mm-virt-residual-read", {
+            currentGeometryEpoch: plane.captureGeometryEpoch(),
+            descriptorKind: input.descriptor.kind,
+            eventGeometryEpoch: settlement.payload.geometryEpoch,
+            operationEpoch: operation.operationEpoch,
+            residual
+          });
+          const residualAbs = Math.abs(residual);
+          if (residualAbs <= VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
+            resolve({ kind: "nominal", residual });
+            return;
+          }
+          if (pass >= VIRTUALIZED_NAVIGATION_CORRECTION_MAX_PASSES || pass > 0 && residualAbs >= previousResidualAbs - VIRTUALIZED_NAVIGATION_CORRECTION_MIN_SHRINK_PX) {
+            resolve({ kind: "non-converged", residual });
+            return;
+          }
+          writeVirtualizedProgrammaticNavigationScrollTop(
+            operation,
+            root.scrollTop + residual,
+            "navigation-residual"
+          );
+          const receipt = virtualizedWriteReceipts.get(operation.operationEpoch);
+          if (receipt === void 0) {
+            resolve({ kind: "canceled" });
+            return;
+          }
+          resolve({ kind: "written", receipt, residual });
+        });
+        if (!scheduled) {
+          window.requestAnimationFrame(attempt);
+        }
+      };
+      attempt();
     });
   }
-  function scheduleVirtualizedProgrammaticNavigationCorrection(input, generation, operation, pass = 0, previousResidualAbs = Number.POSITIVE_INFINITY) {
-    if (!operation.isCurrent() || generation !== virtualizedProgrammaticNavigationGeneration) {
-      return;
-    }
-    const scheduled = operation.scheduleFrameTransaction(() => {
-      if (!operation.isCurrent() || generation !== virtualizedProgrammaticNavigationGeneration) {
-        return;
+  async function settleVirtualizedProgrammaticNavigationTarget(input, generation, operation) {
+    let afterEmission = 0;
+    let pass = 0;
+    let previousResidualAbs = Number.POSITIVE_INFINITY;
+    let settlement = null;
+    while (generation === virtualizedProgrammaticNavigationGeneration && operation.isCurrent()) {
+      if (settlement === null) {
+        const outcome = await waitForCurrentVirtualizedGeometry(operation, afterEmission);
+        if (outcome.status === "canceled") {
+          return;
+        }
+        settlement = outcome;
       }
-      settleVirtualizedProgrammaticNavigationTarget(
+      const frame = await scheduleVirtualizedProgrammaticNavigationFrame(
         input,
         generation,
         operation,
+        settlement,
         pass,
         previousResidualAbs
       );
-    });
-    if (!scheduled && operation.isCurrent() && generation === virtualizedProgrammaticNavigationGeneration) {
-      window.requestAnimationFrame(() => {
-        scheduleVirtualizedProgrammaticNavigationCorrection(
-          input,
-          generation,
-          operation,
-          pass,
-          previousResidualAbs
-        );
+      if (frame.kind === "canceled") {
+        return;
+      }
+      if (frame.kind === "missing-target") {
+        releaseVirtualizedProgrammaticNavigationOperation(operation, true);
+        return;
+      }
+      if (frame.kind === "geometry-changed") {
+        afterEmission = settlement.emission;
+        settlement = null;
+        continue;
+      }
+      if (frame.kind === "non-converged") {
+        postPerfMark("mm-virt-navigation-failed", {
+          descriptorKind: input.descriptor.kind,
+          geometryEpoch: settlement.payload.geometryEpoch,
+          passCount: pass,
+          reason: "residual-non-converged",
+          residual: frame.residual
+        });
+        releaseVirtualizedProgrammaticNavigationOperation(operation, true);
+        return;
+      }
+      if (frame.kind === "written") {
+        const write = await frame.receipt.result;
+        if (write.status !== "committed") {
+          return;
+        }
+        previousResidualAbs = Math.abs(frame.residual);
+        pass++;
+        afterEmission = settlement.emission;
+        settlement = null;
+        continue;
+      }
+      const confirmation = await awaitConfirmedVirtualizedGeometry(operation, settlement);
+      if (confirmation.status === "canceled") {
+        return;
+      }
+      if (confirmation.status === "changed") {
+        settlement = confirmation.settlement;
+        continue;
+      }
+      const plane = scrollOwnershipControlPlane;
+      if (!operation.isCurrent() || generation !== virtualizedProgrammaticNavigationGeneration) {
+        return;
+      }
+      if (plane?.holds(operation.lease, confirmation.confirmation.payload.geometryEpoch) !== true) {
+        afterEmission = confirmation.confirmation.emission;
+        settlement = null;
+        continue;
+      }
+      finishVirtualizedProgrammaticNavigationCorrection(generation, operation, {
+        descriptor: input.descriptor,
+        passCount: pass,
+        residual: frame.residual
       });
+      return;
     }
   }
   function landVirtualizedProgrammaticNavigation(input) {
@@ -6765,8 +6947,6 @@
     virtualizedProgrammaticNavigationGeneration++;
     virtualizedProgrammaticNavigationOperation = null;
     virtualizedProgrammaticNavigationPostSettleTarget = null;
-    virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
-    virtualizedCalibrationDeferredDuringNavigation = false;
   }
   function alignVirtualizedProgrammaticNavigationPostSettleTarget() {
     const target = virtualizedProgrammaticNavigationPostSettleTarget;
@@ -6787,8 +6967,6 @@
     virtualizedProgrammaticNavigationInProgress = true;
     virtualizedProgrammaticNavigationOperation = input.operation;
     virtualizedProgrammaticNavigationExternalShiftCount = 0;
-    virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
-    virtualizedCalibrationDeferredDuringNavigation = false;
     cancelVirtualizedCalibration();
     if (input.initialContext !== void 0) {
       applyVirtualizedProgrammaticNavigationContext(
@@ -6798,51 +6976,20 @@
         input.operation
       );
     }
-    const root = getDocumentScrollRoot();
-    let lastScrollTop = root.scrollTop;
-    let stableFrames = 0;
-    let frameCount = 0;
-    const finish = () => {
-      if (generation !== virtualizedProgrammaticNavigationGeneration || !input.operation.isCurrent()) {
-        return;
-      }
-      if (virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-        virtualizedProgrammaticNavigationInProgress = false;
-        return;
-      }
-      rememberVirtualizedProgrammaticNavigationPostSettleTarget(input);
-      scheduleVirtualizedProgrammaticNavigationCorrection(input, generation, input.operation);
-    };
-    const tick = () => {
-      if (generation !== virtualizedProgrammaticNavigationGeneration || !input.operation.isCurrent()) {
-        return;
-      }
-      const currentScrollTop = root.scrollTop;
-      if (Math.abs(currentScrollTop - lastScrollTop) <= VIRTUALIZED_NAVIGATION_SETTLE_TOLERANCE_PX) {
-        stableFrames++;
-      } else {
-        stableFrames = 0;
-        lastScrollTop = currentScrollTop;
-      }
-      frameCount++;
-      if (stableFrames >= VIRTUALIZED_NAVIGATION_SETTLE_STABLE_FRAMES || frameCount >= VIRTUALIZED_NAVIGATION_SETTLE_MAX_FRAMES) {
-        finish();
-        return;
-      }
-      window.requestAnimationFrame(tick);
-    };
-    window.requestAnimationFrame(tick);
+    rememberVirtualizedProgrammaticNavigationPostSettleTarget(input);
+    void settleVirtualizedProgrammaticNavigationTarget(input, generation, input.operation);
   }
   function cancelVirtualizedCalibration() {
-    if (virtualizedCalibrationHandle === null) {
-      return;
+    if (virtualizedCalibrationHandle !== null) {
+      if (virtualizedCalibrationHandle.kind === "idle") {
+        window.cancelIdleCallback?.(virtualizedCalibrationHandle.id);
+      } else {
+        window.clearTimeout(virtualizedCalibrationHandle.id);
+      }
+      virtualizedCalibrationHandle = null;
     }
-    if (virtualizedCalibrationHandle.kind === "idle") {
-      window.cancelIdleCallback?.(virtualizedCalibrationHandle.id);
-    } else {
-      window.clearTimeout(virtualizedCalibrationHandle.id);
-    }
-    virtualizedCalibrationHandle = null;
+    endVirtualizedGeometryWork(virtualizedCalibrationGeometryTicket);
+    virtualizedCalibrationGeometryTicket = null;
   }
   function resetVirtualizedDocumentWindow(resetCalibrator = true) {
     cancelVirtualizedCalibration();
@@ -6851,14 +6998,18 @@
     virtualizedDocumentWindowController?.dispose();
     virtualizedDocumentWindowController = null;
     virtualizedDocumentWindowModel = null;
+    endVirtualizedGeometryWork(virtualizedMeasuredHeightGeometryTicket);
+    virtualizedMeasuredHeightGeometryTicket = null;
+    finishVirtualizedMeasuredHeightTerminalSubscribers();
+    endVirtualizedGeometryWork(virtualizedWindowFontGeometryTicket);
+    virtualizedWindowFontGeometryTicket = null;
+    virtualizedWindowMountGeneration++;
     virtualizedMeasureFrameRequested = false;
     virtualizedProgrammaticNavigationInProgress = false;
     virtualizedProgrammaticNavigationGeneration++;
     virtualizedProgrammaticNavigationOperation = null;
     virtualizedProgrammaticNavigationExternalShiftCount = 0;
     virtualizedProgrammaticNavigationPostSettleTarget = null;
-    virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = false;
-    virtualizedCalibrationDeferredDuringNavigation = false;
     if (resetCalibrator) {
       virtualizedIntrinsicCalibrator.reset();
     }
@@ -6866,17 +7017,20 @@
   function refreshVirtualizedFindHighlights() {
     virtualizedFindProvider?.refreshVisibleHighlights();
   }
-  function prepareVirtualizedInsertedContent(root) {
+  function prepareVirtualizedInsertedContent(root, mountGeneration) {
     const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
     renderCodeBlocks(root);
+    disconnectMermaidLazyObserver();
+    mermaidRenderGeneration++;
     virtualizedWindowMathController?.cancel();
+    const mathGeometryTicket = root.querySelector(".math-inline, .math-display") === null ? null : beginVirtualizedGeometryWork("window-math", mountGeneration);
     const mathController = renderMath({
       katex: hostWindow.katex ?? void 0,
       documentRoot: root
     });
     virtualizedWindowMathController = mathController;
     const scheduleAfterRichContent = () => {
-      if (virtualizedWindowMathController !== mathController || mathController.isCancelled() || documentEpoch === void 0 || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
+      if (virtualizedWindowMathController !== mathController || mathController.isCancelled() || mountGeneration !== virtualizedWindowMountGeneration || documentEpoch === void 0 || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
         return;
       }
       invalidateSourceLineAnchors({
@@ -6886,7 +7040,15 @@
       scheduleVirtualizedMeasuredHeightAdoption();
     };
     mathController.initialVisibleReady.then(scheduleAfterRichContent, scheduleAfterRichContent);
-    mathController.allMathRendered.then(scheduleAfterRichContent, scheduleAfterRichContent);
+    const finishMathGeometry = () => {
+      scheduleAfterRichContent();
+      if (mathGeometryTicket !== null && virtualizedWindowMathController === mathController && !mathController.isCancelled() && mountGeneration === virtualizedWindowMountGeneration && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(mathGeometryTicket.documentEpoch) === true) {
+        mutateVirtualizedGeometry(mathGeometryTicket);
+        scheduleVirtualizedMeasuredHeightAdoption();
+      }
+      endVirtualizedGeometryWork(mathGeometryTicket);
+    };
+    mathController.allMathRendered.then(finishMathGeometry, finishMathGeometry);
     const mermaid = hostWindow.mermaid;
     if (!mermaid) {
       return;
@@ -6895,8 +7057,50 @@
     if (mermaidNodes.length === 0) {
       return;
     }
-    disconnectMermaidLazyObserver();
-    void renderMermaidNodes(mermaidNodes, mermaid, "mm-mermaid-virt-window").finally(scheduleAfterRichContent);
+    void renderMermaidNodes(
+      mermaidNodes,
+      mermaid,
+      "mm-mermaid-virt-window",
+      "window-mermaid",
+      mountGeneration
+    ).finally(scheduleAfterRichContent);
+  }
+  function scheduleVirtualizedWindowFontReadiness(mountGeneration) {
+    if (!virtualizationEnabled || mountGeneration !== virtualizedWindowMountGeneration) {
+      return;
+    }
+    endVirtualizedGeometryWork(virtualizedWindowFontGeometryTicket);
+    const ticket = beginVirtualizedGeometryWork("window-fonts", mountGeneration);
+    virtualizedWindowFontGeometryTicket = ticket;
+    const ready = document.fonts?.ready;
+    if (ready === void 0) {
+      endVirtualizedGeometryWork(ticket);
+      if (virtualizedWindowFontGeometryTicket === ticket) {
+        virtualizedWindowFontGeometryTicket = null;
+      }
+      return;
+    }
+    const finish = () => {
+      if (virtualizedWindowFontGeometryTicket !== ticket) {
+        endVirtualizedGeometryWork(ticket);
+        return;
+      }
+      if (ticket !== null && mountGeneration === virtualizedWindowMountGeneration && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(ticket.documentEpoch) === true) {
+        mutateVirtualizedGeometry(ticket);
+        scheduleVirtualizedMeasuredHeightAdoption(() => {
+          endVirtualizedGeometryWork(ticket);
+          if (virtualizedWindowFontGeometryTicket === ticket) {
+            virtualizedWindowFontGeometryTicket = null;
+          }
+        });
+        return;
+      }
+      endVirtualizedGeometryWork(ticket);
+      if (virtualizedWindowFontGeometryTicket === ticket) {
+        virtualizedWindowFontGeometryTicket = null;
+      }
+    };
+    void ready.then(finish, finish);
   }
   function initializeVirtualizedDocumentWindow() {
     if (!virtualizationEnabled) {
@@ -6922,11 +7126,31 @@
     virtualizedDocumentWindowModel = models.estimateOnlyModel;
     const documentEpoch = scrollOwnershipControlPlane.captureDocumentEpoch();
     virtualizedDocumentWindowController = createVirtualizedDocumentWindowController({
+      beginWindowGeometryWork: (mountGeneration) => {
+        const ticket = beginVirtualizedGeometryWork("window-render", mountGeneration);
+        return ticket === null ? null : {
+          end: () => {
+            endVirtualizedGeometryWork(ticket);
+          },
+          mutated: () => {
+            mutateVirtualizedGeometry(ticket);
+          }
+        };
+      },
       documentEpoch,
       isCurrentDocumentEpoch: (epoch) => scrollOwnershipControlPlane?.isCurrentDocumentEpoch(epoch) === true,
       main,
       model: virtualizedDocumentWindowModel,
       ownerWindow: window,
+      onRealizationReady: (mountGeneration) => {
+        if (mountGeneration === virtualizedWindowMountGeneration) {
+          scheduleVirtualizedMeasuredHeightAdoption();
+        }
+      },
+      onWindowMounted: (mountGeneration) => {
+        virtualizedWindowMountGeneration = mountGeneration;
+        scheduleVirtualizedWindowFontReadiness(mountGeneration);
+      },
       prepareInsertedContent: prepareVirtualizedInsertedContent,
       readMeasuredHeights: readLiveBlockOffsetMeasuredHeights,
       // The delegated contentvisibilityautostatechange listener is installed only
@@ -6941,7 +7165,7 @@
         if (!operation.isCurrent() || controller !== virtualizedDocumentWindowController) {
           return;
         }
-        controller.updateWindowForScroll({ operation });
+        controller.updateWindowForScroll();
         refreshVirtualizedFindHighlights();
         invalidateTopVisibleBlockIndexCache();
         scheduleVirtualizedMeasuredHeightAdoption();
@@ -6981,41 +7205,62 @@
       }
     });
   }
-  function scheduleVirtualizedMeasuredHeightAdoption() {
+  function finishVirtualizedMeasuredHeightTerminalSubscribers() {
+    const subscribers = [...virtualizedMeasuredHeightTerminalSubscribers];
+    virtualizedMeasuredHeightTerminalSubscribers.clear();
+    for (const subscriber of subscribers) {
+      subscriber();
+    }
+  }
+  function scheduleVirtualizedMeasuredHeightAdoption(onTerminal) {
     if (!virtualizationEnabled || virtualizedDocumentWindowController === null) {
+      onTerminal?.();
       return;
     }
-    if (isVirtualizedProgrammaticNavigationInProgress()) {
-      virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = true;
-      return;
+    if (onTerminal !== void 0) {
+      virtualizedMeasuredHeightTerminalSubscribers.add(onTerminal);
     }
     if (virtualizedMeasureFrameRequested) {
       return;
     }
     virtualizedMeasureFrameRequested = true;
     const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+    endVirtualizedGeometryWork(virtualizedMeasuredHeightGeometryTicket);
+    const ticket = beginVirtualizedGeometryWork("measured-height-adoption");
+    virtualizedMeasuredHeightGeometryTicket = ticket;
     window.requestAnimationFrame(() => {
       virtualizedMeasureFrameRequested = false;
       if (documentEpoch === void 0 || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
+        endVirtualizedGeometryWork(ticket);
+        if (virtualizedMeasuredHeightGeometryTicket === ticket) {
+          virtualizedMeasuredHeightGeometryTicket = null;
+        }
+        finishVirtualizedMeasuredHeightTerminalSubscribers();
         return;
       }
-      adoptVirtualizedRenderedHeights();
+      adoptVirtualizedRenderedHeights(ticket);
     });
   }
-  function adoptVirtualizedRenderedHeights() {
+  function adoptVirtualizedRenderedHeights(ticket) {
     if (!virtualizationEnabled || virtualizedDocumentWindowController === null) {
-      return;
-    }
-    if (isVirtualizedProgrammaticNavigationInProgress()) {
-      virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = true;
+      endVirtualizedGeometryWork(ticket);
+      if (virtualizedMeasuredHeightGeometryTicket === ticket) {
+        virtualizedMeasuredHeightGeometryTicket = null;
+      }
+      finishVirtualizedMeasuredHeightTerminalSubscribers();
       return;
     }
     const controller = virtualizedDocumentWindowController;
-    scheduleVirtualizedMaintenance("measured-height-adoption", (operation) => {
-      if (isVirtualizedProgrammaticNavigationInProgress()) {
-        virtualizedMeasuredHeightAdoptionDeferredDuringNavigation = true;
-        return;
+    const closeTicket = (terminal) => {
+      endVirtualizedGeometryWork(ticket);
+      if (virtualizedMeasuredHeightGeometryTicket === ticket) {
+        virtualizedMeasuredHeightGeometryTicket = null;
       }
+      if (terminal?.reason !== "coalesced") {
+        finishVirtualizedMeasuredHeightTerminalSubscribers();
+      }
+    };
+    const scheduled = scheduleVirtualizedMaintenance("measured-height-adoption", (operation) => {
       if (controller !== virtualizedDocumentWindowController) {
         return;
       }
@@ -7028,6 +7273,9 @@
           ...postSettleTarget === null ? {} : { reanchor: false }
         }
       );
+      if (hasMeasuredHeightGeometryDelta(result)) {
+        mutateVirtualizedGeometry(ticket);
+      }
       applyVirtualizedRenderedHeightAdoptionEffects(result, {
         alignPostSettleTarget: postSettleTarget === null
       });
@@ -7037,49 +7285,45 @@
           operation
         });
       }
-    });
+    }, closeTicket);
+    if (!scheduled) {
+      closeTicket();
+    }
   }
   function scheduleVirtualizedCalibration() {
     if (!virtualizationEnabled || virtualizedDocumentWindowModel === null) {
       return;
     }
-    if (isVirtualizedProgrammaticNavigationInProgress()) {
-      virtualizedCalibrationDeferredDuringNavigation = true;
-      return;
-    }
-    if (virtualizedCalibrationHandle !== null) {
+    if (virtualizedCalibrationGeometryTicket !== null) {
       return;
     }
     const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
-    const run = () => {
-      virtualizedCalibrationHandle = null;
-      if (documentEpoch === void 0 || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
-        return;
-      }
-      runVirtualizedCalibration(documentEpoch);
-    };
-    const requestIdle = window.requestIdleCallback;
-    if (requestIdle) {
-      virtualizedCalibrationHandle = { kind: "idle", id: requestIdle(run, { timeout: 1500 }) };
+    const ticket = beginVirtualizedGeometryWork("calibration");
+    virtualizedCalibrationGeometryTicket = ticket;
+    if (documentEpoch === void 0 || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
+      endVirtualizedGeometryWork(ticket);
+      virtualizedCalibrationGeometryTicket = null;
       return;
     }
-    virtualizedCalibrationHandle = { kind: "timeout", id: window.setTimeout(run, 250) };
+    runVirtualizedCalibration(documentEpoch, ticket);
   }
-  function runVirtualizedCalibration(documentEpoch) {
+  function runVirtualizedCalibration(documentEpoch, ticket) {
     const model = virtualizedDocumentWindowModel;
     const controller = virtualizedDocumentWindowController;
     if (!virtualizationEnabled || model === null || controller === null) {
-      return;
-    }
-    if (isVirtualizedProgrammaticNavigationInProgress()) {
-      virtualizedCalibrationDeferredDuringNavigation = true;
-      return;
-    }
-    scheduleVirtualizedMaintenance("calibration", (operation) => {
-      if (isVirtualizedProgrammaticNavigationInProgress()) {
-        virtualizedCalibrationDeferredDuringNavigation = true;
-        return;
+      endVirtualizedGeometryWork(ticket);
+      if (virtualizedCalibrationGeometryTicket === ticket) {
+        virtualizedCalibrationGeometryTicket = null;
       }
+      return;
+    }
+    const closeTicket = () => {
+      endVirtualizedGeometryWork(ticket);
+      if (virtualizedCalibrationGeometryTicket === ticket) {
+        virtualizedCalibrationGeometryTicket = null;
+      }
+    };
+    const scheduled = scheduleVirtualizedMaintenance("calibration", (operation) => {
       if (!operation.isCurrent() || operation.documentEpoch !== documentEpoch || model !== virtualizedDocumentWindowModel || controller !== virtualizedDocumentWindowController) {
         return;
       }
@@ -7091,9 +7335,10 @@
         return;
       }
       const result = model.updateEstimatedHeightsFromCalibration(virtualizedIntrinsicCalibrator);
-      if (result.updatedCount === 0) {
+      if (!hasMeasuredHeightGeometryDelta(result)) {
         return;
       }
+      mutateVirtualizedGeometry(ticket);
       const target = preserveSectionIndex !== null ? model.sectionTop(preserveSectionIndex) : scrollTopForReadingAnchor(model, anchor) ?? 0;
       controller.updateWindowForScroll({ desiredScrollTop: target, force: true });
       if (postSettleTarget === null) {
@@ -7112,7 +7357,10 @@
         totalDelta: result.totalDelta,
         updatedCount: result.updatedCount
       });
-    });
+    }, closeTicket);
+    if (!scheduled) {
+      closeTicket();
+    }
   }
   function postScroll() {
     const scrollState = getScrollState();
@@ -7343,7 +7591,7 @@
     });
     postPerfMark("mm-layout-ready", { cached: true });
     flushPostLayoutReadyWork();
-    if (cachedLayoutState !== null) {
+    if (!virtualizationEnabled && cachedLayoutState !== null) {
       queueCachedGeometryRefresh(
         cachedLayoutState.readingAnchor ?? null,
         cachedLayoutState.topBlockIndex
@@ -7419,7 +7667,19 @@
     const documentEpoch = operation.documentEpoch;
     cachedScrollRestoreCompletion = new Promise((resolve) => {
       let completed = false;
-      const finish = (status, reason) => {
+      const semanticAnchorReadyReason = "semantic-anchor-agreed";
+      const publishCachedRestoreReady = (reason, geometryStatus) => {
+        const liveGeometry = getScrollState();
+        postPerfMark("mm-virt-cache-restore-ready-terminal", {
+          documentEpoch,
+          geometryStatus,
+          reason,
+          scrollHeight: liveGeometry.scrollHeight,
+          scrollTop: liveGeometry.scrollTop,
+          topBlockIndex: findTopVisibleBlockIndex()
+        });
+      };
+      const finish = (status, reason, geometryStatus = status === "committed" ? "settled" : status) => {
         if (completed) {
           return;
         }
@@ -7430,55 +7690,208 @@
         if (operation.isCurrent()) {
           releaseVirtualizedScrollOperation(operation);
         }
+        const plane = scrollOwnershipControlPlane;
+        if (plane?.isCurrentDocumentEpoch(documentEpoch) === true) {
+          publishCachedRestoreReady(reason, geometryStatus);
+        }
         postPerfMark("mm-virt-cache-restore-terminal", {
           documentEpoch,
+          geometryStatus,
           reason,
           status
         });
         resolve();
       };
       finishCachedScrollRestore = finish;
-      const scheduled = operation.scheduleFrameTransaction(() => {
-        if (!operation.isCurrent()) {
-          finish("canceled", "stale-operation");
-          return;
-        }
-        try {
+      const scheduleFrameWork = (work) => new Promise((completedWork) => {
+        const attempt = () => {
+          const plane = scrollOwnershipControlPlane;
+          if (plane === null || !plane.isCurrentDocumentEpoch(documentEpoch)) {
+            finish("canceled", "stale-document");
+            completedWork(false);
+            return;
+          }
+          if (!operation.isCurrent()) {
+            finish("canceled", "user-supersession", "canceled");
+            completedWork(false);
+            return;
+          }
+          const scheduled = operation.scheduleFrameTransaction(() => {
+            if (!operation.isCurrent() || !plane.isCurrentDocumentEpoch(documentEpoch)) {
+              finish("canceled", "stale-document");
+              completedWork(false);
+              return;
+            }
+            try {
+              work();
+              completedWork(true);
+            } catch {
+              finish("failed", "frame-work-failed", "failed");
+              completedWork(false);
+            }
+          });
+          if (!scheduled) {
+            window.requestAnimationFrame(attempt);
+          }
+        };
+        attempt();
+      });
+      const scheduleWrite = (target, writer) => new Promise((completedWrite) => {
+        const attempt = () => {
+          const plane = scrollOwnershipControlPlane;
+          if (plane === null || !plane.isCurrentDocumentEpoch(documentEpoch)) {
+            finish("canceled", "stale-document");
+            completedWrite(null);
+            return;
+          }
+          if (!operation.isCurrent()) {
+            finish("canceled", "user-supersession", "canceled");
+            completedWrite(null);
+            return;
+          }
+          const scheduled = operation.scheduleFrameTransaction(() => {
+            if (!operation.isCurrent() || !plane.isCurrentDocumentEpoch(documentEpoch)) {
+              finish("canceled", "stale-document");
+              completedWrite(null);
+              return;
+            }
+            try {
+              operation.requestScrollTop(target, writer);
+            } catch {
+              finish("failed", "frame-work-failed", "failed");
+              completedWrite(null);
+              return;
+            }
+            completedWrite(virtualizedWriteReceipts.get(operation.operationEpoch) ?? null);
+          });
+          if (!scheduled) {
+            window.requestAnimationFrame(attempt);
+          }
+        };
+        attempt();
+      });
+      void (async () => {
+        const anchor = layoutState.readingAnchor ?? null;
+        let model = virtualizedDocumentWindowModel;
+        let controller = virtualizedDocumentWindowController;
+        let entry = anchor === null ? void 0 : model?.getEntryByBlockIndex(anchor.blockIndex);
+        let target = model !== null && controller !== null && entry !== void 0 ? scrollTopForReadingAnchor(model, anchor) : null;
+        const prepared = await scheduleFrameWork(() => {
           consumePendingInitialVirtualizedWindow(operation);
-          const model = virtualizedDocumentWindowModel;
-          const controller = virtualizedDocumentWindowController;
-          const anchor = layoutState.readingAnchor ?? null;
-          const entry = anchor === null ? void 0 : model?.getEntryByBlockIndex(anchor.blockIndex);
-          if (model !== null && controller !== null && entry !== void 0) {
-            controller.ensureSectionRendered(entry.sectionIndex, {
+          if (target !== null && entry !== void 0) {
+            controller?.ensureSectionRendered(entry.sectionIndex, {
               force: true,
+              operation,
               preserveAnchor: false
             });
           }
-          const target = model === null ? 0 : scrollTopForReadingAnchor(model, anchor) ?? 0;
-          operation.requestScrollTop(target, entry === void 0 ? "cache-anchor-missing" : "cache-restore");
-        } catch {
-          finish("failed", "frame-work-failed");
-          return;
-        }
-        const receipt = virtualizedWriteReceipts.get(operation.operationEpoch);
-        if (receipt === void 0) {
-          finish("failed", "missing-write-receipt");
-          return;
-        }
-        void receipt.result.then((outcome) => {
-          if (outcome.status === "committed") {
-            finish("committed", "write-committed");
-          } else {
-            finish("failed", outcome.reason);
-          }
-        }).catch(() => {
-          finish("failed", "write-result-failed");
         });
+        if (!prepared || completed) {
+          return;
+        }
+        const firstSettlement = await waitForCurrentVirtualizedGeometry(operation, 0);
+        if (firstSettlement.status === "canceled") {
+          const plane = scrollOwnershipControlPlane;
+          if (firstSettlement.reason === "stale-document" || plane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
+            finish("canceled", "stale-document");
+          } else if (firstSettlement.reason === "non-converged") {
+            finish("failed", "non-converged", "non-converged");
+          } else {
+            finish("canceled", "user-supersession", "canceled");
+          }
+          return;
+        }
+        model = virtualizedDocumentWindowModel;
+        controller = virtualizedDocumentWindowController;
+        entry = anchor === null ? void 0 : model?.getEntryByBlockIndex(anchor.blockIndex);
+        target = model !== null && controller !== null && entry !== void 0 ? scrollTopForReadingAnchor(model, anchor) : null;
+        const coldTop = target === null;
+        const initialReceipt = await scheduleWrite(
+          target ?? 0,
+          coldTop ? "cache-cold-top" : "cache-restore"
+        );
+        if (initialReceipt === null || completed) {
+          return;
+        }
+        const initialWrite = await initialReceipt.result;
+        if (initialWrite.status !== "committed") {
+          finish("failed", initialWrite.reason, "failed");
+          return;
+        }
+        let afterEmission = firstSettlement.emission;
+        let settlement = null;
+        while (!completed) {
+          const plane = scrollOwnershipControlPlane;
+          if (plane === null || !plane.isCurrentDocumentEpoch(documentEpoch)) {
+            finish("canceled", "stale-document");
+            return;
+          }
+          if (!operation.isCurrent()) {
+            finish("canceled", "user-supersession", "canceled");
+            return;
+          }
+          if (settlement === null) {
+            const outcome = await waitForCurrentVirtualizedGeometry(operation, afterEmission);
+            if (outcome.status === "canceled") {
+              if (outcome.reason === "stale-document" || !plane.isCurrentDocumentEpoch(documentEpoch)) {
+                finish("canceled", "stale-document");
+              } else if (outcome.reason === "non-converged") {
+                finish("failed", "non-converged", "non-converged");
+              } else {
+                finish("canceled", "user-supersession", "canceled");
+              }
+              return;
+            }
+            settlement = outcome;
+          }
+          model = virtualizedDocumentWindowModel;
+          controller = virtualizedDocumentWindowController;
+          entry = anchor === null ? void 0 : model?.getEntryByBlockIndex(anchor.blockIndex);
+          target = model !== null && controller !== null && entry !== void 0 ? scrollTopForReadingAnchor(model, anchor) : null;
+          const expectedTarget = target ?? 0;
+          if (Math.abs(getDocumentScrollRoot().scrollTop - expectedTarget) > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
+            const correctionReceipt = await scheduleWrite(
+              expectedTarget,
+              target === null ? "cache-cold-top" : "cache-restore-correction"
+            );
+            if (correctionReceipt === null || completed) {
+              return;
+            }
+            const correction = await correctionReceipt.result;
+            if (correction.status !== "committed") {
+              finish("failed", correction.reason, "failed");
+              return;
+            }
+            afterEmission = settlement.emission;
+            settlement = null;
+            continue;
+          }
+          const confirmation = await awaitConfirmedVirtualizedGeometry(operation, settlement);
+          if (confirmation.status === "canceled") {
+            if (confirmation.reason === "stale-document" || !plane.isCurrentDocumentEpoch(documentEpoch)) {
+              finish("canceled", "stale-document");
+            } else if (confirmation.reason === "non-converged") {
+              finish("failed", "non-converged", "non-converged");
+            } else {
+              finish("canceled", "user-supersession", "canceled");
+            }
+            return;
+          }
+          if (confirmation.status === "changed") {
+            settlement = confirmation.settlement;
+            continue;
+          }
+          if (!plane.holds(operation.lease, confirmation.confirmation.payload.geometryEpoch)) {
+            afterEmission = confirmation.confirmation.emission;
+            settlement = null;
+            continue;
+          }
+          finish("committed", target === null ? "cold-top-agreed" : semanticAnchorReadyReason, "settled");
+          return;
+        }
+      })().catch(() => {
+        finish("failed", "restore-pipeline-failed", "failed");
       });
-      if (!scheduled) {
-        finish("canceled", "frame-transaction-rejected");
-      }
     });
   }
   function scheduleLayoutReady(skipFrameWait = false) {
@@ -8650,29 +9063,24 @@
       if (firstTarget !== null) {
         if (!virtualizationEnabled) {
           window.scrollTo({ top: firstTarget, behavior: "instant" });
-        } else {
-          requestMinimapScrollTarget(firstTarget, "minimap-click");
-        }
-        let attempts = 0;
-        const refine = () => {
-          const operation = minimapScrollOperation;
-          if (++attempts > 3 || virtualizationEnabled && operation?.isCurrent() !== true) {
-            finishMinimapScrollOperation();
-            return;
-          }
-          const next = docScrollTopForCloneY(root, cloneYTarget);
-          if (next !== null && Math.abs(next - root.scrollTop) > 2) {
-            if (virtualizationEnabled) {
-              requestMinimapScrollTarget(next, "minimap-refine");
-            } else {
-              window.scrollTo({ top: next, behavior: "instant" });
+          let attempts = 0;
+          const refine = () => {
+            if (++attempts > 3) {
+              return;
             }
-            window.requestAnimationFrame(refine);
-            return;
+            const next = docScrollTopForCloneY(root, cloneYTarget);
+            if (next !== null && Math.abs(next - root.scrollTop) > 2) {
+              window.scrollTo({ top: next, behavior: "instant" });
+              window.requestAnimationFrame(refine);
+            }
+          };
+          window.requestAnimationFrame(refine);
+        } else if (requestMinimapScrollTarget(firstTarget, "minimap-click")) {
+          const operation = minimapScrollOperation;
+          if (operation !== null) {
+            void settleMinimapScrollOperation(operation, () => docScrollTopForCloneY(root, cloneYTarget));
           }
-          finishMinimapScrollOperation();
-        };
-        window.requestAnimationFrame(refine);
+        }
         return;
       }
     }
@@ -8681,8 +9089,12 @@
     const targetScrollTop = Math.min(minimapY, thumbTravel) / thumbTravel * maxScrollTop;
     const clamped = Math.max(0, Math.min(maxScrollTop, targetScrollTop));
     if (virtualizationEnabled) {
-      requestMinimapScrollTarget(clamped, "minimap-click-fallback");
-      finishMinimapScrollOperation();
+      if (requestMinimapScrollTarget(clamped, "minimap-click-fallback")) {
+        const operation = minimapScrollOperation;
+        if (operation !== null) {
+          void settleMinimapScrollOperation(operation);
+        }
+      }
     } else {
       window.scrollTo({ top: clamped, behavior: "instant" });
     }
@@ -8708,9 +9120,52 @@
     operation.scheduleFrameTransaction(() => void 0);
     return true;
   }
-  function finishMinimapScrollOperation() {
-    const operation = minimapScrollOperation;
-    minimapScrollOperation = null;
+  async function settleMinimapScrollOperation(operation, readRefinedTarget) {
+    let afterEmission = 0;
+    let settlement = null;
+    while (operation.isCurrent() && minimapScrollOperation === operation) {
+      if (settlement === null) {
+        const outcome = await waitForCurrentVirtualizedGeometry(operation, afterEmission);
+        if (outcome.status === "canceled") {
+          return;
+        }
+        settlement = outcome;
+      }
+      const refinedTarget = readRefinedTarget?.() ?? null;
+      if (refinedTarget !== null && Number.isFinite(refinedTarget) && Math.abs(refinedTarget - getDocumentScrollRoot().scrollTop) > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
+        if (!requestMinimapScrollTarget(refinedTarget, "minimap-refine")) {
+          return;
+        }
+        const receipt = virtualizedWriteReceipts.get(operation.operationEpoch);
+        if (receipt === void 0 || (await receipt.result).status !== "committed") {
+          return;
+        }
+        afterEmission = settlement.emission;
+        settlement = null;
+        continue;
+      }
+      const confirmation = await awaitConfirmedVirtualizedGeometry(operation, settlement);
+      if (confirmation.status === "canceled") {
+        return;
+      }
+      if (confirmation.status === "changed") {
+        settlement = confirmation.settlement;
+        continue;
+      }
+      const plane = scrollOwnershipControlPlane;
+      if (plane?.holds(operation.lease, confirmation.confirmation.payload.geometryEpoch) !== true) {
+        afterEmission = confirmation.confirmation.emission;
+        settlement = null;
+        continue;
+      }
+      finishMinimapScrollOperation(operation);
+      return;
+    }
+  }
+  function finishMinimapScrollOperation(operation = minimapScrollOperation) {
+    if (minimapScrollOperation === operation) {
+      minimapScrollOperation = null;
+    }
     if (operation !== null) {
       releaseVirtualizedScrollOperationAfterWrite(operation);
     }
@@ -8786,7 +9241,10 @@
     if (wasTap) {
       scrollFromMinimapClientY(event.clientY);
     } else {
-      finishMinimapScrollOperation();
+      const operation = minimapScrollOperation;
+      if (operation !== null) {
+        void settleMinimapScrollOperation(operation);
+      }
     }
   }
   function queueMinimapViewportUpdate(perfMarkName) {
@@ -9960,6 +10418,32 @@
       columnNumber: e.columnNumber ?? 0
     });
   });
+  function runLegacyResizeObserverWork(documentEpoch) {
+    if (widthHandleDragging) {
+      return;
+    }
+    queueMinimapRefreshAfterLayoutSettles();
+    scheduleResizeReactions(documentEpoch);
+    invalidateSourceLineAnchors({
+      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
+    });
+    scheduleVirtualizedMeasuredHeightAdoption();
+    window.requestAnimationFrame(() => {
+      if (documentEpoch === void 0 || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) === true) {
+        postScroll();
+      }
+    });
+  }
+  function runLegacyDocumentFontsReadyWork(documentEpoch) {
+    if (documentEpoch !== void 0 && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
+      return;
+    }
+    queueMinimapRefreshAfterLayoutSettles();
+    invalidateSourceLineAnchors({
+      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
+    });
+    scheduleVirtualizedMeasuredHeightAdoption();
+  }
   document.addEventListener("DOMContentLoaded", () => {
     emitMark("mm-doc-loaded");
     postPerfMark("mm-doc-loaded");
@@ -9987,34 +10471,34 @@
     if (documentElement) {
       const resizeObserver = new ResizeObserver(() => {
         const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
-        if (widthHandleDragging) {
+        if (!virtualizationEnabled) {
+          runLegacyResizeObserverWork(documentEpoch);
           return;
         }
-        queueMinimapRefreshAfterLayoutSettles();
-        scheduleResizeReactions(documentEpoch);
-        invalidateSourceLineAnchors({
-          reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
-        });
-        scheduleVirtualizedMeasuredHeightAdoption();
-        window.requestAnimationFrame(() => {
-          if (documentEpoch === void 0 || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) === true) {
-            postScroll();
-          }
-        });
+        const ticket = beginVirtualizedGeometryWork("resize-observer");
+        mutateVirtualizedGeometry(ticket);
+        try {
+          runLegacyResizeObserverWork(documentEpoch);
+        } finally {
+          endVirtualizedGeometryWork(ticket);
+        }
       });
       resizeObserver.observe(documentElement);
       resizeObserver.observe(document.body);
     }
     const fontsDocumentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
     document.fonts?.ready.then(() => {
-      if (fontsDocumentEpoch !== void 0 && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(fontsDocumentEpoch) !== true) {
+      if (!virtualizationEnabled) {
+        runLegacyDocumentFontsReadyWork(fontsDocumentEpoch);
         return;
       }
-      queueMinimapRefreshAfterLayoutSettles();
-      invalidateSourceLineAnchors({
-        reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
-      });
-      scheduleVirtualizedMeasuredHeightAdoption();
+      const ticket = beginVirtualizedGeometryWork("document-fonts-ready");
+      mutateVirtualizedGeometry(ticket);
+      try {
+        runLegacyDocumentFontsReadyWork(fontsDocumentEpoch);
+      } finally {
+        endVirtualizedGeometryWork(ticket);
+      }
     }).catch(() => void 0);
   });
   var queuePostScroll = createScrollCoalescer({

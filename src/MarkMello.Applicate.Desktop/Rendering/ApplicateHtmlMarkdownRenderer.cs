@@ -4,6 +4,7 @@ using System.Text.Encodings.Web;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Math;
 using MarkMello.Domain;
+using SkiaSharp;
 
 namespace MarkMello.Applicate.Desktop.Rendering;
 
@@ -13,6 +14,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
 
     private readonly ApplicateMarkdownDocumentRenderer _markdownRenderer;
     private readonly ApplicateWebAssetEmbedder? _assetEmbedder;
+    private readonly bool _virtualizationEnabled;
 
     public ApplicateHtmlMarkdownRenderer()
         : this(new ApplicateMarkdownDocumentRenderer(PreserveTexForKatex), assetEmbedder: null)
@@ -26,10 +28,12 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
 
     internal ApplicateHtmlMarkdownRenderer(
         ApplicateMarkdownDocumentRenderer markdownRenderer,
-        ApplicateWebAssetEmbedder? assetEmbedder = null)
+        ApplicateWebAssetEmbedder? assetEmbedder = null,
+        bool? virtualizationEnabled = null)
     {
         _markdownRenderer = markdownRenderer;
         _assetEmbedder = assetEmbedder;
+        _virtualizationEnabled = virtualizationEnabled ?? ApplicateVirtualizationMode.IsEnabled;
     }
 
     private static string PreserveTexForKatex(string tex)
@@ -102,7 +106,8 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             imageSourceResolver,
             baseDirectory,
             cancellationToken,
-            source.Content.Split('\n'));
+            source.Content.Split('\n'),
+            _virtualizationEnabled);
 
         foreach (var block in rendered.Blocks)
         {
@@ -342,15 +347,24 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         string kind,
         MarkdownSourceSpan? sourceSpan)
     {
-        var src = await TryResolveImageDataUriAsync(context, url).ConfigureAwait(false);
-        if (src is null)
+        var resolved = await TryResolveImageDataUriAsync(context, url).ConfigureAwait(false);
+        if (resolved is null)
         {
             RenderImagePlaceholder(context, altText, blockIndex, kind, sourceSpan);
             return;
         }
 
-        context.Html.Append("<figure").Append(BlockDataAttributes(blockIndex, kind, sourceSpan)).Append("><img src=\"").Append(HtmlAttribute(src)).Append('"');
-        AppendImageAttributes(context.Html, altText, title, width, height);
+        var reservedWidth = width;
+        var reservedHeight = height;
+        if (context.VirtualizationEnabled
+            && !TryResolveReservedImageSize(resolved.Bytes, width, height, out reservedWidth, out reservedHeight))
+        {
+            RenderImagePlaceholder(context, altText, blockIndex, kind, sourceSpan);
+            return;
+        }
+
+        context.Html.Append("<figure").Append(BlockDataAttributes(blockIndex, kind, sourceSpan)).Append("><img src=\"").Append(HtmlAttribute(resolved.DataUri)).Append('"');
+        AppendImageAttributes(context.Html, altText, title, reservedWidth, reservedHeight);
         context.Html.Append('>');
         if (!string.IsNullOrWhiteSpace(altText))
         {
@@ -421,8 +435,8 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
 
     private static async Task RenderImageInlineAsync(RenderContext context, MarkdownImageInline image)
     {
-        var src = await TryResolveImageDataUriAsync(context, image.Url).ConfigureAwait(false);
-        if (src is null)
+        var resolved = await TryResolveImageDataUriAsync(context, image.Url).ConfigureAwait(false);
+        if (resolved is null)
         {
             context.Html.Append("<span class=\"image-placeholder\">")
                 .Append(HtmlText(image.AltText ?? "image"))
@@ -430,8 +444,19 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             return;
         }
 
-        context.Html.Append("<img src=\"").Append(HtmlAttribute(src)).Append('"');
-        AppendImageAttributes(context.Html, image.AltText, image.Title, width: null, height: null);
+        double? reservedWidth = null;
+        double? reservedHeight = null;
+        if (context.VirtualizationEnabled
+            && !TryResolveReservedImageSize(resolved.Bytes, width: null, height: null, out reservedWidth, out reservedHeight))
+        {
+            context.Html.Append("<span class=\"image-placeholder\">")
+                .Append(HtmlText(image.AltText ?? "image"))
+                .Append("</span>");
+            return;
+        }
+
+        context.Html.Append("<img src=\"").Append(HtmlAttribute(resolved.DataUri)).Append('"');
+        AppendImageAttributes(context.Html, image.AltText, image.Title, reservedWidth, reservedHeight);
         context.Html.Append('>');
     }
 
@@ -453,7 +478,7 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         context.Html.Append("</a>");
     }
 
-    private static async Task<string?> TryResolveImageDataUriAsync(RenderContext context, string url)
+    private static async Task<ResolvedImage?> TryResolveImageDataUriAsync(RenderContext context, string url)
     {
         if (context.ImageSourceResolver is null)
         {
@@ -475,9 +500,67 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             return null;
         }
 
+        var bytes = memory.ToArray();
         var mime = GetImageMimeType(url);
-        return $"data:{mime};base64,{Convert.ToBase64String(memory.ToArray())}";
+        return new ResolvedImage($"data:{mime};base64,{Convert.ToBase64String(bytes)}", bytes);
     }
+
+    private static bool TryResolveReservedImageSize(
+        byte[] bytes,
+        double? width,
+        double? height,
+        out double? reservedWidth,
+        out double? reservedHeight)
+    {
+        reservedWidth = IsUsableImageDimension(width) ? width : null;
+        reservedHeight = IsUsableImageDimension(height) ? height : null;
+        if (reservedWidth is not null && reservedHeight is not null)
+        {
+            return true;
+        }
+
+        var intrinsic = ReadIntrinsicImageSize(bytes);
+        if (intrinsic is null)
+        {
+            return false;
+        }
+
+        var ratio = intrinsic.Value.Width / intrinsic.Value.Height;
+        if (reservedWidth is not null)
+        {
+            reservedHeight = reservedWidth.Value / ratio;
+        }
+        else if (reservedHeight is not null)
+        {
+            reservedWidth = reservedHeight.Value * ratio;
+        }
+        else
+        {
+            reservedWidth = intrinsic.Value.Width;
+            reservedHeight = intrinsic.Value.Height;
+        }
+        return IsUsableImageDimension(reservedWidth) && IsUsableImageDimension(reservedHeight);
+    }
+
+    private static (double Width, double Height)? ReadIntrinsicImageSize(byte[] bytes)
+    {
+        try
+        {
+            using var stream = new MemoryStream(bytes, writable: false);
+            using var codec = SKCodec.Create(stream);
+            var info = codec?.Info;
+            return info is { Width: > 0, Height: > 0 }
+                ? (info.Value.Width, info.Value.Height)
+                : null;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException)
+        {
+            return null;
+        }
+    }
+
+    private static bool IsUsableImageDimension(double? value)
+        => value is > 0 && double.IsFinite(value.Value);
 
     private static void AppendImageAttributes(
         StringBuilder html,
@@ -760,7 +843,8 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         IImageSourceResolver? imageSourceResolver,
         string? baseDirectory,
         CancellationToken cancellationToken,
-        string[]? sourceLines = null)
+        string[]? sourceLines = null,
+        bool virtualizationEnabled = false)
     {
         public StringBuilder Html { get; } = new();
 
@@ -786,8 +870,12 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
 
         public CancellationToken CancellationToken { get; } = cancellationToken;
 
+        public bool VirtualizationEnabled { get; } = virtualizationEnabled;
+
         public bool HasMermaidBlock { get; set; }
 
         public bool HasCodeBlockWithSyntax { get; set; }
     }
+
+    private sealed record ResolvedImage(string DataUri, byte[] Bytes);
 }

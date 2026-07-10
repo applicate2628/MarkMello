@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 type HostBridge = (msg: unknown) => void;
 
@@ -49,6 +50,19 @@ function perfMarkDetail(messages: readonly unknown[], name: string): Record<stri
   }
 
   return JSON.parse(mark.detail) as Record<string, unknown>;
+}
+
+function readRendererSource(): string {
+  return readFileSync("RendererWeb/src/renderer.ts", "utf8");
+}
+
+function readCacheRestoreSource(): string {
+  const source = readRendererSource();
+  const start = source.indexOf("function restoreCachedScrollPosition()");
+  const end = source.indexOf("function scheduleLayoutReady", start);
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return source.slice(start, end);
 }
 
 function installVirtualizedDocumentLayout(sectionHeight: number, sectionGap: number, sectionCount: number): void {
@@ -110,6 +124,89 @@ afterEach(() => {
 });
 
 describe("renderer document cache", () => {
+  it("captures live block plus intra-offset synchronously before reset", () => {
+    const source = readRendererSource();
+    const captureStart = source.indexOf("function captureCurrentProcessedDocumentCacheEntry");
+    const captureEnd = source.indexOf("function storeProcessedDocumentCacheEntry", captureStart);
+    const capture = source.slice(captureStart, captureEnd);
+    expect(capture).toContain("captureCurrentVirtualizedReadingAnchor()");
+    expect(capture.indexOf("captureCurrentVirtualizedReadingAnchor()"))
+      .toBeLessThan(capture.indexOf("cloneNode"));
+  });
+
+  it("cache restore ignores raw scrollTop when geometry changed", () => {
+    const restore = readCacheRestoreSource();
+    const flagOnRestore = restore.slice(restore.indexOf(
+      'const operation = acquireVirtualizedScrollOperation("cache-restore"'
+    ));
+    expect(flagOnRestore).not.toContain("layoutState.scrollTop");
+    expect(flagOnRestore).toContain("scrollTopForReadingAnchor");
+  });
+
+  it("flag-on restore settles realized anchor geometry before its first root write", () => {
+    const restore = readCacheRestoreSource();
+    const prepareIndex = restore.indexOf("const prepared = await scheduleFrameWork");
+    const settleIndex = restore.indexOf("await waitForCurrentVirtualizedGeometry(operation, 0)");
+    const writeIndex = restore.indexOf("const initialReceipt = await scheduleWrite");
+    expect(prepareIndex).toBeGreaterThanOrEqual(0);
+    expect(settleIndex).toBeGreaterThan(prepareIndex);
+    expect(writeIndex).toBeGreaterThan(settleIndex);
+    expect(restore.slice(prepareIndex, settleIndex)).not.toContain("operation.requestScrollTop");
+  });
+
+  it("cache restore has no 180ms correctness retry", () => {
+    const source = readRendererSource();
+    const restore = readCacheRestoreSource();
+    const cachedReadyStart = source.indexOf("function postCachedLayoutReady");
+    const cachedReadyEnd = source.indexOf("function flushPostLayoutReadyWork", cachedReadyStart);
+    const cachedReady = source.slice(cachedReadyStart, cachedReadyEnd);
+    expect(restore).not.toContain("queueCachedGeometryRefresh");
+    expect(cachedReady).toContain("if (!virtualizationEnabled && cachedLayoutState !== null)");
+    expect(cachedReady).toContain("}, 180);");
+  });
+
+  it("cached ready follows semantic-anchor agreement under the current epoch", () => {
+    const restore = readCacheRestoreSource();
+    expect(restore).toContain("awaitConfirmedVirtualizedGeometry");
+    expect(restore).toContain("semantic-anchor-agreed");
+    expect(restore.indexOf("semantic-anchor-agreed"))
+      .toBeLessThan(restore.indexOf("publishCachedRestoreReady"));
+  });
+
+  it("user-canceled restore still posts one cached ready with live geometry", () => {
+    const restore = readCacheRestoreSource();
+    expect(restore).toContain("user-supersession");
+    expect(restore).toContain("publishCachedRestoreReady");
+    expect(restore).toContain("getScrollState()");
+  });
+
+  it("delivered-frame non-convergence posts ready without settled", () => {
+    const restore = readCacheRestoreSource();
+    expect(restore).toContain("non-converged");
+    expect(restore).toContain('finish("failed", "non-converged", "non-converged")');
+    expect(restore).not.toContain('status: "settled", reason: "non-converged"');
+  });
+
+  it("frame-starved restore is paused not canceled", () => {
+    const plane = readFileSync("RendererWeb/src/scrollOwnershipControlPlane.ts", "utf8");
+    expect(plane).toContain('watchdogPaused');
+    expect(plane).toContain('reason: "awaiting-delivered-frame"');
+    expect(plane).not.toContain("setTimeout(failNonConvergence");
+  });
+
+  it("model-less restore cold-tops under lease and posts ready", () => {
+    const restore = readCacheRestoreSource();
+    expect(restore).toContain('coldTop ? "cache-cold-top" : "cache-restore"');
+    expect(restore).toContain("operation.requestScrollTop(target, writer)");
+    expect(restore).toContain("publishCachedRestoreReady");
+  });
+
+  it("stale restore event cannot write into the next document", () => {
+    const restore = readCacheRestoreSource();
+    expect(restore).toContain("isCurrentDocumentEpoch(documentEpoch)");
+    expect(restore).toContain('finish("canceled", "stale-document"');
+  });
+
   it("prestores the prepared active document so leaving a tab refreshes state instead of moving DOM", async () => {
     const root = document.documentElement;
     Object.defineProperty(root, "scrollHeight", { configurable: true, value: 2400 });

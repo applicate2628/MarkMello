@@ -67,6 +67,9 @@ const makeReadingPreferences = (
 
 async function loadRendererHarness(options: {
   controllerFaults?: ControllerFaults;
+  fontsReady?: Promise<unknown>;
+  intersectionObserverAvailable?: boolean;
+  mathReadiness?: readonly Promise<void>[];
   rectTopShiftByBlockIndex?: Record<number, number>;
   renderedSectionHeight?: number;
   sectionCount: number;
@@ -74,6 +77,32 @@ async function loadRendererHarness(options: {
 }): Promise<RendererHarness> {
   vi.resetModules();
   vi.doUnmock("../src/virtualizedDocumentWindow");
+  vi.doUnmock("../src/mathRenderInit");
+  if (options.mathReadiness !== undefined) {
+    const mathReadiness = options.mathReadiness;
+    vi.doMock("../src/mathRenderInit", async () => {
+      const actual = await vi.importActual<typeof import("../src/mathRenderInit")>("../src/mathRenderInit");
+      let invocation = 0;
+      return {
+        ...actual,
+        renderMath: (deps: Parameters<typeof actual.renderMath>[0]) => {
+          const readiness = mathReadiness[invocation++];
+          if (readiness === undefined) {
+            return actual.renderMath(deps);
+          }
+          let canceled = false;
+          return {
+            allMathRendered: readiness,
+            cancel: () => { canceled = true; },
+            initialVisibleNodes: new Set<HTMLElement>(),
+            initialVisibleReady: readiness,
+            isCancelled: () => canceled,
+            totalMathCount: deps.documentRoot.querySelectorAll("[data-tex]").length,
+          };
+        },
+      };
+    });
+  }
   if (options.controllerFaults !== undefined) {
     const controllerFaults = options.controllerFaults;
     vi.doMock("../src/virtualizedDocumentWindow", async () => {
@@ -108,6 +137,12 @@ async function loadRendererHarness(options: {
     });
   }
   document.documentElement.innerHTML = `<body><main class="mm-document"></main></body>`;
+  if (options.fontsReady !== undefined) {
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: { ready: options.fontsReady },
+    });
+  }
   trackRendererEventListeners();
 
   if (options.virtualization) {
@@ -158,7 +193,10 @@ async function loadRendererHarness(options: {
     takeRecords(): IntersectionObserverEntry[] { return []; }
     unobserve(): void { }
   }
-  vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
+  vi.stubGlobal(
+    "IntersectionObserver",
+    options.intersectionObserverAvailable === false ? undefined : TestIntersectionObserver
+  );
 
   const resizeObservers: TestResizeObserver[] = [];
   class TestResizeObserver implements ResizeObserver {
@@ -261,6 +299,26 @@ async function loadRendererHarness(options: {
 
   await import("../src/renderer");
   const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
+  const realizationEventsDelivered = new WeakSet<HTMLElement>();
+  const deliverMountedRealizationEvents = (): void => {
+    const blocks = document.querySelectorAll<HTMLElement>("main.mm-document > [data-mm-block-index]");
+    for (const block of blocks) {
+      const contentVisibility = block.style.getPropertyValue("content-visibility")
+        || getComputedStyle(block).getPropertyValue("content-visibility");
+      if (contentVisibility.trim() !== "auto" || realizationEventsDelivered.has(block)) {
+        continue;
+      }
+      realizationEventsDelivered.add(block);
+      const event = new Event("contentvisibilityautostatechange");
+      Object.defineProperty(event, "skipped", { configurable: true, value: false });
+      block.dispatchEvent(event);
+    }
+  };
+  const flushRendererMicrotasks = async (): Promise<void> => {
+    for (let index = 0; index < 4; index++) {
+      await Promise.resolve();
+    }
+  };
 
   const flushNextRaf = async (): Promise<void> => {
     const frame = rafCallbacks.shift();
@@ -268,8 +326,9 @@ async function loadRendererHarness(options: {
       throw new Error("Expected a queued requestAnimationFrame callback");
     }
 
+    deliverMountedRealizationEvents();
     frame.callback(0);
-    await Promise.resolve();
+    await flushRendererMicrotasks();
   };
 
   const flushAnimationFrame = async (): Promise<void> => {
@@ -277,45 +336,52 @@ async function loadRendererHarness(options: {
     if (callbacks.length === 0) {
       throw new Error("Expected queued requestAnimationFrame callbacks for a frame");
     }
+    deliverMountedRealizationEvents();
     for (const frame of callbacks) {
       frame.callback(0);
-      await Promise.resolve();
+      await flushRendererMicrotasks();
     }
-    await Promise.resolve();
+    await flushRendererMicrotasks();
   };
 
   const flushCanceledRafs = async (): Promise<void> => {
     const callbacks = canceledRafCallbacks.splice(0, canceledRafCallbacks.length);
     for (const callback of callbacks) {
       callback(0);
-      await Promise.resolve();
+      await flushRendererMicrotasks();
     }
-    await Promise.resolve();
+    await flushRendererMicrotasks();
   };
 
   const flushQueuedRafs = async (): Promise<void> => {
-    for (let i = 0; i < 160 && rafCallbacks.length > 0; i++) {
+    for (let i = 0; i < 160; i++) {
+      await flushRendererMicrotasks();
+      if (rafCallbacks.length === 0) {
+        break;
+      }
       const callbacks = rafCallbacks.splice(0, rafCallbacks.length);
+      deliverMountedRealizationEvents();
       for (const frame of callbacks) {
         frame.callback(i * 16);
-        await Promise.resolve();
+        await flushRendererMicrotasks();
       }
     }
     if (rafCallbacks.length > 0) {
       throw new Error("requestAnimationFrame queue did not settle");
     }
-    await Promise.resolve();
+    await flushRendererMicrotasks();
   };
 
   const flushRafsUntil = async (predicate: () => boolean, maxFrames = 40): Promise<void> => {
     for (let i = 0; i < maxFrames && !predicate() && rafCallbacks.length > 0; i++) {
       const callbacks = rafCallbacks.splice(0, rafCallbacks.length);
+      deliverMountedRealizationEvents();
       for (const frame of callbacks) {
         frame.callback(i * 16);
-        await Promise.resolve();
+        await flushRendererMicrotasks();
       }
     }
-    await Promise.resolve();
+    await flushRendererMicrotasks();
   };
 
   const triggerResize = (): void => {
@@ -496,6 +562,13 @@ function buildNestedBlockDocument(count: number, ownerIndex: number, nestedIndex
 
     return `<p data-mm-block-index="${index}" data-mm-block-kind="paragraph">Block ${index}</p>`;
   }).join("");
+}
+
+function buildLazyMermaidDocument(count: number, mermaidIndex: number): string {
+  return Array.from({ length: count }, (_, index) => index === mermaidIndex
+    ? `<pre class="mm-mermaid" data-mm-block-index="${index}" data-mm-block-kind="mermaid"><code data-mm-mermaid>graph TD; A--&gt;B</code></pre>`
+    : `<p data-mm-block-index="${index}" data-mm-block-kind="paragraph">Block ${index}</p>`
+  ).join("");
 }
 
 function buildSourceLineDocument(count: number): string {
@@ -853,9 +926,10 @@ function maintenanceLifecycleEvents(messages: readonly unknown[]): MaintenanceLi
 function perfMarkMessageIndex(
   messages: readonly unknown[],
   name: string,
-  predicate: (detail: Record<string, unknown>) => boolean = () => true
+  predicate: (detail: Record<string, unknown>) => boolean = () => true,
+  startIndex = 0
 ): number {
-  return messages.findIndex(message => {
+  const relativeIndex = messages.slice(startIndex).findIndex(message => {
     if (
       typeof message !== "object"
       || message === null
@@ -867,6 +941,7 @@ function perfMarkMessageIndex(
     const detail = (message as { detail?: string }).detail;
     return predicate(detail ? JSON.parse(detail) as Record<string, unknown> : {});
   });
+  return relativeIndex < 0 ? -1 : startIndex + relativeIndex;
 }
 
 function maintenanceRequestKey(detail: MaintenanceLifecycleDetail): string {
@@ -1029,11 +1104,14 @@ afterEach(() => {
   removeRendererEventListeners();
   vi.useRealTimers();
   vi.doUnmock("../src/virtualizedDocumentWindow");
+  vi.doUnmock("../src/mathRenderInit");
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", window.location.pathname);
   delete (window as unknown as { MARKMELLO_VIRTUALIZATION?: boolean }).MARKMELLO_VIRTUALIZATION;
+  delete (document as unknown as { fonts?: unknown }).fonts;
   delete (window as unknown as { chrome?: unknown }).chrome;
+  delete (window as unknown as { mermaid?: unknown }).mermaid;
 });
 
 describe("renderer scroll-family virtualization integration", () => {
@@ -2153,6 +2231,16 @@ describe("renderer scroll-family virtualization integration", () => {
       status: "completed",
     });
     expect(maintenanceEventsForRequest(harness.messages, request).at(-1)?.detail.workRevision).toBe(3);
+    const producerTickets = perfDetails<{
+      source?: string;
+      ticket?: number;
+    }>(harness.messages, "mm-virt-geometry-work-start")
+      .filter(detail => detail.source === "measured-height-adoption");
+    expect(producerTickets.length).toBeGreaterThanOrEqual(3);
+    for (const producerTicket of producerTickets) {
+      expect(perfDetails(harness.messages, "mm-virt-geometry-work-end")
+        .filter(detail => detail["ticket"] === producerTicket.ticket)).toHaveLength(1);
+    }
   });
 
   it("frame-transaction rejection is the only retry edge and retains the request id", async () => {
@@ -2432,10 +2520,253 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(maintenanceLifecycleEvents(harness.messages)).toEqual([]);
   });
 
-  it("retries calibration after an occupied minimap frame and performs it once", async () => {
-    vi.useFakeTimers();
+  it("navigation nominal zero waits for same-epoch confirmation before release", async () => {
+    const harness = await loadMaintenanceLifecycleHarness();
+    harness.load({ type: "scroll-to-block", blockIndex: 90 });
+    await harness.flushQueuedRafs();
+
+    const settled = perfDetails(harness.messages, "mm-virt-geometry-settled");
+    expect(settled.length).toBeGreaterThanOrEqual(2);
+    expect(settled.at(-1)?.geometryEpoch).toBe(settled.at(-2)?.geometryEpoch);
+    const secondSettleIndex = perfMarkMessageIndex(harness.messages, "mm-virt-geometry-settled", detail =>
+      detail["geometryEpoch"] === settled.at(-1)?.geometryEpoch);
+    const releaseIndex = perfMarkMessageIndex(harness.messages, "mm-virt-scroll-lease-released", detail =>
+      detail["owner"] === "block-navigation");
+    expect(releaseIndex).toBeGreaterThan(secondSettleIndex);
+  });
+
+  it("minimap nominal zero waits for same-epoch confirmation before release", async () => {
+    const harness = await loadMaintenanceLifecycleHarness();
+    const minimap = beginMinimapMaintenanceLease(harness);
+    minimap.dispatchEvent(pointerEvent("pointerup", 12));
+    await harness.flushQueuedRafs();
+
+    const settled = perfDetails(harness.messages, "mm-virt-geometry-settled");
+    expect(settled.length).toBeGreaterThanOrEqual(2);
+    expect(settled.at(-1)?.geometryEpoch).toBe(settled.at(-2)?.geometryEpoch);
+  });
+
+  it("window mount holds font ticket through adoption", async () => {
+    let resolveFonts!: () => void;
+    const fontsReady = new Promise<void>(resolve => { resolveFonts = resolve; });
+    const harness = await loadRendererHarness({
+      fontsReady,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    harness.load({
+      type: "load-document",
+      html: buildHeadingDocument(120),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 81,
+    });
+    await harness.flushRafsUntil(() => perfDetails(harness.messages, "mm-virt-geometry-work-start")
+      .some(detail => detail.source === "window-fonts"), 20);
+
+    expect(perfDetails(harness.messages, "mm-virt-geometry-work-start")).toContainEqual(
+      expect.objectContaining({ source: "window-fonts" })
+    );
+    expect(perfDetails(harness.messages, "mm-virt-geometry-work-end")
+      .some(detail => detail.source === "window-fonts")).toBe(false);
+    resolveFonts();
+    await Promise.resolve();
+    await harness.flushQueuedRafs();
+    const currentFontStart = perfDetails<{
+      source?: string;
+      ticket?: number;
+    }>(harness.messages, "mm-virt-geometry-work-start")
+      .filter(detail => detail.source === "window-fonts")
+      .at(-1)!;
+    const mutationIndex = perfMarkMessageIndex(harness.messages, "mm-virt-geometry-mutated", detail =>
+      detail["source"] === "window-fonts" && detail["ticket"] === currentFontStart.ticket);
+    const adoptionIndex = perfMarkMessageIndex(harness.messages, "mm-virt-maintenance-terminal", detail =>
+      detail["owner"] === "measured-height-adoption", mutationIndex + 1);
+    const endIndex = perfMarkMessageIndex(harness.messages, "mm-virt-geometry-work-end", detail =>
+      detail["source"] === "window-fonts" && detail["ticket"] === currentFontStart.ticket);
+    expect(mutationIndex).toBeGreaterThanOrEqual(0);
+    expect(adoptionIndex).toBeGreaterThan(mutationIndex);
+    expect(endIndex).toBeGreaterThan(adoptionIndex);
+  });
+
+  it("stale window font completion cannot mutate the next document", async () => {
+    let resolveFonts!: () => void;
+    const fontsReady = new Promise<void>(resolve => { resolveFonts = resolve; });
+    const harness = await loadRendererHarness({
+      fontsReady,
+      sectionCount: 20,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    harness.load({ type: "load-document", html: buildHeadingDocument(20), renderId: 82 });
+    await harness.flushRafsUntil(() => perfDetails<{
+      source?: string;
+    }>(harness.messages, "mm-virt-geometry-work-start")
+      .some(detail => detail.source === "window-fonts"), 20);
+    const staleFontTicket = perfDetails<{
+      documentEpoch?: number;
+      mountGeneration?: number;
+      source?: string;
+      ticket?: number;
+    }>(harness.messages, "mm-virt-geometry-work-start")
+      .filter(detail => detail.source === "window-fonts")
+      .at(-1)!;
+    harness.load({ type: "load-document", html: buildHeadingDocument(12), renderId: 83 });
+    resolveFonts();
+    await Promise.resolve();
+    await harness.flushQueuedRafs();
+    const fontMutations = perfDetails<{
+      documentEpoch?: number;
+      mountGeneration?: number;
+      source?: string;
+      ticket?: number;
+    }>(harness.messages, "mm-virt-geometry-mutated")
+      .filter(detail => detail.source === "window-fonts");
+    expect(fontMutations.filter(detail =>
+      detail.documentEpoch === staleFontTicket.documentEpoch
+      && detail.mountGeneration === staleFontTicket.mountGeneration
+      && detail.ticket === staleFontTicket.ticket)).toEqual([]);
+    expect(fontMutations.length).toBeGreaterThan(0);
+    expect(fontMutations.every(detail => detail.documentEpoch !== staleFontTicket.documentEpoch)).toBe(true);
+  });
+
+  it("stale same-document window math completion cannot mutate after remount", async () => {
+    let resolveOldMath!: () => void;
+    const oldMathReady = new Promise<void>(resolve => { resolveOldMath = resolve; });
+    const harness = await loadRendererHarness({
+      mathReadiness: [Promise.resolve(), oldMathReady, Promise.resolve()],
+      sectionCount: 120,
+      virtualization: true,
+    });
+    harness.load({
+      type: "load-document",
+      html: buildClonePollutionDocument(120),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 84,
+    });
+    await harness.flushRafsUntil(() => perfDetails<{
+      source?: string;
+    }>(harness.messages, "mm-virt-geometry-work-start")
+      .some(detail => detail.source === "window-math"), 20);
+    const oldMathTicket = perfDetails<{
+      mountGeneration?: number;
+      source?: string;
+      ticket?: number;
+    }>(harness.messages, "mm-virt-geometry-work-start")
+      .filter(detail => detail.source === "window-math")
+      .at(-1)!;
+
+    harness.load({ type: "scroll-to-block", blockIndex: 90 });
+    await harness.flushRafsUntil(() => perfDetails<{
+      mountGeneration?: number;
+      source?: string;
+    }>(harness.messages, "mm-virt-geometry-work-start")
+      .some(detail => detail.source === "window-math"
+        && detail.mountGeneration !== oldMathTicket.mountGeneration), 40);
+    const adoptionCountBeforeStaleCompletion = perfDetails(harness.messages, "mm-virt-geometry-work-start")
+      .filter(detail => detail["source"] === "measured-height-adoption").length;
+
+    resolveOldMath();
+    for (let pass = 0; pass < 4; pass++) {
+      await Promise.resolve();
+    }
+
+    expect(perfDetails(harness.messages, "mm-virt-geometry-mutated")
+      .filter(detail => detail["ticket"] === oldMathTicket.ticket)).toEqual([]);
+    expect(perfDetails(harness.messages, "mm-virt-geometry-work-end")
+      .filter(detail => detail["ticket"] === oldMathTicket.ticket)).toHaveLength(1);
+    expect(perfDetails(harness.messages, "mm-virt-geometry-work-start")
+      .filter(detail => detail["source"] === "measured-height-adoption")).toHaveLength(
+      adoptionCountBeforeStaleCompletion
+    );
+    await harness.flushQueuedRafs();
+  });
+
+  it("stale same-document lazy Mermaid completion cannot mutate after a zero-Mermaid remount", async () => {
+    let resolveOldMermaid!: (value: { svg: string }) => void;
+    const oldMermaidReady = new Promise<{ svg: string }>(resolve => { resolveOldMermaid = resolve; });
+    const render = vi.fn(() => oldMermaidReady);
+    const harness = await loadRendererHarness({
+      intersectionObserverAvailable: false,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    (window as unknown as {
+      mermaid?: {
+        initialize: (config: unknown) => void;
+        render: typeof render;
+      };
+    }).mermaid = {
+      initialize: vi.fn(),
+      render,
+    };
+    harness.load({
+      type: "load-document",
+      html: buildLazyMermaidDocument(120, 40),
+      hasMermaid: true,
+      hasHljs: false,
+      renderId: 85,
+    });
+    await harness.flushRafsUntil(() => render.mock.calls.length > 0 && perfDetails<{
+      mountGeneration?: number;
+      source?: string;
+    }>(harness.messages, "mm-virt-geometry-work-start")
+      .some(detail => detail.source === "lazy-mermaid" && (detail.mountGeneration ?? 0) > 0), 40);
+    const oldMermaidTicket = perfDetails<{
+      mountGeneration?: number;
+      source?: string;
+      ticket?: number;
+    }>(harness.messages, "mm-virt-geometry-work-start")
+      .filter(detail => detail.source === "lazy-mermaid" && (detail.mountGeneration ?? 0) > 0)
+      .at(-1)!;
+
+    harness.load({ type: "scroll-to-block", blockIndex: 90 });
+    await harness.flushRafsUntil(() => perfDetails<{
+      mountGeneration?: number;
+      source?: string;
+    }>(harness.messages, "mm-virt-geometry-work-start")
+      .some(detail => detail.source === "window-render"
+        && (detail.mountGeneration ?? 0) > (oldMermaidTicket.mountGeneration ?? 0)), 40);
+    expect(document.querySelector("pre.mm-mermaid")).toBeNull();
+    const adoptionCountBeforeStaleCompletion = perfDetails(harness.messages, "mm-virt-geometry-work-start")
+      .filter(detail => detail["source"] === "measured-height-adoption").length;
+
+    resolveOldMermaid({ svg: "<svg></svg>" });
+    for (let pass = 0; pass < 6; pass++) {
+      await Promise.resolve();
+    }
+
+    expect(perfDetails(harness.messages, "mm-virt-geometry-mutated")
+      .filter(detail => detail["ticket"] === oldMermaidTicket.ticket)).toEqual([]);
+    expect(perfDetails(harness.messages, "mm-virt-geometry-work-end")
+      .filter(detail => detail["ticket"] === oldMermaidTicket.ticket)).toHaveLength(1);
+    expect(perfDetails(harness.messages, "mm-virt-geometry-work-start")
+      .filter(detail => detail["source"] === "measured-height-adoption")).toHaveLength(
+      adoptionCountBeforeStaleCompletion
+    );
+    await harness.flushQueuedRafs();
+    delete (window as unknown as { mermaid?: unknown }).mermaid;
+  });
+
+  it("H3 diagnostic fails an unregistered late mover", () => {
+    const causalGeometryEpochs = new Set<number>([0]);
+    let previousHeight = 100;
+    const sample = (height: number, geometryEpoch: number): void => {
+      if (Math.abs(height - previousHeight) > 1 && !causalGeometryEpochs.has(geometryEpoch)) {
+        throw new Error("unregistered late geometry mover");
+      }
+      previousHeight = height;
+    };
+
+    expect(() => sample(128, 1)).toThrow("unregistered late geometry mover");
+  });
+
+  it("registers leased calibration at schedule time and performs it once", async () => {
     const sectionCount = 120;
     const harness = await loadRendererHarness({ sectionCount, virtualization: true });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
     document.documentElement.style.setProperty("--mm-minimap-width", "136px");
     setMinimapViewportHeight(592);
     harness.load({ type: "reading-preferences", ...makeReadingPreferences("on") });
@@ -2450,125 +2781,94 @@ describe("renderer scroll-family virtualization integration", () => {
     await harness.flushQueuedRafs();
     harness.messages.length = 0;
 
-    const minimap = document.querySelector<HTMLElement>(".mm-minimap")!;
-    Object.defineProperty(minimap, "setPointerCapture", { configurable: true, value: vi.fn() });
-    vi.spyOn(minimap, "getBoundingClientRect").mockReturnValue({
-      bottom: 592,
-      height: 592,
-      left: 0,
-      right: 136,
-      top: 0,
-      width: 136,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
-    } as DOMRect);
-    minimap.dispatchEvent(pointerEvent("pointerdown", 12));
-    minimap.dispatchEvent(pointerEvent("pointermove", 588));
-    await vi.advanceTimersByTimeAsync(250);
+    const minimap = beginMinimapMaintenanceLease(harness);
+    harness.setRenderedSectionHeight(SECTION_HEIGHT + 80);
+    harness.triggerResize();
+    await harness.flushRafsUntil(() => maintenanceRequestsForOwner(
+      harness.messages,
+      "calibration"
+    ).length > 0, 80);
+    const calibrationRequest = maintenanceRequestsForOwner(harness.messages, "calibration")[0]!;
+    const calibrationStart = perfDetails<{
+      source?: string;
+      ticket?: number;
+    }>(harness.messages, "mm-virt-geometry-work-start")
+      .filter(detail => detail.source === "calibration")
+      .at(-1)!;
+    const ticketStartIndex = perfMarkMessageIndex(harness.messages, "mm-virt-geometry-work-start", detail =>
+      detail["source"] === "calibration" && detail["ticket"] === calibrationStart.ticket);
+    const requestIndex = perfMarkMessageIndex(harness.messages, "mm-virt-maintenance-requested", detail =>
+      detail["requestSerial"] === calibrationRequest.requestSerial);
+    expect(ticketStartIndex).toBeGreaterThanOrEqual(0);
+    expect(requestIndex).toBeGreaterThan(ticketStartIndex);
+    minimap.dispatchEvent(pointerEvent("pointerup", 12));
     await harness.flushQueuedRafs();
 
     expect(perfDetails(harness.messages, "mm-virt-window-calibrated")).toHaveLength(1);
-    expect(maintenanceTerminalDetails(harness.messages)).toContainEqual(expect.objectContaining({
-      owner: "calibration",
+    expectExactMaintenanceLifecycle(harness.messages, calibrationRequest, {
+      executionCount: 1,
+      reason: "delivered",
       status: "completed",
-    }));
+    });
+    expect(perfDetails(harness.messages, "mm-virt-geometry-work-end")
+      .filter(detail => detail["ticket"] === calibrationStart.ticket)).toHaveLength(1);
   });
 
-  it("cancels occupied maintenance retry on user supersession and document teardown", async () => {
-    const sectionCount = 120;
-    const harness = await loadRendererHarness({ sectionCount, virtualization: true });
-    document.dispatchEvent(new Event("DOMContentLoaded"));
-    harness.load({
-      type: "load-document",
-      html: buildFindDocument(sectionCount, [90]),
-      hasMermaid: false,
-      hasHljs: false,
-      renderId: 41,
-    });
-    await harness.flushQueuedRafs();
-    await harness.flushQueuedRafs();
+  it.each(["user", "document", "teardown"] as const)(
+    "terminalizes a retry-pending producer ticket exactly once on %s cancellation",
+    async cancellation => {
+      const harness = await loadMaintenanceLifecycleHarness();
+      const request = await startMeasuredMaintenanceInState(harness, "retry-pending");
+      const producerTicket = perfDetails<{
+        source?: string;
+        ticket?: number;
+      }>(harness.messages, "mm-virt-geometry-work-start")
+        .filter(detail => detail.source === "measured-height-adoption")
+        .at(-1)!;
+      const actionIndex = harness.messages.length;
+      const reason = cancellation === "user"
+        ? "user-supersession"
+        : cancellation === "document"
+          ? "stale-document"
+          : "teardown";
 
-    let collisionHeight = SECTION_HEIGHT + 40;
-    const collide = async (renderId = 41): Promise<void> => {
-      harness.setRenderedSectionHeight(collisionHeight);
-      collisionHeight += 20;
-      harness.triggerResize();
-      harness.load({ type: "open-find-bar" });
-      submitFindQuery("needle");
-      const request = findQueryMessages(harness.messages).at(-1)!;
-      harness.load({
-        type: "find-results",
-        requestId: request.requestId,
-        query: "needle",
-        renderId,
-        totalCount: 1,
-        matches: [descriptorForBlock(90, 1)],
+      if (cancellation === "user") {
+        harness.root.scrollTop += 17;
+        document.dispatchEvent(new Event("scroll"));
+      } else if (cancellation === "document") {
+        harness.load({
+          type: "load-document",
+          html: buildHeadingDocument(12),
+          hasMermaid: false,
+          hasHljs: false,
+        });
+      } else {
+        window.dispatchEvent(new Event("pagehide"));
+      }
+
+      expectExactMaintenanceLifecycle(harness.messages, request, {
+        executionCount: 0,
+        reason,
+        status: "canceled",
       });
-      await harness.flushRafsUntil(() => perfDetails<{
-        owner?: string;
-        reason?: string;
-      }>(harness.messages, "mm-virt-maintenance-retry").some(detail =>
-        detail.owner === "measured-height-adoption"
-        && detail.reason === "frame-transaction-occupied"));
-      expect(perfDetails<{
-        owner?: string;
-        reason?: string;
-      }>(harness.messages, "mm-virt-maintenance-retry")).toContainEqual(expect.objectContaining({
-        owner: "measured-height-adoption",
-        reason: "frame-transaction-occupied",
-      }));
-    };
+      const terminalIndex = perfMarkMessageIndex(harness.messages, "mm-virt-maintenance-terminal", detail =>
+        detail["requestSerial"] === request.requestSerial, actionIndex);
+      const ticketEndIndex = perfMarkMessageIndex(harness.messages, "mm-virt-geometry-work-end", detail =>
+        detail["ticket"] === producerTicket.ticket, actionIndex);
+      expect(terminalIndex).toBeGreaterThanOrEqual(actionIndex);
+      expect(ticketEndIndex).toBeGreaterThan(terminalIndex);
+      expect(perfDetails(harness.messages, "mm-virt-geometry-work-end")
+        .filter(detail => detail["ticket"] === producerTicket.ticket)).toHaveLength(1);
 
-    harness.messages.length = 0;
-    await collide();
-    const terminalCountBeforeUserSupersession = maintenanceTerminalDetails(harness.messages).length;
-    harness.root.scrollTop += 17;
-    document.dispatchEvent(new Event("scroll"));
-    await harness.flushQueuedRafs();
-    expect(maintenanceTerminalDetails(harness.messages)
-      .slice(terminalCountBeforeUserSupersession)
-      .filter(detail => detail.owner === "measured-height-adoption"
-        && detail.reason === "user-supersession"
-        && detail.status === "canceled")).toHaveLength(1);
-
-    harness.messages.length = 0;
-    await collide();
-    const terminalCountBeforeDocumentReplacement = maintenanceTerminalDetails(harness.messages).length;
-    harness.load({ type: "load-document", html: buildHeadingDocument(12), hasMermaid: false, hasHljs: false });
-    await harness.flushQueuedRafs();
-    expect(maintenanceTerminalDetails(harness.messages)
-      .slice(terminalCountBeforeDocumentReplacement)
-      .filter(detail => detail.owner === "measured-height-adoption"
-        && detail.reason === "stale-document"
-        && detail.status === "canceled")).toHaveLength(1);
-
-    harness.load({
-      type: "load-document",
-      html: buildFindDocument(sectionCount, [90]),
-      hasMermaid: false,
-      hasHljs: false,
-      renderId: 42,
-    });
-    await harness.flushQueuedRafs();
-    harness.messages.length = 0;
-    await collide(42);
-    const terminalCountBeforeTeardown = maintenanceTerminalDetails(harness.messages).length;
-    window.dispatchEvent(new Event("pagehide"));
-    expect(maintenanceTerminalDetails(harness.messages)
-      .slice(terminalCountBeforeTeardown)
-      .filter(detail => detail.owner === "measured-height-adoption"
-        && detail.reason === "teardown"
-        && detail.status === "canceled")).toHaveLength(1);
-    const adoptionCountAtTeardown = perfDetails(
-      harness.messages,
-      "mm-virt-window-height-adopted"
-    ).length;
-    await harness.flushQueuedRafs();
-    expect(perfDetails(harness.messages, "mm-virt-window-height-adopted")).toHaveLength(
-      adoptionCountAtTeardown
-    );
-  });
+      const lifecycleCount = maintenanceEventsForRequest(harness.messages, request).length;
+      const ticketEndCount = perfDetails(harness.messages, "mm-virt-geometry-work-end")
+        .filter(detail => detail["ticket"] === producerTicket.ticket).length;
+      await harness.flushQueuedRafs();
+      expect(maintenanceEventsForRequest(harness.messages, request)).toHaveLength(lifecycleCount);
+      expect(perfDetails(harness.messages, "mm-virt-geometry-work-end")
+        .filter(detail => detail["ticket"] === producerTicket.ticket)).toHaveLength(ticketEndCount);
+    }
+  );
 
   it("clicks and drags the model-fragment minimap clone to off-window sections", async () => {
     const sectionCount = 120;

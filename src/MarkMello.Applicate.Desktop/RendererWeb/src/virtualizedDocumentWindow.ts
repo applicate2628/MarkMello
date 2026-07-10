@@ -18,6 +18,7 @@ const BOTTOM_SPACER = "bottom";
 const SPACER_CLASS = "mm-virtual-spacer";
 
 export type VirtualizedDocumentWindowDeps = {
+  beginWindowGeometryWork?: (mountGeneration: number) => VirtualizedWindowGeometryWork | null;
   documentEpoch?: number;
   isCurrentDocumentEpoch?: (epoch: number) => boolean;
   ownerWindow: Window;
@@ -25,7 +26,9 @@ export type VirtualizedDocumentWindowDeps = {
   root: Element & { scrollTop: number; scrollHeight: number; clientHeight: number };
   model: DocumentWindowModel;
   renderAhead?: RenderAheadConfig;
-  prepareInsertedContent?: (root: ParentNode) => void;
+  prepareInsertedContent?: (root: ParentNode, mountGeneration: number) => void;
+  onRealizationReady?: (mountGeneration: number) => void;
+  onWindowMounted?: (mountGeneration: number) => void;
   readMeasuredHeights?: (blocks: readonly HTMLElement[]) => MeasuredHeightUpdate[];
   realization?: VirtualizedRealizationOptions;
 };
@@ -38,6 +41,12 @@ export type VirtualizedDocumentWindowController = {
   ensureSectionRendered: (sectionIndex: number, options?: EnsureSectionRenderedOptions) => boolean;
   ensureSectionRangeRendered: (start: number, end: number, options?: EnsureSectionRenderedOptions) => boolean;
   isSectionRendered: (sectionIndex: number) => boolean;
+  recensusRealizationWatches: () => boolean;
+};
+
+export type VirtualizedWindowGeometryWork = {
+  end: () => void;
+  mutated: () => void;
 };
 
 export type VirtualizedRealizationOptions = {
@@ -113,12 +122,15 @@ export function createVirtualizedDocumentWindowController(
   deps: VirtualizedDocumentWindowDeps
 ): VirtualizedDocumentWindowController {
   let currentRange: WindowRange | null = null;
+  let windowMountGeneration = 0;
   const renderAhead = deps.renderAhead ?? DEFAULT_RENDER_AHEAD;
   const realizationTracker = deps.realization?.enabled === true
     ? createRealizationTracker(deps)
     : null;
 
   const renderRange = (range: WindowRange): void => {
+    const mountGeneration = ++windowMountGeneration;
+    const geometryWork = deps.beginWindowGeometryWork?.(mountGeneration) ?? null;
     const existingByBlockIndex = collectExistingSections(deps.main);
     const nodes: Node[] = [];
     let insertedCount = 0;
@@ -154,13 +166,19 @@ export function createVirtualizedDocumentWindowController(
     }
 
     nodes.push(bottomSpacer);
-    deps.main.replaceChildren(...nodes);
-    currentRange = { ...range };
-    const mountedBlocks = collectLiveDocumentSectionElements(deps.main);
-    reconcileMountedNonContentMetadata(deps.model, mountedBlocks, repairedMermaidBlockIndexes);
-    realizationTracker?.syncMountedSections(mountedBlocks);
-    if (insertedCount > 0 || repairedMermaidCount > 0) {
-      deps.prepareInsertedContent?.(deps.main);
+    try {
+      deps.main.replaceChildren(...nodes);
+      geometryWork?.mutated();
+      currentRange = { ...range };
+      const mountedBlocks = collectLiveDocumentSectionElements(deps.main);
+      reconcileMountedNonContentMetadata(deps.model, mountedBlocks, repairedMermaidBlockIndexes);
+      realizationTracker?.syncMountedSections(mountedBlocks, mountGeneration);
+      deps.onWindowMounted?.(mountGeneration);
+      if (insertedCount > 0 || repairedMermaidCount > 0) {
+        deps.prepareInsertedContent?.(deps.main, mountGeneration);
+      }
+    } finally {
+      geometryWork?.end();
     }
   };
 
@@ -210,6 +228,9 @@ export function createVirtualizedDocumentWindowController(
       if (result.updatedCount === 0) {
         return EMPTY_HEIGHT_UPDATE;
       }
+      if (result.maxAbsDelta <= Number.EPSILON && Math.abs(result.totalDelta) <= Number.EPSILON) {
+        return result;
+      }
 
       const desiredScrollTop = preserveSectionIndex !== null
         ? deps.model.sectionTop(preserveSectionIndex)
@@ -230,6 +251,7 @@ export function createVirtualizedDocumentWindowController(
       ensureRangeRendered({ end: sectionIndex, start: sectionIndex }, options),
     getCurrentRange: () => currentRange === null ? null : { ...currentRange },
     isSectionRendered,
+    recensusRealizationWatches: () => realizationTracker?.recensusRealizationWatches() ?? true,
     updateWindowForScroll: (options = {}) => {
       const nextRange = computeRange(options.desiredScrollTop ?? deps.root.scrollTop);
       if (options.force !== true && currentRange !== null && rangesEqual(currentRange, nextRange)) {
@@ -307,12 +329,17 @@ export function captureReadingAnchor(blocks: readonly HTMLElement[]): ReadingAnc
 
     const boxElement = readReadyMermaidProxy(block) ?? block;
     const rect = boxElement.getBoundingClientRect();
+    const ownerDocument = boxElement.ownerDocument;
+    const viewportHeight = ownerDocument.scrollingElement?.clientHeight
+      || ownerDocument.defaultView?.innerHeight
+      || 0;
     if (
       !Number.isFinite(rect.top)
       || !Number.isFinite(rect.height)
       || rect.height <= 0
       || !Number.isFinite(rect.bottom)
       || rect.bottom <= 0
+      || (Number.isFinite(viewportHeight) && viewportHeight > 0 && rect.top >= viewportHeight)
     ) {
       continue;
     }
@@ -446,10 +473,11 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
     blocks: readonly HTMLElement[],
     updates: readonly MeasuredHeightUpdate[]
   ) => MeasuredHeightUpdate[];
-  syncMountedSections: (blocks: readonly HTMLElement[]) => void;
+  recensusRealizationWatches: () => boolean;
+  syncMountedSections: (blocks: readonly HTMLElement[], mountGeneration: number) => void;
 } {
   const watches = new Map<HTMLElement, RealizationWatch>();
-  let mountGeneration = 0;
+  let currentMountGeneration = 0;
   let disposed = false;
 
   const eventOptions: AddEventListenerOptions = { capture: true };
@@ -505,12 +533,15 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
     deps.main.removeEventListener("contentvisibilityautostatechange", handleContentVisibilityStateChange, eventOptions);
   };
 
-  const syncMountedSections = (blocks: readonly HTMLElement[]): void => {
+  const syncMountedSections = (
+    blocks: readonly HTMLElement[],
+    mountGeneration: number
+  ): void => {
     if (disposed) {
       return;
     }
 
-    mountGeneration++;
+    currentMountGeneration = mountGeneration;
     for (const block of blocks) {
       if (readReadyMermaidProxy(block) !== null) {
         watches.delete(block);
@@ -530,8 +561,11 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
       const existing = watches.get(block);
       if (existing !== undefined) {
         existing.blockIndex = blockIndex;
-        existing.mountGeneration = mountGeneration;
-        if (existing.state !== "real-ready" && existing.state !== "event-equal-fallback-noop") {
+        existing.mountGeneration = currentMountGeneration;
+        if (
+          existing.state === "placeholder-not-intersecting"
+          || existing.state === "realized-then-skipped"
+        ) {
           existing.state = isStrictlyIntersecting(block)
             ? "intersecting-await-event"
             : "placeholder-not-intersecting";
@@ -546,7 +580,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
         frameRequested: false,
         lastOccupiedHeight: null,
         lastOffsetHeight: null,
-        mountGeneration,
+        mountGeneration: currentMountGeneration,
         readyMeasuredHeight: null,
         skipped: true,
         stableFrameCount: 0,
@@ -557,7 +591,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
     }
 
     for (const [element, watch] of watches) {
-      if (watch.mountGeneration !== mountGeneration || !deps.main.contains(element)) {
+      if (watch.mountGeneration !== currentMountGeneration || !deps.main.contains(element)) {
         watches.delete(element);
       }
     }
@@ -592,7 +626,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
       if (
         watch.element !== block
         || watch.blockIndex !== update.blockIndex
-        || watch.mountGeneration !== mountGeneration
+        || watch.mountGeneration !== currentMountGeneration
         || !deps.main.contains(block)
         || watch.state !== "real-ready"
         || watch.readyMeasuredHeight === null
@@ -656,12 +690,14 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
       if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) <= 1) {
         watch.state = "event-equal-fallback-noop";
         watch.readyMeasuredHeight = null;
+        deps.onRealizationReady?.(watch.mountGeneration);
         return;
       }
 
       if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) > 1) {
         watch.state = "real-ready";
         watch.readyMeasuredHeight = Math.max(0, sample.occupiedHeight);
+        deps.onRealizationReady?.(watch.mountGeneration);
         return;
       }
     }
@@ -680,7 +716,37 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
     scheduleSample(watch);
   }
 
-  return { dispose, filterRealizedUpdates, syncMountedSections };
+  const recensusRealizationWatches = (): boolean => {
+    if (disposed || !isCurrentDocument()) {
+      return false;
+    }
+    syncMountedSections(collectLiveDocumentSectionElements(deps.main), currentMountGeneration);
+    let ready = true;
+    for (const watch of watches.values()) {
+      const intersecting = isStrictlyIntersecting(watch.element);
+      if (
+        intersecting
+        && watch.state !== "real-ready"
+        && watch.state !== "event-equal-fallback-noop"
+      ) {
+        if (
+          watch.state === "placeholder-not-intersecting"
+          || watch.state === "realized-then-skipped"
+        ) {
+          watch.state = "intersecting-await-event";
+        }
+        ready = false;
+      }
+    }
+    return ready;
+  };
+
+  return {
+    dispose,
+    filterRealizedUpdates,
+    recensusRealizationWatches,
+    syncMountedSections,
+  };
 }
 
 function mapBlocksByBlockIndex(blocks: readonly HTMLElement[]): Map<number, HTMLElement | null> {

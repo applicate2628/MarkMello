@@ -429,6 +429,77 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
+    public async Task FlagOnResolvedBlockImagesCarryMountStableIntrinsicRatio()
+    {
+        var renderer = CreateRendererForVirtualization(enabled: true);
+        var source = new MarkdownSource("docs/sample.md", "sample.md", "![reserved](asset.png)");
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            new ByteImageSourceResolver(OnePixelPng),
+            CancellationToken.None);
+
+        Assert.Contains("<figure", document.Html, StringComparison.Ordinal);
+        Assert.Contains("<img src=\"data:image/png;base64,", document.Html, StringComparison.Ordinal);
+        Assert.Contains(" width=\"1\"", document.Html, StringComparison.Ordinal);
+        Assert.Contains(" height=\"1\"", document.Html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlagOnResolvedInlineImagesCarryMountStableIntrinsicRatio()
+    {
+        var renderer = CreateRendererForVirtualization(enabled: true);
+        var source = new MarkdownSource("docs/sample.md", "sample.md", "before ![reserved](asset.png) after");
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            new ByteImageSourceResolver(OnePixelPng),
+            CancellationToken.None);
+
+        Assert.Contains("<p", document.Html, StringComparison.Ordinal);
+        Assert.Contains("<img src=\"data:image/png;base64,", document.Html, StringComparison.Ordinal);
+        Assert.Contains(" width=\"1\"", document.Html, StringComparison.Ordinal);
+        Assert.Contains(" height=\"1\"", document.Html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlagOnUndecodableImageUsesExistingPlaceholderWithoutSecondFetch()
+    {
+        var renderer = CreateRendererForVirtualization(enabled: true);
+        var resolver = new ByteImageSourceResolver("not an image"u8.ToArray());
+        var source = new MarkdownSource("docs/sample.md", "sample.md", "![broken](asset.png)");
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            resolver,
+            CancellationToken.None);
+
+        Assert.Equal(1, resolver.CallCount);
+        Assert.Contains("class=\"image-placeholder\"", document.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<img", document.Html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlagOffImageMarkupRemainsByteIdenticalWithoutIntrinsicReservation()
+    {
+        var renderer = CreateRendererForVirtualization(enabled: false);
+        var source = new MarkdownSource("docs/sample.md", "sample.md", "![legacy](asset.png)");
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            new ByteImageSourceResolver(OnePixelPng),
+            CancellationToken.None);
+
+        Assert.Contains("<img src=\"data:image/png;base64,", document.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain(" width=\"1\"", document.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain(" height=\"1\"", document.Html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RenderEmbedsBundledKatexAndRendererAssetsWhenAssetEmbedderIsProvided()
     {
         var renderer = new ApplicateHtmlMarkdownRenderer(new ApplicateWebAssetEmbedder());
@@ -637,6 +708,38 @@ public sealed class ApplicateHtmlMarkdownRendererTests
         var source = new MarkdownSource("test.md", "test.md", markdown);
         var result = await renderer.RenderAsync(source, ReadingPreferences.Default, imageSourceResolver: null, CancellationToken.None);
         return result.Html;
+    }
+
+    private static readonly byte[] OnePixelPng = Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+
+    private static ApplicateHtmlMarkdownRenderer CreateRendererForVirtualization(bool enabled)
+    {
+        var constructor = typeof(ApplicateHtmlMarkdownRenderer).GetConstructor(
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+            binder: null,
+            [typeof(ApplicateMarkdownDocumentRenderer), typeof(ApplicateWebAssetEmbedder), typeof(bool?)],
+            modifiers: null);
+        Assert.NotNull(constructor);
+        return (ApplicateHtmlMarkdownRenderer)constructor.Invoke([
+            new ApplicateMarkdownDocumentRenderer(),
+            null,
+            enabled,
+        ]);
+    }
+
+    private sealed class ByteImageSourceResolver(byte[] bytes) : IImageSourceResolver
+    {
+        public int CallCount { get; private set; }
+
+        public Task<Stream?> TryOpenAsync(
+            string url,
+            string? baseDirectory,
+            CancellationToken ct = default)
+        {
+            CallCount++;
+            return Task.FromResult<Stream?>(new MemoryStream(bytes, writable: false));
+        }
     }
 
     private sealed class CountingImageSourceResolver : IImageSourceResolver

@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import {
   readVirtualizationFlag,
   readRendererBooleanFlag,
@@ -6,6 +8,19 @@ import {
 import { readVirtualizationShadowFlag } from "../src/virtualizationShadow";
 
 let localStorageValues = new Map<string, string>();
+const TASK_5_PARENT = "7de62689420a87df65b23fd938a09bc67104c973";
+
+function readRendererSource(): string {
+  return readFileSync("RendererWeb/src/renderer.ts", "utf8");
+}
+
+function sliceBetween(source: string, start: string, end: string): string {
+  const startIndex = source.indexOf(start);
+  const endIndex = source.indexOf(end, startIndex + start.length);
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+  expect(endIndex).toBeGreaterThan(startIndex);
+  return source.slice(startIndex, endIndex);
+}
 
 Object.defineProperty(window, "localStorage", {
   configurable: true,
@@ -81,5 +96,45 @@ describe("renderer virtualization flags", () => {
     expect(document.documentElement.dataset.markmelloVirtualization).toBeUndefined();
     expect((window as Window & { MARKMELLO_VIRTUALIZATION?: unknown }).MARKMELLO_VIRTUALIZATION)
       .toBeUndefined();
+  });
+
+  it("flags unset install no control plane tickets listeners watches reservations font tickets or H3 observer", () => {
+    const source = readRendererSource();
+    const initialization = sliceBetween(
+      source,
+      "function initializeVirtualizedDocumentWindow()",
+      "function updateVirtualizedWindowForScroll"
+    );
+
+    expect(initialization).toContain("if (!virtualizationEnabled)");
+    expect(initialization).toContain("beginVirtualizedGeometryWork");
+    expect(source).not.toContain("H3DiagnosticObserver");
+    expect(source).not.toContain("mm-virt-h3-unregistered-mover");
+    expect(readVirtualizationFlag(window, document)).toBe(false);
+  });
+
+  it("flag off preserves resize fonts image and mermaid shared-owner output", () => {
+    const current = readRendererSource();
+    const baseline = execFileSync(
+      "git",
+      ["show", `${TASK_5_PARENT}:src/MarkMello.Applicate.Desktop/RendererWeb/src/renderer.ts`],
+      { encoding: "utf8" }
+    );
+    const currentShared = sliceBetween(
+      current,
+      "  const documentElement = document.querySelector<HTMLElement>(\".mm-document\");",
+      "const queuePostScroll"
+    );
+    const baselineShared = sliceBetween(
+      baseline,
+      "  const documentElement = document.querySelector<HTMLElement>(\".mm-document\");",
+      "const queuePostScroll"
+    );
+
+    expect(currentShared).toContain("if (!virtualizationEnabled)");
+    expect(currentShared).toContain("runLegacyResizeObserverWork");
+    expect(currentShared).toContain("runLegacyDocumentFontsReadyWork");
+    expect(baselineShared).toContain("queueMinimapRefreshAfterLayoutSettles");
+    expect(baselineShared).toContain("scheduleVirtualizedMeasuredHeightAdoption");
   });
 });
