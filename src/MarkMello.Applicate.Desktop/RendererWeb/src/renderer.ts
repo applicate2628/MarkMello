@@ -9,7 +9,12 @@ import {
   normalizeWidthResizerVisibility,
   type WidthResizerVisibility
 } from "./widthResizerVisibility";
-import { isMermaidNodeNearViewport, renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
+import {
+  isMermaidNodeNearViewport,
+  reclaimClonedMermaidProxyLifecycles,
+  renderMermaidNode,
+  type MermaidApiLike,
+} from "./mermaidRender";
 import { normalizeHljsLanguage } from "./hljsLanguage";
 import { runInitialRenderPipeline, type MathReadinessController, type RendererTheme } from "./initialRenderPipeline";
 import { applyLoadDocument, clearDocumentState } from "./loadDocument";
@@ -6956,6 +6961,12 @@ function ensureChromeNodes(useCachedDocumentState = false, options: EnsureChrome
   ensureMinimap();
   ensureWidthHandle();
   ensureDropOverlay();
+  if (useCachedDocumentState && virtualizationEnabled) {
+    const main = document.querySelector<HTMLElement>("main.mm-document");
+    if (main !== null) {
+      reclaimClonedMermaidProxyLifecycles(main);
+    }
+  }
   if (options.allowVirtualization === false) {
     resetVirtualizedDocumentWindow(false);
   } else {

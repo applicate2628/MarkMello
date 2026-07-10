@@ -124,6 +124,16 @@ afterEach(() => {
 });
 
 describe("renderer document cache", () => {
+  it("reclaims cloned mermaid proxy ownership before cache-hit model rebuild", () => {
+    const source = readRendererSource();
+    const start = source.indexOf("function ensureChromeNodes(");
+    const end = source.indexOf("async function runLoadDocumentInitialRenderPipeline", start);
+    const ensureChromeNodes = source.slice(start, end);
+    expect(ensureChromeNodes).toContain("if (useCachedDocumentState && virtualizationEnabled)");
+    expect(ensureChromeNodes.indexOf("reclaimClonedMermaidProxyLifecycles(main)"))
+      .toBeLessThan(ensureChromeNodes.indexOf("initializeVirtualizedDocumentWindow()"));
+  });
+
   it("captures live block plus intra-offset synchronously before reset", () => {
     const source = readRendererSource();
     const captureStart = source.indexOf("function captureCurrentProcessedDocumentCacheEntry");

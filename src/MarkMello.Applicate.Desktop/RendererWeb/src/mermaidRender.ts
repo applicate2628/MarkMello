@@ -134,6 +134,40 @@ export function readReadyMermaidProxy(source: HTMLElement): HTMLElement | null {
   return proxy;
 }
 
+export function reclaimClonedMermaidProxyLifecycles(root: ParentNode): void {
+  const sources = root.querySelectorAll<HTMLElement>("pre.mm-mermaid.is-rendered");
+  for (const source of sources) {
+    if (readReadyMermaidProxy(source) !== null) {
+      continue;
+    }
+
+    const proxy = source.nextElementSibling;
+    const hasValidAdjacency = proxy instanceof HTMLElement
+      && proxy.parentElement === source.parentElement
+      && proxy.classList.contains("mm-mermaid-svg")
+      && !proxy.hasAttribute("data-mm-block-index")
+      && !proxy.nextElementSibling?.classList.contains("mm-mermaid-svg");
+    if (hasValidAdjacency) {
+      const claim: MermaidProxyLifecycleClaim = {
+        proxy,
+        source,
+        state: "ready",
+      };
+      (source as LifecycleOwnedElement)[MERMAID_PROXY_LIFECYCLE_OWNER] = claim;
+      (proxy as LifecycleOwnedElement)[MERMAID_PROXY_LIFECYCLE_OWNER] = claim;
+      continue;
+    }
+
+    source.classList.remove("is-rendered");
+    let sibling = source.nextElementSibling;
+    while (sibling instanceof HTMLElement && sibling.classList.contains("mm-mermaid-svg")) {
+      const nextSibling = sibling.nextElementSibling;
+      sibling.remove();
+      sibling = nextSibling;
+    }
+  }
+}
+
 function claimProxyLifecycle(node: HTMLElement): MermaidProxyLifecycleClaim {
   const previousClaim = (node as LifecycleOwnedElement)[MERMAID_PROXY_LIFECYCLE_OWNER];
   if (previousClaim !== undefined) {

@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { isMermaidNodeNearViewport, renderMermaidNode, type MermaidApiLike } from "../src/mermaidRender";
+import {
+  isMermaidNodeNearViewport,
+  reclaimClonedMermaidProxyLifecycles,
+  readReadyMermaidProxy,
+  renderMermaidNode,
+  type MermaidApiLike,
+} from "../src/mermaidRender";
+import { buildDocumentWindowModelsFromLiveBlocks, collectLiveDocumentSectionElements } from "../src/documentWindow";
 
 function makeNode(source: string): HTMLElement {
   const pre = document.createElement("pre");
@@ -202,6 +209,65 @@ describe("renderMermaidNode", () => {
 
     expect(node.classList.contains("is-rendered")).toBe(false);
     expect(node.nextElementSibling).toBeNull();
+  });
+
+  it("reclaims a cache-cloned rendered proxy before rebuilding the virtualized model", async () => {
+    document.body.replaceChildren();
+    const source = makeNode("graph TD");
+    source.dataset.mmBlockIndex = "1";
+    source.dataset.mmBlockKind = "code";
+    await renderMermaidNode(
+      source,
+      1,
+      () => 1,
+      { render: async () => ({ svg: "<svg>CLONED</svg>" }) },
+      1000,
+      { manageVirtualizedProxyLifecycle: true }
+    );
+    source.style.display = "none";
+    const renderedProxy = source.nextElementSibling as HTMLElement;
+
+    const main = document.createElement("main");
+    main.className = "mm-document";
+    const predecessor = document.createElement("p");
+    predecessor.dataset.mmBlockIndex = "0";
+    predecessor.dataset.mmBlockKind = "paragraph";
+    predecessor.textContent = "before";
+    const follower = document.createElement("p");
+    follower.dataset.mmBlockIndex = "2";
+    follower.dataset.mmBlockKind = "paragraph";
+    follower.textContent = "after";
+    const clonedSource = source.cloneNode(true) as HTMLElement;
+    const clonedProxy = renderedProxy.cloneNode(true) as HTMLElement;
+    main.append(predecessor, clonedSource, clonedProxy, follower);
+    document.body.replaceChildren(main);
+
+    const layouts = new Map<HTMLElement, { height: number; top: number }>([
+      [predecessor, { height: 40, top: 0 }],
+      [clonedSource, { height: 0, top: 40 }],
+      [clonedProxy, { height: 180, top: 40 }],
+      [follower, { height: 40, top: 220 }],
+    ]);
+    for (const [element, layout] of layouts) {
+      Object.defineProperty(element, "offsetHeight", { configurable: true, value: layout.height });
+      Object.defineProperty(element, "offsetTop", { configurable: true, value: layout.top });
+    }
+
+    expect(readReadyMermaidProxy(clonedSource)).toBeNull();
+    reclaimClonedMermaidProxyLifecycles(main);
+    expect(readReadyMermaidProxy(clonedSource)).toBe(clonedProxy);
+
+    const models = buildDocumentWindowModelsFromLiveBlocks(
+      collectLiveDocumentSectionElements(main),
+      { charsPerLine: 40, fontSizePx: 18, lineHeightPx: 30 },
+      260
+    );
+    expect(models.measuredModel.sections.map(section => section.blockIndex)).toEqual([0, 1, 2]);
+    expect(models.measuredModel.getEntryByBlockIndex(0)?.measuredHeight).toBe(40);
+    expect(models.measuredModel.getEntryByBlockIndex(1)).toMatchObject({
+      geometryOwner: "mermaid-proxy",
+      measuredHeight: 180,
+    });
   });
 });
 
