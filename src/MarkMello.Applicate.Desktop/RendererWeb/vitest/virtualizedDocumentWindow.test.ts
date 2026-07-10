@@ -692,6 +692,56 @@ describe("virtualized document window", () => {
     }
   });
 
+  it("re-adopts late real-ready growth while preserving the off-screen height pin", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 800, 240);
+    const frames = installFrameQueue();
+    let blockHeight = 122;
+    let blockTop = 0;
+    let occupiedBottom = 144;
+    const model = new DocumentWindowModel([
+      entry(0, 253, 104, {
+        html: '<section data-mm-block-index="253" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 253</section>',
+        occupiedNonContentHeight: 22,
+      }),
+    ]);
+    const controller = makeController({
+      model,
+      realization: { enabled: true },
+      root,
+    });
+
+    try {
+      controller.updateWindowForScroll();
+      const blockNode = document.querySelector<HTMLElement>("[data-mm-block-index='253']")!;
+      let bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(blockNode, { height: () => blockHeight, top: () => blockTop });
+      setElementLayout(bottomSpacer, { top: () => occupiedBottom });
+
+      dispatchContentVisibilityState(blockNode, false);
+      frames.flush(2);
+      expect(controller.adoptRenderedHeights().updatedCount).toBe(1);
+      expect(model.getEntryByBlockIndex(253)?.measuredHeight).toBe(144);
+
+      blockHeight = 162;
+      occupiedBottom = 184;
+      bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(bottomSpacer, { top: () => occupiedBottom });
+      expect(controller.adoptRenderedHeights().updatedCount).toBe(1);
+      expect(model.getEntryByBlockIndex(253)?.measuredHeight).toBe(184);
+
+      blockTop = 500;
+      blockHeight = 82;
+      occupiedBottom = 104;
+      bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(bottomSpacer, { top: () => occupiedBottom });
+      controller.adoptRenderedHeights();
+      expect(model.getEntryByBlockIndex(253)?.measuredHeight).toBe(184);
+    } finally {
+      frames.restore();
+    }
+  });
+
   it("keeps equal-fallback event geometry diagnostic-only", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { root } = setScrollRoot(0, 400, 180);

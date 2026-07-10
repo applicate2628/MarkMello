@@ -634,6 +634,10 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
         continue;
       }
 
+      if (isStrictlyIntersecting(block)) {
+        watch.readyMeasuredHeight = Math.max(0, update.measuredHeight);
+      }
+
       const acceptedUpdate: MeasuredHeightUpdate = {
         ...update,
         measuredHeight: watch.readyMeasuredHeight,
