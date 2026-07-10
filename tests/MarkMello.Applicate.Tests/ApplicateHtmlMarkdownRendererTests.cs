@@ -1,4 +1,5 @@
 using System.Text.Encodings.Web;
+using System.Text.Json;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Math;
 using MarkMello.Applicate.Desktop.Rendering;
@@ -440,10 +441,12 @@ public sealed class ApplicateHtmlMarkdownRendererTests
             new ByteImageSourceResolver(OnePixelPng),
             CancellationToken.None);
 
-        Assert.Contains("<figure", document.Html, StringComparison.Ordinal);
-        Assert.Contains("<img src=\"data:image/png;base64,", document.Html, StringComparison.Ordinal);
-        Assert.Contains(" width=\"1\"", document.Html, StringComparison.Ordinal);
-        Assert.Contains(" height=\"1\"", document.Html, StringComparison.Ordinal);
+        var expected = ReadHostImageMarkupFixture("flagOn");
+        Assert.Contains(expected, document.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            expected.Replace(" width=\"1\" height=\"1\"", string.Empty, StringComparison.Ordinal),
+            document.Html,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -494,9 +497,12 @@ public sealed class ApplicateHtmlMarkdownRendererTests
             new ByteImageSourceResolver(OnePixelPng),
             CancellationToken.None);
 
-        Assert.Contains("<img src=\"data:image/png;base64,", document.Html, StringComparison.Ordinal);
-        Assert.DoesNotContain(" width=\"1\"", document.Html, StringComparison.Ordinal);
-        Assert.DoesNotContain(" height=\"1\"", document.Html, StringComparison.Ordinal);
+        var expected = ReadHostImageMarkupFixture("flagOff");
+        Assert.Contains(expected, document.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            expected.Replace(" alt=\"legacy\"", " alt=\"legacy\" width=\"1\"", StringComparison.Ordinal),
+            document.Html,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -726,6 +732,21 @@ public sealed class ApplicateHtmlMarkdownRendererTests
             null,
             enabled,
         ]);
+    }
+
+    private static string ReadHostImageMarkupFixture(string propertyName)
+    {
+        var repositoryRoot = new DirectoryInfo(AppContext.BaseDirectory);
+        while (repositoryRoot is not null && !File.Exists(Path.Combine(repositoryRoot.FullName, "MarkMello.sln")))
+        {
+            repositoryRoot = repositoryRoot.Parent;
+        }
+        Assert.NotNull(repositoryRoot);
+        var path = Path.Combine(
+            repositoryRoot.FullName,
+            "src", "MarkMello.Applicate.Desktop", "RendererWeb", "vitest", "fixtures", "hostImageMarkup.json");
+        using var json = JsonDocument.Parse(File.ReadAllText(path));
+        return json.RootElement.GetProperty(propertyName).GetString()!.Replace("\n", Environment.NewLine, StringComparison.Ordinal);
     }
 
     private sealed class ByteImageSourceResolver(byte[] bytes) : IImageSourceResolver

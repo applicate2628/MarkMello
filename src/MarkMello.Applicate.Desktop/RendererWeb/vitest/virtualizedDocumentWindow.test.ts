@@ -13,6 +13,7 @@ import {
 } from "../src/virtualizedDocumentWindow";
 import type { IntrinsicSizeMetrics, SectionKind } from "../src/sectionIntrinsicSize";
 import { renderMermaidNode, type MermaidApiLike } from "../src/mermaidRender";
+import { readFileSync } from "node:fs";
 
 const metrics: IntrinsicSizeMetrics = {
   charsPerLine: 40,
@@ -329,40 +330,60 @@ describe("virtualized document window", () => {
     expect(document.querySelector<HTMLElement>("pre")?.style.containIntrinsicSize).toBe("auto 111px");
   });
 
-  it("top-level block box sizing is compatible with content-box stamping", () => {
+  it("top-level block box sizing is compatible with content-box stamping", async () => {
+    const css = readFileSync("RendererWeb/assets/renderer.css", "utf8");
+    document.documentElement.innerHTML = `<head><style>${css}</style></head><body><main class="mm-document"></main></body>`;
+    const { root } = setScrollRoot(0, 2000, 2000);
     const kinds: SectionKind[] = [
       "heading", "paragraph", "quote", "list", "rule", "code", "table", "image", "math", "unknown",
     ];
+    const markup: Record<SectionKind, string> = {
+      heading: "<h2>heading</h2>",
+      paragraph: "<p>paragraph</p>",
+      quote: "<blockquote>quote</blockquote>",
+      list: "<ul><li>list</li></ul>",
+      rule: "<hr>",
+      code: "<pre><code>code</code></pre>",
+      table: '<div class="mm-table-scroll"><table><tbody><tr><td>table</td></tr></tbody></table></div>',
+      image: '<figure><img alt="image"></figure>',
+      math: '<div class="math-display">math</div>',
+      unknown: "<section>unknown</section>",
+    };
     const isCompatible = (element: HTMLElement): boolean => {
       const style = window.getComputedStyle(element);
-      if (style.boxSizing === "content-box") return true;
-      if (style.boxSizing !== "border-box") return false;
+      const boxSizing = style.boxSizing || "content-box";
+      if (boxSizing === "content-box") return true;
+      if (boxSizing !== "border-box") return false;
       return [style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth]
         .every(value => value === "" || value === "0" || value === "0px");
     };
+    const model = new DocumentWindowModel(kinds.map((kind, index) => entry(index, 300 + index, 50, {
+      html: markup[kind].replace(">", ` data-mm-block-index="${300 + index}" data-mm-block-kind="${kind}">`),
+      kind,
+      occupiedNonContentHeight: 0,
+    })));
+    makeController({ model, root }).updateWindowForScroll();
+    const generated = Array.from(document.querySelectorAll<HTMLElement>("main.mm-document > [data-mm-block-kind]"));
+    expect(generated.map(node => node.dataset.mmBlockKind)).toEqual(kinds);
 
-    const fixtures = kinds.map(kind => {
-      const element = document.createElement("section");
-      element.dataset.mmBlockKind = kind;
-      element.style.boxSizing = "content-box";
-      document.body.append(element);
-      return element;
-    });
-    const mermaidProxy = document.createElement("div");
-    mermaidProxy.className = "mm-mermaid-svg";
-    mermaidProxy.style.boxSizing = "border-box";
-    mermaidProxy.style.paddingTop = "0px";
-    mermaidProxy.style.paddingBottom = "0px";
-    mermaidProxy.style.borderTopWidth = "0px";
-    mermaidProxy.style.borderBottomWidth = "0px";
-    document.body.append(mermaidProxy);
-    fixtures.push(mermaidProxy);
+    const mermaidSource = document.createElement("pre");
+    mermaidSource.className = "mm-mermaid";
+    mermaidSource.innerHTML = '<code data-mm-mermaid>flowchart LR\nA --&gt; B</code>';
+    document.querySelector("main.mm-document")!.append(mermaidSource);
+    await renderMermaidNode(
+      mermaidSource,
+      1,
+      () => 1,
+      { render: async () => ({ svg: "<svg>owned</svg>" }) },
+      1000,
+      { manageVirtualizedProxyLifecycle: true }
+    );
+    const mermaidProxy = mermaidSource.nextElementSibling as HTMLElement;
+    expect([...generated, mermaidProxy].every(isCompatible)).toBe(true);
 
-    expect(fixtures.every(isCompatible)).toBe(true);
-
-    const invalid = document.createElement("pre");
-    invalid.style.boxSizing = "border-box";
-    invalid.style.paddingTop = "8px";
+    const invalid = generated.find(node => node.dataset.mmBlockKind === "code")!;
+    invalid.classList.add("qa-padded-border-box");
+    document.head.insertAdjacentHTML("beforeend", "<style>.qa-padded-border-box{box-sizing:border-box;padding-top:8px}</style>");
     expect(isCompatible(invalid)).toBe(false);
   });
 
@@ -1283,12 +1304,17 @@ describe("virtualized document window", () => {
   });
 
   it("delayed image decode changes occupied delta by at most one pixel", () => {
+    const fixture = JSON.parse(readFileSync("RendererWeb/vitest/fixtures/hostImageMarkup.json", "utf8")) as {
+      flagOn: string;
+      intrinsicHeight: number;
+      intrinsicWidth: number;
+    };
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { root } = setScrollRoot(0, 400, 50);
     const model = new DocumentWindowModel([
       {
-        ...entry(0, 120, 100),
-        html: '<figure data-mm-block-index="120"><img src="data:image/png;base64,x" width="160" height="90"></figure>',
+        ...entry(0, 0, 100),
+        html: fixture.flagOn,
       },
     ]);
     const controller = makeController({ model, root });
@@ -1297,7 +1323,10 @@ describe("virtualized document window", () => {
     const image = document.querySelector<HTMLImageElement>("img")!;
     let decoded = false;
     const occupiedHeight = () => {
-      if (decoded) return 160 / (160 / 90);
+      if (decoded) {
+        const renderedWidth = Number(image.getAttribute("width"));
+        return renderedWidth / (fixture.intrinsicWidth / fixture.intrinsicHeight);
+      }
       const reserved = image.getAttribute("height");
       return reserved === null ? Number.NaN : Number(reserved);
     };
@@ -1307,8 +1336,8 @@ describe("virtualized document window", () => {
     image.dispatchEvent(new Event("load"));
     const afterDecode = figure.offsetHeight;
 
-    expect(image.getAttribute("width")).toBe("160");
-    expect(image.getAttribute("height")).toBe("90");
+    expect(image.getAttribute("width")).toBe(String(fixture.intrinsicWidth));
+    expect(image.getAttribute("height")).toBe(String(fixture.intrinsicHeight));
     expect(Math.abs(afterDecode - beforeDecode)).toBeLessThanOrEqual(1);
 
     image.removeAttribute("height");

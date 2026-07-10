@@ -120,13 +120,15 @@ describe("renderer virtualization flags", () => {
       ["show", `${TASK_5_PARENT}:src/MarkMello.Applicate.Desktop/RendererWeb/src/renderer.ts`],
       { encoding: "utf8" }
     );
+    const currentDomReady = current.slice(current.indexOf('document.addEventListener("DOMContentLoaded"'));
+    const baselineDomReady = baseline.slice(baseline.indexOf('document.addEventListener("DOMContentLoaded"'));
     const currentShared = sliceBetween(
-      current,
+      currentDomReady,
       "  const documentElement = document.querySelector<HTMLElement>(\".mm-document\");",
       "const queuePostScroll"
     );
     const baselineShared = sliceBetween(
-      baseline,
+      baselineDomReady,
       "  const documentElement = document.querySelector<HTMLElement>(\".mm-document\");",
       "const queuePostScroll"
     );
@@ -141,35 +143,41 @@ describe("renderer virtualization flags", () => {
       "function runLegacyDocumentFontsReadyWork",
       "document.addEventListener(\"DOMContentLoaded\""
     );
-    const orderedSignature = (source: string, statements: readonly string[]) => {
-      let cursor = -1;
-      return statements.map(statement => {
-        cursor = source.indexOf(statement, cursor + 1);
-        expect(cursor).toBeGreaterThanOrEqual(0);
-        return statement;
-      });
-    };
+    const normalizedMatches = (source: string, patterns: readonly RegExp[]) => patterns.map(pattern => {
+      const match = source.match(pattern)?.[0];
+      expect(match).toBeDefined();
+      return match!.replace(/\s+/g, " ").trim();
+    });
     const resizeStatements = [
-      "queueMinimapRefreshAfterLayoutSettles();",
-      "scheduleResizeReactions(documentEpoch);",
-      "invalidateSourceLineAnchors({",
-      "scheduleVirtualizedMeasuredHeightAdoption();",
-      "window.requestAnimationFrame(() => {",
-      "postScroll();",
+      /queueMinimapRefreshAfterLayoutSettles\(\);/,
+      /scheduleResizeReactions\(documentEpoch\);/,
+      /invalidateSourceLineAnchors\(\{[\s\S]*?\}\);/,
+      /scheduleVirtualizedMeasuredHeightAdoption\(\);/,
+      /window\.requestAnimationFrame\(\(\) => \{[\s\S]*?postScroll\(\);[\s\S]*?\}\);/,
     ] as const;
     const fontStatements = [
-      "queueMinimapRefreshAfterLayoutSettles();",
-      "invalidateSourceLineAnchors({",
-      "scheduleVirtualizedMeasuredHeightAdoption();",
+      /queueMinimapRefreshAfterLayoutSettles\(\);/,
+      /invalidateSourceLineAnchors\(\{[\s\S]*?\}\);/,
+      /scheduleVirtualizedMeasuredHeightAdoption\(\);/,
     ] as const;
 
-    expect(orderedSignature(currentResizeOwner, resizeStatements))
-      .toEqual(orderedSignature(baselineShared, resizeStatements));
-    expect(orderedSignature(currentFontsOwner, fontStatements))
-      .toEqual(orderedSignature(baselineShared, fontStatements));
+    expect(normalizedMatches(currentResizeOwner, resizeStatements))
+      .toEqual(normalizedMatches(baselineShared, resizeStatements));
+    expect(normalizedMatches(currentFontsOwner, fontStatements))
+      .toEqual(normalizedMatches(baselineShared, fontStatements));
     expect(currentShared).toContain("if (!virtualizationEnabled) {\n        runLegacyResizeObserverWork(documentEpoch);");
     expect(currentShared).toContain("if (!virtualizationEnabled) {\n      runLegacyDocumentFontsReadyWork(fontsDocumentEpoch);");
     expect(current.match(/virtualizationEnabled \? \{ manageVirtualizedProxyLifecycle: true \} : undefined/g))
       .toEqual(baseline.match(/virtualizationEnabled \? \{ manageVirtualizedProxyLifecycle: true \} : undefined/g));
+
+    const hostImageFixture = JSON.parse(
+      readFileSync("RendererWeb/vitest/fixtures/hostImageMarkup.json", "utf8")
+    ) as { flagOff: string };
+    const template = document.createElement("template");
+    template.innerHTML = hostImageFixture.flagOff;
+    const image = template.content.querySelector<HTMLImageElement>("img")!;
+    expect(image.alt).toBe("legacy");
+    expect(image.hasAttribute("width")).toBe(false);
+    expect(image.hasAttribute("height")).toBe(false);
   });
 });

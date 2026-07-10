@@ -1,0 +1,6 @@
+{
+  "intrinsicWidth": 1,
+  "intrinsicHeight": 1,
+  "flagOn": "<figure data-mm-block-index=\"0\" data-mm-block-kind=\"image\" data-mm-source-line=\"0\" data-mm-source-end-line=\"0\"><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk&#x2B;A8AAQUBAScY42YAAAAASUVORK5CYII=\" alt=\"reserved\" width=\"1\" height=\"1\"><figcaption>reserved</figcaption></figure>\n",
+  "flagOff": "<figure data-mm-block-index=\"0\" data-mm-block-kind=\"image\" data-mm-source-line=\"0\" data-mm-source-end-line=\"0\"><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk&#x2B;A8AAQUBAScY42YAAAAASUVORK5CYII=\" alt=\"legacy\"><figcaption>legacy</figcaption></figure>\n"
+}

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const TASK_4_BASELINE = "e75df2cbc53407420bfce82d0dfb94fc43e5c684";
@@ -107,8 +108,22 @@ describe("renderer virtualization wiring", () => {
 
     expect(controllerDeps).toContain("readMeasuredHeights:");
     expect(controllerDeps).toContain("realization:");
-    expect(source).not.toContain("offsetHeight !==");
-    expect(source).not.toContain("Math.abs(item.height - intrinsicSize) > CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX");
+    const readProductionTypeScript = (directory: string): Array<{ path: string; source: string }> =>
+      readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+        const path = join(directory, entry.name);
+        return entry.isDirectory()
+          ? readProductionTypeScript(path)
+          : entry.isFile() && entry.name.endsWith(".ts")
+            ? [{ path, source: readFileSync(path, "utf8") }]
+            : [];
+      });
+    const detector = /(?:Math\.abs\([^)]*(?:offsetHeight[^)]*(?:intrinsic|fallbackBorderBoxHeight)|(?:intrinsic|fallbackBorderBoxHeight)[^)]*offsetHeight)[^)]*\)|offsetHeight\s*(?:===?|!==?|[<>]=?)\s*[^;\n]*(?:intrinsic|fallbackBorderBoxHeight)|(?:intrinsic|fallbackBorderBoxHeight)[^;\n]*?\s*(?:===?|!==?|[<>]=?)\s*offsetHeight)/g;
+    const comparisons = readProductionTypeScript("RendererWeb/src").flatMap(file =>
+      Array.from(file.source.matchAll(detector), match => ({ path: file.path, text: match[0] }))
+    );
+    expect(comparisons).toHaveLength(2);
+    expect(comparisons.every(candidate => candidate.path.endsWith("virtualizedDocumentWindow.ts"))).toBe(true);
+    expect("offsetHeight > intrinsicSize".match(detector)).not.toBeNull();
     expect(windowSource).toContain("const filterRealizedUpdates = (");
     expect(windowSource).toContain("watch.state !== \"real-ready\"");
     expect(windowSource).toContain("realizationTracker?.filterRealizedUpdates(blocks, updates) ?? updates");
@@ -343,18 +358,31 @@ describe("renderer virtualization wiring", () => {
   });
 
   it("flag-on resolved images carry mount-stable intrinsic ratio", () => {
-    const source = readFileSync("Rendering/ApplicateHtmlMarkdownRenderer.cs", "utf8");
-    const tests = readFileSync("../../tests/MarkMello.Applicate.Tests/ApplicateHtmlMarkdownRendererTests.cs", "utf8");
+    const fixture = JSON.parse(readFileSync("RendererWeb/vitest/fixtures/hostImageMarkup.json", "utf8")) as {
+      flagOn: string;
+      intrinsicHeight: number;
+      intrinsicWidth: number;
+    };
+    const template = document.createElement("template");
+    template.innerHTML = fixture.flagOn;
+    const image = template.content.querySelector<HTMLImageElement>("img")!;
+    const readRatio = (candidate: HTMLImageElement): number | null => {
+      const width = Number(candidate.getAttribute("width"));
+      const height = Number(candidate.getAttribute("height"));
+      return candidate.hasAttribute("width")
+        && candidate.hasAttribute("height")
+        && Number.isFinite(width)
+        && Number.isFinite(height)
+        && width > 0
+        && height > 0
+        ? width / height
+        : null;
+    };
 
-    expect(source).toContain("ReadIntrinsicImageSize");
-    expect(source).toContain("virtualizationEnabled");
-    expect(source).toContain("resolved.Bytes");
-    expect(source).toContain("RenderImagePlaceholder");
-    expect(source).toContain("TryResolveReservedImageSize(resolved.Bytes, width, height");
-    expect(source).toContain("AppendImageAttributes(context.Html, altText, title, reservedWidth, reservedHeight)");
-    expect(tests).toContain("FlagOnResolvedBlockImagesCarryMountStableIntrinsicRatio");
-    expect(tests).toContain("Assert.Contains(\" width=\\\"1\\\"\"");
-    expect(tests).toContain("Assert.Contains(\" height=\\\"1\\\"\"");
+    expect(readRatio(image))
+      .toBe(fixture.intrinsicWidth / fixture.intrinsicHeight);
+    image.removeAttribute("height");
+    expect(readRatio(image)).toBeNull();
   });
 
   it("keeps the H3 diagnostic observer test-only and out of production", () => {
