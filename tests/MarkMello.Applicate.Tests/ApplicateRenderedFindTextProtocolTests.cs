@@ -1,3 +1,4 @@
+using System.Text;
 using MarkMello.Applicate.Desktop.Rendering;
 using Xunit;
 
@@ -88,6 +89,19 @@ public sealed class ApplicateRenderedFindTextProtocolTests
         Assert.False(ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(oneCodeUnitOver).Accepted);
         Assert.True(ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(exactUtf8).Accepted);
         Assert.False(ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(oneUtf8ByteOver).Accepted);
+    }
+
+    [Fact]
+    public void RawMessageBoundsAcceptCyrillicDenseChunkAtProducerMargin()
+    {
+        var producerUtf8Ceiling = ApplicateRenderedFindTextProtocol.MaxMessageUtf8Bytes * 9 / 10;
+        var body = BuildCyrillicDenseChunkAtUtf8Bytes(producerUtf8Ceiling);
+
+        Assert.Equal(producerUtf8Ceiling, Encoding.UTF8.GetByteCount(body));
+        Assert.True(ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body).Accepted);
+        Assert.True(ApplicateRenderedFindTextProtocol.ParseMessage(
+            body,
+            new ApplicateRenderedFindProtocolContext(11)).Accepted);
     }
 
     [Theory]
@@ -472,6 +486,48 @@ public sealed class ApplicateRenderedFindTextProtocolTests
 
         Assert.Equal(0, targetChunkBytes);
         return transfer.Apply(complete);
+    }
+
+    private static string BuildCyrillicDenseChunkAtUtf8Bytes(int targetUtf8Bytes)
+    {
+        var text = new string('\u044f', Math.Max(1, (targetUtf8Bytes - 256) / 2));
+        while (true)
+        {
+            var body = ChunkJson(11, 1, 0, SplitPartJson(text));
+            var byteCount = Encoding.UTF8.GetByteCount(body);
+            if (byteCount == targetUtf8Bytes)
+            {
+                return body;
+            }
+
+            if (byteCount > targetUtf8Bytes)
+            {
+                text = text[..^1];
+                continue;
+            }
+
+            var cyrillicToAdd = (targetUtf8Bytes - byteCount) / 2;
+            text += cyrillicToAdd > 0
+                ? new string('\u044f', cyrillicToAdd)
+                : "x";
+        }
+    }
+
+    private static string[] SplitPartJson(string text)
+    {
+        const int firstPartLength = ApplicateRenderedFindTextProtocol.MaxTextPartCodeUnits;
+        if (text.Length <= firstPartLength)
+        {
+            return [PartJson(0, 0, 0, text.Length, 0, text)];
+        }
+
+        var first = text[..firstPartLength];
+        var second = text[firstPartLength..];
+        return
+        [
+            PartJson(0, 0, 0, text.Length, 0, first),
+            PartJson(0, 0, 0, text.Length, first.Length, second),
+        ];
     }
 
     private static string StartJson(

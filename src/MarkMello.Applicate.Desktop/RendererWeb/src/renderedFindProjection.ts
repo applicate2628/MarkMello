@@ -13,6 +13,21 @@ export const RENDERED_FIND_MAX_PROJECTION_CODE_UNITS = 16_777_216;
 export const RENDERED_FIND_MAX_SEMANTIC_SEGMENTS = 524_288;
 export const RENDERED_FIND_MAX_TRANSFER_PARTS = 1_048_576;
 export const RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS = 7;
+// Producer packing measures the JSON.stringify payload this module emits. The
+// host raw-message limits remain authoritative; this reserve does not model any
+// undocumented WebView bridge escaping.
+export const RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_NUMERATOR = 9;
+export const RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_DENOMINATOR = 10;
+export const RENDERED_FIND_MAX_PACKED_CHUNK_MESSAGE_UTF8_BYTES = Math.floor(
+  RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES
+  * RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_NUMERATOR
+  / RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_DENOMINATOR
+);
+export const RENDERED_FIND_MAX_PACKED_CHUNK_MESSAGE_CODE_UNITS = Math.floor(
+  RENDERED_FIND_MAX_MESSAGE_CODE_UNITS
+  * RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_NUMERATOR
+  / RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_DENOMINATOR
+);
 
 export type RenderedFindTextSegment = {
   segmentOrdinal: number;
@@ -393,6 +408,11 @@ export function assertRenderedFindMessageWithinLimits(message: unknown): void {
   }
 }
 
+function isWithinRenderedFindPackedChunkLimit(measurement: { codeUnits: number; utf8Bytes: number }): boolean {
+  return measurement.codeUnits <= RENDERED_FIND_MAX_PACKED_CHUNK_MESSAGE_CODE_UNITS
+    && measurement.utf8Bytes <= RENDERED_FIND_MAX_PACKED_CHUNK_MESSAGE_UTF8_BYTES;
+}
+
 export async function emitRenderedFindProjectionTransfer(
   segments: RenderedFindTextSegment[],
   options: RenderedFindTransferOptions
@@ -516,25 +536,71 @@ async function buildTransferPlan(
     if (
       pending.length > 0
       && (
-        measurement.codeUnits > RENDERED_FIND_MAX_MESSAGE_CODE_UNITS
-        || measurement.utf8Bytes > RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES
+        !isWithinRenderedFindPackedChunkLimit(measurement)
       )
     ) {
       flush();
-      pending.push(part);
+      appendPart(part);
       return;
     }
     if (
       pending.length === 0
       && (
-        measurement.codeUnits > RENDERED_FIND_MAX_MESSAGE_CODE_UNITS
-        || measurement.utf8Bytes > RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES
+        !isWithinRenderedFindPackedChunkLimit(measurement)
       )
     ) {
       throw new Error("rendered find text part cannot fit within one message");
     }
 
     pending = candidate;
+  };
+
+  const findPackedTextPartEnd = (
+    text: string,
+    offset: number,
+    segment: RenderedFindTextSegment
+  ): number => {
+    const fitsPartEndingAt = (end: number): boolean => {
+      const part: RenderedFindTextPart = {
+        blockIndex: segment.blockIndex,
+        blockLocalStart: segment.blockLocalStart,
+        partOffset: offset,
+        segmentCodeUnitLength: segment.segmentCodeUnitLength,
+        segmentOrdinal: segment.segmentOrdinal,
+        text: text.slice(offset, end),
+      };
+      const message = createRenderedFindTextIndexChunkMessage({
+        chunkIndex: RENDERED_FIND_MAX_TRANSFER_PARTS,
+        parts: [part],
+        projectionRevision: options.projectionRevision,
+        renderId: options.renderId,
+      });
+
+      return isWithinRenderedFindPackedChunkLimit(measureRenderedFindMessage(message));
+    };
+
+    let low = offset + 1;
+    let high = Math.min(text.length, offset + RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS);
+    if (fitsPartEndingAt(high)) {
+      return high;
+    }
+
+    let best = offset;
+
+    while (low <= high) {
+      const mid = low + Math.floor((high - low) / 2);
+      if (fitsPartEndingAt(mid)) {
+        best = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    if (best === offset) {
+      throw new Error("rendered find text part cannot fit within one message");
+    }
+    return best;
   };
 
   for (const segment of segments) {
@@ -548,18 +614,21 @@ async function buildTransferPlan(
       throw new Error(`rendered find projection exceeds total UTF-16 limit: ${totalCodeUnits}`);
     }
 
-    for (let offset = 0; offset < text.length; offset += RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS) {
+    let offset = 0;
+    while (offset < text.length) {
       if (await beginOrContinuePackingSlice()) {
         return { status: "cancelled" };
       }
+      const partEnd = findPackedTextPartEnd(text, offset, segment);
       appendPart({
         blockIndex: segment.blockIndex,
         blockLocalStart: segment.blockLocalStart,
         partOffset: offset,
         segmentCodeUnitLength: segmentLength,
         segmentOrdinal: segment.segmentOrdinal,
-        text: text.slice(offset, offset + RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS),
+        text: text.slice(offset, partEnd),
       });
+      offset = partEnd;
       partCount++;
       if (partCount > RENDERED_FIND_MAX_TRANSFER_PARTS) {
         throw new Error(`rendered find projection exceeds transfer part limit: ${partCount}`);

@@ -552,6 +552,31 @@ describe("rendered find transfer packing", () => {
     expect(chunks.flatMap(chunk => chunk.parts).map(part => part.partOffset)).toEqual([0, 65536]);
   });
 
+  it("packs every rendered-find chunk below the 90 percent host raw-message ceiling", async () => {
+    const mod = await loadProjectionModule();
+    const producerCodeUnitCeiling = Math.floor(mod.RENDERED_FIND_MAX_MESSAGE_CODE_UNITS * 0.9);
+    const producerUtf8Ceiling = Math.floor(mod.RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES * 0.9);
+    const cyrillicText = "я".repeat(58_900);
+    const { messages } = await collectTransfer(mod, [
+      makeSegment(cyrillicText, { blockLocalStart: 0, segmentOrdinal: 0 }),
+      makeSegment(cyrillicText, { blockLocalStart: cyrillicText.length, segmentOrdinal: 1 }),
+    ]);
+    const chunks = messages.filter(
+      (message): message is { type: "find-text-index-chunk"; parts: Array<{ text: string }> } =>
+        (message as { type: string }).type === "find-text-index-chunk"
+    );
+
+    expect(chunks.length).toBeGreaterThan(0);
+    for (const chunk of chunks) {
+      const measurement = mod.measureRenderedFindMessage(chunk);
+      expect(measurement.codeUnits).toBeLessThanOrEqual(producerCodeUnitCeiling);
+      expect(measurement.utf8Bytes).toBeLessThanOrEqual(producerUtf8Ceiling);
+    }
+    expect(chunks.flatMap(chunk => chunk.parts).map(part => part.text).join("")).toBe(
+      cyrillicText + cyrillicText
+    );
+  });
+
   it("splits at 4,096 parts per chunk without changing semantic boundaries", async () => {
     const mod = await loadProjectionModule();
     const segments = Array.from({ length: mod.RENDERED_FIND_MAX_CHUNK_PARTS + 1 }, (_, index) =>
