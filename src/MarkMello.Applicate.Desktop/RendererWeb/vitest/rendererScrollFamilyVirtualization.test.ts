@@ -1466,14 +1466,15 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(postedIds.every(id => liveHeadingIds.has(id))).toBe(true);
   });
 
-  it("renders an off-window anchor target before handling a scroll-to anchor message", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, messages, root, scrollCalls } = await loadRendererHarness({
+  it("keeps a non-smooth off-window anchor landing instant", async () => {
+    const { flushNextRaf, flushQueuedRafs, load, messages, root, scrollCalls, scrollWrites } = await loadRendererHarness({
       sectionCount: 120,
       virtualization: true,
     });
     load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
     await flushQueuedRafs();
     scrollCalls.length = 0;
+    scrollWrites.length = 0;
 
     expect(document.getElementById("heading-90")).toBeNull();
     load({ type: "scroll-to", anchor: "heading-90" });
@@ -1482,10 +1483,12 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(document.getElementById("heading-90")).not.toBeNull();
     expect(scrollCalls).toEqual([]);
     expect(root.scrollTop).toBeGreaterThan(0);
+    expect(scrollWrites.filter(value => value > 0)).toHaveLength(1);
+    expectCommittedWriterOwned(messages, "navigation-initial", "heading-navigation");
   });
 
-  it("renders an off-window TOC target before smooth scrolling the heading", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, messages, root, scrollCalls } = await loadRendererHarness({
+  it("smoothly lands an off-window TOC target through owned intermediate frames", async () => {
+    const { flushNextRaf, flushQueuedRafs, load, messages, root, scrollCalls, scrollWrites } = await loadRendererHarness({
       sectionCount: 120,
       virtualization: true,
     });
@@ -1499,8 +1502,16 @@ describe("renderer scroll-family virtualization integration", () => {
 
     expect(document.getElementById("heading-95")).not.toBeNull();
     expect(scrollCalls).toEqual([]);
-    expect(root.scrollTop).toBeGreaterThan(0);
-    expectCommittedWriterOwned(messages, "navigation-initial", "heading-navigation");
+    await flushQueuedRafs();
+
+    const positiveWrites = scrollWrites.filter(value => value > 0);
+    expect(positiveWrites.length).toBeGreaterThan(2);
+    expect(positiveWrites.slice(1).every((value, index) => value > positiveWrites[index]!)).toBe(true);
+    expect(positiveWrites.slice(0, -1).every(value => value < root.scrollTop)).toBe(true);
+    expect(root.scrollTop).toBeCloseTo(positiveWrites.at(-1)!, 5);
+    expect(document.getElementById("heading-95")!.getBoundingClientRect().top).toBeCloseTo(0, 0);
+    expectCommittedWriterOwned(messages, "navigation-smooth", "heading-navigation");
+    expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(1);
   });
 
   it("routes hash navigation through the virtualized heading landing owner", async () => {
@@ -1553,6 +1564,46 @@ describe("renderer scroll-family virtualization integration", () => {
 
     expect(document.getElementById("heading-95")).not.toBeNull();
     expect(root.scrollTop).toBeGreaterThan(10 * SECTION_PITCH);
+  });
+
+  it("stops a smooth TOC transition after genuine user supersession", async () => {
+    const { flushNextRaf, flushQueuedRafs, load, messages, root, scrollCalls, scrollWrites } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    scrollCalls.length = 0;
+    scrollWrites.length = 0;
+
+    load({ type: "scroll-to-heading", id: "heading-95" });
+    await flushNextRaf();
+    await flushNextRaf();
+
+    expect(document.getElementById("heading-95")).not.toBeNull();
+    expect(scrollWrites.filter(value => value > 0)).toHaveLength(1);
+    expect(scrollCalls).toEqual([]);
+
+    root.scrollTop += 333;
+    document.dispatchEvent(new Event("scroll"));
+    await Promise.resolve();
+    const smoothWritesAfterUserTakeover = perfDetails<{ writer?: string }>(
+      messages,
+      "mm-virt-scroll-write-committed"
+    ).filter(detail => detail.writer === "navigation-smooth").length;
+    await flushQueuedRafs();
+
+    expect(perfDetails<{ writer?: string }>(messages, "mm-virt-scroll-write-committed")
+      .filter(detail => detail.writer === "navigation-smooth"))
+      .toHaveLength(smoothWritesAfterUserTakeover);
+    expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(0);
+    expect(perfDetails<{ owner?: string; supersessionSource?: string }>(
+      messages,
+      "mm-virt-scroll-lease-superseded"
+    )).toContainEqual(expect.objectContaining({
+      owner: "heading-navigation",
+      supersessionSource: "native-scroll",
+    }));
   });
 
   it("renders the containing section and scrolls the nested block descendant", async () => {

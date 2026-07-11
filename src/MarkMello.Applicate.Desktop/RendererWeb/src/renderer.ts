@@ -2881,6 +2881,71 @@ function writeVirtualizedProgrammaticNavigationScrollTop(
   operation.requestScrollTop(Math.max(0, scrollTop), writer);
 }
 
+const VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS = 200;
+const VIRTUALIZED_NAVIGATION_FRAME_INTERVAL_MS = 1000 / 60;
+
+function easeVirtualizedNavigationProgress(progress: number): number {
+  const clamped = Math.min(1, Math.max(0, progress));
+  return clamped < 0.5
+    ? 4 * clamped * clamped * clamped
+    : 1 - Math.pow(-2 * clamped + 2, 3) / 2;
+}
+
+function scheduleVirtualizedProgrammaticNavigationSmoothTransition(input: {
+  descriptor: WindowTargetDescriptor;
+  destinationScrollTop: number;
+  generation: number;
+  operation: VirtualizedScrollOperation;
+  startScrollTop: number;
+  viewportOffsetY: number;
+}): boolean {
+  if (
+    !Number.isFinite(input.startScrollTop)
+    || !Number.isFinite(input.destinationScrollTop)
+    || !input.operation.isCurrent()
+  ) {
+    return false;
+  }
+
+  let frame = 0;
+  const advance = (): boolean => input.operation.scheduleFrameTransaction(() => {
+    if (
+      !input.operation.isCurrent()
+      || input.generation !== virtualizedProgrammaticNavigationGeneration
+    ) {
+      return;
+    }
+
+    frame++;
+    const elapsedMs = Math.min(
+      VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS,
+      frame * VIRTUALIZED_NAVIGATION_FRAME_INTERVAL_MS
+    );
+    const progress = elapsedMs / VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS;
+    const easedProgress = easeVirtualizedNavigationProgress(progress);
+    const scrollTop = input.startScrollTop
+      + (input.destinationScrollTop - input.startScrollTop) * easedProgress;
+    writeVirtualizedProgrammaticNavigationScrollTop(
+      input.operation,
+      scrollTop,
+      "navigation-smooth"
+    );
+
+    if (elapsedMs < VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS) {
+      advance();
+      return;
+    }
+
+    void settleVirtualizedProgrammaticNavigationTarget(
+      { descriptor: input.descriptor, viewportOffsetY: input.viewportOffsetY },
+      input.generation,
+      input.operation
+    );
+  });
+
+  return advance();
+}
+
 function resolveVirtualizedNavigationTargetSectionIndex(descriptor: WindowTargetDescriptor): number | null {
   const model = virtualizedDocumentWindowModel;
   if (model === null) {
@@ -3340,6 +3405,7 @@ async function settleVirtualizedProgrammaticNavigationTarget(
 }
 
 function landVirtualizedProgrammaticNavigation(input: {
+  behavior?: ScrollBehavior | undefined;
   context: WindowTargetContext;
   descriptor: WindowTargetDescriptor;
   operation: VirtualizedScrollOperation;
@@ -3347,6 +3413,7 @@ function landVirtualizedProgrammaticNavigation(input: {
 }): void {
   startVirtualizedProgrammaticNavigationSettle({
     descriptor: input.descriptor,
+    behavior: input.behavior,
     initialContext: input.context,
     operation: input.operation,
     viewportOffsetY: input.viewportOffsetY,
@@ -3459,6 +3526,7 @@ function getVirtualizedProgrammaticNavigationPostSettleSectionIndex(): number | 
 }
 
 function startVirtualizedProgrammaticNavigationSettle(input: {
+  behavior?: ScrollBehavior | undefined;
   descriptor: WindowTargetDescriptor;
   initialContext?: WindowTargetContext;
   operation: VirtualizedScrollOperation;
@@ -3473,6 +3541,29 @@ function startVirtualizedProgrammaticNavigationSettle(input: {
   virtualizedProgrammaticNavigationOperation = input.operation;
   virtualizedProgrammaticNavigationExternalShiftCount = 0;
   cancelVirtualizedCalibration();
+  rememberVirtualizedProgrammaticNavigationPostSettleTarget(input);
+  if (input.behavior === "smooth" && input.initialContext !== undefined) {
+    const destinationScrollTop = computeVirtualizedProgrammaticNavigationScrollTop(
+      input.initialContext,
+      input.descriptor,
+      input.viewportOffsetY
+    );
+    const transitionScheduled = scheduleVirtualizedProgrammaticNavigationSmoothTransition({
+      descriptor: input.descriptor,
+      destinationScrollTop,
+      generation,
+      operation: input.operation,
+      startScrollTop: getDocumentScrollRoot().scrollTop,
+      viewportOffsetY: input.viewportOffsetY,
+    });
+    if (transitionScheduled) {
+      return;
+    }
+    postPerfMark("mm-virt-navigation-smooth-fallback", {
+      descriptorKind: input.descriptor.kind,
+      reason: "frame-transaction-unavailable",
+    });
+  }
   if (input.initialContext !== undefined) {
     applyVirtualizedProgrammaticNavigationContext(
       input.initialContext,
@@ -3481,7 +3572,6 @@ function startVirtualizedProgrammaticNavigationSettle(input: {
       input.operation
     );
   }
-  rememberVirtualizedProgrammaticNavigationPostSettleTarget(input);
   void settleVirtualizedProgrammaticNavigationTarget(input, generation, input.operation);
 }
 
@@ -6902,6 +6992,7 @@ function scrollToHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): 
   void renderWindowTargetThenAct({
     action: (context) => {
       landVirtualizedProgrammaticNavigation({
+        behavior: options.behavior,
         context,
         descriptor,
         operation,
