@@ -24,6 +24,7 @@ import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSa
 import { createScrollCoalescer } from "./scrollCoalescer";
 import { calculateWidthHandleLeft, clampWidthHandleLeft } from "./widthHandleLayout";
 import { createFindBar, type FindBarController } from "./findBar";
+import { createLegacyScrollWriter, type LegacyScrollWriter } from "./legacyScrollWriter";
 import {
   createVirtualizedFindProvider,
   type FindQueryMessage,
@@ -398,6 +399,12 @@ let lastPostedPreviewSourceLine: number | null = null;
 let liveDocumentBlockElements: HTMLElement[] = [];
 let liveDocumentBlockElementsStale = true;
 const virtualizationEnabled = readVirtualizationFlag(window, document);
+const legacyScrollWriter: LegacyScrollWriter = createLegacyScrollWriter({
+  developmentDiagnosticsEnabled: __MM_RENDERER_DEV_DIAGNOSTICS__,
+  ownerWindow: window,
+  trace: event => postPerfMark(event.id, { operation: event.operation }),
+  virtualizationEnabled,
+});
 const scrollOwnershipControlPlane: ScrollOwnershipControlPlane | null = virtualizationEnabled
   ? createScrollOwnershipControlPlane({
     cancelFrame: handle => window.cancelAnimationFrame(handle),
@@ -923,7 +930,7 @@ function applyDocumentScrollState(): void {
         operation.requestScrollTop(0, "scroll-disabled-reset");
       });
     } else {
-      window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior });
+      legacyScrollWriter.legacyScrollTo(0, { left: 0, behavior: "instant" as ScrollBehavior });
     }
   }
 }
@@ -4064,11 +4071,13 @@ function scrollToSourceLineInCurrentWindow(sourceLine: number): void {
   // the read side samples (window.scrollY + getViewportAnchorY()). Writing the
   // line to the viewport TOP while reading it at 38% made the two panes settle
   // on different chunks by exactly the anchor offset.
-  window.scrollTo({
-    left: 0,
-    top: Math.max(0, scrollTop - getViewportAnchorY()),
-    behavior: "instant" as ScrollBehavior
-  });
+  legacyScrollWriter.legacyScrollTo(
+    Math.max(0, scrollTop - getViewportAnchorY()),
+    {
+      left: 0,
+      behavior: "instant" as ScrollBehavior,
+    }
+  );
 }
 
 function scheduleVirtualizedSourceLineLanding(
@@ -4384,9 +4393,8 @@ function flushPostLayoutReadyWork(): void {
 function restoreCachedScrollPosition(): void {
   const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
   if (!virtualizationEnabled) {
-    window.scrollTo({
+    legacyScrollWriter.legacyScrollTo(layoutState.scrollTop, {
       left: 0,
-      top: layoutState.scrollTop,
       behavior: "instant" as ScrollBehavior,
     });
     updateVirtualizedWindowForScroll({ force: true });
@@ -6318,7 +6326,7 @@ function scrollFromMinimapClientY(clientY: number): void {
     const firstTarget = docScrollTopForCloneY(root, cloneYTarget);
     if (firstTarget !== null) {
       if (!virtualizationEnabled) {
-        window.scrollTo({ top: firstTarget, behavior: "instant" as ScrollBehavior });
+        legacyScrollWriter.legacyScrollTo(firstTarget, { behavior: "instant" as ScrollBehavior });
         let attempts = 0;
         const refine = () => {
           if (++attempts > 3) {
@@ -6326,7 +6334,7 @@ function scrollFromMinimapClientY(clientY: number): void {
           }
           const next = docScrollTopForCloneY(root, cloneYTarget);
           if (next !== null && Math.abs(next - root.scrollTop) > 2) {
-            window.scrollTo({ top: next, behavior: "instant" as ScrollBehavior });
+            legacyScrollWriter.legacyScrollTo(next, { behavior: "instant" as ScrollBehavior });
             window.requestAnimationFrame(refine);
           }
         };
@@ -6356,7 +6364,7 @@ function scrollFromMinimapClientY(clientY: number): void {
       }
     }
   } else {
-    window.scrollTo({ top: clamped, behavior: "instant" as ScrollBehavior });
+    legacyScrollWriter.legacyScrollTo(clamped, { behavior: "instant" as ScrollBehavior });
   }
 }
 
@@ -6369,7 +6377,7 @@ function scrollToProgress(progressPercent: number): void {
       operation.requestScrollTop(maximum * (progress / 100), "host-progress");
     });
   } else {
-    window.scrollTo({ top: maximum * (progress / 100), behavior: "instant" as ScrollBehavior });
+    legacyScrollWriter.legacyScrollTo(maximum * (progress / 100), { behavior: "instant" as ScrollBehavior });
   }
 }
 
@@ -6503,7 +6511,10 @@ function handleMinimapPointerMove(event: PointerEvent): void {
       if (virtualizationEnabled) {
         requestMinimapScrollTarget(Math.max(0, Math.min(maxScrollTop, target)), "minimap-drag");
       } else {
-        window.scrollTo({ top: Math.max(0, Math.min(maxScrollTop, target)), behavior: "instant" as ScrollBehavior });
+        legacyScrollWriter.legacyScrollTo(
+          Math.max(0, Math.min(maxScrollTop, target)),
+          { behavior: "instant" as ScrollBehavior }
+        );
       }
       // Optimistic pin: paint the indicator at the cursor's clamped position THIS frame
       // so a fast flick has no one-frame lag. The scroll-driven updateMinimapViewport
@@ -6523,7 +6534,7 @@ function handleMinimapPointerMove(event: PointerEvent): void {
   if (virtualizationEnabled) {
     requestMinimapScrollTarget(clampedScrollTop, "minimap-drag-fallback");
   } else {
-    window.scrollTo({ top: clampedScrollTop, behavior: "instant" as ScrollBehavior });
+    legacyScrollWriter.legacyScrollTo(clampedScrollTop, { behavior: "instant" as ScrollBehavior });
   }
   event.preventDefault();
 }
@@ -6962,7 +6973,10 @@ function scheduleHeavyLiveUpdate(): void {
 }
 
 function scrollLegacyHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): void {
-  document.getElementById(anchor)?.scrollIntoView(options);
+  const element = document.getElementById(anchor);
+  if (element !== null) {
+    legacyScrollWriter.legacyScrollIntoView(element, options);
+  }
 }
 
 function scrollToHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): void {
@@ -7129,7 +7143,7 @@ function handleHostMessage(raw: unknown): void {
         operation.requestScrollTop(root.scrollTop + message.deltaY, "host-scroll-by");
       });
     } else {
-      window.scrollBy({ top: message.deltaY, behavior: "instant" as ScrollBehavior });
+      legacyScrollWriter.legacyScrollBy(message.deltaY);
     }
     return;
   }
@@ -7140,7 +7154,7 @@ function handleHostMessage(raw: unknown): void {
         `[data-mm-block-index="${message.blockIndex}"]`
       );
       if (target) {
-        target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
+        legacyScrollWriter.legacyScrollIntoView(target, { block: "start", behavior: "instant" as ScrollBehavior });
       }
       return;
     }
@@ -7704,7 +7718,7 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
           operation.requestScrollTop(0, "cold-load-reset");
         });
       } else {
-        window.scrollTo({ left: 0, top: 0, behavior: "instant" as ScrollBehavior });
+        legacyScrollWriter.legacyScrollTo(0, { left: 0, behavior: "instant" as ScrollBehavior });
       }
     },
     // Mirror selected renderer-side perf marks into the host's
@@ -8081,7 +8095,7 @@ function wireFindBar(): void {
       readContext: readVirtualizedFindContext,
     })
     : null;
-  findBarController = createFindBar(virtualizedFindProvider ?? undefined);
+  findBarController = createFindBar(legacyScrollWriter, virtualizedFindProvider ?? undefined);
   window.addEventListener(
     "keydown",
     (event) => {

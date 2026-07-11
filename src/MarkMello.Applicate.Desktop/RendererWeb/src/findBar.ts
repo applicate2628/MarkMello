@@ -1,4 +1,5 @@
 import { walkVisibleTextNodes } from "./findVisibleText";
+import type { LegacyScrollWriter } from "./legacyScrollWriter";
 
 // Find-in-document feature (Ctrl+F). Renderer-side, CSS Custom Highlight API.
 //
@@ -102,6 +103,7 @@ type State = {
   matchesDirty: boolean;
   /** Active only while the bar is open. */
   observer: MutationObserver | null;
+  legacyScrollWriter: LegacyScrollWriter;
 };
 
 // --- CSS Custom Highlight API access (typed defensively so tsc passes even when
@@ -273,7 +275,9 @@ function scrollToCurrent(s: State): void {
   const host = range.startContainer.parentElement;
   const block = host?.closest("main.mm-document > *") ?? host;
   // Step 1 — reveal the (possibly collapsed) c-v block.
-  block?.scrollIntoView({ block: "center" });
+  if (block !== null && block !== undefined) {
+    s.legacyScrollWriter.legacyScrollIntoView(block, { block: "center" });
+  }
 
   // Step 2 — bounded rAF settle: once the block paints, the Range gets real
   // geometry; re-center on it if it is off-screen. Same proven shape as
@@ -292,7 +296,7 @@ function scrollToCurrent(s: State): void {
     const viewport = window.innerHeight || document.documentElement.clientHeight;
     if (rect.top < 0 || rect.bottom > viewport) {
       const target = window.scrollY + rect.top - viewport / 2 + rect.height / 2;
-      window.scrollTo({ top: Math.max(0, target), behavior: "instant" as ScrollBehavior });
+      s.legacyScrollWriter.legacyScrollTo(Math.max(0, target), { behavior: "instant" as ScrollBehavior });
       window.requestAnimationFrame(reaim);
     }
   };
@@ -373,7 +377,10 @@ function navigate(s: State, direction: "next" | "prev"): void {
  * survives the load-document innerHTML swap on <main>, though we still call
  * `close()` on doc-swap to reset state).
  */
-export function createFindBar(provider?: FindProvider): FindBarController {
+export function createFindBar(
+  legacyScrollWriter: LegacyScrollWriter,
+  provider?: FindProvider
+): FindBarController {
   let state: State | null = null;
 
   function buildDom(): State {
@@ -435,6 +442,7 @@ export function createFindBar(provider?: FindProvider): FindBarController {
       currentIndex: -1,
       matchesDirty: false,
       observer: null,
+      legacyScrollWriter,
     };
   }
 

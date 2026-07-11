@@ -59,7 +59,7 @@ jobs:
         run: |
           npm --prefix .\src\MarkMello.Applicate.Desktop install
           npm --prefix .\src\MarkMello.Applicate.Desktop run check:renderer
-          npm --prefix .\src\MarkMello.Applicate.Desktop run build:renderer
+          npm --prefix .\src\MarkMello.Applicate.Desktop run build:renderer:release
 
       - name: Test domain layer
         shell: pwsh
@@ -222,7 +222,7 @@ jobs:
         shell: pwsh
         run: |
           npm --prefix .\src\MarkMello.Applicate.Desktop install
-          npm --prefix .\src\MarkMello.Applicate.Desktop run build:renderer
+          npm --prefix .\src\MarkMello.Applicate.Desktop run build:renderer:release
 
       - name: Install Inno Setup
         shell: pwsh

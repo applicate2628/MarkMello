@@ -2,12 +2,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check:renderer": "tsc -p RendererWeb/tsconfig.json --noEmit",
-    "build:renderer": "esbuild RendererWeb/src/renderer.ts --bundle --format=iife --target=es2020 --outfile=RendererWeb/assets/renderer.js --legal-comments=none",
+    "check:renderer": "tsc -p RendererWeb/tsconfig.json --noEmit && npm run lint:renderer",
+    "lint:renderer": "eslint \"RendererWeb/src/**/*.ts\"",
+    "build:renderer": "esbuild RendererWeb/src/renderer.ts --bundle --format=iife --target=es2020 --define:__MM_RENDERER_DEV_DIAGNOSTICS__=true --outfile=RendererWeb/assets/renderer.js --legal-comments=none",
+    "build:renderer:release": "esbuild RendererWeb/src/renderer.ts --bundle --format=iife --target=es2020 --define:__MM_RENDERER_DEV_DIAGNOSTICS__=false --outfile=RendererWeb/assets/renderer.js --legal-comments=none",
     "test:renderer": "vitest run --config vitest.config.ts"
   },
   "devDependencies": {
+    "@typescript-eslint/parser": "8.63.0",
     "esbuild": "0.28.0",
+    "eslint": "10.7.0",
     "typescript": "6.0.3",
     "vitest": "2.1.8",
     "happy-dom": "15.11.7"
