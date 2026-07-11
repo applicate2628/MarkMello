@@ -507,7 +507,83 @@ public sealed class ApplicateHtmlMarkdownRendererTests
     }
 
     [Fact]
-    public async Task FlagOnUndecodableImageUsesExistingPlaceholderWithoutSecondFetch()
+    public async Task FlagOnResolvableButUnsizeableImageEmitsUnreservedImg()
+    {
+        var source = new MarkdownSource("docs/sample.md", "sample.md", "![opaque](asset.avif)");
+        var flagOnResolver = new ByteImageSourceResolver(OpaqueImageBytes);
+        var flagOn = await CreateRendererForVirtualization(enabled: true).RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            flagOnResolver,
+            CancellationToken.None);
+        var flagOff = await CreateRendererForVirtualization(enabled: false).RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            new ByteImageSourceResolver(OpaqueImageBytes),
+            CancellationToken.None);
+
+        Assert.Equal(1, flagOnResolver.CallCount);
+        Assert.Contains("<img src=\"data:", flagOn.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain("image-placeholder", flagOn.Html, StringComparison.Ordinal);
+        var flagOnFragment = ExtractElement(flagOn.Html, "<figure", "</figure>");
+        Assert.DoesNotContain(" width=", flagOnFragment, StringComparison.Ordinal);
+        Assert.DoesNotContain(" height=", flagOnFragment, StringComparison.Ordinal);
+        Assert.Equal(ExtractElement(flagOff.Html, "<figure", "</figure>"), flagOnFragment);
+    }
+
+    [Fact]
+    public async Task FlagOnSizelessSvgEmitsUnreservedImg()
+    {
+        var source = new MarkdownSource("docs/sample.md", "sample.md", "![vector](diagram.svg)");
+        var flagOnResolver = new ByteImageSourceResolver(SizelessSvg);
+        var flagOn = await CreateRendererForVirtualization(enabled: true).RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            flagOnResolver,
+            CancellationToken.None);
+        var flagOff = await CreateRendererForVirtualization(enabled: false).RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            new ByteImageSourceResolver(SizelessSvg),
+            CancellationToken.None);
+
+        Assert.Equal(1, flagOnResolver.CallCount);
+        Assert.Contains("<img src=\"data:", flagOn.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain("image-placeholder", flagOn.Html, StringComparison.Ordinal);
+        var flagOnFragment = ExtractElement(flagOn.Html, "<figure", "</figure>");
+        Assert.DoesNotContain(" width=", flagOnFragment, StringComparison.Ordinal);
+        Assert.DoesNotContain(" height=", flagOnFragment, StringComparison.Ordinal);
+        Assert.Equal(ExtractElement(flagOff.Html, "<figure", "</figure>"), flagOnFragment);
+    }
+
+    [Fact]
+    public async Task FlagOnResolvableButUnsizeableInlineImageEmitsUnreservedImg()
+    {
+        var source = new MarkdownSource("docs/sample.md", "sample.md", "text ![icon](icon.avif) more");
+        var flagOnResolver = new ByteImageSourceResolver(OpaqueImageBytes);
+        var flagOn = await CreateRendererForVirtualization(enabled: true).RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            flagOnResolver,
+            CancellationToken.None);
+        var flagOff = await CreateRendererForVirtualization(enabled: false).RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            new ByteImageSourceResolver(OpaqueImageBytes),
+            CancellationToken.None);
+
+        Assert.Equal(1, flagOnResolver.CallCount);
+        Assert.Contains("<p", flagOn.Html, StringComparison.Ordinal);
+        Assert.Contains("<img src=\"data:", flagOn.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<span class=\"image-placeholder\">", flagOn.Html, StringComparison.Ordinal);
+        var flagOnFragment = ExtractElement(flagOn.Html, "<p", "</p>");
+        Assert.DoesNotContain(" width=", flagOnFragment, StringComparison.Ordinal);
+        Assert.DoesNotContain(" height=", flagOnFragment, StringComparison.Ordinal);
+        Assert.Equal(ExtractElement(flagOff.Html, "<p", "</p>"), flagOnFragment);
+    }
+
+    [Fact]
+    public async Task FlagOnUndecodableImageEmitsImgWithoutSecondFetch()
     {
         var renderer = CreateRendererForVirtualization(enabled: true);
         var resolver = new ByteImageSourceResolver("not an image"u8.ToArray());
@@ -520,6 +596,22 @@ public sealed class ApplicateHtmlMarkdownRendererTests
             CancellationToken.None);
 
         Assert.Equal(1, resolver.CallCount);
+        Assert.Contains("<img src=\"data:", document.Html, StringComparison.Ordinal);
+        Assert.DoesNotContain("class=\"image-placeholder\"", document.Html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlagOnUnresolvableImageKeepsExistingPlaceholder()
+    {
+        var renderer = CreateRendererForVirtualization(enabled: true);
+        var source = new MarkdownSource("docs/sample.md", "sample.md", "![missing](asset.png)");
+
+        var document = await renderer.RenderAsync(
+            source,
+            ReadingPreferences.Default,
+            new NullImageSourceResolver(),
+            CancellationToken.None);
+
         Assert.Contains("class=\"image-placeholder\"", document.Html, StringComparison.Ordinal);
         Assert.DoesNotContain("<img", document.Html, StringComparison.Ordinal);
     }
@@ -760,6 +852,27 @@ public sealed class ApplicateHtmlMarkdownRendererTests
 
     private static readonly byte[] DimensionlessSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 640 360\"><rect width=\"640\" height=\"360\"/></svg>"u8.ToArray();
 
+    private static readonly byte[] SizelessSvg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"u8.ToArray();
+
+    private static readonly byte[] OpaqueImageBytes =
+    [
+        0x00, 0x00, 0x00, 0x18,
+        (byte)'f', (byte)'t', (byte)'y', (byte)'p',
+        (byte)'a', (byte)'v', (byte)'i', (byte)'f',
+        0x00, 0x00, 0x00, 0x00,
+        (byte)'a', (byte)'v', (byte)'i', (byte)'f',
+        (byte)'m', (byte)'i', (byte)'f', (byte)'1',
+    ];
+
+    private static string ExtractElement(string html, string openingPrefix, string closingTag)
+    {
+        var start = html.IndexOf(openingPrefix, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"Expected '{openingPrefix}' in rendered HTML.");
+        var end = html.IndexOf(closingTag, start, StringComparison.Ordinal);
+        Assert.True(end >= 0, $"Expected '{closingTag}' in rendered HTML.");
+        return html[start..(end + closingTag.Length)];
+    }
+
     private static ApplicateHtmlMarkdownRenderer CreateRendererForVirtualization(bool enabled)
     {
         var constructor = typeof(ApplicateHtmlMarkdownRenderer).GetConstructor(
@@ -802,6 +915,15 @@ public sealed class ApplicateHtmlMarkdownRendererTests
             CallCount++;
             return Task.FromResult<Stream?>(new MemoryStream(bytes, writable: false));
         }
+    }
+
+    private sealed class NullImageSourceResolver : IImageSourceResolver
+    {
+        public Task<Stream?> TryOpenAsync(
+            string url,
+            string? baseDirectory,
+            CancellationToken ct = default)
+            => Task.FromResult<Stream?>(null);
     }
 
     private sealed class CountingImageSourceResolver : IImageSourceResolver

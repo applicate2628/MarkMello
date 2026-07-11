@@ -362,8 +362,8 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         if (context.VirtualizationEnabled
             && !TryResolveReservedImageSize(resolved.Bytes, width, height, out reservedWidth, out reservedHeight))
         {
-            RenderImagePlaceholder(context, altText, blockIndex, kind, sourceSpan);
-            return;
+            reservedWidth = width;
+            reservedHeight = height;
         }
 
         context.Html.Append("<figure").Append(BlockDataAttributes(blockIndex, kind, sourceSpan)).Append("><img src=\"").Append(HtmlAttribute(resolved.DataUri)).Append('"');
@@ -452,10 +452,8 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         if (context.VirtualizationEnabled
             && !TryResolveReservedImageSize(resolved.Bytes, width: null, height: null, out reservedWidth, out reservedHeight))
         {
-            context.Html.Append("<span class=\"image-placeholder\">")
-                .Append(HtmlText(image.AltText ?? "image"))
-                .Append("</span>");
-            return;
+            reservedWidth = null;
+            reservedHeight = null;
         }
 
         context.Html.Append("<img src=\"").Append(HtmlAttribute(resolved.DataUri)).Append('"');
