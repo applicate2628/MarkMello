@@ -81,9 +81,12 @@ import {
 } from "./virtualizedDocumentWindow";
 import {
   createRenderedFindDomainBeginMessage,
+  createRenderedFindUnavailableMessage,
   publishRenderedFindProjection,
   type RenderedFindDomainBeginMessage,
   type RenderedFindTransferMessage,
+  type RenderedFindUnavailableMessage,
+  type RenderedFindUnavailableReason,
 } from "./renderedFindProjection";
 import {
   createVirtualizationShadowValidator,
@@ -176,6 +179,7 @@ type RendererMessage =
   | FindQueryMessage
   | RenderedFindDomainBeginMessage
   | RenderedFindTransferMessage
+  | RenderedFindUnavailableMessage
   // Mode-toggle reveal gate (2026-05-20). Posted in response to a host-sent
   // `mode-settle-probe` message after the renderer has applied pending reading
   // preferences and let layout chrome such as the minimap paint at the new slot
@@ -225,6 +229,14 @@ type HostMessage =
   | { type: "scroll-to-heading"; id: string }
   | { type: "scroll-to-source-line"; sourceLine: number }
   | FindResultsMessage
+  | {
+      type: "rendered-find-rejected";
+      schemaVersion: 1;
+      textDomain: "rendered-dom-v1";
+      renderId: number;
+      reason: string;
+      minimumProjectionRevision: number;
+    }
   | { type: "open-find-bar" }
   | { type: "host-scrollbar"; active: boolean }
   // Host-sent probe (2026-05-20). The host sends this after Avalonia
@@ -514,6 +526,8 @@ let renderedFindContentLease: ModelRenderedContentLease | null = null;
 let renderedFindProjectionGeneration = 0;
 let renderedFindProjectionRenderId: number | null = null;
 let renderedFindProjectionRevision = 0;
+let renderedFindProjectionRetryCount = 0;
+const RENDERED_FIND_MAX_RETRY_COUNT = 2;
 const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
 type ProcessedDocumentCacheEntry = {
   fragment: DocumentFragment;
@@ -1421,6 +1435,16 @@ function releaseRenderedFindContentLease(): void {
 }
 
 function startRenderedFindProjectionForCurrentModel(): void {
+  startRenderedFindProjectionPublication({
+    minimumProjectionRevision: 1,
+    postDomainBegin: true,
+  });
+}
+
+function startRenderedFindProjectionPublication(options: {
+  minimumProjectionRevision: number;
+  postDomainBegin: boolean;
+}): void {
   const model = virtualizedDocumentWindowModel;
   const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   const renderId = currentDocumentRenderId;
@@ -1439,13 +1463,20 @@ function startRenderedFindProjectionForCurrentModel(): void {
   if (renderedFindProjectionRenderId !== renderId) {
     renderedFindProjectionRenderId = renderId;
     renderedFindProjectionRevision = 0;
+    renderedFindProjectionRetryCount = 0;
   }
-  const projectionRevision = ++renderedFindProjectionRevision;
+  const projectionRevision = Math.max(
+    renderedFindProjectionRevision + 1,
+    options.minimumProjectionRevision);
+  renderedFindProjectionRevision = projectionRevision;
   const generation = ++renderedFindProjectionGeneration;
-  postHostMessage(createRenderedFindDomainBeginMessage({ renderId }));
+  if (options.postDomainBegin) {
+    postHostMessage(createRenderedFindDomainBeginMessage({ renderId }));
+  }
   releaseRenderedFindContentLease();
   const lease = acquireCurrentModelRenderedContentLease("rendered-find-projection");
   if (lease === null) {
+    postCurrentRenderedFindUnavailable(renderId, "lease-unavailable");
     return;
   }
   renderedFindContentLease = lease;
@@ -1465,12 +1496,18 @@ function startRenderedFindProjectionForCurrentModel(): void {
     shouldCancel,
     yieldControl: yieldModelRenderedContentWork,
   }).then(status => {
+    if (status === "unavailable" && !shouldCancel()) {
+      postCurrentRenderedFindUnavailable(renderId, "rendered-content-unavailable");
+    }
     postPerfMark("mm-find-projection-terminal", {
       projectionRevision,
       renderId,
       status,
     });
   }).catch(error => {
+    if (!shouldCancel()) {
+      postCurrentRenderedFindUnavailable(renderId, "projection-build-failed");
+    }
     postPerfMark("mm-find-projection-failed", {
       projectionRevision,
       renderId,
@@ -1481,6 +1518,49 @@ function startRenderedFindProjectionForCurrentModel(): void {
       renderedFindContentLease = null;
       lease.release();
     }
+  });
+}
+
+function postCurrentRenderedFindUnavailable(
+  renderId: number,
+  reason: RenderedFindUnavailableReason
+): void {
+  if (renderId !== currentDocumentRenderId || renderId !== renderedFindProjectionRenderId) {
+    return;
+  }
+
+  postHostMessage(createRenderedFindUnavailableMessage({ renderId, reason }));
+}
+
+function handleRenderedFindRejectedMessage(
+  message: Extract<HostMessage, { type: "rendered-find-rejected" }>
+): void {
+  if (
+    message.schemaVersion !== 1
+    || message.textDomain !== "rendered-dom-v1"
+    || message.renderId !== currentDocumentRenderId
+    || message.renderId !== renderedFindProjectionRenderId
+    || !Number.isSafeInteger(message.minimumProjectionRevision)
+    || message.minimumProjectionRevision <= 0
+  ) {
+    return;
+  }
+
+  if (message.minimumProjectionRevision <= renderedFindProjectionRevision) {
+    return;
+  }
+
+  if (renderedFindProjectionRetryCount >= RENDERED_FIND_MAX_RETRY_COUNT) {
+    renderedFindProjectionGeneration++;
+    releaseRenderedFindContentLease();
+    postCurrentRenderedFindUnavailable(message.renderId, "retry-exhausted");
+    return;
+  }
+
+  renderedFindProjectionRetryCount++;
+  startRenderedFindProjectionPublication({
+    minimumProjectionRevision: message.minimumProjectionRevision,
+    postDomainBegin: false,
   });
 }
 
@@ -7123,6 +7203,11 @@ function handleHostMessage(raw: unknown): void {
 
   if (message.type === "find-results") {
     virtualizedFindProvider?.handleFindResults(message);
+    return;
+  }
+
+  if (message.type === "rendered-find-rejected") {
+    handleRenderedFindRejectedMessage(message);
     return;
   }
 

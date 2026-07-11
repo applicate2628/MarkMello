@@ -105,6 +105,7 @@ public static class ApplicateRenderedFindTextProtocol
                 "find-text-index-start" => ParseStart(properties),
                 "find-text-index-chunk" => ParseChunk(properties),
                 "find-text-index-complete" => ParseComplete(properties),
+                "rendered-find-unavailable" => ParseUnavailable(properties),
                 _ => null,
             };
             if (parsed is null)
@@ -439,7 +440,7 @@ public static class ApplicateRenderedFindTextProtocol
 
     public static ApplicateRenderedFindTransferState CreateTransferState(
         int currentRenderId,
-        int minimumProjectionRevision = 0)
+        int minimumProjectionRevision = 1)
         => new(currentRenderId, minimumProjectionRevision);
 
     private static ApplicateRenderedFindProtocolMessage? ParseBegin(
@@ -610,6 +611,19 @@ public static class ApplicateRenderedFindTextProtocol
             text);
     }
 
+    private static ApplicateRenderedFindProtocolMessage? ParseUnavailable(
+        IReadOnlyDictionary<string, JsonElement> properties)
+    {
+        if (!HasExactFields(properties, "type", "schemaVersion", "textDomain", "renderId", "reason") ||
+            !TryGetEnvelope(properties, requireProjection: false, out var envelope) ||
+            !TryGetRequiredString(properties, "reason", out var reason))
+        {
+            return null;
+        }
+
+        return new ApplicateRenderedFindUnavailableMessage(envelope.RenderId, reason);
+    }
+
     private static bool TryGetEnvelope(
         IReadOnlyDictionary<string, JsonElement> properties,
         bool requireProjection,
@@ -667,7 +681,8 @@ public static class ApplicateRenderedFindTextProtocol
         => type is "find-domain-begin" or
             "find-text-index-start" or
             "find-text-index-chunk" or
-            "find-text-index-complete";
+            "find-text-index-complete" or
+            "rendered-find-unavailable";
 
     private static bool HasExactFields(
         IReadOnlyDictionary<string, JsonElement> properties,
@@ -739,6 +754,8 @@ public sealed class ApplicateRenderedFindTransferState
         _minimumProjectionRevision = minimumProjectionRevision;
     }
 
+    public int MinimumProjectionRevision => _minimumProjectionRevision;
+
     public ApplicateRenderedFindProtocolApplyResult Apply(string body)
         => Apply(ApplicateRenderedFindTextProtocol.ParseMessage(
             body,
@@ -762,8 +779,9 @@ public sealed class ApplicateRenderedFindTransferState
 
         try
         {
-            if (validation.Message is ApplicateRenderedFindTransferMessage transferMessage &&
-                IsOlderThanCurrentProjection(transferMessage.ProjectionRevision))
+            if (_staging is not null &&
+                validation.Message is ApplicateRenderedFindTransferMessage transferMessage &&
+                transferMessage.ProjectionRevision < _staging.Start.ProjectionRevision)
             {
                 return Stale();
             }
@@ -782,12 +800,6 @@ public sealed class ApplicateRenderedFindTransferState
         }
     }
 
-    private bool IsOlderThanCurrentProjection(int projectionRevision)
-    {
-        var currentProjectionRevision = _staging?.Start.ProjectionRevision ?? _minimumProjectionRevision;
-        return projectionRevision < currentProjectionRevision;
-    }
-
     private ApplicateRenderedFindProtocolApplyResult ApplyStart(
         ApplicateRenderedFindTextStartMessage start,
         int wireUtf8Bytes)
@@ -795,11 +807,11 @@ public sealed class ApplicateRenderedFindTransferState
         if (_staging is not null)
         {
             if (start.ProjectionRevision > _staging.Start.ProjectionRevision &&
-                start.ProjectionRevision > _minimumProjectionRevision)
+                start.ProjectionRevision >= _minimumProjectionRevision)
             {
                 _minimumProjectionRevision = System.Math.Max(
                     _minimumProjectionRevision,
-                    _staging.Start.ProjectionRevision);
+                    checked(_staging.Start.ProjectionRevision + 1));
                 _staging = new TransferStaging(start, wireUtf8Bytes);
                 return Accepted();
             }
@@ -807,9 +819,9 @@ public sealed class ApplicateRenderedFindTransferState
             return Reject("mm-find-transfer-invalid");
         }
 
-        if (start.ProjectionRevision <= _minimumProjectionRevision)
+        if (start.ProjectionRevision < _minimumProjectionRevision)
         {
-            return Reject("mm-find-transfer-invalid");
+            return Reject("mm-find-transfer-invalid", start.ProjectionRevision, advanceWhenUnknown: false);
         }
 
         _staging = new TransferStaging(start, wireUtf8Bytes);
@@ -822,7 +834,7 @@ public sealed class ApplicateRenderedFindTransferState
     {
         if (!TryGetMatchingStaging(chunk, out var staging) || chunk.ChunkIndex != staging.NextChunkIndex)
         {
-            return Reject("mm-find-transfer-invalid");
+            return Reject("mm-find-transfer-invalid", chunk.ProjectionRevision);
         }
 
         staging.WireUtf8Bytes = checked(staging.WireUtf8Bytes + wireUtf8Bytes);
@@ -856,7 +868,7 @@ public sealed class ApplicateRenderedFindTransferState
     {
         if (!TryGetMatchingStaging(complete, out var staging))
         {
-            return Reject("mm-find-transfer-invalid");
+            return Reject("mm-find-transfer-invalid", complete.ProjectionRevision);
         }
 
         staging.WireUtf8Bytes = checked(staging.WireUtf8Bytes + wireUtf8Bytes);
@@ -882,7 +894,7 @@ public sealed class ApplicateRenderedFindTransferState
             complete.RenderId,
             complete.ProjectionRevision,
             staging.Segments);
-        _minimumProjectionRevision = complete.ProjectionRevision;
+        _minimumProjectionRevision = checked(complete.ProjectionRevision + 1);
         _staging = null;
         return new ApplicateRenderedFindProtocolApplyResult(
             ApplicateRenderedFindProtocolApplyStatus.Committed,
@@ -966,20 +978,39 @@ public sealed class ApplicateRenderedFindTransferState
                message.TransferId == staging.Start.TransferId;
     }
 
-    private ApplicateRenderedFindProtocolApplyResult Reject(string failureId)
+    public ApplicateRenderedFindProtocolApplyResult RejectCurrentTransfer(string failureId)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(failureId);
+        return Reject(failureId);
+    }
+
+    private ApplicateRenderedFindProtocolApplyResult Reject(
+        string failureId,
+        int? rejectedProjectionRevision = null,
+        bool advanceWhenUnknown = true)
     {
         if (_staging is not null)
         {
             _minimumProjectionRevision = System.Math.Max(
                 _minimumProjectionRevision,
-                _staging.Start.ProjectionRevision);
+                checked(_staging.Start.ProjectionRevision + 1));
+        }
+        else if (rejectedProjectionRevision is int revision)
+        {
+            _minimumProjectionRevision = System.Math.Max(
+                _minimumProjectionRevision,
+                checked(revision + 1));
+        }
+        else if (advanceWhenUnknown)
+        {
+            _minimumProjectionRevision = checked(_minimumProjectionRevision + 1);
         }
 
         _staging = null;
         return new ApplicateRenderedFindProtocolApplyResult(
             ApplicateRenderedFindProtocolApplyStatus.Rejected,
             null,
-            new ApplicateRenderedFindProtocolRejection(failureId));
+            new ApplicateRenderedFindProtocolRejection(failureId, _minimumProjectionRevision, _currentRenderId));
     }
 
     private static ApplicateRenderedFindProtocolApplyResult Accepted()
@@ -1029,7 +1060,10 @@ public sealed record ApplicateRenderedFindProtocolValidation(
     bool IsStale,
     int WireUtf8Bytes);
 
-public sealed record ApplicateRenderedFindProtocolRejection(string FailureId);
+public sealed record ApplicateRenderedFindProtocolRejection(
+    string FailureId,
+    int MinimumProjectionRevision = 1,
+    int RenderId = 0);
 
 public enum ApplicateRenderedFindRoutingClassification
 {
@@ -1059,6 +1093,9 @@ public abstract record ApplicateRenderedFindTransferMessage(
     string TransferId) : ApplicateRenderedFindProtocolMessage(RenderId);
 
 public sealed record ApplicateRenderedFindDomainBeginMessage(int CurrentRenderId)
+    : ApplicateRenderedFindProtocolMessage(CurrentRenderId);
+
+public sealed record ApplicateRenderedFindUnavailableMessage(int CurrentRenderId, string Reason)
     : ApplicateRenderedFindProtocolMessage(CurrentRenderId);
 
 public sealed record ApplicateRenderedFindTextStartMessage(

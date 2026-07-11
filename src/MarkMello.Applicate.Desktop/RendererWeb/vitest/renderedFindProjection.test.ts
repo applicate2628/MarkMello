@@ -330,6 +330,43 @@ describe("rendered find transfer packing", () => {
     });
   });
 
+  it("creates the rendered-find terminal unavailable envelope", async () => {
+    const mod = await loadProjectionModule();
+    const createUnavailable = (mod as unknown as {
+      createRenderedFindUnavailableMessage?: (input: {
+        renderId: number;
+        reason: "retry-exhausted";
+      }) => unknown;
+    }).createRenderedFindUnavailableMessage;
+
+    expect(createUnavailable).toBeTypeOf("function");
+    expect(createUnavailable!({ renderId: 11, reason: "retry-exhausted" })).toEqual({
+      reason: "retry-exhausted",
+      renderId: 11,
+      schemaVersion: 1,
+      textDomain: "rendered-dom-v1",
+      type: "rendered-find-unavailable",
+    });
+  });
+
+  it("returns unavailable instead of cancelled when rendered-content readiness is terminal unavailable", async () => {
+    const mod = await loadProjectionModule();
+    const messages: unknown[] = [];
+
+    await expect(mod.publishRenderedFindProjection({
+      emit: message => { messages.push(message); },
+      projectionRevision: 1,
+      readiness: Promise.resolve("unavailable"),
+      renderId: 11,
+      root: () => {
+        throw new Error("root should not be read when readiness is unavailable");
+      },
+      shouldCancel: () => false,
+      yieldControl: async () => {},
+    })).resolves.toBe("unavailable");
+    expect(messages).toEqual([]);
+  });
+
   it("measures exact serialized UTF-16 and UTF-8 message boundaries", async () => {
     const mod = await loadProjectionModule();
     const emptyMeasurement = mod.measureRenderedFindMessage({ text: "" });

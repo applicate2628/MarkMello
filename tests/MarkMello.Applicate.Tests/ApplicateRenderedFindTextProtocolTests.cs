@@ -9,6 +9,7 @@ public sealed class ApplicateRenderedFindTextProtocolTests
     [InlineData("""{"type":"\u0066ind-domain-begin","renderId":11}""")]
     [InlineData("""{"\u0074ype":"find-domain-begin","renderId":11}""")]
     [InlineData("""{ "renderId" : 11 , "type" : "find-text-index-start" }""")]
+    [InlineData("""{ "renderId" : 11 , "type" : "rendered-find-unavailable" }""")]
     [InlineData("""{"type":"other","type":"\u0066ind-text-index-chunk"}""")]
     [InlineData("""{"type":"find-text-index-complete","type":"other"}""")]
     public void RoutingClassifierFindsAnySemanticReservedRootType(string body)
@@ -16,6 +17,20 @@ public sealed class ApplicateRenderedFindTextProtocolTests
         Assert.Equal(
             ApplicateRenderedFindRoutingClassification.Candidate,
             ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body));
+    }
+
+    [Fact]
+    public void ParserAcceptsRendererUnavailableTerminalMessage()
+    {
+        const string body = """{"type":"rendered-find-unavailable","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11,"reason":"retry-exhausted"}""";
+
+        var validation = ApplicateRenderedFindTextProtocol.ParseMessage(
+            body,
+            new ApplicateRenderedFindProtocolContext(11));
+
+        Assert.True(validation.Accepted);
+        Assert.NotNull(validation.Message);
+        Assert.Equal("ApplicateRenderedFindUnavailableMessage", validation.Message!.GetType().Name);
     }
 
     [Theory]
@@ -215,7 +230,7 @@ public sealed class ApplicateRenderedFindTextProtocolTests
             transfer.Apply(StartJson(renderId: 10, projectionRevision: 1, semanticSegmentCount: 1, totalCodeUnits: 1, chunkCount: 1, partCount: 1)).Status);
 
         transfer = ApplicateRenderedFindTextProtocol.CreateTransferState(currentRenderId: 11, minimumProjectionRevision: 2);
-        AssertRejected(transfer.Apply(StartJson(projectionRevision: 2, semanticSegmentCount: 1, totalCodeUnits: 1, chunkCount: 1, partCount: 1)));
+        AssertAccepted(transfer.Apply(StartJson(projectionRevision: 2, semanticSegmentCount: 1, totalCodeUnits: 1, chunkCount: 1, partCount: 1)));
 
         transfer = ApplicateRenderedFindTextProtocol.CreateTransferState(currentRenderId: 11);
         AssertAccepted(transfer.Apply(StartJson(semanticSegmentCount: 1, totalCodeUnits: 1, chunkCount: 1, partCount: 1)));
@@ -360,6 +375,42 @@ public sealed class ApplicateRenderedFindTextProtocolTests
         Assert.Equal(
             ApplicateRenderedFindProtocolApplyStatus.Committed,
             transfer.Apply(CompleteJson(projectionRevision: 2)).Status);
+    }
+
+    [Fact]
+    public void RejectedTransferReportsTruthfulInclusiveMinimumProjectionRevision()
+    {
+        var transfer = ApplicateRenderedFindTextProtocol.CreateTransferState(11);
+        AssertAccepted(transfer.Apply(StartJson(projectionRevision: 1)));
+        AssertAccepted(transfer.Apply(ChunkJson(11, 1, 0, PartJson(0, 2, 0, 1, 0, "x"))));
+
+        var rejected = transfer.Apply(CompleteJson(projectionRevision: 1, totalCodeUnits: 2));
+
+        AssertRejected(rejected);
+        Assert.NotNull(rejected.Rejection);
+        Assert.Equal(2, rejected.Rejection!.MinimumProjectionRevision);
+
+        var sameRevision = transfer.Apply(StartJson(projectionRevision: 1));
+        AssertRejected(sameRevision);
+        Assert.Equal(2, sameRevision.Rejection!.MinimumProjectionRevision);
+
+        AssertAccepted(transfer.Apply(StartJson(projectionRevision: 2)));
+    }
+
+    [Fact]
+    public void SupersededActiveTransferReportsNextInclusiveProjectionRevision()
+    {
+        var transfer = ApplicateRenderedFindTextProtocol.CreateTransferState(11);
+        AssertAccepted(transfer.Apply(StartJson(projectionRevision: 1, chunkCount: 2, partCount: 2, totalCodeUnits: 2)));
+        AssertAccepted(transfer.Apply(StartJson(projectionRevision: 2)));
+
+        var rejected = transfer.Apply(CompleteJson(projectionRevision: 2, totalCodeUnits: 2));
+
+        AssertRejected(rejected);
+        Assert.NotNull(rejected.Rejection);
+        Assert.Equal(3, rejected.Rejection!.MinimumProjectionRevision);
+        AssertRejected(transfer.Apply(StartJson(projectionRevision: 2)));
+        AssertAccepted(transfer.Apply(StartJson(projectionRevision: 3)));
     }
 
     [Fact]

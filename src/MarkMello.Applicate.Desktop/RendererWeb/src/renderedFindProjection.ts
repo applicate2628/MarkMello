@@ -75,6 +75,20 @@ export type RenderedFindTextIndexCompleteMessage = {
   partCount: number;
 };
 
+export type RenderedFindUnavailableReason =
+  | "lease-unavailable"
+  | "projection-build-failed"
+  | "rendered-content-unavailable"
+  | "retry-exhausted";
+
+export type RenderedFindUnavailableMessage = {
+  type: "rendered-find-unavailable";
+  schemaVersion: 1;
+  textDomain: "rendered-dom-v1";
+  renderId: number;
+  reason: RenderedFindUnavailableReason;
+};
+
 export type RenderedFindTransferMessage =
   | RenderedFindTextIndexStartMessage
   | RenderedFindTextIndexChunkMessage
@@ -91,7 +105,7 @@ export type RenderedFindTransferOptions = {
   now?: () => number;
 };
 
-export type RenderedFindTransferResult = "complete" | "cancelled";
+export type RenderedFindTransferResult = "complete" | "cancelled" | "unavailable";
 
 export type RenderedFindProjectionOptions = {
   shouldCancel?: (checkpoint: VisibleTextTraversalCheckpoint) => boolean;
@@ -122,11 +136,11 @@ export async function publishRenderedFindProjection(
   }
 
   const readiness = await options.readiness;
-  if (
-    (readiness !== "not-needed" && readiness !== "ready" && readiness !== "ready-with-failures")
-    || options.shouldCancel()
-  ) {
+  if (options.shouldCancel() || readiness === "cancelled") {
     return "cancelled";
+  }
+  if (readiness !== "not-needed" && readiness !== "ready" && readiness !== "ready-with-failures") {
+    return "unavailable";
   }
 
   const projectionOptions: RenderedFindProjectionOptions = {
@@ -212,6 +226,19 @@ export function createRenderedFindDomainBeginMessage(input: { renderId: number }
     schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
     textDomain: RENDERED_FIND_TEXT_DOMAIN,
     type: "find-domain-begin",
+  };
+}
+
+export function createRenderedFindUnavailableMessage(input: {
+  renderId: number;
+  reason: RenderedFindUnavailableReason;
+}): RenderedFindUnavailableMessage {
+  return {
+    reason: input.reason,
+    renderId: input.renderId,
+    schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
+    textDomain: RENDERED_FIND_TEXT_DOMAIN,
+    type: "rendered-find-unavailable",
   };
 }
 

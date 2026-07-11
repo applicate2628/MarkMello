@@ -90,11 +90,37 @@ async function loadRendererHarness(options: {
   rectTopShiftByBlockIndex?: Record<number, number>;
   renderedSectionHeight?: number;
   sectionCount: number;
+  staleRenderedFindLeaseAcquisition?: boolean;
   virtualization: boolean;
 }): Promise<RendererHarness> {
   vi.resetModules();
   vi.doUnmock("../src/virtualizedDocumentWindow");
   vi.doUnmock("../src/mathRenderInit");
+  vi.doUnmock("../src/scrollOwnershipControlPlane");
+  if (options.staleRenderedFindLeaseAcquisition === true) {
+    vi.doMock("../src/scrollOwnershipControlPlane", async () => {
+      const actual = await vi.importActual<typeof import("../src/scrollOwnershipControlPlane")>(
+        "../src/scrollOwnershipControlPlane"
+      );
+      return {
+        ...actual,
+        createScrollOwnershipControlPlane: (
+          deps: Parameters<typeof actual.createScrollOwnershipControlPlane>[0]
+        ) => {
+          const plane = actual.createScrollOwnershipControlPlane(deps);
+          return {
+            ...plane,
+            captureDocumentEpoch: () => {
+              const captured = plane.captureDocumentEpoch();
+              return (new Error().stack ?? "").includes("acquireCurrentModelRenderedContentLease")
+                ? captured + 1
+                : captured;
+            },
+          };
+        },
+      };
+    });
+  }
   if (options.mathReadiness !== undefined) {
     const mathReadiness = options.mathReadiness;
     vi.doMock("../src/mathRenderInit", async () => {
@@ -896,6 +922,39 @@ function findQueryMessages(messages: readonly unknown[]): FindQueryMessage[] {
     && (message as { type?: unknown }).type === "find-query");
 }
 
+function renderedFindProtocolMessages(messages: readonly unknown[]): Array<{
+  type: string;
+  projectionRevision?: number;
+  renderId?: number;
+  reason?: string;
+}> {
+  return messages.filter((message): message is {
+    type: string;
+    projectionRevision?: number;
+    renderId?: number;
+    reason?: string;
+  } =>
+    typeof message === "object"
+    && message !== null
+    && "type" in message
+    && (
+      String((message as { type?: unknown }).type).startsWith("find-domain-")
+      || String((message as { type?: unknown }).type).startsWith("find-text-index-")
+      || (message as { type?: unknown }).type === "rendered-find-unavailable"
+    ));
+}
+
+async function flushUntilRendererCondition(
+  flushQueuedRafs: () => Promise<void>,
+  predicate: () => boolean,
+  maxFrames = 128
+): Promise<void> {
+  for (let pass = 0; pass < maxFrames && !predicate(); pass++) {
+    await flushQueuedRafs();
+    await Promise.resolve();
+  }
+}
+
 function findBarInput(): HTMLInputElement {
   const input = document.querySelector<HTMLInputElement>(".mm-find-input");
   if (input === null) {
@@ -1280,6 +1339,8 @@ afterEach(() => {
   vi.useRealTimers();
   vi.doUnmock("../src/virtualizedDocumentWindow");
   vi.doUnmock("../src/mathRenderInit");
+  vi.doUnmock("../src/renderedFindProjection");
+  vi.doUnmock("../src/scrollOwnershipControlPlane");
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", window.location.pathname);
@@ -2790,6 +2851,202 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(findBarCount().textContent).toBe("1 of 1");
     expect(highlights.get("mm-find-all")?.map(range => range.toString())).toEqual([query.query]);
     expect(highlights.get("mm-find-current")?.map(range => range.toString())).toEqual([query.query]);
+  });
+
+  it("retries the current rendered-find generation twice from host NACKs and then posts terminal unavailable", async () => {
+    const sectionCount = 20;
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, []),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 81,
+    });
+
+    await flushUntilRendererCondition(flushQueuedRafs, () =>
+      perfDetails<{ status?: string }>(messages, "mm-find-projection-terminal")
+        .some(detail => detail.status === "complete"));
+    expect(renderedFindProtocolMessages(messages).map(message => message.type)).toEqual([
+      "find-domain-begin",
+      "find-text-index-start",
+      "find-text-index-chunk",
+      "find-text-index-complete",
+    ]);
+
+    const nack = (minimumProjectionRevision: number) => {
+      load({
+        type: "rendered-find-rejected",
+        schemaVersion: 1,
+        textDomain: "rendered-dom-v1",
+        renderId: 81,
+        reason: "mm-find-transfer-invalid",
+        minimumProjectionRevision,
+      });
+    };
+
+    messages.length = 0;
+    nack(5);
+    await flushUntilRendererCondition(flushQueuedRafs, () =>
+      renderedFindProtocolMessages(messages)
+        .some(message => message.type === "find-text-index-complete" && message.projectionRevision === 5));
+    expect(renderedFindProtocolMessages(messages).map(message => message.type)).toEqual([
+      "find-text-index-start",
+      "find-text-index-chunk",
+      "find-text-index-complete",
+    ]);
+
+    const messageCountAfterFirstRetry = messages.length;
+    nack(5);
+    await flushQueuedRafs();
+    await Promise.resolve();
+    expect(messages).toHaveLength(messageCountAfterFirstRetry);
+
+    messages.length = 0;
+    nack(6);
+    await flushUntilRendererCondition(flushQueuedRafs, () =>
+      renderedFindProtocolMessages(messages)
+        .some(message => message.type === "find-text-index-complete" && message.projectionRevision === 6));
+    expect(renderedFindProtocolMessages(messages).map(message => message.type)).toEqual([
+      "find-text-index-start",
+      "find-text-index-chunk",
+      "find-text-index-complete",
+    ]);
+
+    messages.length = 0;
+    nack(7);
+    await flushUntilRendererCondition(flushQueuedRafs, () =>
+      renderedFindProtocolMessages(messages)
+        .some(message => message.type === "rendered-find-unavailable"));
+
+    expect(renderedFindProtocolMessages(messages)).toEqual([
+      expect.objectContaining({
+        reason: "retry-exhausted",
+        renderId: 81,
+        type: "rendered-find-unavailable",
+      }),
+    ]);
+  });
+
+  it("ignores stale rendered-find NACKs and does not emit stale unavailable after supersession", async () => {
+    const sectionCount = 20;
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, []),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 82,
+    });
+    await flushUntilRendererCondition(flushQueuedRafs, () =>
+      perfDetails<{ status?: string }>(messages, "mm-find-projection-terminal")
+        .some(detail => detail.status === "complete"));
+
+    messages.length = 0;
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, []),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 83,
+    });
+    load({
+      type: "rendered-find-rejected",
+      schemaVersion: 1,
+      textDomain: "rendered-dom-v1",
+      renderId: 82,
+      reason: "mm-find-transfer-invalid",
+      minimumProjectionRevision: 2,
+    });
+    await flushQueuedRafs();
+    await Promise.resolve();
+
+    expect(renderedFindProtocolMessages(messages))
+      .toEqual(expect.not.arrayContaining([expect.objectContaining({ renderId: 82 })]));
+    expect(renderedFindProtocolMessages(messages))
+      .toEqual(expect.not.arrayContaining([expect.objectContaining({ type: "rendered-find-unavailable" })]));
+  });
+
+  it("posts terminal rendered-find unavailable without transfer when the current projection lease is unavailable", async () => {
+    const sectionCount = 20;
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      staleRenderedFindLeaseAcquisition: true,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, []),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 84,
+    });
+    await flushQueuedRafs();
+
+    const protocol = renderedFindProtocolMessages(messages);
+    expect(protocol).toEqual([
+      expect.objectContaining({
+        renderId: 84,
+        type: "find-domain-begin",
+      }),
+      expect.objectContaining({
+        reason: "lease-unavailable",
+        renderId: 84,
+        type: "rendered-find-unavailable",
+      }),
+    ]);
+    expect(protocol.filter(message => message.type === "rendered-find-unavailable")).toHaveLength(1);
+    expect(protocol.some(message => message.type.startsWith("find-text-index-"))).toBe(false);
+  });
+
+  it("posts terminal rendered-find unavailable when current projection publication throws", async () => {
+    vi.doMock("../src/renderedFindProjection", async () => {
+      const actual = await vi.importActual<typeof import("../src/renderedFindProjection")>(
+        "../src/renderedFindProjection"
+      );
+      return {
+        ...actual,
+        publishRenderedFindProjection: async () => {
+          throw new Error("injected projection failure");
+        },
+      };
+    });
+
+    const sectionCount = 20;
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, []),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 85,
+    });
+    await flushUntilRendererCondition(flushQueuedRafs, () =>
+      renderedFindProtocolMessages(messages)
+        .some(message => message.type === "rendered-find-unavailable"));
+
+    expect(renderedFindProtocolMessages(messages)).toContainEqual(expect.objectContaining({
+      reason: "projection-build-failed",
+      renderId: 85,
+      type: "rendered-find-unavailable",
+    }));
   });
 
   it("shares one model rendered content job across minimap and find leases", async () => {

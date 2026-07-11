@@ -1807,6 +1807,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
             if (ingress.Kind == ApplicateWebMessageIngressKind.RenderedFind)
             {
+                PostRenderedFindRejection(ingress.RenderedFindResult);
                 PostLatestRenderedFindResult(ingress.RenderedFindResult?.LatestQueryResult);
                 return;
             }
@@ -2717,6 +2718,25 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             PostRenderedFindResults(envelope);
         }
+    }
+
+    private void PostRenderedFindRejection(ApplicateRenderedFindDomainApplyResult? result)
+    {
+        if (result?.ProtocolStatus != ApplicateRenderedFindProtocolApplyStatus.Rejected ||
+            result.Rejection is not { RenderId: > 0 } rejection)
+        {
+            return;
+        }
+
+        PostRendererMessage(new
+        {
+            type = "rendered-find-rejected",
+            schemaVersion = 1,
+            textDomain = ApplicateRenderedFindDomainState.RenderedTextDomain,
+            renderId = rejection.RenderId,
+            reason = rejection.FailureId,
+            minimumProjectionRevision = rejection.MinimumProjectionRevision,
+        });
     }
 
     private void PostRenderedFindResults(ApplicateRenderedFindResultEnvelope envelope)

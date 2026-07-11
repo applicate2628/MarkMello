@@ -108,12 +108,12 @@ public sealed class ApplicateRenderedFindDomainStateTests
         var rejected = state.ApplyProtocolMessage(CompleteJson(renderId: 31, projectionRevision: 1, semanticSegmentCount: 1, totalCodeUnits: 4, chunkCount: 1, partCount: 1));
         Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, rejected.StateStatus);
 
-        var unavailable = state.QueryRendered(renderId: 31, requestId: 4, query: "alpha");
-        AssertRenderedEnvelope(unavailable, ApplicateRenderedFindResultStatus.Unavailable, totalCount: 0);
+        var pending = state.QueryRendered(renderId: 31, requestId: 4, query: "alpha");
+        AssertRenderedEnvelope(pending, ApplicateRenderedFindResultStatus.Pending, totalCount: 0);
     }
 
     [Fact]
-    public void NewerProjectionStartStopsSearchingPreviouslyCommittedIndex()
+    public void SameRenderReplacementStartKeepsSearchingPreviouslyCommittedIndex()
     {
         var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
         state.BeginRenderedRender(renderId: 35);
@@ -124,9 +124,107 @@ public sealed class ApplicateRenderedFindDomainStateTests
 
         var newStart = state.ApplyProtocolMessage(StartJson(renderId: 35, projectionRevision: 2, semanticSegmentCount: 1, totalCodeUnits: 4, chunkCount: 1, partCount: 1));
         Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReceiving, newStart.StateStatus);
-        var pending = state.QueryRendered(renderId: 35, requestId: 2, query: "alpha");
+        var ready = state.QueryRendered(renderId: 35, requestId: 2, query: "alpha");
+
+        AssertRenderedEnvelope(ready, ApplicateRenderedFindResultStatus.Ready, totalCount: 1);
+    }
+
+    [Fact]
+    public void SameRenderCorruptReplacementRetainsCommittedIndexAndReportsInclusiveRevisionFloor()
+    {
+        var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        state.BeginRenderedRender(renderId: 61);
+        state.ApplyProtocolMessage(StartJson(renderId: 61, projectionRevision: 1, semanticSegmentCount: 1, totalCodeUnits: 5, chunkCount: 1, partCount: 1));
+        state.ApplyProtocolMessage(ChunkJson(renderId: 61, projectionRevision: 1, chunkIndex: 0, PartJson(0, 4, 0, 5, 0, "alpha")));
+        state.ApplyProtocolMessage(CompleteJson(renderId: 61, projectionRevision: 1, semanticSegmentCount: 1, totalCodeUnits: 5, chunkCount: 1, partCount: 1));
+        AssertRenderedEnvelope(
+            state.QueryRendered(renderId: 61, requestId: 1, query: "alpha"),
+            ApplicateRenderedFindResultStatus.Ready,
+            totalCount: 1);
+
+        Assert.Equal(
+            ApplicateRenderedFindDomainStatus.RenderedReceiving,
+            state.ApplyProtocolMessage(StartJson(renderId: 61, projectionRevision: 2, semanticSegmentCount: 1, totalCodeUnits: 4, chunkCount: 1, partCount: 1)).StateStatus);
+        var rejected = state.ApplyProtocolMessage(CompleteJson(renderId: 61, projectionRevision: 2, semanticSegmentCount: 1, totalCodeUnits: 4, chunkCount: 1, partCount: 1));
+
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, rejected.ProtocolStatus);
+        Assert.NotNull(rejected.Rejection);
+        Assert.Equal(3, rejected.Rejection!.MinimumProjectionRevision);
+        AssertRenderedEnvelope(
+            state.QueryRendered(renderId: 61, requestId: 2, query: "alpha"),
+            ApplicateRenderedFindResultStatus.Ready,
+            totalCount: 1);
+
+        var sameRevision = state.ApplyProtocolMessage(StartJson(renderId: 61, projectionRevision: 2, semanticSegmentCount: 1, totalCodeUnits: 4, chunkCount: 1, partCount: 1));
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, sameRevision.ProtocolStatus);
+        Assert.NotNull(sameRevision.Rejection);
+        Assert.Equal(3, sameRevision.Rejection!.MinimumProjectionRevision);
+
+        var retry = state.ApplyProtocolMessage(StartJson(renderId: 61, projectionRevision: 3, semanticSegmentCount: 1, totalCodeUnits: 4, chunkCount: 1, partCount: 1));
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Accepted, retry.ProtocolStatus);
+    }
+
+    [Fact]
+    public void NewRenderInvalidatesRetainedIndexAndIgnoresStaleReplacementFailure()
+    {
+        var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        state.BeginRenderedRender(renderId: 62);
+        state.ApplyProtocolMessage(StartJson(renderId: 62, projectionRevision: 1, semanticSegmentCount: 1, totalCodeUnits: 5, chunkCount: 1, partCount: 1));
+        state.ApplyProtocolMessage(ChunkJson(renderId: 62, projectionRevision: 1, chunkIndex: 0, PartJson(0, 4, 0, 5, 0, "alpha")));
+        state.ApplyProtocolMessage(CompleteJson(renderId: 62, projectionRevision: 1, semanticSegmentCount: 1, totalCodeUnits: 5, chunkCount: 1, partCount: 1));
+        AssertRenderedEnvelope(
+            state.QueryRendered(renderId: 62, requestId: 1, query: "alpha"),
+            ApplicateRenderedFindResultStatus.Ready,
+            totalCount: 1);
+
+        state.BeginRenderedRender(renderId: 63);
+        var pending = state.QueryRendered(renderId: 63, requestId: 2, query: "alpha");
+        var staleUnavailable = state.ApplyProtocolMessage(UnavailableJson(renderId: 62, reason: "retry-exhausted"));
 
         AssertRenderedEnvelope(pending, ApplicateRenderedFindResultStatus.Pending, totalCount: 0);
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Stale, staleUnavailable.ProtocolStatus);
+        AssertRenderedEnvelope(
+            state.QueryRendered(renderId: 63, requestId: 3, query: "alpha"),
+            ApplicateRenderedFindResultStatus.Pending,
+            totalCount: 0);
+    }
+
+    [Fact]
+    public void RendererUnavailableWithoutCommittedIndexProducesTerminalUnavailable()
+    {
+        var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        state.BeginRenderedRender(renderId: 71);
+        state.QueryRendered(renderId: 71, requestId: 1, query: "alpha");
+
+        var terminal = state.ApplyProtocolMessage(UnavailableJson(renderId: 71, reason: "rendered-content-unavailable"));
+
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Accepted, terminal.ProtocolStatus);
+        Assert.Null(terminal.Rejection);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedUnavailable, terminal.StateStatus);
+        AssertRenderedEnvelope(
+            state.QueryRendered(renderId: 71, requestId: 2, query: "alpha"),
+            ApplicateRenderedFindResultStatus.Unavailable,
+            totalCount: 0);
+    }
+
+    [Fact]
+    public void RendererUnavailableForSameRenderRetainsCommittedIndex()
+    {
+        var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        state.BeginRenderedRender(renderId: 72);
+        state.ApplyProtocolMessage(StartJson(renderId: 72, projectionRevision: 1, semanticSegmentCount: 1, totalCodeUnits: 5, chunkCount: 1, partCount: 1));
+        state.ApplyProtocolMessage(ChunkJson(renderId: 72, projectionRevision: 1, chunkIndex: 0, PartJson(0, 4, 0, 5, 0, "alpha")));
+        state.ApplyProtocolMessage(CompleteJson(renderId: 72, projectionRevision: 1, semanticSegmentCount: 1, totalCodeUnits: 5, chunkCount: 1, partCount: 1));
+        state.ApplyProtocolMessage(StartJson(renderId: 72, projectionRevision: 2, semanticSegmentCount: 1, totalCodeUnits: 4, chunkCount: 1, partCount: 1));
+
+        var terminal = state.ApplyProtocolMessage(UnavailableJson(renderId: 72, reason: "retry-exhausted"));
+
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Accepted, terminal.ProtocolStatus);
+        Assert.Null(terminal.Rejection);
+        AssertRenderedEnvelope(
+            state.QueryRendered(renderId: 72, requestId: 1, query: "alpha"),
+            ApplicateRenderedFindResultStatus.Ready,
+            totalCount: 1);
     }
 
     [Fact]
@@ -189,6 +287,10 @@ public sealed class ApplicateRenderedFindDomainStateTests
     private static string CompleteJson(int renderId, int projectionRevision, int semanticSegmentCount, int totalCodeUnits, int chunkCount, int partCount)
         => $$"""{"type":"find-text-index-complete","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":{{renderId}},"projectionRevision":{{projectionRevision}},"transferId":"{{renderId}}:{{projectionRevision}}","semanticSegmentCount":{{semanticSegmentCount}},"totalCodeUnits":{{totalCodeUnits}},"chunkCount":{{chunkCount}},"partCount":{{partCount}}}""";
 
+    private static string UnavailableJson(int renderId, string reason)
+        => $$"""{"type":"rendered-find-unavailable","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":{{renderId}},"reason":"{{reason}}"}""";
+
     private static string PartJson(int segmentOrdinal, int blockIndex, int blockLocalStart, int segmentCodeUnitLength, int partOffset, string text)
         => $$"""{"segmentOrdinal":{{segmentOrdinal}},"blockIndex":{{blockIndex}},"blockLocalStart":{{blockLocalStart}},"segmentCodeUnitLength":{{segmentCodeUnitLength}},"partOffset":{{partOffset}},"text":"{{text}}"}""";
+
 }
