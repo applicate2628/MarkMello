@@ -5643,6 +5643,8 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
       && minimapRenderedContentLease.model === model
       && minimapRenderedContentLease.documentEpoch === documentEpoch
     ) {
+      emitMark("mm-minimap-refresh-skipped", { phase, reason: "model-rendered-content-pending" });
+      postPerfMark("mm-minimap-refresh-skipped", { phase, reason: "model-rendered-content-pending" });
       return;
     }
     releaseMinimapRenderedContentLease();
@@ -5668,6 +5670,8 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
       }
       refreshMinimapContent(phase);
     });
+    emitMark("mm-minimap-refresh-skipped", { phase, reason: "model-rendered-content-wait" });
+    postPerfMark("mm-minimap-refresh-skipped", { phase, reason: "model-rendered-content-wait" });
     return;
   }
   const clone = model === null

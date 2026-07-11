@@ -833,6 +833,59 @@ function perfDetails<T extends Record<string, unknown>>(
     .flatMap(message => message.detail ? [JSON.parse(message.detail) as T] : []);
 }
 
+type MinimapRefreshPerfName =
+  | "mm-minimap-refresh-end"
+  | "mm-minimap-refresh-skipped"
+  | "mm-minimap-refresh-start";
+
+type MinimapRefreshPerfEvent = {
+  messageIndex: number;
+  name: MinimapRefreshPerfName;
+};
+
+function minimapRefreshPerfEvents(messages: readonly unknown[]): MinimapRefreshPerfEvent[] {
+  return messages.flatMap((message, messageIndex) => {
+    if (
+      typeof message !== "object"
+      || message === null
+      || (message as { type?: unknown }).type !== "perf-mark"
+    ) {
+      return [];
+    }
+
+    const name = (message as { name?: unknown }).name;
+    if (
+      name !== "mm-minimap-refresh-end"
+      && name !== "mm-minimap-refresh-skipped"
+      && name !== "mm-minimap-refresh-start"
+    ) {
+      return [];
+    }
+
+    return [{
+      messageIndex,
+      name,
+    }];
+  });
+}
+
+function expectPairedMinimapRefreshMarks(messages: readonly unknown[]): void {
+  const events = minimapRefreshPerfEvents(messages);
+  const starts = events.filter(event => event.name === "mm-minimap-refresh-start");
+  expect(starts.length).toBeGreaterThan(0);
+
+  for (const start of starts) {
+    const nextStart = events.find(event =>
+      event.name === "mm-minimap-refresh-start"
+      && event.messageIndex > start.messageIndex);
+    const terminals = events.filter(event =>
+      event.messageIndex > start.messageIndex
+      && (nextStart === undefined || event.messageIndex < nextStart.messageIndex)
+      && (event.name === "mm-minimap-refresh-end" || event.name === "mm-minimap-refresh-skipped"));
+    expect(terminals).toHaveLength(1);
+  }
+}
+
 function expectCommittedWriterOwned(
   messages: readonly unknown[],
   writer: string,
@@ -3181,6 +3234,53 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(new Set(katex.render.mock.calls.map(call => call[0]).filter(tex => tex === "x_0" || tex === "x_90")))
       .toEqual(new Set(["x_0", "x_90"]));
     expect(perfDetails(messages, "mm-model-rendered-content-cancel")).toEqual([]);
+  });
+
+  it("pairs minimap refresh starts for model-rendered-content wait and pending reuse", async () => {
+    vi.useFakeTimers();
+    const sectionCount = 120;
+    const katex = makeRendererKatex();
+    const harness = await loadRendererHarness({
+      katex,
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    await enableDetailedMinimap(harness.load, harness.flushQueuedRafs);
+    harness.messages.length = 0;
+
+    harness.load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, [90]),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 43,
+    });
+    await harness.flushRafsUntil(
+      () => perfDetails(harness.messages, "mm-model-rendered-content-start").length > 0,
+      40
+    );
+    const pendingStartCount = perfDetails(harness.messages, "mm-minimap-refresh-start").length;
+    expect(pendingStartCount).toBeGreaterThan(0);
+
+    loadMinimapPolicy(harness.load);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await harness.flushRafsUntil(
+      () => perfDetails(harness.messages, "mm-minimap-refresh-start").length > pendingStartCount,
+      40
+    );
+
+    await harness.flushQueuedRafs();
+
+    expect(perfDetails<{ reason?: string }>(harness.messages, "mm-minimap-refresh-skipped"))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ reason: "model-rendered-content-wait" }),
+        expect.objectContaining({ reason: "model-rendered-content-pending" }),
+      ]));
+    expectPairedMinimapRefreshMarks(harness.messages);
+    expect(perfDetails<{ source?: string }>(harness.messages, "mm-minimap-refresh-end"))
+      .toContainEqual(expect.objectContaining({ source: "model-fragment" }));
   });
 
   it("cancels the last model rendered content lease and resumes pending entries later", async () => {
