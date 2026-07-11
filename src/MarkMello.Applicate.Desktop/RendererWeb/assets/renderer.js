@@ -1389,22 +1389,40 @@
   var RENDERED_FIND_MAX_SEMANTIC_SEGMENTS = 524288;
   var RENDERED_FIND_MAX_TRANSFER_PARTS = 1048576;
   var RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS = 7;
+  var RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_NUMERATOR = 9;
+  var RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_DENOMINATOR = 10;
+  var RENDERED_FIND_MAX_PACKED_CHUNK_MESSAGE_UTF8_BYTES = Math.floor(
+    RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES * RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_NUMERATOR / RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_DENOMINATOR
+  );
+  var RENDERED_FIND_MAX_PACKED_CHUNK_MESSAGE_CODE_UNITS = Math.floor(
+    RENDERED_FIND_MAX_MESSAGE_CODE_UNITS * RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_NUMERATOR / RENDERED_FIND_PRODUCER_MESSAGE_LIMIT_DENOMINATOR
+  );
   async function publishRenderedFindProjection(options) {
     if (options.shouldCancel()) {
       return "cancelled";
     }
     const readiness = await options.readiness;
-    if (readiness !== "not-needed" && readiness !== "ready" && readiness !== "ready-with-failures" || options.shouldCancel()) {
+    if (options.shouldCancel() || readiness === "cancelled") {
+      return "cancelled";
+    }
+    if (readiness !== "not-needed" && readiness !== "ready" && readiness !== "ready-with-failures") {
+      return "unavailable";
+    }
+    await options.yieldControl();
+    if (options.shouldCancel()) {
       return "cancelled";
     }
     const projectionOptions = {
       shouldCancel: () => options.shouldCancel(),
       yieldControl: options.yieldControl
     };
+    if (options.onSectionProjected !== void 0) {
+      projectionOptions.onSectionProjected = options.onSectionProjected;
+    }
     if (options.now !== void 0) {
       projectionOptions.now = options.now;
     }
-    const projection = await createRenderedFindProjection(options.root(), projectionOptions);
+    const projection = options.sectionRoots !== void 0 ? await createRenderedFindProjectionFromSectionRoots(options.sectionRoots, projectionOptions) : await createRenderedFindProjection(readProjectionRoot(options), projectionOptions);
     if (projection.status === "cancelled" || options.shouldCancel()) {
       return "cancelled";
     }
@@ -1422,9 +1440,79 @@
     }
     return emitRenderedFindProjectionTransfer(projection.segments, transferOptions);
   }
+  function readProjectionRoot(options) {
+    if (options.root === void 0) {
+      throw new Error("rendered find projection root is unavailable");
+    }
+    return options.root();
+  }
   async function createRenderedFindProjection(root, options = {}) {
-    const segments = [];
-    const blockLengths = /* @__PURE__ */ new Map();
+    const collector = createRenderedFindSegmentCollector();
+    const result = await appendRenderedFindProjectionRoot(root, options, collector);
+    if (result === "cancelled") {
+      return { segments: [], status: "cancelled" };
+    }
+    return { segments: collector.segments, status: "complete" };
+  }
+  async function createRenderedFindProjectionFromSectionRoots(sections, options = {}) {
+    const collector = createRenderedFindSegmentCollector();
+    const now = options.now ?? (() => performance.now());
+    const shouldCancel = options.shouldCancel ?? (() => false);
+    const yieldControl = options.yieldControl ?? (async () => {
+    });
+    const sectionCount = Math.max(0, Math.floor(sections.sectionCount));
+    let sliceActive = false;
+    let sliceStart = 0;
+    const beginOrContinueSectionSlice = async () => {
+      if (!sliceActive) {
+        if (shouldCancel("before-work")) {
+          return true;
+        }
+        sliceStart = now();
+        sliceActive = true;
+        return false;
+      }
+      if (now() - sliceStart < RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS) {
+        return false;
+      }
+      await yieldControl();
+      if (shouldCancel("after-yield")) {
+        return true;
+      }
+      if (shouldCancel("before-work")) {
+        return true;
+      }
+      sliceStart = now();
+      return false;
+    };
+    for (let sectionIndex = 0; sectionIndex < sectionCount; sectionIndex++) {
+      if (await beginOrContinueSectionSlice()) {
+        return { segments: [], status: "cancelled" };
+      }
+      const sectionStart = now();
+      const root = sections.createRoot(sectionIndex);
+      if (root !== null) {
+        const result = await appendRenderedFindProjectionRoot(root, options, collector);
+        if (result === "cancelled") {
+          return { segments: [], status: "cancelled" };
+        }
+      }
+      const durationMs = Math.max(0, now() - sectionStart);
+      options.onSectionProjected?.({
+        durationMs,
+        overranSliceBudget: durationMs > RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS,
+        sectionIndex
+      });
+    }
+    return { segments: collector.segments, status: "complete" };
+  }
+  function createRenderedFindSegmentCollector() {
+    return {
+      blockLengths: /* @__PURE__ */ new Map(),
+      segments: []
+    };
+  }
+  async function appendRenderedFindProjectionRoot(root, options, collector) {
     const walkOptions = {
       shouldCancel: options.shouldCancel ?? (() => false),
       sliceBudgetMs: RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS,
@@ -1448,20 +1536,20 @@
       if (!Number.isSafeInteger(blockIndex) || blockIndex < 0) {
         return;
       }
-      const blockLocalStart = blockLengths.get(blockIndex) ?? 0;
-      segments.push({
+      const blockLocalStart = collector.blockLengths.get(blockIndex) ?? 0;
+      collector.segments.push({
         blockIndex,
         blockLocalStart,
         segmentCodeUnitLength: text.length,
-        segmentOrdinal: segments.length,
+        segmentOrdinal: collector.segments.length,
         text
       });
-      blockLengths.set(blockIndex, blockLocalStart + text.length);
+      collector.blockLengths.set(blockIndex, blockLocalStart + text.length);
     });
     if (result === "cancelled") {
-      return { segments: [], status: "cancelled" };
+      return "cancelled";
     }
-    return { segments, status: "complete" };
+    return "complete";
   }
   function createRenderedFindDomainBeginMessage(input) {
     return {
@@ -1469,6 +1557,15 @@
       schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
       textDomain: RENDERED_FIND_TEXT_DOMAIN,
       type: "find-domain-begin"
+    };
+  }
+  function createRenderedFindUnavailableMessage(input) {
+    return {
+      reason: input.reason,
+      renderId: input.renderId,
+      schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
+      textDomain: RENDERED_FIND_TEXT_DOMAIN,
+      type: "rendered-find-unavailable"
     };
   }
   function createRenderedFindTextIndexChunkMessage(input) {
@@ -1498,6 +1595,9 @@
     if (measurement.utf8Bytes > RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES) {
       throw new Error(`rendered find message exceeds UTF-8 limit: ${measurement.utf8Bytes}`);
     }
+  }
+  function isWithinRenderedFindPackedChunkLimit(measurement) {
+    return measurement.codeUnits <= RENDERED_FIND_MAX_PACKED_CHUNK_MESSAGE_CODE_UNITS && measurement.utf8Bytes <= RENDERED_FIND_MAX_PACKED_CHUNK_MESSAGE_UTF8_BYTES;
   }
   async function emitRenderedFindProjectionTransfer(segments, options) {
     const now = options.now ?? (() => performance.now());
@@ -1594,15 +1694,53 @@
         renderId: options.renderId
       });
       const measurement = measureRenderedFindMessage(candidateMessage);
-      if (pending.length > 0 && (measurement.codeUnits > RENDERED_FIND_MAX_MESSAGE_CODE_UNITS || measurement.utf8Bytes > RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES)) {
+      if (pending.length > 0 && !isWithinRenderedFindPackedChunkLimit(measurement)) {
         flush();
-        pending.push(part);
+        appendPart(part);
         return;
       }
-      if (pending.length === 0 && (measurement.codeUnits > RENDERED_FIND_MAX_MESSAGE_CODE_UNITS || measurement.utf8Bytes > RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES)) {
+      if (pending.length === 0 && !isWithinRenderedFindPackedChunkLimit(measurement)) {
         throw new Error("rendered find text part cannot fit within one message");
       }
       pending = candidate;
+    };
+    const findPackedTextPartEnd = (text, offset, segment) => {
+      const fitsPartEndingAt = (end) => {
+        const part = {
+          blockIndex: segment.blockIndex,
+          blockLocalStart: segment.blockLocalStart,
+          partOffset: offset,
+          segmentCodeUnitLength: segment.segmentCodeUnitLength,
+          segmentOrdinal: segment.segmentOrdinal,
+          text: text.slice(offset, end)
+        };
+        const message = createRenderedFindTextIndexChunkMessage({
+          chunkIndex: RENDERED_FIND_MAX_TRANSFER_PARTS,
+          parts: [part],
+          projectionRevision: options.projectionRevision,
+          renderId: options.renderId
+        });
+        return isWithinRenderedFindPackedChunkLimit(measureRenderedFindMessage(message));
+      };
+      let low = offset + 1;
+      let high = Math.min(text.length, offset + RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS);
+      if (fitsPartEndingAt(high)) {
+        return high;
+      }
+      let best = offset;
+      while (low <= high) {
+        const mid = low + Math.floor((high - low) / 2);
+        if (fitsPartEndingAt(mid)) {
+          best = mid;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+      if (best === offset) {
+        throw new Error("rendered find text part cannot fit within one message");
+      }
+      return best;
     };
     for (const segment of segments) {
       if (await beginOrContinuePackingSlice()) {
@@ -1614,18 +1752,21 @@
       if (totalCodeUnits > RENDERED_FIND_MAX_PROJECTION_CODE_UNITS) {
         throw new Error(`rendered find projection exceeds total UTF-16 limit: ${totalCodeUnits}`);
       }
-      for (let offset = 0; offset < text.length; offset += RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS) {
+      let offset = 0;
+      while (offset < text.length) {
         if (await beginOrContinuePackingSlice()) {
           return { status: "cancelled" };
         }
+        const partEnd = findPackedTextPartEnd(text, offset, segment);
         appendPart({
           blockIndex: segment.blockIndex,
           blockLocalStart: segment.blockLocalStart,
           partOffset: offset,
           segmentCodeUnitLength: segmentLength,
           segmentOrdinal: segment.segmentOrdinal,
-          text: text.slice(offset, offset + RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS)
+          text: text.slice(offset, partEnd)
         });
+        offset = partEnd;
         partCount++;
         if (partCount > RENDERED_FIND_MAX_TRANSFER_PARTS) {
           throw new Error(`rendered find projection exceeds transfer part limit: ${partCount}`);
@@ -3095,6 +3236,10 @@
     }
     return fragment;
   }
+  function createDocumentWindowSectionNodeFromModel(ownerDocument, model, sectionIndex) {
+    const entry = model.sections[sectionIndex];
+    return entry === void 0 ? null : createSectionNode(ownerDocument, entry);
+  }
   function collectExistingSections(main) {
     const result = /* @__PURE__ */ new Map();
     for (const element of collectLiveDocumentSectionElements(main)) {
@@ -3385,12 +3530,14 @@
       watch.lastOccupiedHeight = sample.occupiedHeight;
       if (watch.stableFrameCount >= 2) {
         if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) <= 1) {
+          watch.nonconvergentCycles = 0;
           watch.state = "event-equal-fallback-noop";
           watch.readyMeasuredHeight = null;
           deps.onRealizationReady?.(watch.mountGeneration);
           return;
         }
         if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) > 1) {
+          watch.nonconvergentCycles = 0;
           watch.state = "real-ready";
           watch.readyMeasuredHeight = Math.max(0, sample.occupiedHeight);
           deps.onRealizationReady?.(watch.mountGeneration);
@@ -4250,8 +4397,19 @@
   }
 
   // RendererWeb/src/minimapCache.ts
+  function isMinimapSnapshotProvenance(value) {
+    if (value === null || typeof value !== "object") {
+      return false;
+    }
+    const candidate = value;
+    if (candidate.source === "live-dom") {
+      return candidate.modelGeneration === null;
+    }
+    const modelGeneration = candidate.modelGeneration;
+    return candidate.source === "model-fragment" && typeof modelGeneration === "number" && Number.isSafeInteger(modelGeneration) && modelGeneration >= 0;
+  }
   function captureMinimapSnapshot(input) {
-    if (!input.minimapContent || input.minimapContent.childNodes.length === 0) {
+    if (!input.minimapContent || input.minimapContent.childNodes.length === 0 || !isMinimapSnapshotProvenance(input.provenance)) {
       return null;
     }
     const nodes = Array.from(input.minimapContent.childNodes);
@@ -4265,6 +4423,7 @@
         width: input.minimapContent.style.width,
         transform: input.minimapContent.style.transform
       },
+      provenance: { ...input.provenance },
       viewportStyle: {
         height: input.minimapViewport?.style.height ?? "",
         transform: input.minimapViewport?.style.transform ?? ""
@@ -5874,7 +6033,10 @@
     },
     hasRecentUserInput: (withinMs) => userInputWitness.hasRecentUserInput(withinMs),
     prepareGeometrySettleCandidate: () => virtualizedDocumentWindowController?.recensusRealizationWatches() ?? true,
-    requestFrame: (callback) => window.requestAnimationFrame(callback),
+    requestFrame: (callback) => window.requestAnimationFrame((timestamp) => {
+      virtualizedScrollControlFrameTimestamp = timestamp;
+      callback(timestamp);
+    }),
     root: getDocumentScrollRoot(),
     trace: (event) => postPerfMark(event.id, {
       ...event.details,
@@ -5916,6 +6078,7 @@
   var virtualizationShadowDocumentFinal = true;
   var virtualizedDocumentWindowController = null;
   var virtualizedDocumentWindowModel = null;
+  var virtualizedDocumentWindowModelGeneration = 0;
   var virtualizedFindProvider = null;
   var virtualizedIntrinsicCalibrator = createSectionIntrinsicCalibrator();
   var virtualizedMeasureFrameRequested = false;
@@ -5930,6 +6093,7 @@
   var virtualizedProgrammaticNavigationExternalShiftCount = 0;
   var virtualizedProgrammaticNavigationPostSettleTarget = null;
   var virtualizedProgrammaticNavigationOperation = null;
+  var virtualizedScrollControlFrameTimestamp = null;
   var minimapScrollOperation = null;
   var virtualizedWriteReceipts = /* @__PURE__ */ new Map();
   var cachedScrollRestoreCompletion = null;
@@ -5942,6 +6106,8 @@
   var renderedFindProjectionGeneration = 0;
   var renderedFindProjectionRenderId = null;
   var renderedFindProjectionRevision = 0;
+  var renderedFindProjectionRetryCount = 0;
+  var RENDERED_FIND_MAX_RETRY_COUNT = 2;
   var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
   function cloneHeadingPayload(heading) {
     return {
@@ -5955,6 +6121,7 @@
   var restoredCachedLayoutState = null;
   var restoredCachedHeadings = null;
   var restoredCachedMinimapSnapshot = null;
+  var currentMinimapContentProvenance = null;
   var processedDocumentCacheCloneGeneration = 0;
   var processedDocumentCacheCloneHandle = null;
   var lastExtractedHeadings = [];
@@ -6009,6 +6176,11 @@
   function getCurrentProcessedDocumentRenderedContentState() {
     return virtualizationEnabled && virtualizedDocumentWindowModel !== null ? virtualizedDocumentWindowModel.getRenderedContentState() : null;
   }
+  function markVirtualizedDocumentWindowModelChanged(model) {
+    if (model === virtualizedDocumentWindowModel) {
+      virtualizedDocumentWindowModelGeneration++;
+    }
+  }
   function readRenderedContentStateFromFragment(fragment) {
     const mathNodes = Array.from(fragment.querySelectorAll("[data-tex]"));
     if (mathNodes.length === 0) {
@@ -6040,8 +6212,19 @@
     return cached.renderedContentState;
   }
   function isCurrentModelFragmentMinimapSnapshot(snapshot) {
-    const root = snapshot.content.firstElementChild;
-    return root instanceof HTMLElement && root.dataset["mmMinimapSource"] === "model-fragment" && snapshot.content.querySelector("[data-tex]") === null;
+    return snapshot.provenance.source === "model-fragment" && snapshot.provenance.modelGeneration === virtualizedDocumentWindowModelGeneration && snapshot.content.querySelector("[data-tex]") === null;
+  }
+  function createMinimapContentProvenance(model) {
+    if (model === null) {
+      return { source: "live-dom", modelGeneration: null };
+    }
+    return model === virtualizedDocumentWindowModel ? { source: "model-fragment", modelGeneration: virtualizedDocumentWindowModelGeneration } : null;
+  }
+  function createRestoredMinimapContentProvenance(snapshot) {
+    if (snapshot.provenance.source === "live-dom") {
+      return { source: "live-dom", modelGeneration: null };
+    }
+    return virtualizedDocumentWindowModel === null ? null : { source: "model-fragment", modelGeneration: virtualizedDocumentWindowModelGeneration };
   }
   function captureProcessedDocumentMinimapPayload(renderedContentState) {
     let minimapSnapshot = null;
@@ -6051,7 +6234,8 @@
         minimapContent,
         minimapViewport,
         documentHeight: minimapDocumentHeight,
-        lastPostedState: lastPostedMinimapState
+        lastPostedState: lastPostedMinimapState,
+        provenance: currentMinimapContentProvenance
       });
       minimapSnapshot = renderedContentState === null || captured === null || isCurrentModelFragmentMinimapSnapshot(captured) ? captured : null;
     }
@@ -6484,6 +6668,9 @@
   }
   function handleModelRenderedContentEvent(state2, event) {
     if (event.type === "progress") {
+      if (event.committed) {
+        markVirtualizedDocumentWindowModelChanged(state2.model);
+      }
       postModelRenderedContentMark(state2, "mm-model-rendered-content-progress", {
         committed: event.committed,
         failedMathCount: event.failedMathCount,
@@ -6616,6 +6803,12 @@
     lease?.release();
   }
   function startRenderedFindProjectionForCurrentModel() {
+    startRenderedFindProjectionPublication({
+      minimumProjectionRevision: 1,
+      postDomainBegin: true
+    });
+  }
+  function startRenderedFindProjectionPublication(options) {
     const model = virtualizedDocumentWindowModel;
     const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
     const renderId = currentDocumentRenderId;
@@ -6625,34 +6818,67 @@
     if (renderedFindProjectionRenderId !== renderId) {
       renderedFindProjectionRenderId = renderId;
       renderedFindProjectionRevision = 0;
+      renderedFindProjectionRetryCount = 0;
     }
-    const projectionRevision = ++renderedFindProjectionRevision;
+    const projectionRevision = Math.max(
+      renderedFindProjectionRevision + 1,
+      options.minimumProjectionRevision
+    );
+    renderedFindProjectionRevision = projectionRevision;
     const generation = ++renderedFindProjectionGeneration;
-    postHostMessage(createRenderedFindDomainBeginMessage({ renderId }));
+    if (options.postDomainBegin) {
+      postHostMessage(createRenderedFindDomainBeginMessage({ renderId }));
+    }
     releaseRenderedFindContentLease();
     const lease = acquireCurrentModelRenderedContentLease("rendered-find-projection");
     if (lease === null) {
+      postCurrentRenderedFindUnavailable(renderId, "lease-unavailable");
       return;
     }
     renderedFindContentLease = lease;
-    const shouldCancel = () => generation !== renderedFindProjectionGeneration || model !== virtualizedDocumentWindowModel || renderId !== currentDocumentRenderId || lease.documentEpoch !== documentEpoch || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true;
+    let projectionModelGeneration = null;
+    const shouldCancel = () => generation !== renderedFindProjectionGeneration || model !== virtualizedDocumentWindowModel || projectionModelGeneration !== null && projectionModelGeneration !== virtualizedDocumentWindowModelGeneration || renderId !== currentDocumentRenderId || lease.documentEpoch !== documentEpoch || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true;
     void publishRenderedFindProjection({
       emit: (message) => {
         postHostMessage(message);
       },
+      onSectionProjected: (event) => {
+        if (event.overranSliceBudget) {
+          postPerfMark("mm-find-projection-section-overrun", {
+            durationMs: event.durationMs,
+            projectionRevision,
+            renderId,
+            sectionIndex: event.sectionIndex
+          });
+        }
+      },
       projectionRevision,
       readiness: lease.readiness,
       renderId,
-      root: () => createFullDocumentFragmentFromWindowModel(document, model),
+      sectionRoots: {
+        createRoot: (sectionIndex) => {
+          if (projectionModelGeneration === null) {
+            projectionModelGeneration = virtualizedDocumentWindowModelGeneration;
+          }
+          return shouldCancel() ? null : createDocumentWindowSectionNodeFromModel(document, model, sectionIndex);
+        },
+        sectionCount: model.getSectionCount()
+      },
       shouldCancel,
       yieldControl: yieldModelRenderedContentWork
     }).then((status) => {
+      if (status === "unavailable" && !shouldCancel()) {
+        postCurrentRenderedFindUnavailable(renderId, "rendered-content-unavailable");
+      }
       postPerfMark("mm-find-projection-terminal", {
         projectionRevision,
         renderId,
         status
       });
     }).catch((error) => {
+      if (!shouldCancel()) {
+        postCurrentRenderedFindUnavailable(renderId, "projection-build-failed");
+      }
       postPerfMark("mm-find-projection-failed", {
         projectionRevision,
         renderId,
@@ -6663,6 +6889,31 @@
         renderedFindContentLease = null;
         lease.release();
       }
+    });
+  }
+  function postCurrentRenderedFindUnavailable(renderId, reason) {
+    if (renderId !== currentDocumentRenderId || renderId !== renderedFindProjectionRenderId) {
+      return;
+    }
+    postHostMessage(createRenderedFindUnavailableMessage({ renderId, reason }));
+  }
+  function handleRenderedFindRejectedMessage(message) {
+    if (message.schemaVersion !== 1 || message.textDomain !== "rendered-dom-v1" || message.renderId !== currentDocumentRenderId || message.renderId !== renderedFindProjectionRenderId || !Number.isSafeInteger(message.minimumProjectionRevision) || message.minimumProjectionRevision <= 0) {
+      return;
+    }
+    if (message.minimumProjectionRevision <= renderedFindProjectionRevision) {
+      return;
+    }
+    if (renderedFindProjectionRetryCount >= RENDERED_FIND_MAX_RETRY_COUNT) {
+      renderedFindProjectionGeneration++;
+      releaseRenderedFindContentLease();
+      postCurrentRenderedFindUnavailable(message.renderId, "retry-exhausted");
+      return;
+    }
+    renderedFindProjectionRetryCount++;
+    startRenderedFindProjectionPublication({
+      minimumProjectionRevision: message.minimumProjectionRevision,
+      postDomainBegin: false
     });
   }
   function getLiveDocumentRoot() {
@@ -7703,7 +7954,6 @@
     operation.requestScrollTop(Math.max(0, scrollTop), writer);
   }
   var VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS = 200;
-  var VIRTUALIZED_NAVIGATION_FRAME_INTERVAL_MS = 1e3 / 60;
   function easeVirtualizedNavigationProgress(progress) {
     const clamped = Math.min(1, Math.max(0, progress));
     return clamped < 0.5 ? 4 * clamped * clamped * clamped : 1 - Math.pow(-2 * clamped + 2, 3) / 2;
@@ -7712,15 +7962,20 @@
     if (!Number.isFinite(input.startScrollTop) || !Number.isFinite(input.destinationScrollTop) || !input.operation.isCurrent()) {
       return false;
     }
-    let frame = 0;
+    let startTimestamp = null;
     const advance = () => input.operation.scheduleFrameTransaction(() => {
       if (!input.operation.isCurrent() || input.generation !== virtualizedProgrammaticNavigationGeneration) {
         return;
       }
-      frame++;
+      const timestamp = virtualizedScrollControlFrameTimestamp;
+      if (timestamp === null || !Number.isFinite(timestamp)) {
+        advance();
+        return;
+      }
+      startTimestamp ?? (startTimestamp = timestamp);
       const elapsedMs = Math.min(
         VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS,
-        frame * VIRTUALIZED_NAVIGATION_FRAME_INTERVAL_MS
+        Math.max(0, timestamp - startTimestamp)
       );
       const progress = elapsedMs / VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS;
       const easedProgress = easeVirtualizedNavigationProgress(progress);
@@ -8227,6 +8482,9 @@
     virtualizedWindowMathController = null;
     virtualizedDocumentWindowController?.dispose();
     virtualizedDocumentWindowController = null;
+    if (virtualizedDocumentWindowModel !== null) {
+      virtualizedDocumentWindowModelGeneration++;
+    }
     virtualizedDocumentWindowModel = null;
     endVirtualizedGeometryWork(virtualizedMeasuredHeightGeometryTicket);
     virtualizedMeasuredHeightGeometryTicket = null;
@@ -8354,6 +8612,7 @@
       { intrinsicSizeCalibrator: virtualizedIntrinsicCalibrator }
     );
     virtualizedDocumentWindowModel = models.estimateOnlyModel;
+    virtualizedDocumentWindowModelGeneration++;
     const documentEpoch = scrollOwnershipControlPlane.captureDocumentEpoch();
     startRenderedFindProjectionForCurrentModel();
     virtualizedDocumentWindowController = createVirtualizedDocumentWindowController({
@@ -9710,9 +9969,6 @@
     }
     const source = document.createElement(liveSource.localName);
     source.className = liveSource.className;
-    source.dataset["mmMinimapSource"] = "model-fragment";
-    source.dataset["mmModelMinimapSectionCount"] = String(model.getSectionCount());
-    source.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
     source.append(createFullDocumentFragmentFromWindowModel(document, model));
     const clone = cloneDocumentElementForMinimap(source, getComputedStyle(liveSource), documentHeight);
     return clone;
@@ -9733,6 +9989,7 @@
       minimapSourceReady = false;
       minimapDocumentHeight = buildDecision.documentHeight;
       currentMinimapLayout = null;
+      currentMinimapContentProvenance = null;
       minimapContent.replaceChildren();
       updateMinimapVisibility(true);
       emitMark("mm-minimap-refresh-skipped", {
@@ -9752,6 +10009,8 @@
     if (model !== null && model.getRenderedContentState() === "unprepared") {
       const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
       if (minimapRenderedContentLease !== null && minimapRenderedContentLease.model === model && minimapRenderedContentLease.documentEpoch === documentEpoch) {
+        emitMark("mm-minimap-refresh-skipped", { phase, reason: "model-rendered-content-pending" });
+        postPerfMark("mm-minimap-refresh-skipped", { phase, reason: "model-rendered-content-pending" });
         return;
       }
       releaseMinimapRenderedContentLease();
@@ -9772,10 +10031,13 @@
         }
         refreshMinimapContent(phase);
       });
+      emitMark("mm-minimap-refresh-skipped", { phase, reason: "model-rendered-content-wait" });
+      postPerfMark("mm-minimap-refresh-skipped", { phase, reason: "model-rendered-content-wait" });
       return;
     }
     const clone = model === null ? cloneDocumentForMinimap(buildDecision.documentHeight) : cloneModelDocumentForMinimap(model, buildDecision.documentHeight);
     if (!clone) {
+      currentMinimapContentProvenance = null;
       emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
       postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
       return;
@@ -9786,6 +10048,7 @@
       minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
     }
     minimapContent.replaceChildren(clone);
+    currentMinimapContentProvenance = createMinimapContentProvenance(model);
     syncModelMinimapCloneMetadata();
     updateMinimapVisibility(true);
     updateMinimapViewport({ skipVisibilityUpdate: true });
@@ -9845,6 +10108,9 @@
     if (!snapshot) {
       return false;
     }
+    if (snapshot.provenance.source === "model-fragment" && !isCurrentModelFragmentMinimapSnapshot(snapshot)) {
+      return false;
+    }
     ensureMinimap();
     const restored = restoreMinimapSnapshot(snapshot, { minimapContent, minimapViewport });
     if (!restored) {
@@ -9852,6 +10118,7 @@
     }
     minimapDocumentHeight = restored.documentHeight;
     minimapSourceReady = true;
+    currentMinimapContentProvenance = createRestoredMinimapContentProvenance(snapshot);
     const restoredClone = minimapContent?.firstElementChild;
     if (restoredClone instanceof HTMLElement) {
       applyMinimapClonePaintHeightLimit(restoredClone, restored.documentHeight);
@@ -10936,6 +11203,10 @@
       virtualizedFindProvider?.handleFindResults(message);
       return;
     }
+    if (message.type === "rendered-find-rejected") {
+      handleRenderedFindRejectedMessage(message);
+      return;
+    }
     if (message.type === "open-find-bar") {
       findBarController?.toggle();
       return;
@@ -11312,6 +11583,7 @@
     minimapDocumentHeight = 0;
     lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
     minimapSourceReady = false;
+    currentMinimapContentProvenance = null;
     currentMinimapLayout = null;
     hasInitialLayoutSettled = false;
     resetVirtualizedDocumentWindow();
