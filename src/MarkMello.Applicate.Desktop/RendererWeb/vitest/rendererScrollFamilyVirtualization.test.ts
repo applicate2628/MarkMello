@@ -2577,6 +2577,20 @@ describe("renderer scroll-family virtualization integration", () => {
       .filter((message): message is { type: string } => typeof message === "object" && message !== null && "type" in message)
       .map(message => message.type)
       .filter(type => type.startsWith("find-domain-") || type.startsWith("find-text-index-"));
+    const domainBeginIndex = messages.findIndex(message =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: unknown }).type === "find-domain-begin");
+    const readinessStartIndex = perfMarkMessageIndex(messages, "mm-model-rendered-content-start");
+    const readinessEndIndex = perfMarkMessageIndex(messages, "mm-model-rendered-content-end");
+    const transferStartIndex = messages.findIndex(message =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: unknown }).type === "find-text-index-start");
+    expect(domainBeginIndex).toBeGreaterThanOrEqual(0);
+    expect(domainBeginIndex).toBeLessThan(readinessStartIndex);
+    expect(readinessStartIndex).toBeLessThan(readinessEndIndex);
+    expect(readinessEndIndex).toBeLessThan(transferStartIndex);
     expect(perfDetails<{ status?: string }>(messages, "mm-find-projection-terminal"))
       .toContainEqual(expect.objectContaining({ status: "complete" }));
     expect(protocolTypes).toEqual([

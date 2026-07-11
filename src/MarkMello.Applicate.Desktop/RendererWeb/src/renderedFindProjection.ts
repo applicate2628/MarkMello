@@ -104,7 +104,7 @@ export type RenderedFindProjectionResult =
   | { status: "cancelled"; segments: [] };
 
 export type PublishRenderedFindProjectionOptions = {
-  emit: (message: RenderedFindDomainBeginMessage | RenderedFindTransferMessage) => void;
+  emit: (message: RenderedFindTransferMessage) => void;
   projectionRevision: number;
   readiness: Promise<"not-needed" | "ready" | "ready-with-failures" | "cancelled" | "unavailable" | "unprepared">;
   renderId: number;
@@ -121,7 +121,6 @@ export async function publishRenderedFindProjection(
     return "cancelled";
   }
 
-  options.emit(createRenderedFindDomainBeginMessage({ renderId: options.renderId }));
   const readiness = await options.readiness;
   if (
     (readiness !== "not-needed" && readiness !== "ready" && readiness !== "ready-with-failures")

@@ -75,6 +75,7 @@ import {
   type VirtualizedWindowOperation,
 } from "./virtualizedDocumentWindow";
 import {
+  createRenderedFindDomainBeginMessage,
   publishRenderedFindProjection,
   type RenderedFindDomainBeginMessage,
   type RenderedFindTransferMessage,
@@ -1422,6 +1423,7 @@ function startRenderedFindProjectionForCurrentModel(): void {
   }
   const projectionRevision = ++renderedFindProjectionRevision;
   const generation = ++renderedFindProjectionGeneration;
+  postHostMessage(createRenderedFindDomainBeginMessage({ renderId }));
   releaseRenderedFindContentLease();
   const lease = acquireCurrentModelRenderedContentLease("rendered-find-projection");
   if (lease === null) {

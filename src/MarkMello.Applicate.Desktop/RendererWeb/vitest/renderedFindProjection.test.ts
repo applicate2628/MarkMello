@@ -62,7 +62,7 @@ async function collectTransfer(
 }
 
 describe("rendered find visible text projection", () => {
-  it("posts the rendered domain begin before readiness and publishes only after readiness", async () => {
+  it("publishes the transfer only after readiness", async () => {
     const mod = await loadProjectionModule();
     const messages: Array<{ type: string }> = [];
     let resolveReadiness!: (status: "ready") => void;
@@ -91,11 +91,10 @@ describe("rendered find visible text projection", () => {
       yieldControl: async () => { },
     });
 
-    expect(messages.map(message => message.type)).toEqual(["find-domain-begin"]);
+    expect(messages).toEqual([]);
     resolveReadiness("ready");
     await expect(result).resolves.toBe("complete");
     expect(messages.map(message => message.type)).toEqual([
-      "find-domain-begin",
       "find-text-index-start",
       "find-text-index-chunk",
       "find-text-index-complete",
@@ -130,7 +129,7 @@ describe("rendered find visible text projection", () => {
     stale = true;
 
     await expect(result).resolves.toBe("cancelled");
-    expect(messages.map(message => message.type)).toEqual(["find-domain-begin"]);
+    expect(messages).toEqual([]);
   });
 
   beforeEach(() => {
