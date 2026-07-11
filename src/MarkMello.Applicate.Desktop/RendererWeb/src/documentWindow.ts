@@ -28,6 +28,27 @@ export type SectionModelEntry = {
   sourceLineSpans?: readonly SourceLineModelSpan[];
 };
 
+export type RenderedContentState = "not-needed" | "unprepared" | "ready" | "ready-with-failures";
+
+export type RenderedSectionHtmlUpdate = {
+  sectionIndex: number;
+  html: string;
+};
+
+export type RenderedSectionHtmlAdoptionResult = {
+  updatedCount: number;
+  pendingMathCount: number;
+};
+
+export type RenderedFormulaFragmentResult = {
+  status: "ready" | "ready-with-failures";
+};
+
+export type RenderedFormulaFragmentCommitResult = {
+  changed: boolean;
+  pendingMathCount: number;
+};
+
 export type SectionGeometryOwner = "mermaid-proxy";
 
 export type SourceLineModelSpan = {
@@ -197,6 +218,72 @@ export class DocumentWindowModel {
       return sourceComparison !== 0 ? sourceComparison : left.sectionIndex - right.sectionIndex;
     });
     this.refreshHeightModel();
+  }
+
+  getPendingRenderedContentEntryIndexes(): number[] {
+    const pendingIndexes: number[] = [];
+    for (let index = 0; index < this.sections.length; index++) {
+      const entry = this.sections[index]!;
+      if (readRenderedContentHtmlStats(entry.html).pendingMathCount > 0) {
+        pendingIndexes.push(index);
+      }
+    }
+    return pendingIndexes;
+  }
+
+  adoptRenderedSectionHtml(updates: Iterable<RenderedSectionHtmlUpdate>): RenderedSectionHtmlAdoptionResult {
+    let updatedCount = 0;
+    for (const update of updates) {
+      const entry = this.sections[update.sectionIndex];
+      if (entry === undefined || typeof update.html !== "string") {
+        continue;
+      }
+      if (entry.html === update.html) {
+        continue;
+      }
+
+      entry.html = update.html;
+      updatedCount++;
+    }
+
+    return {
+      pendingMathCount: this.countPendingRenderedContentMath(),
+      updatedCount,
+    };
+  }
+
+  commitRenderedFormulaFragment(
+    sectionIndex: number,
+    renderedHtml: string,
+    result: RenderedFormulaFragmentResult
+  ): RenderedFormulaFragmentCommitResult {
+    const entry = this.sections[sectionIndex];
+    if (entry === undefined || typeof renderedHtml !== "string" || !isRenderedFormulaFragmentResultConsistent(renderedHtml, result)) {
+      return {
+        changed: false,
+        pendingMathCount: this.countPendingRenderedContentMath(),
+      };
+    }
+
+    const changed = entry.html !== renderedHtml;
+    if (changed) {
+      entry.html = renderedHtml;
+    }
+    return {
+      changed,
+      pendingMathCount: this.countPendingRenderedContentMath(),
+    };
+  }
+
+  getRenderedContentState(): RenderedContentState {
+    const summary = this.readRenderedContentSummary();
+    if (summary.totalMathCount === 0) {
+      return "not-needed";
+    }
+    if (summary.pendingMathCount > 0) {
+      return "unprepared";
+    }
+    return summary.failedMathCount > 0 ? "ready-with-failures" : "ready";
   }
 
   getSectionCount(): number {
@@ -489,6 +576,25 @@ export class DocumentWindowModel {
       windowHeight,
     };
   }
+
+  private countPendingRenderedContentMath(): number {
+    return this.readRenderedContentSummary().pendingMathCount;
+  }
+
+  private readRenderedContentSummary(): RenderedContentHtmlStats {
+    const summary: RenderedContentHtmlStats = {
+      failedMathCount: 0,
+      pendingMathCount: 0,
+      totalMathCount: 0,
+    };
+    for (const entry of this.sections) {
+      const stats = readRenderedContentHtmlStats(entry.html);
+      summary.failedMathCount += stats.failedMathCount;
+      summary.pendingMathCount += stats.pendingMathCount;
+      summary.totalMathCount += stats.totalMathCount;
+    }
+    return summary;
+  }
 }
 
 export function buildDocumentWindowModelFromLiveBlocks(
@@ -549,6 +655,63 @@ export function readLiveBlockMeasuredHeights(
     }
     return update;
   });
+}
+
+type RenderedContentHtmlStats = {
+  failedMathCount: number;
+  pendingMathCount: number;
+  totalMathCount: number;
+};
+
+function readRenderedContentHtmlStats(html: string | undefined): RenderedContentHtmlStats {
+  if (typeof html !== "string" || !html.includes("data-tex")) {
+    return EMPTY_RENDERED_CONTENT_HTML_STATS;
+  }
+  if (typeof document === "undefined") {
+    return {
+      failedMathCount: 0,
+      pendingMathCount: 1,
+      totalMathCount: 1,
+    };
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const mathNodes = Array.from(template.content.querySelectorAll<HTMLElement>("[data-tex]"));
+  let failedMathCount = 0;
+  let pendingMathCount = 0;
+  for (const node of mathNodes) {
+    const state = node.dataset["mmMathRendered"];
+    if (state === "failed") {
+      failedMathCount++;
+    } else if (state !== "true") {
+      pendingMathCount++;
+    }
+  }
+  return {
+    failedMathCount,
+    pendingMathCount,
+    totalMathCount: mathNodes.length,
+  };
+}
+
+const EMPTY_RENDERED_CONTENT_HTML_STATS: RenderedContentHtmlStats = {
+  failedMathCount: 0,
+  pendingMathCount: 0,
+  totalMathCount: 0,
+};
+
+function isRenderedFormulaFragmentResultConsistent(
+  renderedHtml: string,
+  result: RenderedFormulaFragmentResult
+): boolean {
+  const stats = readRenderedContentHtmlStats(renderedHtml);
+  if (stats.pendingMathCount > 0) {
+    return false;
+  }
+  return result.status === "ready-with-failures"
+    ? stats.failedMathCount > 0
+    : stats.failedMathCount === 0;
 }
 
 export function readLiveBlockOffsetMeasuredHeights(blocks: readonly HTMLElement[]): MeasuredHeightUpdate[] {

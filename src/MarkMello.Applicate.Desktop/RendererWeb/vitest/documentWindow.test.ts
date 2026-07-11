@@ -677,6 +677,136 @@ describe("document window model", () => {
     ]);
   });
 
+  describe("rendered content readiness", () => {
+    const pendingMathHtml = "<p><span class='math-inline' data-tex='x'>x</span></p>";
+    const readyMathHtml = "<p><span class='math-inline' data-tex='x' data-mm-math-rendered='true'><span class='katex'>x</span></span></p>";
+    const failedMathHtml = "<p><span class='math-inline' data-tex='bad' data-mm-math-rendered='failed'>bad</span></p>";
+
+    it("discovers rendered content entries with pending formula nodes", () => {
+      const model = new DocumentWindowModel([
+        { ...entry(0, 140, 100), html: pendingMathHtml, kind: "math" },
+        { ...entry(1, 141, 80), html: "<p>No formula</p>" },
+      ]);
+
+      expect(model.getRenderedContentState()).toBe("unprepared");
+      expect(model.getPendingRenderedContentEntryIndexes()).toEqual([0]);
+    });
+
+    it("reports rendered content as not-needed without parsing no-formula entries", () => {
+      const model = new DocumentWindowModel([
+        { ...entry(0, 142, 100), html: "<p>No formula</p>" },
+      ]);
+      const createElement = document.createElement.bind(document);
+      document.createElement = ((tagName: string, options?: ElementCreationOptions) => {
+        if (tagName.toLowerCase() === "template") {
+          throw new Error("no-formula rendered content discovery should not parse HTML");
+        }
+        return createElement(tagName, options);
+      }) as typeof document.createElement;
+      try {
+        expect(model.getPendingRenderedContentEntryIndexes()).toEqual([]);
+        expect(model.getRenderedContentState()).toBe("not-needed");
+      } finally {
+        document.createElement = createElement;
+      }
+    });
+
+    it("reports rendered content as ready when every formula node is terminal-success", () => {
+      const model = new DocumentWindowModel([
+        { ...entry(0, 143, 100), html: readyMathHtml, kind: "math" },
+      ]);
+
+      expect(model.getPendingRenderedContentEntryIndexes()).toEqual([]);
+      expect(model.getRenderedContentState()).toBe("ready");
+    });
+
+    it("reports rendered content as ready-with-failures when terminal formula nodes include failures", () => {
+      const model = new DocumentWindowModel([
+        { ...entry(0, 144, 100), html: readyMathHtml, kind: "math" },
+        { ...entry(1, 145, 100), html: failedMathHtml, kind: "math" },
+      ]);
+
+      expect(model.getPendingRenderedContentEntryIndexes()).toEqual([]);
+      expect(model.getRenderedContentState()).toBe("ready-with-failures");
+    });
+
+    it("adopts and commits rendered content HTML without changing model geometry or lookup metadata", () => {
+      const model = new DocumentWindowModel([
+        {
+          ...entry(0, 150, 120),
+          geometryOwner: "mermaid-proxy",
+          headingLevel: 2,
+          html: "<section data-mm-block-index='150'><h2 id='alpha-heading'>Alpha <span class='math-inline' data-tex='a'>a</span></h2></section>",
+          intrinsicSize: {
+            contentLength: 5,
+            defaultHeight: 120,
+            hasMermaid: false,
+            kind: "heading",
+            lineCount: 1,
+          },
+          kind: "heading",
+          measuredHeight: 128,
+          occupiedNonContentHeight: 8,
+        },
+        {
+          ...entry(1, 151, 140),
+          html: "<blockquote data-mm-block-index='152' data-mm-source-line='24' data-mm-source-end-line='27'>Nested <span class='math-inline' data-tex='b'>b</span></blockquote>",
+          kind: "quote",
+          measuredHeight: 164,
+        },
+      ], { leadingOffset: 20 });
+      const beforeProjection = model.getMinimapBlockProjection();
+      const beforeAnchors = model.getSourceLineAnchors();
+      const beforeTotalHeight = model.getTotalHeight();
+      const beforeSectionTop = model.sectionTop(1);
+      const beforeFirstEntry = { ...model.sections[0] };
+      const beforeSecondEntry = { ...model.sections[1] };
+      const adoptedHtml = "<section data-mm-block-index='150'><h2 id='alpha-heading'>Alpha <span class='math-inline' data-tex='a' data-mm-math-rendered='true'><span class='katex'>a</span></span></h2></section>";
+      const committedHtml = "<blockquote data-mm-block-index='152' data-mm-source-line='24' data-mm-source-end-line='27'>Nested <span class='math-inline' data-tex='b' data-mm-math-rendered='failed'>b</span></blockquote>";
+
+      expect(model.getRenderedContentState()).toBe("unprepared");
+      expect(model.adoptRenderedSectionHtml([{ sectionIndex: 0, html: adoptedHtml }])).toEqual({
+        pendingMathCount: 1,
+        updatedCount: 1,
+      });
+      expect(model.commitRenderedFormulaFragment(1, committedHtml, { status: "ready-with-failures" })).toEqual({
+        changed: true,
+        pendingMathCount: 0,
+      });
+
+      expect(model.sections[0]?.html).toBe(adoptedHtml);
+      expect(model.sections[1]?.html).toBe(committedHtml);
+      expect(model.getRenderedContentState()).toBe("ready-with-failures");
+      expect(model.getSectionCount()).toBe(2);
+      expect(model.getTotalHeight()).toBe(beforeTotalHeight);
+      expect(model.sectionTop(1)).toBe(beforeSectionTop);
+      expect(model.getMinimapBlockProjection()).toEqual(beforeProjection);
+      expect(model.getSourceLineAnchors()).toEqual(beforeAnchors);
+      expect(model.getEntryByBlockIndex(150)).toMatchObject({ blockIndex: 150, sectionIndex: 0 });
+      expect(model.getEntryContainingBlockIndex(152)).toMatchObject({ blockIndex: 151, sectionIndex: 1 });
+      expect(model.getEntryByHeadingAnchor("alpha-heading")).toMatchObject({ blockIndex: 150, sectionIndex: 0 });
+      expect(model.getEntryBySourceLine(26)).toMatchObject({ blockIndex: 151, sectionIndex: 1 });
+      expect(model.sections[0]).toMatchObject({
+        blockIndex: beforeFirstEntry.blockIndex,
+        containedBlockIndexes: beforeFirstEntry.containedBlockIndexes,
+        cumulativeTop: beforeFirstEntry.cumulativeTop,
+        geometryOwner: beforeFirstEntry.geometryOwner,
+        headingAnchors: beforeFirstEntry.headingAnchors,
+        headingLevel: beforeFirstEntry.headingLevel,
+        intrinsicSize: beforeFirstEntry.intrinsicSize,
+        measuredHeight: beforeFirstEntry.measuredHeight,
+        occupiedNonContentHeight: beforeFirstEntry.occupiedNonContentHeight,
+        sectionIndex: beforeFirstEntry.sectionIndex,
+      });
+      expect(model.sections[1]).toMatchObject({
+        blockIndex: beforeSecondEntry.blockIndex,
+        containedBlockIndexes: beforeSecondEntry.containedBlockIndexes,
+        cumulativeTop: beforeSecondEntry.cumulativeTop,
+        sourceLineSpans: beforeSecondEntry.sourceLineSpans,
+      });
+    });
+  });
+
   it("ignores non-finite, negative, and unknown measured-height updates", () => {
     const model = new DocumentWindowModel([
       entry(0, 90, 100),
