@@ -129,6 +129,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private readonly Dictionary<long, object> _pendingRendererCacheFallbackLoads = new();
     private ApplicateBlockTextIndex? _currentFindTextIndex;
     private long _currentFindTextIndexRenderId;
+    private ApplicateRenderedFindDomainState _renderedFindDomain =
+        ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -1065,6 +1067,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _scrollHeight = 0;
         _clientHeight = 0;
         CancelRender();
+        ResetCurrentFindDomainForRender(renderId);
 
         // Free cache-fallback entries left by superseded renders: a new render
         // supersedes all prior ones (renderId is monotonic), so their
@@ -1754,6 +1757,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         try
         {
+            if (TryHandleRenderedFindProtocolMessage(e.Body))
+            {
+                return;
+            }
+
             using var document = JsonDocument.Parse(e.Body);
             // A valid-JSON-but-non-object payload ([], null, "x", 0) parses fine,
             // but TryGetProperty below throws InvalidOperationException on a
@@ -2370,6 +2378,13 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void SetCurrentFindTextIndex(long renderId, IReadOnlyList<ApplicateHtmlBlockMarker> blocks)
     {
+        if (ApplicateVirtualizationMode.IsEnabled)
+        {
+            _currentFindTextIndex = null;
+            _currentFindTextIndexRenderId = 0;
+            return;
+        }
+
         _currentFindTextIndex = ApplicateBlockTextIndex.Create(blocks);
         _currentFindTextIndexRenderId = renderId;
     }
@@ -2378,7 +2393,121 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     {
         _currentFindTextIndex = null;
         _currentFindTextIndexRenderId = 0;
+        _renderedFindDomain = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
     }
+
+    private void ResetCurrentFindDomainForRender(long renderId)
+    {
+        _currentFindTextIndex = null;
+        _currentFindTextIndexRenderId = 0;
+        if (ApplicateVirtualizationMode.IsEnabled)
+        {
+            _renderedFindDomain.BeginRenderedRender(checked((int)renderId));
+            return;
+        }
+
+        _renderedFindDomain = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+    }
+
+    private bool TryHandleRenderedFindProtocolMessage(string body)
+    {
+        // This token check only selects the strict protocol owner. It never accepts
+        // a message and deliberately treats the protocol's reserved type values as
+        // fail-closed even when an oversized body cannot be parsed safely here.
+        if (!ContainsRenderedFindProtocolTypeToken(body))
+        {
+            return false;
+        }
+
+        var bounds = ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body);
+        if (!bounds.Accepted)
+        {
+            var rejected = _renderedFindDomain.ApplyProtocolMessage(body);
+            PostLatestRenderedFindResult(rejected.LatestQueryResult);
+            return true;
+        }
+
+        if (!TryReadRenderedFindMessageType(body, out var type))
+        {
+            var rejected = _renderedFindDomain.ApplyProtocolMessage(body);
+            PostLatestRenderedFindResult(rejected.LatestQueryResult);
+            return true;
+        }
+
+        if (!IsRenderedFindProtocolType(type))
+        {
+            return false;
+        }
+
+        var result = _renderedFindDomain.ApplyProtocolMessage(body);
+        PostLatestRenderedFindResult(result.LatestQueryResult);
+        return true;
+    }
+
+    private static bool ContainsRenderedFindProtocolTypeToken(string body)
+    {
+        return body.Contains("find-domain-begin", StringComparison.Ordinal)
+               || body.Contains("find-text-index-start", StringComparison.Ordinal)
+               || body.Contains("find-text-index-chunk", StringComparison.Ordinal)
+               || body.Contains("find-text-index-complete", StringComparison.Ordinal);
+    }
+
+    private static bool TryReadRenderedFindMessageType(string body, out string? type)
+    {
+        type = null;
+        try
+        {
+            var utf8 = Encoding.UTF8.GetBytes(body);
+            var reader = new Utf8JsonReader(utf8, new JsonReaderOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 8,
+            });
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject)
+            {
+                return false;
+            }
+
+            while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+            {
+                if (reader.TokenType != JsonTokenType.PropertyName)
+                {
+                    return false;
+                }
+
+                var isType = reader.ValueTextEquals("type");
+                if (!reader.Read())
+                {
+                    return false;
+                }
+
+                if (isType)
+                {
+                    if (reader.TokenType != JsonTokenType.String || type is not null)
+                    {
+                        return false;
+                    }
+
+                    type = reader.GetString();
+                }
+
+                reader.Skip();
+            }
+
+            return type is not null;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsRenderedFindProtocolType(string? type)
+        => type is "find-domain-begin"
+            or "find-text-index-start"
+            or "find-text-index-chunk"
+            or "find-text-index-complete";
 
     private void HandleFindQueryMessage(JsonElement root)
     {
@@ -2393,6 +2522,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         var query = root.TryGetProperty("query", out var queryProperty)
             ? SafeGetString(queryProperty) ?? string.Empty
             : string.Empty;
+        var textDomain = root.TryGetProperty("textDomain", out var textDomainProperty)
+            ? SafeGetString(textDomainProperty)
+            : null;
         long? requestedRenderId = null;
         if (root.TryGetProperty("renderId", out var renderIdProperty)
             && renderIdProperty.ValueKind == JsonValueKind.Number
@@ -2400,6 +2532,24 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             && parsedRenderId > 0)
         {
             requestedRenderId = parsedRenderId;
+        }
+
+        if (string.Equals(
+                textDomain,
+                ApplicateRenderedFindDomainState.RenderedTextDomain,
+                StringComparison.Ordinal))
+        {
+            if (requestedRenderId is not long renderedRenderId || renderedRenderId > int.MaxValue)
+            {
+                return;
+            }
+
+            var envelope = _renderedFindDomain.QueryRendered(
+                checked((int)renderedRenderId),
+                requestId,
+                query);
+            PostRenderedFindResults(envelope);
+            return;
         }
 
         if (_currentFindTextIndex is null
@@ -2439,6 +2589,54 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             }).ToArray()
         });
     }
+
+    private void PostLatestRenderedFindResult(ApplicateRenderedFindResultEnvelope? envelope)
+    {
+        if (envelope is not null)
+        {
+            PostRenderedFindResults(envelope);
+        }
+    }
+
+    private void PostRenderedFindResults(ApplicateRenderedFindResultEnvelope envelope)
+    {
+        var matches = envelope.Status == ApplicateRenderedFindResultStatus.Ready
+            ? envelope.Matches.Select(static match => new
+            {
+                matchId = match.MatchId,
+                renderId = match.RenderId,
+                projectionRevision = match.ProjectionRevision,
+                blockIndex = match.BlockIndex,
+                segmentOrdinal = match.SegmentOrdinal,
+                blockLocalOffset = match.BlockLocalOffset,
+                length = match.Length,
+                normalizedText = match.NormalizedText,
+                ordinal = match.Ordinal
+            }).ToArray()
+            : Array.Empty<object>();
+        PostRendererMessage(new
+        {
+            type = "find-results",
+            requestId = envelope.RequestId,
+            query = envelope.Query,
+            renderId = envelope.RenderId,
+            textDomain = envelope.TextDomain,
+            status = ToWireStatus(envelope.Status),
+            totalCount = envelope.Status == ApplicateRenderedFindResultStatus.Ready
+                ? envelope.TotalCount
+                : 0,
+            matches
+        });
+    }
+
+    private static string ToWireStatus(ApplicateRenderedFindResultStatus status)
+        => status switch
+        {
+            ApplicateRenderedFindResultStatus.Pending => "pending",
+            ApplicateRenderedFindResultStatus.Ready => "ready",
+            ApplicateRenderedFindResultStatus.Unavailable => "unavailable",
+            _ => throw new InvalidOperationException("Unknown rendered-find result status."),
+        };
 
     private void HandleMinimapStateMessage(JsonElement root)
     {

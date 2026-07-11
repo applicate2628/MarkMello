@@ -92,6 +92,64 @@ public sealed class ApplicateWebHostMessagingTests
     }
 
     [Fact]
+    public void RenderedFindProtocolIsBoundedAndRoutedBeforeGenericMessageParsing()
+    {
+        var source = File.ReadAllText(WebDocumentViewSourcePath);
+        var handler = ExtractMethodBody(source, "private void OnWebMessageReceived(");
+        var renderedRoute = handler.IndexOf("TryHandleRenderedFindProtocolMessage(e.Body)", StringComparison.Ordinal);
+        var genericParse = handler.IndexOf("JsonDocument.Parse(e.Body)", StringComparison.Ordinal);
+        var protocolRoute = ExtractMethodBody(source, "private bool TryHandleRenderedFindProtocolMessage(");
+        var protocolTypes = ExtractMethodBody(source, "private static bool ContainsRenderedFindProtocolTypeToken(");
+
+        Assert.True(renderedRoute >= 0, "Known rendered-find messages should have a dedicated host route.");
+        Assert.True(genericParse > renderedRoute, "The strict rendered-find route must run before generic host parsing.");
+        Assert.Contains("ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body)", protocolRoute, StringComparison.Ordinal);
+        Assert.Contains("_renderedFindDomain.ApplyProtocolMessage(body)", protocolRoute, StringComparison.Ordinal);
+        Assert.Contains("find-domain-begin", protocolTypes, StringComparison.Ordinal);
+        Assert.Contains("find-text-index-start", protocolTypes, StringComparison.Ordinal);
+        Assert.Contains("find-text-index-chunk", protocolTypes, StringComparison.Ordinal);
+        Assert.Contains("find-text-index-complete", protocolTypes, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateTrace", protocolRoute, StringComparison.Ordinal);
+        Assert.DoesNotContain("Console", protocolRoute, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RenderSchedulingSelectsFindDomainBeforePostingCurrentDocument()
+    {
+        var source = File.ReadAllText(WebDocumentViewSourcePath);
+        var queueRender = ExtractMethodBody(source, "private void QueueRender(");
+        var shellRender = ExtractMethodBody(source, "private async Task QueueRenderShellAsync(");
+        var domainReset = ExtractMethodBody(source, "private void ResetCurrentFindDomainForRender(");
+        var reset = queueRender.IndexOf("ResetCurrentFindDomainForRender(renderId)", StringComparison.Ordinal);
+        var queueShell = queueRender.IndexOf("QueueRenderShellAsync", StringComparison.Ordinal);
+        var setIndex = shellRender.IndexOf("SetCurrentFindTextIndex(renderId, body.Blocks)", StringComparison.Ordinal);
+        var postLoad = shellRender.IndexOf("PostRendererMessage(rendererMessage)", StringComparison.Ordinal);
+
+        Assert.True(reset >= 0, "Every new render should reset stale find transfer/query ownership.");
+        Assert.True(queueShell > reset, "Flag-ON awaiting state must exist before the asynchronous load-document path starts.");
+        Assert.True(setIndex >= 0 && postLoad > setIndex, "The selected domain must be established before load-document is posted.");
+        Assert.Contains("ApplicateVirtualizationMode.IsEnabled", domainReset, StringComparison.Ordinal);
+        Assert.Contains("_renderedFindDomain.BeginRenderedRender(checked((int)renderId))", domainReset, StringComparison.Ordinal);
+        Assert.Contains("ApplicateRenderedFindDomainState.CreateLegacyPlaintext()", domainReset, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RenderedFindQueriesNeverFallBackToLegacyPlaintextResults()
+    {
+        var source = File.ReadAllText(WebDocumentViewSourcePath);
+        var queryHandler = ExtractMethodBody(source, "private void HandleFindQueryMessage(");
+        var renderedResults = ExtractMethodBody(source, "private void PostRenderedFindResults(");
+
+        Assert.Contains("ApplicateRenderedFindDomainState.RenderedTextDomain", queryHandler, StringComparison.Ordinal);
+        Assert.Contains("_renderedFindDomain.QueryRendered", queryHandler, StringComparison.Ordinal);
+        Assert.Contains("PostRenderedFindResults", queryHandler, StringComparison.Ordinal);
+        Assert.Contains("_currentFindTextIndex.Search(query)", queryHandler, StringComparison.Ordinal);
+        Assert.Contains("textDomain = envelope.TextDomain", renderedResults, StringComparison.Ordinal);
+        Assert.Contains("status = ToWireStatus(envelope.Status)", renderedResults, StringComparison.Ordinal);
+        Assert.Contains("envelope.Status == ApplicateRenderedFindResultStatus.Ready", renderedResults, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TransactionalRenderDefersLivePreferencesUntilModeSettleProbe()
     {
         var hostSource = File.ReadAllText(SharedWebViewHostSourcePath);
