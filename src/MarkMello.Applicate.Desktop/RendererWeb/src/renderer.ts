@@ -54,6 +54,12 @@ import {
   type MeasuredHeightUpdateResult,
 } from "./documentWindow";
 import {
+  prepareDocumentWindowModelRenderedContent,
+  type ModelRenderedContentEvent,
+  type ModelRenderedContentPreparationStatus,
+  type PrepareDocumentWindowModelRenderedContentDeps,
+} from "./modelRenderedContent";
+import {
   createSectionIntrinsicCalibrator,
   readIntrinsicSizeMetrics,
 } from "./sectionIntrinsicSize";
@@ -422,6 +428,7 @@ if (scrollOwnershipControlPlane !== null) {
       window.clearTimeout(minimapContentRefreshTimer);
       minimapContentRefreshTimer = undefined;
     }
+    cancelModelRenderedContentCoordinator("teardown");
     resetVirtualizedDocumentWindow(false);
     scrollOwnershipControlPlane.dispose();
     getDocumentScrollRoot().removeAttribute("data-mm-virtualization-active");
@@ -454,6 +461,28 @@ const virtualizedWriteReceipts = new Map<number, ScrollWriteReceipt>();
 let cachedScrollRestoreCompletion: Promise<void> | null = null;
 let finishCachedScrollRestore: ((status: "canceled" | "committed" | "failed", reason: string) => void) | null = null;
 let virtualizedWindowMathController: MathReadinessController | null = null;
+type ModelRenderedContentConsumerId = "minimap-detail" | "rendered-find-projection";
+type ModelRenderedContentLease = {
+  consumer: ModelRenderedContentConsumerId;
+  documentEpoch: number;
+  model: DocumentWindowModel;
+  readiness: Promise<ModelRenderedContentPreparationStatus>;
+  release: () => void;
+};
+type ModelRenderedContentCoordinatorState = {
+  cancelMarkPosted: boolean;
+  cancelReason: string | null;
+  cancelled: boolean;
+  documentEpoch: number;
+  leases: Map<number, ModelRenderedContentConsumerId>;
+  model: DocumentWindowModel;
+  promise: Promise<ModelRenderedContentPreparationStatus> | null;
+  runSerial: number;
+};
+let modelRenderedContentCoordinatorState: ModelRenderedContentCoordinatorState | null = null;
+let modelRenderedContentLeaseSerial = 0;
+let minimapRenderedContentLease: ModelRenderedContentLease | null = null;
+let renderedFindContentLease: ModelRenderedContentLease | null = null;
 const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
 type ProcessedDocumentCacheEntry = {
   fragment: DocumentFragment;
@@ -1034,6 +1063,272 @@ function postPerfMark(name: string, detail?: Record<string, unknown>): void {
     }
   }
   postHostMessage(message);
+}
+
+function isTerminalModelRenderedContentStatus(status: ModelRenderedContentPreparationStatus): boolean {
+  return status === "not-needed" || status === "ready" || status === "ready-with-failures";
+}
+
+function readModelRenderedContentConsumers(state: ModelRenderedContentCoordinatorState): string[] {
+  return Array.from(new Set(state.leases.values())).sort();
+}
+
+function postModelRenderedContentMark(
+  state: ModelRenderedContentCoordinatorState,
+  name: string,
+  detail: Record<string, unknown> = {}
+): void {
+  postPerfMark(name, {
+    ...detail,
+    activeLeaseCount: state.leases.size,
+    consumers: readModelRenderedContentConsumers(state),
+    documentEpoch: state.documentEpoch,
+  });
+}
+
+function isCurrentModelRenderedContentState(state: ModelRenderedContentCoordinatorState): boolean {
+  return state.model === virtualizedDocumentWindowModel
+    && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(state.documentEpoch) === true;
+}
+
+function postModelRenderedContentCancellation(
+  state: ModelRenderedContentCoordinatorState,
+  reason: string
+): void {
+  if (state.cancelMarkPosted) {
+    return;
+  }
+  state.cancelMarkPosted = true;
+  postModelRenderedContentMark(state, "mm-model-rendered-content-cancel", {
+    reason,
+    status: state.model.getRenderedContentState(),
+  });
+}
+
+function cancelModelRenderedContentState(
+  state: ModelRenderedContentCoordinatorState,
+  reason: string
+): void {
+  state.cancelled = true;
+  state.cancelReason = reason;
+  postModelRenderedContentCancellation(state, reason);
+}
+
+function cancelModelRenderedContentCoordinator(reason: string): void {
+  minimapRenderedContentLease = null;
+  renderedFindContentLease = null;
+  const state = modelRenderedContentCoordinatorState;
+  if (state !== null) {
+    state.leases.clear();
+    if (state.promise !== null && state.model.getRenderedContentState() === "unprepared") {
+      cancelModelRenderedContentState(state, reason);
+    }
+  }
+  modelRenderedContentCoordinatorState = null;
+}
+
+function yieldModelRenderedContentWork(): Promise<void> {
+  return new Promise(resolve => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
+function handleModelRenderedContentEvent(
+  state: ModelRenderedContentCoordinatorState,
+  event: ModelRenderedContentEvent
+): void {
+  if (event.type === "progress") {
+    postModelRenderedContentMark(state, "mm-model-rendered-content-progress", {
+      committed: event.committed,
+      failedMathCount: event.failedMathCount,
+      pendingMathCount: event.pendingMathCount,
+      renderedMathCount: event.renderedMathCount,
+      sectionIndex: event.sectionIndex,
+      status: event.status,
+    });
+    return;
+  }
+
+  const detail = {
+    failedMathCount: event.failedMathCount,
+    pendingMathCount: event.pendingMathCount,
+    renderedMathCount: event.renderedMathCount,
+    status: event.status,
+  };
+  if (event.type === "complete") {
+    postModelRenderedContentMark(state, "mm-model-rendered-content-end", detail);
+  } else if (event.type === "skipped-no-katex") {
+    postModelRenderedContentMark(state, "mm-model-rendered-content-skipped-no-katex", detail);
+  } else {
+    postModelRenderedContentCancellation(state, state.cancelReason ?? "cancelled");
+  }
+}
+
+function ensureModelRenderedContentJob(
+  state: ModelRenderedContentCoordinatorState
+): Promise<ModelRenderedContentPreparationStatus> {
+  if (state.promise !== null) {
+    return state.promise;
+  }
+
+  const runSerial = ++state.runSerial;
+  state.cancelled = false;
+  state.cancelReason = null;
+  state.cancelMarkPosted = false;
+  postModelRenderedContentMark(state, "mm-model-rendered-content-start", {
+    status: state.model.getRenderedContentState(),
+  });
+  const katex = hostWindow.katex as PrepareDocumentWindowModelRenderedContentDeps["katex"] | undefined;
+  const promise: Promise<ModelRenderedContentPreparationStatus> = prepareDocumentWindowModelRenderedContent(state.model, {
+    katex,
+    now: () => performance.now(),
+    onProgress: event => handleModelRenderedContentEvent(state, event),
+    ownerDocument: document,
+    shouldContinue: () =>
+      !state.cancelled
+      && state.leases.size > 0
+      && isCurrentModelRenderedContentState(state),
+    yield: yieldModelRenderedContentWork,
+  })
+    .then(result => {
+      if (
+        modelRenderedContentCoordinatorState === state
+        && state.runSerial === runSerial
+      ) {
+        state.promise = null;
+        if (result.completed) {
+          scheduleCurrentProcessedDocumentCacheClone();
+        }
+      }
+      return result.status;
+    }, error => {
+      cancelModelRenderedContentState(state, `error:${String(error)}`);
+      if (
+        modelRenderedContentCoordinatorState === state
+        && state.runSerial === runSerial
+      ) {
+        state.promise = null;
+      }
+      return "cancelled" satisfies ModelRenderedContentPreparationStatus;
+    });
+  state.promise = promise;
+  return promise;
+}
+
+function getCurrentModelRenderedContentState(
+  model: DocumentWindowModel,
+  documentEpoch: number
+): ModelRenderedContentCoordinatorState {
+  const existing = modelRenderedContentCoordinatorState;
+  if (existing !== null) {
+    if (existing.model === model && existing.documentEpoch === documentEpoch) {
+      return existing;
+    }
+    cancelModelRenderedContentState(existing, "stale-model");
+  }
+
+  const state: ModelRenderedContentCoordinatorState = {
+    cancelMarkPosted: false,
+    cancelReason: null,
+    cancelled: false,
+    documentEpoch,
+    leases: new Map<number, ModelRenderedContentConsumerId>(),
+    model,
+    promise: null,
+    runSerial: 0,
+  };
+  modelRenderedContentCoordinatorState = state;
+  return state;
+}
+
+function acquireCurrentModelRenderedContentLease(
+  consumer: ModelRenderedContentConsumerId
+): ModelRenderedContentLease | null {
+  const model = virtualizedDocumentWindowModel;
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+  if (
+    !virtualizationEnabled
+    || model === null
+    || documentEpoch === undefined
+    || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+  ) {
+    return null;
+  }
+
+  const modelStatus = model.getRenderedContentState();
+  if (modelStatus !== "unprepared") {
+    return {
+      consumer,
+      documentEpoch,
+      model,
+      readiness: Promise.resolve(modelStatus),
+      release: () => {},
+    };
+  }
+
+  const state = getCurrentModelRenderedContentState(model, documentEpoch);
+  const leaseId = ++modelRenderedContentLeaseSerial;
+  state.leases.set(leaseId, consumer);
+  const readiness = ensureModelRenderedContentJob(state);
+  let released = false;
+  return {
+    consumer,
+    documentEpoch,
+    model,
+    readiness,
+    release: () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      state.leases.delete(leaseId);
+      if (
+        state.promise !== null
+        && state.leases.size === 0
+        && state.model.getRenderedContentState() === "unprepared"
+      ) {
+        cancelModelRenderedContentState(state, "last-lease-released");
+      }
+    },
+  };
+}
+
+function releaseMinimapRenderedContentLease(): void {
+  const lease = minimapRenderedContentLease;
+  minimapRenderedContentLease = null;
+  lease?.release();
+}
+
+function releaseRenderedFindContentLease(): void {
+  const lease = renderedFindContentLease;
+  renderedFindContentLease = null;
+  lease?.release();
+}
+
+function requestRenderedFindModelReadiness(): void {
+  const current = renderedFindContentLease;
+  const model = virtualizedDocumentWindowModel;
+  const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+  if (
+    current !== null
+    && current.model === model
+    && current.documentEpoch === documentEpoch
+  ) {
+    return;
+  }
+  releaseRenderedFindContentLease();
+  const lease = acquireCurrentModelRenderedContentLease("rendered-find-projection");
+  if (lease === null || isTerminalModelRenderedContentStatus(lease.model.getRenderedContentState())) {
+    lease?.release();
+    return;
+  }
+  renderedFindContentLease = lease;
+  void lease.readiness.finally(() => {
+    if (renderedFindContentLease === lease) {
+      renderedFindContentLease = null;
+      lease.release();
+    }
+  });
 }
 
 function getLiveDocumentRoot(): HTMLElement | null {
@@ -3071,6 +3366,9 @@ function cancelVirtualizedCalibration(): void {
 
 function resetVirtualizedDocumentWindow(resetCalibrator = true): void {
   cancelVirtualizedCalibration();
+  if (virtualizedDocumentWindowModel !== null) {
+    cancelModelRenderedContentCoordinator("stale-model");
+  }
   virtualizedWindowMathController?.cancel();
   virtualizedWindowMathController = null;
   virtualizedDocumentWindowController?.dispose();
@@ -4926,6 +5224,7 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   }
   const buildDecision = shouldBuildDetailedMinimapContent();
   if (!buildDecision.allowed) {
+    releaseMinimapRenderedContentLease();
     minimapSourceReady = false;
     minimapDocumentHeight = buildDecision.documentHeight;
     currentMinimapLayout = null;
@@ -4945,6 +5244,40 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   }
   currentMinimapLayout = null;
   const model = getModelMinimapSource();
+  if (model !== null && model.getRenderedContentState() === "unprepared") {
+    const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+    if (
+      minimapRenderedContentLease !== null
+      && minimapRenderedContentLease.model === model
+      && minimapRenderedContentLease.documentEpoch === documentEpoch
+    ) {
+      return;
+    }
+    releaseMinimapRenderedContentLease();
+    const lease = acquireCurrentModelRenderedContentLease("minimap-detail");
+    if (lease === null) {
+      emitMark("mm-minimap-refresh-end", { phase, skipped: "model-rendered-content-unavailable" });
+      postPerfMark("mm-minimap-refresh-end", { phase, skipped: "model-rendered-content-unavailable" });
+      return;
+    }
+    minimapRenderedContentLease = lease;
+    void lease.readiness.then(status => {
+      if (minimapRenderedContentLease === lease) {
+        minimapRenderedContentLease = null;
+        lease.release();
+      }
+      if (
+        !isTerminalModelRenderedContentStatus(status)
+        || getModelMinimapSource() !== model
+        || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(lease.documentEpoch) !== true
+        || !shouldBuildDetailedMinimapContent().allowed
+      ) {
+        return;
+      }
+      refreshMinimapContent(phase);
+    });
+    return;
+  }
   const clone = model === null
     ? cloneDocumentForMinimap(buildDecision.documentHeight)
     : cloneModelDocumentForMinimap(model, buildDecision.documentHeight);
@@ -4969,7 +5302,11 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
 }
 
 function ensureDetailedMinimapContentForVisiblePath(phase: "A" | "B" = "A"): void {
-  if (minimapSourceReady || !shouldBuildDetailedMinimapContent().allowed) {
+  if (minimapSourceReady) {
+    return;
+  }
+  if (!shouldBuildDetailedMinimapContent().allowed) {
+    releaseMinimapRenderedContentLease();
     return;
   }
 
@@ -6218,6 +6555,9 @@ function applyReadingPreferences(message: Extract<HostMessage, { type: "reading-
     updateMinimapVisibility(true);
     updateWidthHandlePositionForCurrentLayout();
   }
+  if (!next.viewerChromeEnabled || next.minimapMode === "off") {
+    releaseMinimapRenderedContentLease();
+  }
   if (applyPrefsFrameRequested) return;
   applyPrefsFrameRequested = true;
   requestAnimationFrame(flushPendingReadingPreferences);
@@ -6298,6 +6638,9 @@ function flushPendingReadingPreferences(): void {
   const hadHostPreferences = hasReceivedHostPreferences;
   hasReceivedHostPreferences = true;
   lastAppliedReadingPreferences = next;
+  if (!shouldBuildDetailedMinimapContent().allowed) {
+    releaseMinimapRenderedContentLease();
+  }
 
   // Width handle anchor depends purely on .mm-document size + body size →
   // observed by the canonical ResizeObserver wired in DOMContentLoaded. The
@@ -6319,6 +6662,9 @@ function flushPendingReadingPreferences(): void {
     if (!minimapSourceReady && shouldBuildDetailedMinimapContent().allowed) {
       queueMinimapContentRefreshAfterLayoutSettles();
     } else {
+      if (!shouldBuildDetailedMinimapContent().allowed) {
+        releaseMinimapRenderedContentLease();
+      }
       scheduleHeavyLiveUpdate();
     }
   }
@@ -6490,6 +6836,9 @@ function handleHostMessage(raw: unknown): void {
     if (!minimapSourceReady && shouldBuildDetailedMinimapContent().allowed) {
       queueMinimapContentRefreshAfterLayoutSettles();
     } else {
+      if (!shouldBuildDetailedMinimapContent().allowed) {
+        releaseMinimapRenderedContentLease();
+      }
       queueMinimapViewportUpdate();
     }
     return;
@@ -6929,6 +7278,7 @@ function applyModeSettleProbePreferences(message: Extract<HostMessage, { type: "
 function resetModuleGlobalsForLoadDocument(): void {
   finishCachedScrollRestore?.("canceled", "stale-document");
   cancelPendingVirtualizedMaintenance("stale-document");
+  cancelModelRenderedContentCoordinator("stale-document");
   scrollOwnershipControlPlane?.invalidateDocument();
   virtualizedWriteReceipts.clear();
   pendingInitialVirtualizedWindowWork = null;
@@ -7500,7 +7850,10 @@ function wireFileDrop(): void {
 function wireFindBar(): void {
   virtualizedFindProvider = virtualizationEnabled
     ? createVirtualizedFindProvider({
-      postHostMessage,
+      postHostMessage: message => {
+        requestRenderedFindModelReadiness();
+        postHostMessage(message);
+      },
       readContext: readVirtualizedFindContext,
     })
     : null;

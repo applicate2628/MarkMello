@@ -43,6 +43,10 @@ type ControllerFaults = {
   onCreated?: (controller: import("../src/virtualizedDocumentWindow").VirtualizedDocumentWindowController) => void;
 };
 
+type TestKatexApi = {
+  render: ReturnType<typeof vi.fn>;
+};
+
 const SECTION_HEIGHT = 80;
 const SECTION_PITCH = 120;
 const VIEWPORT_HEIGHT = 200;
@@ -79,6 +83,7 @@ async function loadRendererHarness(options: {
   controllerFaults?: ControllerFaults;
   fontsReady?: Promise<unknown>;
   intersectionObserverAvailable?: boolean;
+  katex?: TestKatexApi;
   mathReadiness?: readonly Promise<void>[];
   rectTopShiftByBlockIndex?: Record<number, number>;
   renderedSectionHeight?: number;
@@ -160,6 +165,11 @@ async function loadRendererHarness(options: {
     (window as unknown as { MARKMELLO_VIRTUALIZATION?: boolean }).MARKMELLO_VIRTUALIZATION = true;
   } else {
     delete (window as unknown as { MARKMELLO_VIRTUALIZATION?: boolean }).MARKMELLO_VIRTUALIZATION;
+  }
+  if (options.katex !== undefined) {
+    (window as unknown as { katex?: TestKatexApi }).katex = options.katex;
+  } else {
+    delete (window as unknown as { katex?: TestKatexApi }).katex;
   }
 
   const messages: unknown[] = [];
@@ -664,6 +674,20 @@ function buildClonePollutionDocument(count: number): string {
   }).join("");
 }
 
+function buildModelRenderedMathDocument(count: number, mathIndexes: readonly number[]): string {
+  const math = new Set(mathIndexes);
+  return Array.from({ length: count }, (_, index) => {
+    const formula = math.has(index)
+      ? ` <span class="math-inline" data-tex="x_${index}">x_${index}</span>`
+      : "";
+    return [
+      `<section data-mm-block-index="${index}" data-mm-block-kind="paragraph">`,
+      `<p>Block ${index} needle${formula}</p>`,
+      `</section>`,
+    ].join("");
+  }).join("");
+}
+
 function buildCloneHtmlIdentityDocument(count: number): string {
   return Array.from({ length: count }, (_, index) => [
     `<section id="html-section-${index}" data-mm-block-index="${index}" data-mm-block-kind="paragraph">`,
@@ -693,6 +717,18 @@ function loadMinimapPolicy(load: HostBridge): void {
       minScrollableViewportRatio: 0,
     },
   });
+}
+
+function makeRendererKatex(): TestKatexApi {
+  return {
+    render: vi.fn((tex: string, node: Element) => {
+      const element = node as HTMLElement;
+      const rendered = element.ownerDocument.createElement("span");
+      rendered.className = "katex";
+      rendered.textContent = `rendered:${tex}`;
+      element.replaceChildren(rendered);
+    }),
+  };
 }
 
 function latestPerfDetail<T extends Record<string, unknown>>(
@@ -1197,6 +1233,7 @@ afterEach(() => {
   delete (window as unknown as { MARKMELLO_VIRTUALIZATION?: boolean }).MARKMELLO_VIRTUALIZATION;
   delete (document as unknown as { fonts?: unknown }).fonts;
   delete (window as unknown as { chrome?: unknown }).chrome;
+  delete (window as unknown as { katex?: unknown }).katex;
   delete (window as unknown as { mermaid?: unknown }).mermaid;
 });
 
@@ -1856,7 +1893,9 @@ describe("renderer scroll-family virtualization integration", () => {
 
   it("sanitizes the model-fragment minimap clone so global document lookups only see the live window", async () => {
     const sectionCount = 120;
+    const katex = makeRendererKatex();
     const { flushQueuedRafs, load } = await loadRendererHarness({
+      katex,
       renderedSectionHeight: SECTION_PITCH,
       sectionCount,
       virtualization: true,
@@ -1923,7 +1962,9 @@ describe("renderer scroll-family virtualization integration", () => {
 
   it("keeps clone-active programmatic landings anchored to the live window", async () => {
     const sectionCount = 120;
+    const katex = makeRendererKatex();
     const { flushNextRaf, flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
+      katex,
       renderedSectionHeight: SECTION_PITCH,
       sectionCount,
       virtualization: true,
@@ -2213,7 +2254,9 @@ describe("renderer scroll-family virtualization integration", () => {
 
   it("keeps model-fragment minimap text while virtualized find counts only host results", async () => {
     const sectionCount = 120;
+    const katex = makeRendererKatex();
     const { flushQueuedRafs, load, messages, root } = await loadRendererHarness({
+      katex,
       renderedSectionHeight: SECTION_PITCH,
       sectionCount,
       virtualization: true,
@@ -2286,6 +2329,211 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(document.querySelectorAll(".mm-minimap-content [data-mm-block-index]")).toHaveLength(0);
     expect(document.querySelector(".mm-minimap-content canvas[data-mm-model-minimap='true']")).toBeNull();
     expect(expectedTotalHeight).toBeGreaterThan(0);
+  });
+
+  it("waits for model rendered content before publishing model-fragment minimap formulas", async () => {
+    const sectionCount = 120;
+    const katex = makeRendererKatex();
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+      katex,
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    await enableDetailedMinimap(load, flushQueuedRafs);
+
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, [0, 90]),
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await flushQueuedRafs();
+
+    const liveMain = document.querySelector<HTMLElement>("body > main.mm-document");
+    expect(liveMain).not.toBeNull();
+    expect(liveMain!.querySelector('[data-mm-block-index="90"]')).toBeNull();
+    const minimapContent = getMinimapContent();
+    expect(minimapContent.querySelectorAll(".katex")).toHaveLength(2);
+    expect(minimapContent.textContent).toContain("rendered:x_0");
+    expect(minimapContent.textContent).toContain("rendered:x_90");
+    expectMinimapCloneIdentitySanitized();
+
+    const start = perfDetails<{ consumers?: string[] }>(messages, "mm-model-rendered-content-start");
+    const end = perfDetails<{ status?: string; consumers?: string[] }>(messages, "mm-model-rendered-content-end");
+    expect(start).toHaveLength(1);
+    expect(start[0]!.consumers).toContain("minimap-detail");
+    expect(end).toContainEqual(expect.objectContaining({
+      status: "ready",
+      consumers: expect.arrayContaining(["minimap-detail"]),
+    }));
+    const readinessEndIndex = perfMarkMessageIndex(messages, "mm-model-rendered-content-end");
+    const publishIndex = perfMarkMessageIndex(messages, "mm-minimap-refresh-end", detail =>
+      detail["source"] === "model-fragment");
+    expect(readinessEndIndex).toBeGreaterThanOrEqual(0);
+    expect(publishIndex).toBeGreaterThan(readinessEndIndex);
+  });
+
+  it("runs rendered content readiness for find while detailed minimap is denied", async () => {
+    const sectionCount = 120;
+    const katex = makeRendererKatex();
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+      katex,
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    document.documentElement.style.setProperty("--mm-minimap-width", "136px");
+    setMinimapViewportHeight(592);
+    load({ type: "reading-preferences", ...makeReadingPreferences("auto") });
+    await flushQueuedRafs();
+    loadMinimapPolicy(load);
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, [90]),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 41,
+    });
+    await flushQueuedRafs();
+    messages.length = 0;
+    katex.render.mockClear();
+
+    load({ type: "open-find-bar" });
+    submitFindQuery("needle");
+    await flushQueuedRafs();
+
+    expect(katex.render).toHaveBeenCalledTimes(1);
+    expect(perfDetails<{ consumers?: string[] }>(messages, "mm-model-rendered-content-start"))
+      .toEqual([expect.objectContaining({
+        consumers: ["rendered-find-projection"],
+      })]);
+    expect(perfDetails<{ status?: string; consumers?: string[] }>(messages, "mm-model-rendered-content-end"))
+      .toContainEqual(expect.objectContaining({
+        status: "ready",
+        consumers: expect.arrayContaining(["rendered-find-projection"]),
+      }));
+    expect(perfDetails<{ source?: string }>(messages, "mm-minimap-refresh-end")
+      .filter(detail => detail.source === "model-fragment")).toEqual([]);
+    expect(getMinimapContent().childElementCount).toBe(0);
+  });
+
+  it("shares one model rendered content job across minimap and find leases", async () => {
+    const sectionCount = 120;
+    const katex = makeRendererKatex();
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+      katex,
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    await enableDetailedMinimap(load, flushQueuedRafs);
+
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, [0, 90]),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 42,
+    });
+    load({ type: "open-find-bar" });
+    submitFindQuery("needle");
+    await flushQueuedRafs();
+
+    expect(perfDetails(messages, "mm-model-rendered-content-start")).toHaveLength(1);
+    expect(perfDetails<{ activeLeaseCount?: number; consumers?: string[] }>(
+      messages,
+      "mm-model-rendered-content-progress"
+    )).toContainEqual(expect.objectContaining({
+      activeLeaseCount: 2,
+      consumers: expect.arrayContaining(["minimap-detail", "rendered-find-projection"]),
+    }));
+    expect(new Set(katex.render.mock.calls.map(call => call[0]).filter(tex => tex === "x_0" || tex === "x_90")))
+      .toEqual(new Set(["x_0", "x_90"]));
+    expect(perfDetails(messages, "mm-model-rendered-content-cancel")).toEqual([]);
+  });
+
+  it("cancels the last model rendered content lease and resumes pending entries later", async () => {
+    vi.useFakeTimers();
+    const sectionCount = 120;
+    const katex = makeRendererKatex();
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+      katex,
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    await enableDetailedMinimap(load, flushQueuedRafs);
+
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, [90]),
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    expect(perfDetails(messages, "mm-model-rendered-content-start")).toHaveLength(1);
+    load({ type: "reading-preferences", ...makeReadingPreferences("off") });
+    await flushQueuedRafs();
+
+    expect(perfDetails<{ reason?: string }>(messages, "mm-model-rendered-content-cancel"))
+      .toContainEqual(expect.objectContaining({ reason: "last-lease-released" }));
+    expect(perfDetails(messages, "mm-model-rendered-content-end")).toEqual([]);
+
+    messages.length = 0;
+    katex.render.mockClear();
+    load({ type: "reading-preferences", ...makeReadingPreferences("on") });
+    await flushQueuedRafs();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushQueuedRafs();
+
+    expect(katex.render.mock.calls.map(call => call[0])).toEqual(["x_90"]);
+    expect(getMinimapContent().textContent).toContain("rendered:x_90");
+    expect(perfDetails<{ status?: string }>(messages, "mm-model-rendered-content-end"))
+      .toContainEqual(expect.objectContaining({ status: "ready" }));
+  });
+
+  it("cancels stale model rendered content work on document replacement without blocking a same-model window update", async () => {
+    const sectionCount = 120;
+    const katex = makeRendererKatex();
+    const { flushQueuedRafs, load, messages, root } = await loadRendererHarness({
+      katex,
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    await enableDetailedMinimap(load, flushQueuedRafs);
+
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, [90]),
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    load({ type: "load-document", html: buildHeadingDocument(20), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    expect(perfDetails<{ reason?: string }>(messages, "mm-model-rendered-content-cancel"))
+      .toContainEqual(expect.objectContaining({ reason: "stale-document" }));
+
+    messages.length = 0;
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, [90]),
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    root.scrollTop = 20 * SECTION_PITCH;
+    document.dispatchEvent(new Event("scroll"));
+    await flushQueuedRafs();
+
+    expect(perfDetails(messages, "mm-model-rendered-content-start")).toHaveLength(1);
+    expect(perfDetails(messages, "mm-model-rendered-content-cancel")).toEqual([]);
+    expect(getMinimapContent().textContent).toContain("rendered:x_90");
   });
 
   it("rescales the model-fragment minimap after height adoption without rebuilding the clone", async () => {
