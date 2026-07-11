@@ -1919,6 +1919,150 @@
     return (sorted[middle - 1] + sorted[middle]) / 2;
   }
 
+  // RendererWeb/src/blockGeometryMeasurement.ts
+  var BLOCK_AXIS_PADDING_BORDER_PROPERTIES = [
+    "padding-top",
+    "padding-bottom",
+    "border-top-width",
+    "border-bottom-width"
+  ];
+  function elementDocumentTop(element) {
+    let top = 0;
+    let current = element;
+    while (current !== null) {
+      if (!Number.isFinite(current.offsetTop)) {
+        return Number.NaN;
+      }
+      top += current.offsetTop;
+      const parent = current.offsetParent;
+      current = parent instanceof HTMLElement ? parent : null;
+    }
+    return top;
+  }
+  function readNextSiblingDocumentTop(element) {
+    let sibling = element.nextElementSibling;
+    while (sibling instanceof HTMLElement) {
+      const top = elementDocumentTop(sibling);
+      if (Number.isFinite(top)) {
+        return top;
+      }
+      sibling = sibling.nextElementSibling;
+    }
+    return null;
+  }
+  function readOccupiedTopDelta(top, nextTop) {
+    if (!Number.isFinite(top) || nextTop === null || nextTop === void 0 || !Number.isFinite(nextTop) || nextTop <= top) {
+      return null;
+    }
+    return nextTop - top;
+  }
+  function readOccupiedBlockHeight(element) {
+    return readOccupiedTopDelta(elementDocumentTop(element), readNextSiblingDocumentTop(element));
+  }
+  function readCssPixelLength(raw) {
+    const value = raw.trim();
+    if (value === "" || value === "0") {
+      return 0;
+    }
+    if (!value.endsWith("px")) {
+      return null;
+    }
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  function readBlockAxisPaddingBorderHeightPx(element) {
+    const styles = element.ownerDocument.defaultView?.getComputedStyle(element);
+    if (!styles) {
+      return 0;
+    }
+    let total = 0;
+    for (const propertyName of BLOCK_AXIS_PADDING_BORDER_PROPERTIES) {
+      const value = readCssPixelLength(styles.getPropertyValue(propertyName));
+      if (value === null) {
+        return null;
+      }
+      total += value;
+    }
+    return total;
+  }
+  function readContainIntrinsicBlockSizePx(element) {
+    return parseContainIntrinsicBlockSizePx(readCssPropertyWithNonBlankInlinePreference(
+      element,
+      "contain-intrinsic-size"
+    ));
+  }
+  function readCollapsedBorderBoxHeightPx(element) {
+    const intrinsicSize = parseContainIntrinsicBlockSizePx(readCssPropertyWithTruthyInlinePreference(
+      element,
+      "contain-intrinsic-size"
+    ));
+    const nonContent = readBlockAxisPaddingBorderHeightPx(element);
+    if (intrinsicSize === null || nonContent === null) {
+      return null;
+    }
+    return intrinsicSize + nonContent;
+  }
+  function isStrictlyViewportIntersecting(element) {
+    const root = element.ownerDocument.scrollingElement ?? element.ownerDocument.documentElement;
+    const top = elementDocumentTop(element);
+    const height = element.offsetHeight;
+    const viewportTop = Number.isFinite(root.scrollTop) ? root.scrollTop : 0;
+    const viewportHeight = root.clientHeight || element.ownerDocument.defaultView?.innerHeight || 0;
+    if (!Number.isFinite(top) || !Number.isFinite(height) || !Number.isFinite(viewportHeight) || viewportHeight <= 0) {
+      return false;
+    }
+    return rangesStrictlyIntersect(top, top + height, viewportTop, viewportTop + viewportHeight);
+  }
+  function isOutsideViewportWithTolerance(element, top, height, tolerancePx) {
+    const viewport = readDocumentViewport(element);
+    if (viewport === null) {
+      return false;
+    }
+    const bottom = top + height;
+    return bottom <= viewport.top + tolerancePx || top >= viewport.bottom - tolerancePx;
+  }
+  function reachesViewportTopInclusive(blockTop, blockHeight, viewportTop) {
+    return blockTop + blockHeight >= viewportTop;
+  }
+  function rangesStrictlyIntersect(firstTop, firstBottom, secondTop, secondBottom) {
+    return firstTop < secondBottom && firstBottom > secondTop;
+  }
+  function readBlockIndex(element) {
+    const raw = element.dataset["mmBlockIndex"];
+    const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  function parseContainIntrinsicBlockSizePx(raw) {
+    const matches = Array.from(raw.matchAll(/(-?\d+(?:\.\d+)?)px/g));
+    const lastMatch = matches[matches.length - 1];
+    if (!lastMatch) {
+      return null;
+    }
+    const parsed = Number.parseFloat(lastMatch[1]);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+  function readCssPropertyWithNonBlankInlinePreference(element, propertyName) {
+    const inlineValue = element.style.getPropertyValue(propertyName);
+    if (inlineValue.trim().length > 0) {
+      return inlineValue;
+    }
+    return element.ownerDocument.defaultView?.getComputedStyle(element).getPropertyValue(propertyName) ?? "";
+  }
+  function readCssPropertyWithTruthyInlinePreference(element, propertyName) {
+    return element.style.getPropertyValue(propertyName) || element.ownerDocument.defaultView?.getComputedStyle(element).getPropertyValue(propertyName) || "";
+  }
+  function readDocumentViewport(element) {
+    const doc = element.ownerDocument;
+    const view = doc.defaultView;
+    const root = doc.scrollingElement ?? doc.documentElement;
+    const top = Number.isFinite(root.scrollTop) ? root.scrollTop : view?.scrollY ?? 0;
+    const height = root.clientHeight || view?.innerHeight || doc.documentElement.clientHeight;
+    if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) {
+      return null;
+    }
+    return { bottom: top + height, top };
+  }
+
   // RendererWeb/src/documentWindow.ts
   var ESTIMATE_ERROR_KIND_ORDER = [
     "heading",
@@ -2394,9 +2538,9 @@
     return geometry.map((item, index) => {
       const nextItem = geometry[index + 1];
       const nextTop = hasInvalidRenderedMermaidBetween(blocks, item.sourceIndex, nextItem?.sourceIndex) ? readNextSiblingDocumentTop(item.boxElement) : nextItem?.top ?? readNextSiblingDocumentTop(item.boxElement);
-      const measuredHeight = nextTop !== void 0 && nextTop > item.top ? nextTop - item.top : item.height;
+      const measuredHeight = readOccupiedTopDelta(item.top, nextTop) ?? item.height;
       const update = {
-        blockIndex: readBlockIndex(item.semanticElement, item.sourceIndex),
+        blockIndex: readBlockIndex(item.semanticElement) ?? item.sourceIndex,
         measuredHeight: Math.max(0, measuredHeight)
       };
       if (item.geometryOwner !== void 0) {
@@ -2439,30 +2583,6 @@
       }
     }
     return found ? { start, end } : { start: 0, end: -1 };
-  }
-  function elementDocumentTop(element) {
-    let top = 0;
-    let current = element;
-    while (current !== null) {
-      if (!Number.isFinite(current.offsetTop)) {
-        return Number.NaN;
-      }
-      top += current.offsetTop;
-      const parent = current.offsetParent;
-      current = parent instanceof HTMLElement ? parent : null;
-    }
-    return top;
-  }
-  function readNextSiblingDocumentTop(element) {
-    let sibling = element.nextElementSibling;
-    while (sibling instanceof HTMLElement) {
-      const top = elementDocumentTop(sibling);
-      if (Number.isFinite(top)) {
-        return top;
-      }
-      sibling = sibling.nextElementSibling;
-    }
-    return void 0;
   }
   function summarizeEstimateHeightErrors(estimateOnlyModel, measuredModel) {
     const mutableBuckets = /* @__PURE__ */ new Map();
@@ -2596,10 +2716,11 @@
         nextItem?.sourceIndex
       );
       const nextTop = invalidMermaidBoundary ? readNextSiblingDocumentTop(item.boxElement) : nextItem?.top;
-      const measuredHeight = nextTop !== void 0 && nextTop > item.top ? Math.max(0, nextTop - item.top) : invalidMermaidBoundary ? Math.max(0, item.height) : Math.max(0, item.height, safeDocumentScrollHeight - item.top);
+      const occupiedDelta = readOccupiedTopDelta(item.top, nextTop);
+      const measuredHeight = occupiedDelta !== null ? Math.max(0, occupiedDelta) : invalidMermaidBoundary ? Math.max(0, item.height) : Math.max(0, item.height, safeDocumentScrollHeight - item.top);
       const measurement = {
         ...item,
-        blockIndex: readBlockIndex(item.semanticElement, item.sourceIndex),
+        blockIndex: readBlockIndex(item.semanticElement) ?? item.sourceIndex,
         measuredHeight,
         measuredHeightPlaceholder: isContentVisibilityPlaceholderMeasurement(item)
       };
@@ -2655,12 +2776,12 @@
     if (readCssProperty(item.boxElement, "content-visibility").trim() !== "auto") {
       return false;
     }
-    const viewport = readDocumentViewport(item.boxElement);
-    if (viewport === null) {
-      return false;
-    }
-    const bottom = item.top + item.height;
-    return bottom <= viewport.top + CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX || item.top >= viewport.bottom - CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX;
+    return isOutsideViewportWithTolerance(
+      item.boxElement,
+      item.top,
+      item.height,
+      CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX
+    );
   }
   function readOccupiedNonContentHeight(item, occupiedHeight) {
     if (item.geometryOwner === "mermaid-proxy") {
@@ -2687,42 +2808,6 @@
     const contentBoxHeight = item.height - blockAxisNonContent;
     return Number.isFinite(contentBoxHeight) && contentBoxHeight >= 0 ? contentBoxHeight : null;
   }
-  function readBlockAxisPaddingBorderHeightPx(element) {
-    const styles = element.ownerDocument.defaultView?.getComputedStyle(element);
-    if (!styles) {
-      return 0;
-    }
-    let total = 0;
-    for (const propertyName of ["padding-top", "padding-bottom", "border-top-width", "border-bottom-width"]) {
-      const value = readCssPixelLength(styles.getPropertyValue(propertyName));
-      if (value === null) {
-        return null;
-      }
-      total += value;
-    }
-    return total;
-  }
-  function readCssPixelLength(raw) {
-    const value = raw.trim();
-    if (value === "" || value === "0") {
-      return 0;
-    }
-    if (!value.endsWith("px")) {
-      return null;
-    }
-    const parsed = Number.parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  function readContainIntrinsicBlockSizePx(element) {
-    const raw = readCssProperty(element, "contain-intrinsic-size");
-    const matches = Array.from(raw.matchAll(/(-?\d+(?:\.\d+)?)px/g));
-    const lastMatch = matches[matches.length - 1];
-    if (!lastMatch) {
-      return null;
-    }
-    const parsed = Number.parseFloat(lastMatch[1]);
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-  }
   function readCssProperty(element, propertyName) {
     const inlineValue = element.style.getPropertyValue(propertyName);
     if (inlineValue.trim().length > 0) {
@@ -2730,17 +2815,6 @@
     }
     const view = element.ownerDocument.defaultView;
     return view?.getComputedStyle(element).getPropertyValue(propertyName) ?? "";
-  }
-  function readDocumentViewport(element) {
-    const doc = element.ownerDocument;
-    const view = doc.defaultView;
-    const root = doc.scrollingElement ?? doc.documentElement;
-    const top = Number.isFinite(root.scrollTop) ? root.scrollTop : view?.scrollY ?? 0;
-    const height = root.clientHeight || view?.innerHeight || doc.documentElement.clientHeight;
-    if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) {
-      return null;
-    }
-    return { bottom: top + height, top };
   }
   function estimateErrorKind(entry) {
     return entry.hasMermaid ? "mermaid" : entry.kind;
@@ -2754,11 +2828,6 @@
   }
   function hasMermaidContent(element) {
     return element.classList.contains("mm-mermaid") || element.querySelector("[data-mm-mermaid]") !== null;
-  }
-  function readBlockIndex(element, fallback) {
-    const raw = element.dataset["mmBlockIndex"];
-    const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
-    return Number.isFinite(parsed) ? parsed : fallback;
   }
   function readHeadingLevel2(element) {
     const tag = element.tagName.toUpperCase();
@@ -2801,7 +2870,7 @@
     const headingAnchors = [];
     const sourceLineSpans = [];
     for (const element of elements) {
-      const blockIndex = parseFiniteInt(element.dataset["mmBlockIndex"]);
+      const blockIndex = readBlockIndex(element);
       if (blockIndex !== null) {
         containedBlockIndexes.push(blockIndex);
       }
@@ -3029,9 +3098,8 @@
   function collectExistingSections(main) {
     const result = /* @__PURE__ */ new Map();
     for (const element of collectLiveDocumentSectionElements(main)) {
-      const raw = element.dataset["mmBlockIndex"];
-      const blockIndex = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
-      if (Number.isFinite(blockIndex)) {
+      const blockIndex = readBlockIndex(element);
+      if (blockIndex !== null) {
         result.set(blockIndex, {
           proxy: readReadyMermaidProxy(element),
           source: element
@@ -3056,7 +3124,7 @@
   }
   function captureReadingAnchor(blocks) {
     for (const block of blocks) {
-      const blockIndex = readBlockIndex2(block);
+      const blockIndex = readBlockIndex(block);
       if (blockIndex === null) {
         continue;
       }
@@ -3064,7 +3132,7 @@
       const rect = boxElement.getBoundingClientRect();
       const ownerDocument = boxElement.ownerDocument;
       const viewportHeight = ownerDocument.scrollingElement?.clientHeight || ownerDocument.defaultView?.innerHeight || 0;
-      if (!Number.isFinite(rect.top) || !Number.isFinite(rect.height) || rect.height <= 0 || !Number.isFinite(rect.bottom) || rect.bottom <= 0 || Number.isFinite(viewportHeight) && viewportHeight > 0 && rect.top >= viewportHeight) {
+      if (!Number.isFinite(rect.top) || !Number.isFinite(rect.height) || rect.height <= 0 || !Number.isFinite(rect.bottom) || rect.bottom <= 0 || Number.isFinite(viewportHeight) && viewportHeight > 0 && !rangesStrictlyIntersect(rect.top, rect.bottom, 0, viewportHeight)) {
         continue;
       }
       return {
@@ -3087,14 +3155,6 @@
       intraOffset: anchor.intraOffsetPx,
       sectionIndex: entry.sectionIndex
     });
-  }
-  function readBlockIndex2(element) {
-    const raw = element.dataset["mmBlockIndex"];
-    if (raw === void 0 || raw.trim() === "") {
-      return null;
-    }
-    const parsed = Number.parseInt(raw, 10);
-    return Number.isFinite(parsed) ? parsed : null;
   }
   function createSpacer(ownerDocument, kind) {
     const spacer = ownerDocument.createElement("div");
@@ -3143,7 +3203,7 @@
       if (excludedBlockIndexes.has(update.blockIndex)) {
         continue;
       }
-      const block = blocks.find((candidate) => readBlockIndex2(candidate) === update.blockIndex);
+      const block = blocks.find((candidate) => readBlockIndex(candidate) === update.blockIndex);
       if (update.geometryOwner === "mermaid-proxy") {
         block?.style.removeProperty("contain-intrinsic-size");
         continue;
@@ -3226,7 +3286,7 @@
           watches.delete(block);
           continue;
         }
-        const blockIndex = readBlockIndex2(block);
+        const blockIndex = readBlockIndex(block);
         if (blockIndex === null) {
           continue;
         }
@@ -3235,7 +3295,7 @@
           existing.blockIndex = blockIndex;
           existing.mountGeneration = currentMountGeneration;
           if (existing.state === "placeholder-not-intersecting" || existing.state === "realized-then-skipped") {
-            existing.state = isStrictlyIntersecting(block) ? "intersecting-await-event" : "placeholder-not-intersecting";
+            existing.state = isStrictlyViewportIntersecting(block) ? "intersecting-await-event" : "placeholder-not-intersecting";
           }
           continue;
         }
@@ -3251,7 +3311,7 @@
           readyMeasuredHeight: null,
           skipped: true,
           stableFrameCount: 0,
-          state: isStrictlyIntersecting(block) ? "intersecting-await-event" : "placeholder-not-intersecting"
+          state: isStrictlyViewportIntersecting(block) ? "intersecting-await-event" : "placeholder-not-intersecting"
         });
       }
       for (const [element, watch] of watches) {
@@ -3265,7 +3325,7 @@
       const blocksByBlockIndex = mapBlocksByBlockIndex(blocks);
       for (const update of updates) {
         const block = blocksByBlockIndex.get(update.blockIndex);
-        if (block === void 0 || block === null || readBlockIndex2(block) !== update.blockIndex) {
+        if (block === void 0 || block === null || readBlockIndex(block) !== update.blockIndex) {
           continue;
         }
         if (update.geometryOwner === "mermaid-proxy") {
@@ -3283,7 +3343,7 @@
         if (watch.element !== block || watch.blockIndex !== update.blockIndex || watch.mountGeneration !== currentMountGeneration || !deps.main.contains(block) || watch.state !== "real-ready" || watch.readyMeasuredHeight === null) {
           continue;
         }
-        if (isStrictlyIntersecting(block)) {
+        if (isStrictlyViewportIntersecting(block)) {
           watch.readyMeasuredHeight = Math.max(0, update.measuredHeight);
         }
         const acceptedUpdate = {
@@ -3363,7 +3423,7 @@
       syncMountedSections(collectLiveDocumentSectionElements(deps.main), currentMountGeneration);
       let ready = true;
       for (const watch of watches.values()) {
-        const intersecting = isStrictlyIntersecting(watch.element);
+        const intersecting = isStrictlyViewportIntersecting(watch.element);
         if (intersecting && watch.state === "expired-nonconvergent") {
           if (watch.nonconvergentCycles < REALIZATION_QUARANTINE_CYCLES) {
             watch.frameBudget = REALIZATION_FRAME_BUDGET;
@@ -3406,7 +3466,7 @@
   function mapBlocksByBlockIndex(blocks) {
     const blocksByBlockIndex = /* @__PURE__ */ new Map();
     for (const block of blocks) {
-      const blockIndex = readBlockIndex2(block);
+      const blockIndex = readBlockIndex(block);
       if (blockIndex === null) {
         continue;
       }
@@ -3419,39 +3479,12 @@
   }
   function readRealizationSample(element) {
     const offsetHeight = element.offsetHeight;
-    const occupiedHeight = readOccupiedHeight(element);
-    const fallbackBorderBoxHeight = readFallbackBorderBoxHeight(element);
+    const occupiedHeight = readOccupiedBlockHeight(element);
+    const fallbackBorderBoxHeight = readCollapsedBorderBoxHeightPx(element);
     if (!Number.isFinite(offsetHeight) || occupiedHeight === null || !Number.isFinite(occupiedHeight) || fallbackBorderBoxHeight === null) {
       return null;
     }
     return { fallbackBorderBoxHeight, occupiedHeight, offsetHeight };
-  }
-  function readOccupiedHeight(element) {
-    const top = elementDocumentTop(element);
-    const nextTop = readNextSiblingTop(element);
-    if (!Number.isFinite(top) || nextTop === null || !Number.isFinite(nextTop) || nextTop <= top) {
-      return null;
-    }
-    return nextTop - top;
-  }
-  function readNextSiblingTop(element) {
-    let sibling = element.nextElementSibling;
-    while (sibling instanceof HTMLElement) {
-      const top = elementDocumentTop(sibling);
-      if (Number.isFinite(top)) {
-        return top;
-      }
-      sibling = sibling.nextElementSibling;
-    }
-    return null;
-  }
-  function readFallbackBorderBoxHeight(element) {
-    const intrinsicSize = readContainIntrinsicBlockSizePx2(element);
-    const nonContent = readBlockAxisPaddingBorderHeightPx2(element);
-    if (intrinsicSize === null || nonContent === null) {
-      return null;
-    }
-    return intrinsicSize + nonContent;
   }
   function isContentVisibilityAutoOwner(element) {
     const inlineValue = element.style.getPropertyValue("content-visibility");
@@ -3459,53 +3492,6 @@
       return inlineValue.trim() === "auto";
     }
     return element.ownerDocument.defaultView?.getComputedStyle(element).getPropertyValue("content-visibility").trim() === "auto";
-  }
-  function readContainIntrinsicBlockSizePx2(element) {
-    const raw = element.style.getPropertyValue("contain-intrinsic-size") || element.ownerDocument.defaultView?.getComputedStyle(element).getPropertyValue("contain-intrinsic-size") || "";
-    const matches = Array.from(raw.matchAll(/(-?\d+(?:\.\d+)?)px/g));
-    const lastMatch = matches[matches.length - 1];
-    if (!lastMatch) {
-      return null;
-    }
-    const parsed = Number.parseFloat(lastMatch[1]);
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-  }
-  function readBlockAxisPaddingBorderHeightPx2(element) {
-    const styles = element.ownerDocument.defaultView?.getComputedStyle(element);
-    if (!styles) {
-      return 0;
-    }
-    let total = 0;
-    for (const propertyName of ["padding-top", "padding-bottom", "border-top-width", "border-bottom-width"]) {
-      const value = readCssPixelLength2(styles.getPropertyValue(propertyName));
-      if (value === null) {
-        return null;
-      }
-      total += value;
-    }
-    return total;
-  }
-  function readCssPixelLength2(raw) {
-    const value = raw.trim();
-    if (value === "" || value === "0") {
-      return 0;
-    }
-    if (!value.endsWith("px")) {
-      return null;
-    }
-    const parsed = Number.parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  function isStrictlyIntersecting(element) {
-    const root = element.ownerDocument.scrollingElement ?? element.ownerDocument.documentElement;
-    const top = elementDocumentTop(element);
-    const height = element.offsetHeight;
-    const viewportTop = Number.isFinite(root.scrollTop) ? root.scrollTop : 0;
-    const viewportHeight = root.clientHeight || element.ownerDocument.defaultView?.innerHeight || 0;
-    if (!Number.isFinite(top) || !Number.isFinite(height) || !Number.isFinite(viewportHeight) || viewportHeight <= 0) {
-      return false;
-    }
-    return top < viewportTop + viewportHeight && top + height > viewportTop;
   }
   function rangesEqual(left, right) {
     return left.start === right.start && left.end === right.end;
@@ -4322,7 +4308,7 @@
       if (visibleMid === null) {
         break;
       }
-      if (visibleMid.top + visibleMid.height >= scrollTop) {
+      if (reachesViewportTopInclusive(visibleMid.top, visibleMid.height, scrollTop)) {
         firstAtOrBelowViewportTop = visibleMid.index;
         hi = visibleMid.index - 1;
       } else {
@@ -4330,12 +4316,7 @@
       }
     }
     const index = firstAtOrBelowViewportTop >= 0 ? firstAtOrBelowViewportTop : findLastVisibleBlockIndex(blocks);
-    return index < 0 ? null : readBlockIndex3(blocks[index]);
-  }
-  function readBlockIndex3(block) {
-    const raw = block.dataset["mmBlockIndex"];
-    const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
-    return Number.isFinite(parsed) ? parsed : null;
+    return index < 0 ? null : readBlockIndex(blocks[index]);
   }
   function findNearestVisibleBlockBox(blocks, lo, mid, hi) {
     for (let index = mid; index >= lo; index--) {
@@ -4365,7 +4346,7 @@
   }
   function readVisibleBlockBox(block, index) {
     const height = block.offsetHeight;
-    const top = blockDocumentTop(block);
+    const top = elementDocumentTop(block);
     if (!Number.isFinite(height) || height < 0 || !Number.isFinite(top) || isDisplayNoneZeroBox(block, height)) {
       return null;
     }
@@ -4379,19 +4360,6 @@
       return true;
     }
     return getComputedStyle(block).display === "none";
-  }
-  function blockDocumentTop(block) {
-    let top = 0;
-    let current = block;
-    while (current !== null) {
-      if (!Number.isFinite(current.offsetTop)) {
-        return Number.NaN;
-      }
-      top += current.offsetTop;
-      const nextOffsetParent = current.offsetParent;
-      current = nextOffsetParent instanceof HTMLElement ? nextOffsetParent : null;
-    }
-    return top;
   }
 
   // RendererWeb/src/modelRenderedContent.ts
@@ -4923,9 +4891,7 @@
       return null;
     }
     for (const block of blocks) {
-      const raw = block.dataset["mmBlockIndex"];
-      const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
-      if (parsed === blockIndex) {
+      if (readBlockIndex(block) === blockIndex) {
         return block;
       }
     }

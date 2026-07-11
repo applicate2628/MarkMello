@@ -1,3 +1,9 @@
+import {
+  elementDocumentTop,
+  readBlockIndex,
+  reachesViewportTopInclusive,
+} from "./blockGeometryMeasurement";
+
 const LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]";
 
 export function collectLiveDocumentBlockElements(ownerDocument: Document): HTMLElement[] {
@@ -24,7 +30,7 @@ export function findTopVisibleBlockIndexFromBlocks(
       break;
     }
 
-    if (visibleMid.top + visibleMid.height >= scrollTop) {
+    if (reachesViewportTopInclusive(visibleMid.top, visibleMid.height, scrollTop)) {
       firstAtOrBelowViewportTop = visibleMid.index;
       hi = visibleMid.index - 1;
     } else {
@@ -36,12 +42,6 @@ export function findTopVisibleBlockIndexFromBlocks(
     ? firstAtOrBelowViewportTop
     : findLastVisibleBlockIndex(blocks);
   return index < 0 ? null : readBlockIndex(blocks[index]!);
-}
-
-function readBlockIndex(block: HTMLElement): number | null {
-  const raw = block.dataset["mmBlockIndex"];
-  const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 type VisibleBlockBox = {
@@ -86,7 +86,7 @@ function hasVisibleBlockBox(block: HTMLElement): boolean {
 
 function readVisibleBlockBox(block: HTMLElement, index: number): VisibleBlockBox | null {
   const height = block.offsetHeight;
-  const top = blockDocumentTop(block);
+  const top = elementDocumentTop(block);
   if (!Number.isFinite(height) || height < 0 || !Number.isFinite(top) || isDisplayNoneZeroBox(block, height)) {
     return null;
   }
@@ -101,18 +101,4 @@ function isDisplayNoneZeroBox(block: HTMLElement, height: number): boolean {
     return true;
   }
   return getComputedStyle(block).display === "none";
-}
-
-function blockDocumentTop(block: HTMLElement): number {
-  let top = 0;
-  let current: HTMLElement | null = block;
-  while (current !== null) {
-    if (!Number.isFinite(current.offsetTop)) {
-      return Number.NaN;
-    }
-    top += current.offsetTop;
-    const nextOffsetParent: Element | null = current.offsetParent;
-    current = nextOffsetParent instanceof HTMLElement ? nextOffsetParent : null;
-  }
-  return top;
 }

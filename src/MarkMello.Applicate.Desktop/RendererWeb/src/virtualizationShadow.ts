@@ -4,12 +4,12 @@ import {
   buildDocumentWindowModelsFromLiveBlocks,
   collectLiveDocumentSectionElements,
   computeLiveBlockWindowRange,
-  elementDocumentTop,
   readLiveBlockMeasuredHeights,
   summarizeEstimateHeightErrors,
   type EstimateHeightErrorSummary,
   type RenderAheadConfig,
 } from "./documentWindow";
+import { elementDocumentTop, readBlockIndex } from "./blockGeometryMeasurement";
 import { readIntrinsicSizeMetrics } from "./sectionIntrinsicSize";
 import {
   collectLiveDocumentBlockElements,
@@ -353,9 +353,7 @@ function findBlockByIndex(blocks: readonly HTMLElement[], blockIndex: number | n
   }
 
   for (const block of blocks) {
-    const raw = block.dataset["mmBlockIndex"];
-    const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
-    if (parsed === blockIndex) {
+    if (readBlockIndex(block) === blockIndex) {
       return block;
     }
   }

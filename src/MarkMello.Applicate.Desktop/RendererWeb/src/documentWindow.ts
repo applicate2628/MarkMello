@@ -7,6 +7,17 @@ import {
   type SectionKind,
 } from "./sectionIntrinsicSize";
 import { readReadyMermaidProxy } from "./mermaidRender";
+import {
+  elementDocumentTop,
+  isOutsideViewportWithTolerance,
+  readBlockAxisPaddingBorderHeightPx,
+  readBlockIndex,
+  readContainIntrinsicBlockSizePx,
+  readNextSiblingDocumentTop,
+  readOccupiedTopDelta,
+} from "./blockGeometryMeasurement";
+
+export { elementDocumentTop } from "./blockGeometryMeasurement";
 
 export type SectionModelEntry = {
   sectionIndex: number;
@@ -721,11 +732,9 @@ export function readLiveBlockOffsetMeasuredHeights(blocks: readonly HTMLElement[
     const nextTop = hasInvalidRenderedMermaidBetween(blocks, item.sourceIndex, nextItem?.sourceIndex)
       ? readNextSiblingDocumentTop(item.boxElement)
       : nextItem?.top ?? readNextSiblingDocumentTop(item.boxElement);
-    const measuredHeight = nextTop !== undefined && nextTop > item.top
-      ? nextTop - item.top
-      : item.height;
+    const measuredHeight = readOccupiedTopDelta(item.top, nextTop) ?? item.height;
     const update: MeasuredHeightUpdate = {
-      blockIndex: readBlockIndex(item.semanticElement, item.sourceIndex),
+      blockIndex: readBlockIndex(item.semanticElement) ?? item.sourceIndex,
       measuredHeight: Math.max(0, measuredHeight),
     };
     if (item.geometryOwner !== undefined) {
@@ -776,34 +785,6 @@ export function computeLiveBlockWindowRange(
   }
 
   return found ? { start, end } : { start: 0, end: -1 };
-}
-
-export function elementDocumentTop(element: HTMLElement): number {
-  let top = 0;
-  let current: HTMLElement | null = element;
-  while (current !== null) {
-    if (!Number.isFinite(current.offsetTop)) {
-      return Number.NaN;
-    }
-    top += current.offsetTop;
-    const parent: Element | null = current.offsetParent;
-    current = parent instanceof HTMLElement ? parent : null;
-  }
-  return top;
-}
-
-function readNextSiblingDocumentTop(element: HTMLElement): number | undefined {
-  let sibling = element.nextElementSibling;
-  while (sibling instanceof HTMLElement) {
-    const top = elementDocumentTop(sibling);
-    if (Number.isFinite(top)) {
-      return top;
-    }
-
-    sibling = sibling.nextElementSibling;
-  }
-
-  return undefined;
 }
 
 export function summarizeEstimateHeightErrors(
@@ -976,14 +957,15 @@ function readLiveBlockMeasurements(
     const nextTop = invalidMermaidBoundary
       ? readNextSiblingDocumentTop(item.boxElement)
       : nextItem?.top;
-    const measuredHeight = nextTop !== undefined && nextTop > item.top
-      ? Math.max(0, nextTop - item.top)
+    const occupiedDelta = readOccupiedTopDelta(item.top, nextTop);
+    const measuredHeight = occupiedDelta !== null
+      ? Math.max(0, occupiedDelta)
       : invalidMermaidBoundary
         ? Math.max(0, item.height)
         : Math.max(0, item.height, safeDocumentScrollHeight - item.top);
     const measurement: LiveBlockMeasurement = {
       ...item,
-      blockIndex: readBlockIndex(item.semanticElement, item.sourceIndex),
+      blockIndex: readBlockIndex(item.semanticElement) ?? item.sourceIndex,
       measuredHeight,
       measuredHeightPlaceholder: isContentVisibilityPlaceholderMeasurement(item),
     };
@@ -1052,14 +1034,12 @@ function isContentVisibilityPlaceholderMeasurement(item: VisibleBlockGeometry): 
     return false;
   }
 
-  const viewport = readDocumentViewport(item.boxElement);
-  if (viewport === null) {
-    return false;
-  }
-
-  const bottom = item.top + item.height;
-  return bottom <= viewport.top + CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX
-    || item.top >= viewport.bottom - CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX;
+  return isOutsideViewportWithTolerance(
+    item.boxElement,
+    item.top,
+    item.height,
+    CONTENT_VISIBILITY_PLACEHOLDER_TOLERANCE_PX
+  );
 }
 
 function readOccupiedNonContentHeight(item: VisibleBlockGeometry, occupiedHeight: number): number | null {
@@ -1093,48 +1073,6 @@ function readContentBoxContributionHeight(item: VisibleBlockGeometry): number | 
   return Number.isFinite(contentBoxHeight) && contentBoxHeight >= 0 ? contentBoxHeight : null;
 }
 
-function readBlockAxisPaddingBorderHeightPx(element: HTMLElement): number | null {
-  const styles = element.ownerDocument.defaultView?.getComputedStyle(element);
-  if (!styles) {
-    return 0;
-  }
-
-  let total = 0;
-  for (const propertyName of ["padding-top", "padding-bottom", "border-top-width", "border-bottom-width"]) {
-    const value = readCssPixelLength(styles.getPropertyValue(propertyName));
-    if (value === null) {
-      return null;
-    }
-    total += value;
-  }
-  return total;
-}
-
-function readCssPixelLength(raw: string): number | null {
-  const value = raw.trim();
-  if (value === "" || value === "0") {
-    return 0;
-  }
-  if (!value.endsWith("px")) {
-    return null;
-  }
-
-  const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function readContainIntrinsicBlockSizePx(element: HTMLElement): number | null {
-  const raw = readCssProperty(element, "contain-intrinsic-size");
-  const matches = Array.from(raw.matchAll(/(-?\d+(?:\.\d+)?)px/g));
-  const lastMatch = matches[matches.length - 1];
-  if (!lastMatch) {
-    return null;
-  }
-
-  const parsed = Number.parseFloat(lastMatch[1]!);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-}
-
 function readCssProperty(element: HTMLElement, propertyName: string): string {
   const inlineValue = element.style.getPropertyValue(propertyName);
   if (inlineValue.trim().length > 0) {
@@ -1143,19 +1081,6 @@ function readCssProperty(element: HTMLElement, propertyName: string): string {
 
   const view = element.ownerDocument.defaultView;
   return view?.getComputedStyle(element).getPropertyValue(propertyName) ?? "";
-}
-
-function readDocumentViewport(element: HTMLElement): { top: number; bottom: number } | null {
-  const doc = element.ownerDocument;
-  const view = doc.defaultView;
-  const root = doc.scrollingElement ?? doc.documentElement;
-  const top = Number.isFinite(root.scrollTop) ? root.scrollTop : view?.scrollY ?? 0;
-  const height = root.clientHeight || view?.innerHeight || doc.documentElement.clientHeight;
-  if (!Number.isFinite(top) || !Number.isFinite(height) || height <= 0) {
-    return null;
-  }
-
-  return { bottom: top + height, top };
 }
 
 function estimateErrorKind(entry: SectionModelEntry): EstimateHeightErrorKind {
@@ -1175,12 +1100,6 @@ function insertWorstOffender(
 
 function hasMermaidContent(element: HTMLElement): boolean {
   return element.classList.contains("mm-mermaid") || element.querySelector("[data-mm-mermaid]") !== null;
-}
-
-function readBlockIndex(element: HTMLElement, fallback: number): number {
-  const raw = element.dataset["mmBlockIndex"];
-  const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function readHeadingLevel(element: HTMLElement): number {
@@ -1235,7 +1154,7 @@ function readSectionElementMetadata(elements: readonly HTMLElement[]): SectionMo
   const headingAnchors: string[] = [];
   const sourceLineSpans: SourceLineModelSpan[] = [];
   for (const element of elements) {
-    const blockIndex = parseFiniteInt(element.dataset["mmBlockIndex"]);
+    const blockIndex = readBlockIndex(element);
     if (blockIndex !== null) {
       containedBlockIndexes.push(blockIndex);
     }

@@ -1,7 +1,6 @@
 import {
   DEFAULT_RENDER_AHEAD,
   collectLiveDocumentSectionElements,
-  elementDocumentTop,
   effectiveHeight,
   readLiveBlockOffsetMeasuredHeights,
   type DocumentWindowModel,
@@ -12,6 +11,13 @@ import {
   type WindowRange,
 } from "./documentWindow";
 import { readReadyMermaidProxy } from "./mermaidRender";
+import {
+  isStrictlyViewportIntersecting,
+  rangesStrictlyIntersect,
+  readBlockIndex,
+  readCollapsedBorderBoxHeightPx,
+  readOccupiedBlockHeight,
+} from "./blockGeometryMeasurement";
 
 const TOP_SPACER = "top";
 const BOTTOM_SPACER = "bottom";
@@ -300,9 +306,8 @@ export function createFullDocumentFragmentFromWindowModel(
 function collectExistingSections(main: HTMLElement): Map<number, ExistingSectionUnit> {
   const result = new Map<number, ExistingSectionUnit>();
   for (const element of collectLiveDocumentSectionElements(main)) {
-    const raw = element.dataset["mmBlockIndex"];
-    const blockIndex = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
-    if (Number.isFinite(blockIndex)) {
+    const blockIndex = readBlockIndex(element);
+    if (blockIndex !== null) {
       result.set(blockIndex, {
         proxy: readReadyMermaidProxy(element),
         source: element,
@@ -353,7 +358,11 @@ export function captureReadingAnchor(blocks: readonly HTMLElement[]): ReadingAnc
       || rect.height <= 0
       || !Number.isFinite(rect.bottom)
       || rect.bottom <= 0
-      || (Number.isFinite(viewportHeight) && viewportHeight > 0 && rect.top >= viewportHeight)
+      || (
+        Number.isFinite(viewportHeight)
+        && viewportHeight > 0
+        && !rangesStrictlyIntersect(rect.top, rect.bottom, 0, viewportHeight)
+      )
     ) {
       continue;
     }
@@ -384,16 +393,6 @@ export function scrollTopForReadingAnchor(
     intraOffset: anchor.intraOffsetPx,
     sectionIndex: entry.sectionIndex,
   });
-}
-
-function readBlockIndex(element: HTMLElement): number | null {
-  const raw = element.dataset["mmBlockIndex"];
-  if (raw === undefined || raw.trim() === "") {
-    return null;
-  }
-
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function createSpacer(ownerDocument: Document, kind: typeof TOP_SPACER | typeof BOTTOM_SPACER): HTMLElement {
@@ -583,7 +582,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
           existing.state === "placeholder-not-intersecting"
           || existing.state === "realized-then-skipped"
         ) {
-          existing.state = isStrictlyIntersecting(block)
+          existing.state = isStrictlyViewportIntersecting(block)
             ? "intersecting-await-event"
             : "placeholder-not-intersecting";
         }
@@ -602,7 +601,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
         readyMeasuredHeight: null,
         skipped: true,
         stableFrameCount: 0,
-        state: isStrictlyIntersecting(block)
+        state: isStrictlyViewportIntersecting(block)
           ? "intersecting-await-event"
           : "placeholder-not-intersecting",
       });
@@ -652,7 +651,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
         continue;
       }
 
-      if (isStrictlyIntersecting(block)) {
+      if (isStrictlyViewportIntersecting(block)) {
         watch.readyMeasuredHeight = Math.max(0, update.measuredHeight);
       }
 
@@ -753,7 +752,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
     syncMountedSections(collectLiveDocumentSectionElements(deps.main), currentMountGeneration);
     let ready = true;
     for (const watch of watches.values()) {
-      const intersecting = isStrictlyIntersecting(watch.element);
+      const intersecting = isStrictlyViewportIntersecting(watch.element);
       if (intersecting && watch.state === "expired-nonconvergent") {
         if (watch.nonconvergentCycles < REALIZATION_QUARANTINE_CYCLES) {
           watch.frameBudget = REALIZATION_FRAME_BUDGET;
@@ -825,8 +824,8 @@ function readRealizationSample(element: HTMLElement): {
   offsetHeight: number;
 } | null {
   const offsetHeight = element.offsetHeight;
-  const occupiedHeight = readOccupiedHeight(element);
-  const fallbackBorderBoxHeight = readFallbackBorderBoxHeight(element);
+  const occupiedHeight = readOccupiedBlockHeight(element);
+  const fallbackBorderBoxHeight = readCollapsedBorderBoxHeightPx(element);
   if (
     !Number.isFinite(offsetHeight)
     || occupiedHeight === null
@@ -839,41 +838,6 @@ function readRealizationSample(element: HTMLElement): {
   return { fallbackBorderBoxHeight, occupiedHeight, offsetHeight };
 }
 
-function readOccupiedHeight(element: HTMLElement): number | null {
-  const top = elementDocumentTop(element);
-  const nextTop = readNextSiblingTop(element);
-  if (
-    !Number.isFinite(top)
-    || nextTop === null
-    || !Number.isFinite(nextTop)
-    || nextTop <= top
-  ) {
-    return null;
-  }
-  return nextTop - top;
-}
-
-function readNextSiblingTop(element: HTMLElement): number | null {
-  let sibling = element.nextElementSibling;
-  while (sibling instanceof HTMLElement) {
-    const top = elementDocumentTop(sibling);
-    if (Number.isFinite(top)) {
-      return top;
-    }
-    sibling = sibling.nextElementSibling;
-  }
-  return null;
-}
-
-function readFallbackBorderBoxHeight(element: HTMLElement): number | null {
-  const intrinsicSize = readContainIntrinsicBlockSizePx(element);
-  const nonContent = readBlockAxisPaddingBorderHeightPx(element);
-  if (intrinsicSize === null || nonContent === null) {
-    return null;
-  }
-  return intrinsicSize + nonContent;
-}
-
 function isContentVisibilityAutoOwner(element: HTMLElement): boolean {
   const inlineValue = element.style.getPropertyValue("content-visibility");
   if (inlineValue.trim().length > 0) {
@@ -884,63 +848,6 @@ function isContentVisibilityAutoOwner(element: HTMLElement): boolean {
     ?.getComputedStyle(element)
     .getPropertyValue("content-visibility")
     .trim() === "auto";
-}
-
-function readContainIntrinsicBlockSizePx(element: HTMLElement): number | null {
-  const raw = element.style.getPropertyValue("contain-intrinsic-size")
-    || element.ownerDocument.defaultView?.getComputedStyle(element).getPropertyValue("contain-intrinsic-size")
-    || "";
-  const matches = Array.from(raw.matchAll(/(-?\d+(?:\.\d+)?)px/g));
-  const lastMatch = matches[matches.length - 1];
-  if (!lastMatch) {
-    return null;
-  }
-
-  const parsed = Number.parseFloat(lastMatch[1]!);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-}
-
-function readBlockAxisPaddingBorderHeightPx(element: HTMLElement): number | null {
-  const styles = element.ownerDocument.defaultView?.getComputedStyle(element);
-  if (!styles) {
-    return 0;
-  }
-
-  let total = 0;
-  for (const propertyName of ["padding-top", "padding-bottom", "border-top-width", "border-bottom-width"]) {
-    const value = readCssPixelLength(styles.getPropertyValue(propertyName));
-    if (value === null) {
-      return null;
-    }
-    total += value;
-  }
-  return total;
-}
-
-function readCssPixelLength(raw: string): number | null {
-  const value = raw.trim();
-  if (value === "" || value === "0") {
-    return 0;
-  }
-  if (!value.endsWith("px")) {
-    return null;
-  }
-
-  const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function isStrictlyIntersecting(element: HTMLElement): boolean {
-  const root = element.ownerDocument.scrollingElement ?? element.ownerDocument.documentElement;
-  const top = elementDocumentTop(element);
-  const height = element.offsetHeight;
-  const viewportTop = Number.isFinite(root.scrollTop) ? root.scrollTop : 0;
-  const viewportHeight = root.clientHeight || element.ownerDocument.defaultView?.innerHeight || 0;
-  if (!Number.isFinite(top) || !Number.isFinite(height) || !Number.isFinite(viewportHeight) || viewportHeight <= 0) {
-    return false;
-  }
-
-  return top < viewportTop + viewportHeight && top + height > viewportTop;
 }
 
 function rangesEqual(left: WindowRange, right: WindowRange): boolean {
