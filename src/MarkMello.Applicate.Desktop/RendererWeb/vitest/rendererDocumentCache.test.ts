@@ -3,7 +3,31 @@ import { readFileSync } from "node:fs";
 
 type HostBridge = (msg: unknown) => void;
 
-async function loadRendererWithMessages(options: { virtualization?: boolean } = {}) {
+type TestKatexApi = {
+  render: ReturnType<typeof vi.fn>;
+};
+
+type ReadingPreferencesMessage = {
+  type: "reading-preferences";
+  documentScrollEnabled: boolean;
+  fontFamily: "serif";
+  fontSize: number;
+  lineHeight: number;
+  maxWidth: number;
+  minMaxWidth: number;
+  minimapMode: "off" | "auto" | "on";
+  viewerChromeEnabled: boolean;
+  wheelProxyEnabled: boolean;
+  widthResizerVisibility: "always" | "on-hover";
+  viewportHeight: number;
+  viewportWidth: number;
+};
+
+async function loadRendererWithMessages(options: {
+  deferCacheClone?: boolean;
+  katex?: TestKatexApi;
+  virtualization?: boolean;
+} = {}) {
   vi.resetModules();
   document.documentElement.innerHTML = `<body><main class="mm-document"></main></body>`;
   if (options.virtualization === true) {
@@ -11,13 +35,33 @@ async function loadRendererWithMessages(options: { virtualization?: boolean } = 
   } else {
     delete (window as unknown as { MARKMELLO_VIRTUALIZATION?: boolean }).MARKMELLO_VIRTUALIZATION;
   }
+  if (options.katex !== undefined) {
+    (window as unknown as { katex?: TestKatexApi }).katex = options.katex;
+  } else {
+    delete (window as unknown as { katex?: TestKatexApi }).katex;
+  }
+  const idleCallbacks: Array<() => void> = [];
+  if (options.deferCacheClone === true) {
+    let nextIdleCallbackId = 1;
+    Object.defineProperty(window, "requestIdleCallback", {
+      configurable: true,
+      value: vi.fn((callback: () => void) => {
+        idleCallbacks.push(callback);
+        return nextIdleCallbackId++;
+      }),
+    });
+    Object.defineProperty(window, "cancelIdleCallback", {
+      configurable: true,
+      value: vi.fn(),
+    });
+  }
   const messages: unknown[] = [];
   (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
     webview: { postMessage: (m: unknown) => messages.push(m) }
   };
   await import("../src/renderer");
   const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
-  return { load, messages };
+  return { idleCallbacks, load, messages };
 }
 
 async function letPipelineSettle(): Promise<void> {
@@ -50,6 +94,65 @@ function perfMarkDetail(messages: readonly unknown[], name: string): Record<stri
   }
 
   return JSON.parse(mark.detail) as Record<string, unknown>;
+}
+
+function perfMarkNames(messages: readonly unknown[]): string[] {
+  return messages
+    .filter((message): message is { type: "perf-mark"; name: string } =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: unknown }).type === "perf-mark")
+    .map(message => message.name);
+}
+
+function makeReadingPreferences(minimapMode: ReadingPreferencesMessage["minimapMode"]): ReadingPreferencesMessage {
+  return {
+    type: "reading-preferences",
+    documentScrollEnabled: true,
+    fontFamily: "serif",
+    fontSize: 16,
+    lineHeight: 1.6,
+    maxWidth: 820,
+    minMaxWidth: 320,
+    minimapMode,
+    viewerChromeEnabled: true,
+    viewportHeight: 800,
+    viewportWidth: 1200,
+    wheelProxyEnabled: true,
+    widthResizerVisibility: "on-hover",
+  };
+}
+
+function buildVirtualizedFormulaDocument(
+  sectionCount: number,
+  formulaSections: readonly number[],
+  formulaState: "pending" | "ready" | "ready-with-failures" = "pending"
+): string {
+  const formulaSectionSet = new Set(formulaSections);
+  return Array.from({ length: sectionCount }, (_value, index) => {
+    const formula = formulaSectionSet.has(index)
+      ? ` <span class="math-inline" data-tex="x_${index}"${formulaState === "pending" ? "" : ` data-mm-math-rendered="${formulaState === "ready" ? "true" : "failed"}"`}>x_${index}${formulaState === "pending" ? "" : `<span class="katex">rendered:x_${index}</span>`}</span>`
+      : "";
+    return `<section data-mm-block-index="${index}" data-mm-block-kind="paragraph">Section ${index}${formula}</section>`;
+  }).join("");
+}
+
+function seedPlaceholderMinimapSnapshot(): void {
+  const minimapContent = document.querySelector<HTMLElement>(".mm-minimap-content");
+  if (!minimapContent) {
+    throw new Error("minimap content was not mounted");
+  }
+  const source = document.createElement("main");
+  source.className = "mm-document";
+  source.dataset["mmMinimapSource"] = "model-fragment";
+  source.innerHTML = `<section data-mm-block-index="90" data-mm-block-kind="paragraph"><span class="math-inline" data-tex="x_90">x_90</span></section>`;
+  minimapContent.replaceChildren(source);
+}
+
+function expectNoRestoredPlaceholderMinimap(messages: readonly unknown[]): void {
+  expect(perfMarkNames(messages)).toContain("mm-load-document-cache-hit");
+  expect(perfMarkNames(messages)).not.toContain("mm-minimap-cache-hit");
+  expect(document.querySelector(".mm-minimap-content [data-tex]")).toBeNull();
 }
 
 function readRendererSource(): string {
@@ -658,6 +761,115 @@ describe("renderer document cache", () => {
       nodeCount: sectionCount,
     });
     expect(document.querySelectorAll("main.mm-document > [data-mm-block-index]").length).toBeLessThan(sectionCount);
+  });
+
+  it("does not restore unprepared placeholder minimap content from the tab-away cache fallback", async () => {
+    const sectionCount = 120;
+    installVirtualizedDocumentLayout(80, 20, sectionCount);
+    const { load, messages } = await loadRendererWithMessages({
+      deferCacheClone: true,
+      virtualization: true,
+    });
+    const firstHtml = buildVirtualizedFormulaDocument(sectionCount, [90]);
+    const secondHtml = "<section data-mm-block-index='0' data-mm-block-kind='paragraph'>Second</section>";
+
+    load({ type: "reading-preferences", ...makeReadingPreferences("off") });
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+    seedPlaceholderMinimapSnapshot();
+
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+    await letPipelineSettle();
+
+    messages.length = 0;
+    load({
+      type: "load-cached-document",
+      cacheKey: rendererCacheKey(firstHtml, "light"),
+      documentName: "first.md",
+      theme: "light",
+      hasMermaid: false,
+      renderId: 3,
+    });
+    await letPipelineSettle();
+
+    expectNoRestoredPlaceholderMinimap(messages);
+  });
+
+  it("keeps existing-entry refresh snapshot capture behind the cache payload helper", () => {
+    const source = readRendererSource();
+    const refreshStart = source.indexOf("function refreshProcessedDocumentCacheState");
+    const refreshEnd = source.indexOf("function scheduleCurrentProcessedDocumentCacheClone", refreshStart);
+    const refresh = source.slice(refreshStart, refreshEnd);
+
+    expect(refreshStart).toBeGreaterThanOrEqual(0);
+    expect(refreshEnd).toBeGreaterThan(refreshStart);
+    expect(refresh).toContain("captureProcessedDocumentMinimapPayload");
+    expect(refresh).not.toContain("captureMinimapSnapshot({");
+    expect(refresh).toContain("headings: lastExtractedHeadings.map(cloneHeadingPayload)");
+    expect(refresh).toContain("layoutState: virtualizationEnabled");
+  });
+
+  it.each([
+    ["ready", "ready"] as const,
+    ["ready-with-failures", "ready-with-failures"] as const,
+  ])("restores a validated terminal %s model-fragment minimap snapshot", async (_label, formulaState) => {
+    const sectionCount = 120;
+    installVirtualizedDocumentLayout(80, 20, sectionCount);
+    const { load, messages } = await loadRendererWithMessages({ virtualization: true });
+    const firstHtml = buildVirtualizedFormulaDocument(sectionCount, [90], formulaState);
+    const secondHtml = "<section data-mm-block-index='0' data-mm-block-kind='paragraph'>Second</section>";
+
+    load({ type: "reading-preferences", ...makeReadingPreferences("off") });
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+    const minimapContent = document.querySelector<HTMLElement>(".mm-minimap-content");
+    expect(minimapContent).not.toBeNull();
+    minimapContent!.replaceChildren(document.createElement("main"));
+    minimapContent!.firstElementChild!.className = "mm-document";
+    (minimapContent!.firstElementChild as HTMLElement).dataset["mmMinimapSource"] = "model-fragment";
+    minimapContent!.firstElementChild!.innerHTML = `<section><span class="katex">terminal:${formulaState}</span></section>`;
+
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+    await letPipelineSettle();
+
+    messages.length = 0;
+    load({
+      type: "load-cached-document",
+      cacheKey: rendererCacheKey(firstHtml, "light"),
+      documentName: "first.md",
+      theme: "light",
+      hasMermaid: false,
+      renderId: 3,
+    });
+    await letPipelineSettle();
+
+    expect(perfMarkNames(messages)).toContain("mm-load-document-cache-hit");
+    expect(perfMarkNames(messages)).toContain("mm-minimap-cache-hit");
+    expect(document.querySelector(".mm-minimap-content .katex")?.textContent).toBe(`terminal:${formulaState}`);
+  });
+
+  it("keeps every processed-document cache writer behind the shared minimap payload helper", () => {
+    const source = readRendererSource();
+    const captureStart = source.indexOf("function captureCurrentProcessedDocumentCacheEntry");
+    const storeStart = source.indexOf("function storeProcessedDocumentCacheEntry", captureStart);
+    const refreshStart = source.indexOf("function refreshProcessedDocumentCacheState");
+    const scheduleStart = source.indexOf("function scheduleCurrentProcessedDocumentCacheClone");
+    const preserveStart = source.indexOf("function preserveCurrentProcessedDocument");
+    const helperName = "captureProcessedDocumentMinimapPayload";
+
+    expect(captureStart).toBeGreaterThanOrEqual(0);
+    expect(refreshStart).toBeGreaterThanOrEqual(0);
+    expect(scheduleStart).toBeGreaterThanOrEqual(0);
+    expect(preserveStart).toBeGreaterThanOrEqual(0);
+    expect(source.slice(captureStart, storeStart)).toContain(helperName);
+    expect(source.slice(refreshStart, scheduleStart)).toContain(helperName);
+    expect(source.slice(scheduleStart, preserveStart)).toContain("captureCurrentProcessedDocumentCacheEntry(\"clone\")");
+    expect(source.slice(preserveStart, source.indexOf("function applyViewerChromeState", preserveStart)))
+      .toContain("captureCurrentProcessedDocumentCacheEntry(\"move\")");
+    expect(source.slice(source.indexOf("function getCachedProcessedDocumentFragment"), captureStart))
+      .toContain("validateCachedRenderedContentState");
+    expect(source.slice(source.indexOf("function getCachedProcessedDocumentFragment"), captureStart))
+      .toContain(": null");
   });
 
   it("posts heading inline segments for math spans", async () => {

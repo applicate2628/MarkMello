@@ -52,6 +52,7 @@ import {
   readLiveBlockOffsetMeasuredHeights,
   type DocumentWindowModel,
   type MeasuredHeightUpdateResult,
+  type RenderedContentState,
 } from "./documentWindow";
 import {
   prepareDocumentWindowModelRenderedContent,
@@ -489,6 +490,12 @@ type ProcessedDocumentCacheEntry = {
   nodeCount: number;
   layoutState: CachedLayoutState;
   headings: HeadingPayload[];
+  renderedContentState: RenderedContentState | null;
+  minimapSnapshot: CachedMinimapSnapshot | null;
+};
+
+type ProcessedDocumentMinimapPayload = {
+  renderedContentState: RenderedContentState | null;
   minimapSnapshot: CachedMinimapSnapshot | null;
 };
 
@@ -559,9 +566,12 @@ function getCachedProcessedDocumentFragment(cacheKey: string): DocumentFragment 
 
   processedDocumentCache.delete(cacheKey);
   processedDocumentCache.set(cacheKey, cached);
+  const restoredRenderedContentState = validateCachedRenderedContentState(cached);
   restoredCachedLayoutState = { ...cached.layoutState };
   restoredCachedHeadings = cached.headings.map(cloneHeadingPayload);
-  restoredCachedMinimapSnapshot = cached.minimapSnapshot;
+  restoredCachedMinimapSnapshot = restoredRenderedContentState === cached.renderedContentState
+    ? cached.minimapSnapshot
+    : null;
   return cached.fragment.cloneNode(true) as DocumentFragment;
 }
 
@@ -581,6 +591,87 @@ function cancelProcessedDocumentCacheClone(): void {
   } else {
     window.clearTimeout(handle.id);
   }
+}
+
+function isProcessedDocumentMinimapSnapshotEligible(
+  renderedContentState: RenderedContentState | null
+): boolean {
+  return renderedContentState === null
+    || renderedContentState === "not-needed"
+    || renderedContentState === "ready"
+    || renderedContentState === "ready-with-failures";
+}
+
+function getCurrentProcessedDocumentRenderedContentState(): RenderedContentState | null {
+  return virtualizationEnabled && virtualizedDocumentWindowModel !== null
+    ? virtualizedDocumentWindowModel.getRenderedContentState()
+    : null;
+}
+
+function readRenderedContentStateFromFragment(fragment: DocumentFragment): RenderedContentState {
+  const mathNodes = Array.from(fragment.querySelectorAll<HTMLElement>("[data-tex]"));
+  if (mathNodes.length === 0) {
+    return "not-needed";
+  }
+
+  let failedCount = 0;
+  for (const node of mathNodes) {
+    const state = node.dataset["mmMathRendered"];
+    if (state !== "true" && state !== "failed") {
+      return "unprepared";
+    }
+    if (state === "failed") {
+      failedCount++;
+    }
+  }
+  return failedCount > 0 ? "ready-with-failures" : "ready";
+}
+
+function validateCachedRenderedContentState(cached: ProcessedDocumentCacheEntry): RenderedContentState | null {
+  if (cached.renderedContentState === null) {
+    return null;
+  }
+  const fragmentState = readRenderedContentStateFromFragment(cached.fragment);
+  if (cached.renderedContentState === "not-needed") {
+    return fragmentState === "not-needed" ? cached.renderedContentState : "unprepared";
+  }
+  if (
+    (cached.renderedContentState === "ready" || cached.renderedContentState === "ready-with-failures")
+    && fragmentState !== cached.renderedContentState
+  ) {
+    return "unprepared";
+  }
+  return cached.renderedContentState;
+}
+
+function isCurrentModelFragmentMinimapSnapshot(snapshot: CachedMinimapSnapshot): boolean {
+  const root = snapshot.content.firstElementChild;
+  return root instanceof HTMLElement
+    && root.dataset["mmMinimapSource"] === "model-fragment"
+    && snapshot.content.querySelector("[data-tex]") === null;
+}
+
+function captureProcessedDocumentMinimapPayload(
+  renderedContentState: RenderedContentState | null
+): ProcessedDocumentMinimapPayload {
+  let minimapSnapshot: CachedMinimapSnapshot | null = null;
+  if (isProcessedDocumentMinimapSnapshotEligible(renderedContentState)) {
+    const captured = captureMinimapSnapshot({
+      ownerDocument: document,
+      minimapContent,
+      minimapViewport,
+      documentHeight: minimapDocumentHeight,
+      lastPostedState: lastPostedMinimapState,
+    });
+    minimapSnapshot = renderedContentState === null || captured === null || isCurrentModelFragmentMinimapSnapshot(captured)
+      ? captured
+      : null;
+  }
+
+  return {
+    minimapSnapshot,
+    renderedContentState,
+  };
 }
 
 function captureCurrentProcessedDocumentCacheEntry(mode: "clone" | "move"): ProcessedDocumentCacheEntry | null {
@@ -645,13 +736,8 @@ function captureCurrentProcessedDocumentCacheEntry(mode: "clone" | "move"): Proc
     fragment.append(...sourceNodes);
   }
 
-  const minimapSnapshot = captureMinimapSnapshot({
-    ownerDocument: document,
-    minimapContent,
-    minimapViewport,
-    documentHeight: minimapDocumentHeight,
-    lastPostedState: lastPostedMinimapState,
-  });
+  const minimapPayload = captureProcessedDocumentMinimapPayload(
+    getCurrentProcessedDocumentRenderedContentState());
 
   return {
     fragment,
@@ -663,7 +749,8 @@ function captureCurrentProcessedDocumentCacheEntry(mode: "clone" | "move"): Proc
       }
       : { ...lastKnownLayoutState },
     headings: lastExtractedHeadings.map(cloneHeadingPayload),
-    minimapSnapshot,
+    renderedContentState: minimapPayload.renderedContentState,
+    minimapSnapshot: minimapPayload.minimapSnapshot,
   };
 }
 
@@ -695,6 +782,7 @@ function cachedFragmentIsBehindLiveDocument(cached: ProcessedDocumentCacheEntry)
   }
 
   return cached.minimapSnapshot === null
+    && isProcessedDocumentMinimapSnapshotEligible(getCurrentProcessedDocumentRenderedContentState())
     && minimapContent !== null
     && minimapContent.childNodes.length > 0;
 }
@@ -708,13 +796,8 @@ function refreshProcessedDocumentCacheState(cacheKey: string, markName: string):
     return false;
   }
 
-  const minimapSnapshot = captureMinimapSnapshot({
-    ownerDocument: document,
-    minimapContent,
-    minimapViewport,
-    documentHeight: minimapDocumentHeight,
-    lastPostedState: lastPostedMinimapState,
-  });
+  const minimapPayload = captureProcessedDocumentMinimapPayload(
+    getCurrentProcessedDocumentRenderedContentState());
 
   processedDocumentCache.delete(cacheKey);
   processedDocumentCache.set(cacheKey, {
@@ -727,7 +810,8 @@ function refreshProcessedDocumentCacheState(cacheKey: string, markName: string):
       }
       : { ...lastKnownLayoutState },
     headings: lastExtractedHeadings.map(cloneHeadingPayload),
-    minimapSnapshot,
+    renderedContentState: minimapPayload.renderedContentState,
+    minimapSnapshot: minimapPayload.minimapSnapshot,
   });
   postPerfMark(markName, {
     entries: processedDocumentCache.size,
