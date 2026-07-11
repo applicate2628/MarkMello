@@ -662,7 +662,7 @@
     return new Promise((resolve) => {
       let resolved = false;
       let timeout;
-      const finish = () => {
+      const finish2 = () => {
         if (resolved) return;
         resolved = true;
         if (timeout !== void 0) {
@@ -671,11 +671,11 @@
         resolve();
       };
       if (typeof window.requestAnimationFrame === "function") {
-        timeout = window.setTimeout(finish, MATH_RENDER_FRAME_FALLBACK_MS);
-        window.requestAnimationFrame(finish);
+        timeout = window.setTimeout(finish2, MATH_RENDER_FRAME_FALLBACK_MS);
+        window.requestAnimationFrame(finish2);
         return;
       }
-      timeout = window.setTimeout(finish, 0);
+      timeout = window.setTimeout(finish2, 0);
     });
   }
   function renderMath(deps) {
@@ -866,6 +866,98 @@
     });
   }
 
+  // RendererWeb/src/findVisibleText.ts
+  var FIND_VISIBLE_SKIP_TAGS = /* @__PURE__ */ new Set(["SCRIPT", "STYLE", "NOSCRIPT", "ASIDE"]);
+  var FIND_VISIBLE_SKIP_CLASSES = /* @__PURE__ */ new Set([
+    "mm-minimap",
+    "mm-minimap-viewport",
+    "mm-width-handle",
+    "mm-drop-overlay",
+    "katex-mathml",
+    "mm-find-bar"
+  ]);
+  var FIND_VISIBLE_SKIP_SELECTOR = "pre.mm-mermaid.is-rendered";
+  function shouldSkipVisibleTextSubtree(element) {
+    if (FIND_VISIBLE_SKIP_TAGS.has(element.tagName)) {
+      return true;
+    }
+    for (const className of FIND_VISIBLE_SKIP_CLASSES) {
+      if (element.classList.contains(className)) {
+        return true;
+      }
+    }
+    return element.matches?.(FIND_VISIBLE_SKIP_SELECTOR) === true;
+  }
+  function walkVisibleTextNodes(root) {
+    const out = [];
+    const visit = (node) => {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const element = node;
+        if (shouldSkipVisibleTextSubtree(element)) {
+          return;
+        }
+      } else if (node.nodeType === Node.TEXT_NODE) {
+        out.push(node);
+        return;
+      }
+      for (const child of Array.from(node.childNodes)) {
+        visit(child);
+      }
+    };
+    visit(root);
+    return out;
+  }
+  async function walkVisibleTextNodesSliced(root, options, visitTextNode) {
+    const now = options.now ?? (() => performance.now());
+    const stack = [root];
+    let sliceActive = false;
+    let sliceStart = 0;
+    const beginOrContinueWork = async () => {
+      if (!sliceActive) {
+        if (options.shouldCancel("before-work")) {
+          return true;
+        }
+        sliceStart = now();
+        sliceActive = true;
+        return false;
+      }
+      if (now() - sliceStart < options.sliceBudgetMs) {
+        return false;
+      }
+      await options.yieldControl();
+      if (options.shouldCancel("after-yield")) {
+        return true;
+      }
+      if (options.shouldCancel("before-work")) {
+        return true;
+      }
+      sliceStart = now();
+      return false;
+    };
+    while (stack.length > 0) {
+      if (await beginOrContinueWork()) {
+        return "cancelled";
+      }
+      const node = stack.pop();
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const element = node;
+        if (shouldSkipVisibleTextSubtree(element)) {
+          continue;
+        }
+      } else if (node.nodeType === Node.TEXT_NODE) {
+        visitTextNode(node);
+        continue;
+      }
+      for (let index = node.childNodes.length - 1; index >= 0; index--) {
+        const child = node.childNodes.item(index);
+        if (child !== null) {
+          stack.push(child);
+        }
+      }
+    }
+    return "complete";
+  }
+
   // RendererWeb/src/findBar.ts
   var FIND_BAR_CLASS = "mm-find-bar";
   var FIND_INPUT_CLASS = "mm-find-input";
@@ -874,16 +966,6 @@
   var FIND_DEBOUNCE_MS = 150;
   var HIGHLIGHT_ALL = "mm-find-all";
   var HIGHLIGHT_CURRENT = "mm-find-current";
-  var SKIP_TAGS = /* @__PURE__ */ new Set(["SCRIPT", "STYLE", "NOSCRIPT", "ASIDE"]);
-  var SKIP_CLASSES = /* @__PURE__ */ new Set([
-    "mm-minimap",
-    "mm-minimap-viewport",
-    "mm-width-handle",
-    "mm-drop-overlay",
-    "katex-mathml",
-    FIND_BAR_CLASS
-  ]);
-  var SKIP_SELECTOR = "pre.mm-mermaid.is-rendered";
   function getHighlightRegistry() {
     const css = window.CSS;
     return css?.highlights ?? null;
@@ -917,34 +999,14 @@
     if (needle.length === 0) {
       return out;
     }
-    const visit = (node) => {
-      if (node.nodeType === Node.ELEMENT_NODE) {
-        const el = node;
-        if (SKIP_TAGS.has(el.tagName)) {
-          return;
-        }
-        for (const cls of SKIP_CLASSES) {
-          if (el.classList.contains(cls)) {
-            return;
-          }
-        }
-        if (el.matches?.(SKIP_SELECTOR)) {
-          return;
-        }
-      } else if (node.nodeType === Node.TEXT_NODE) {
-        for (const [start, end] of findCaseInsensitiveMatchOffsets(node.nodeValue ?? "", needle)) {
-          const range = document.createRange();
-          range.setStart(node, start);
-          range.setEnd(node, end);
-          out.push(range);
-        }
-        return;
+    for (const node of walkVisibleTextNodes(root)) {
+      for (const [start, end] of findCaseInsensitiveMatchOffsets(node.nodeValue ?? "", needle)) {
+        const range = document.createRange();
+        range.setStart(node, start);
+        range.setEnd(node, end);
+        out.push(range);
       }
-      for (const child of Array.from(node.childNodes)) {
-        visit(child);
-      }
-    };
-    visit(root);
+    }
     return out;
   }
   function applyHighlights(s) {
@@ -1274,6 +1336,302 @@
     };
   }
 
+  // RendererWeb/src/renderedFindProjection.ts
+  var RENDERED_FIND_TEXT_DOMAIN = "rendered-dom-v1";
+  var RENDERED_FIND_SCHEMA_VERSION = 1;
+  var RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES = 262144;
+  var RENDERED_FIND_MAX_MESSAGE_CODE_UNITS = 262144;
+  var RENDERED_FIND_MAX_CHUNK_PARTS = 4096;
+  var RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS = 65536;
+  var RENDERED_FIND_MAX_PROJECTION_CODE_UNITS = 16777216;
+  var RENDERED_FIND_MAX_SEMANTIC_SEGMENTS = 524288;
+  var RENDERED_FIND_MAX_TRANSFER_PARTS = 1048576;
+  var RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS = 7;
+  async function publishRenderedFindProjection(options) {
+    if (options.shouldCancel()) {
+      return "cancelled";
+    }
+    const readiness = await options.readiness;
+    if (readiness !== "not-needed" && readiness !== "ready" && readiness !== "ready-with-failures" || options.shouldCancel()) {
+      return "cancelled";
+    }
+    const projectionOptions = {
+      shouldCancel: () => options.shouldCancel(),
+      yieldControl: options.yieldControl
+    };
+    if (options.now !== void 0) {
+      projectionOptions.now = options.now;
+    }
+    const projection = await createRenderedFindProjection(options.root(), projectionOptions);
+    if (projection.status === "cancelled" || options.shouldCancel()) {
+      return "cancelled";
+    }
+    const transferOptions = {
+      emit: (message) => {
+        options.emit(message);
+      },
+      projectionRevision: options.projectionRevision,
+      renderId: options.renderId,
+      shouldCancel: () => options.shouldCancel(),
+      yieldControl: options.yieldControl
+    };
+    if (options.now !== void 0) {
+      transferOptions.now = options.now;
+    }
+    return emitRenderedFindProjectionTransfer(projection.segments, transferOptions);
+  }
+  async function createRenderedFindProjection(root, options = {}) {
+    const segments = [];
+    const blockLengths = /* @__PURE__ */ new Map();
+    const walkOptions = {
+      shouldCancel: options.shouldCancel ?? (() => false),
+      sliceBudgetMs: RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS,
+      yieldControl: options.yieldControl ?? (async () => {
+      })
+    };
+    const result = await walkVisibleTextNodesSliced(root, options.now === void 0 ? walkOptions : { ...walkOptions, now: options.now }, (node) => {
+      const text = node.nodeValue ?? "";
+      if (text.length === 0) {
+        return;
+      }
+      const block = node.parentElement?.closest("[data-mm-block-index]");
+      if (block === null || block === void 0) {
+        return;
+      }
+      const blockIndexText = block.dataset.mmBlockIndex;
+      if (blockIndexText === void 0) {
+        return;
+      }
+      const blockIndex = Number.parseInt(blockIndexText, 10);
+      if (!Number.isSafeInteger(blockIndex) || blockIndex < 0) {
+        return;
+      }
+      const blockLocalStart = blockLengths.get(blockIndex) ?? 0;
+      segments.push({
+        blockIndex,
+        blockLocalStart,
+        segmentCodeUnitLength: text.length,
+        segmentOrdinal: segments.length,
+        text
+      });
+      blockLengths.set(blockIndex, blockLocalStart + text.length);
+    });
+    if (result === "cancelled") {
+      return { segments: [], status: "cancelled" };
+    }
+    return { segments, status: "complete" };
+  }
+  function createRenderedFindDomainBeginMessage(input) {
+    return {
+      renderId: input.renderId,
+      schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
+      textDomain: RENDERED_FIND_TEXT_DOMAIN,
+      type: "find-domain-begin"
+    };
+  }
+  function createRenderedFindTextIndexChunkMessage(input) {
+    return {
+      chunkIndex: input.chunkIndex,
+      parts: input.parts,
+      projectionRevision: input.projectionRevision,
+      renderId: input.renderId,
+      schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
+      textDomain: RENDERED_FIND_TEXT_DOMAIN,
+      transferId: transferId(input.renderId, input.projectionRevision),
+      type: "find-text-index-chunk"
+    };
+  }
+  function measureRenderedFindMessage(message) {
+    const serialized = JSON.stringify(message);
+    return {
+      codeUnits: serialized.length,
+      utf8Bytes: new TextEncoder().encode(serialized).length
+    };
+  }
+  function assertRenderedFindMessageWithinLimits(message) {
+    const measurement = measureRenderedFindMessage(message);
+    if (measurement.codeUnits > RENDERED_FIND_MAX_MESSAGE_CODE_UNITS) {
+      throw new Error(`rendered find message exceeds UTF-16 limit: ${measurement.codeUnits}`);
+    }
+    if (measurement.utf8Bytes > RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES) {
+      throw new Error(`rendered find message exceeds UTF-8 limit: ${measurement.utf8Bytes}`);
+    }
+  }
+  async function emitRenderedFindProjectionTransfer(segments, options) {
+    const now = options.now ?? (() => performance.now());
+    if (segments.length > RENDERED_FIND_MAX_SEMANTIC_SEGMENTS) {
+      throw new Error(`rendered find projection exceeds semantic segment limit: ${segments.length}`);
+    }
+    const plan = await buildTransferPlan(segments, options, now);
+    if (plan.status === "cancelled") {
+      return "cancelled";
+    }
+    const start = createStartMessage({
+      chunkCount: plan.chunks.length,
+      partCount: plan.partCount,
+      projectionRevision: options.projectionRevision,
+      renderId: options.renderId,
+      semanticSegmentCount: segments.length,
+      totalCodeUnits: plan.totalCodeUnits
+    });
+    const complete = createCompleteMessage({
+      chunkCount: plan.chunks.length,
+      partCount: plan.partCount,
+      projectionRevision: options.projectionRevision,
+      renderId: options.renderId,
+      semanticSegmentCount: segments.length,
+      totalCodeUnits: plan.totalCodeUnits
+    });
+    const messages = [start, ...plan.chunks, complete];
+    for (const message of messages) {
+      if (options.shouldCancel("before-slice")) {
+        return "cancelled";
+      }
+      const sliceStart = now();
+      if (options.shouldCancel("before-post")) {
+        return "cancelled";
+      }
+      assertRenderedFindMessageWithinLimits(message);
+      options.emit(message);
+      await options.yieldControl();
+      if (options.shouldCancel("after-yield")) {
+        return "cancelled";
+      }
+    }
+    return "complete";
+  }
+  async function buildTransferPlan(segments, options, now) {
+    const chunks = [];
+    let pending = [];
+    let partCount = 0;
+    let totalCodeUnits = 0;
+    let sliceActive = false;
+    let sliceStart = 0;
+    const beginOrContinuePackingSlice = async () => {
+      if (!sliceActive) {
+        if (options.shouldCancel("before-slice")) {
+          return true;
+        }
+        sliceStart = now();
+        sliceActive = true;
+        return false;
+      }
+      if (now() - sliceStart < RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS) {
+        return false;
+      }
+      await options.yieldControl();
+      if (options.shouldCancel("after-yield")) {
+        return true;
+      }
+      if (options.shouldCancel("before-slice")) {
+        return true;
+      }
+      sliceStart = now();
+      return false;
+    };
+    const flush = () => {
+      chunks.push(createRenderedFindTextIndexChunkMessage({
+        chunkIndex: chunks.length,
+        parts: pending,
+        projectionRevision: options.projectionRevision,
+        renderId: options.renderId
+      }));
+      pending = [];
+    };
+    const appendPart = (part) => {
+      const candidate = [...pending, part];
+      if (candidate.length > RENDERED_FIND_MAX_CHUNK_PARTS) {
+        flush();
+        pending.push(part);
+        return;
+      }
+      const candidateMessage = createRenderedFindTextIndexChunkMessage({
+        chunkIndex: chunks.length,
+        parts: candidate,
+        projectionRevision: options.projectionRevision,
+        renderId: options.renderId
+      });
+      const measurement = measureRenderedFindMessage(candidateMessage);
+      if (pending.length > 0 && (measurement.codeUnits > RENDERED_FIND_MAX_MESSAGE_CODE_UNITS || measurement.utf8Bytes > RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES)) {
+        flush();
+        pending.push(part);
+        return;
+      }
+      if (pending.length === 0 && (measurement.codeUnits > RENDERED_FIND_MAX_MESSAGE_CODE_UNITS || measurement.utf8Bytes > RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES)) {
+        throw new Error("rendered find text part cannot fit within one message");
+      }
+      pending = candidate;
+    };
+    for (const segment of segments) {
+      if (await beginOrContinuePackingSlice()) {
+        return { status: "cancelled" };
+      }
+      const text = segment.text;
+      const segmentLength = segment.segmentCodeUnitLength;
+      totalCodeUnits += segmentLength;
+      if (totalCodeUnits > RENDERED_FIND_MAX_PROJECTION_CODE_UNITS) {
+        throw new Error(`rendered find projection exceeds total UTF-16 limit: ${totalCodeUnits}`);
+      }
+      for (let offset = 0; offset < text.length; offset += RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS) {
+        if (await beginOrContinuePackingSlice()) {
+          return { status: "cancelled" };
+        }
+        appendPart({
+          blockIndex: segment.blockIndex,
+          blockLocalStart: segment.blockLocalStart,
+          partOffset: offset,
+          segmentCodeUnitLength: segmentLength,
+          segmentOrdinal: segment.segmentOrdinal,
+          text: text.slice(offset, offset + RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS)
+        });
+        partCount++;
+        if (partCount > RENDERED_FIND_MAX_TRANSFER_PARTS) {
+          throw new Error(`rendered find projection exceeds transfer part limit: ${partCount}`);
+        }
+      }
+    }
+    if (pending.length > 0) {
+      flush();
+    }
+    return {
+      chunks,
+      partCount,
+      status: "ready",
+      totalCodeUnits
+    };
+  }
+  function createStartMessage(input) {
+    return {
+      chunkCount: input.chunkCount,
+      partCount: input.partCount,
+      projectionRevision: input.projectionRevision,
+      renderId: input.renderId,
+      schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
+      semanticSegmentCount: input.semanticSegmentCount,
+      textDomain: RENDERED_FIND_TEXT_DOMAIN,
+      totalCodeUnits: input.totalCodeUnits,
+      transferId: transferId(input.renderId, input.projectionRevision),
+      type: "find-text-index-start"
+    };
+  }
+  function createCompleteMessage(input) {
+    return {
+      chunkCount: input.chunkCount,
+      partCount: input.partCount,
+      projectionRevision: input.projectionRevision,
+      renderId: input.renderId,
+      schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
+      semanticSegmentCount: input.semanticSegmentCount,
+      textDomain: RENDERED_FIND_TEXT_DOMAIN,
+      totalCodeUnits: input.totalCodeUnits,
+      transferId: transferId(input.renderId, input.projectionRevision),
+      type: "find-text-index-complete"
+    };
+  }
+  function transferId(renderId, projectionRevision) {
+    return `${renderId}:${projectionRevision}`;
+  }
+
   // RendererWeb/src/sectionIntrinsicSize.ts
   var MODEL_GAP_PX = 44;
   var DEFAULT_LINE_HEIGHT_PX = 30;
@@ -1581,6 +1939,61 @@
       });
       this.refreshHeightModel();
     }
+    getPendingRenderedContentEntryIndexes() {
+      const pendingIndexes = [];
+      for (let index = 0; index < this.sections.length; index++) {
+        const entry = this.sections[index];
+        if (readRenderedContentHtmlStats(entry.html).pendingMathCount > 0) {
+          pendingIndexes.push(index);
+        }
+      }
+      return pendingIndexes;
+    }
+    adoptRenderedSectionHtml(updates) {
+      let updatedCount = 0;
+      for (const update of updates) {
+        const entry = this.sections[update.sectionIndex];
+        if (entry === void 0 || typeof update.html !== "string") {
+          continue;
+        }
+        if (entry.html === update.html) {
+          continue;
+        }
+        entry.html = update.html;
+        updatedCount++;
+      }
+      return {
+        pendingMathCount: this.countPendingRenderedContentMath(),
+        updatedCount
+      };
+    }
+    commitRenderedFormulaFragment(sectionIndex, renderedHtml, result) {
+      const entry = this.sections[sectionIndex];
+      if (entry === void 0 || typeof renderedHtml !== "string" || !isRenderedFormulaFragmentResultConsistent(renderedHtml, result)) {
+        return {
+          changed: false,
+          pendingMathCount: this.countPendingRenderedContentMath()
+        };
+      }
+      const changed = entry.html !== renderedHtml;
+      if (changed) {
+        entry.html = renderedHtml;
+      }
+      return {
+        changed,
+        pendingMathCount: this.countPendingRenderedContentMath()
+      };
+    }
+    getRenderedContentState() {
+      const summary = this.readRenderedContentSummary();
+      if (summary.totalMathCount === 0) {
+        return "not-needed";
+      }
+      if (summary.pendingMathCount > 0) {
+        return "unprepared";
+      }
+      return summary.failedMathCount > 0 ? "ready-with-failures" : "ready";
+    }
     getSectionCount() {
       return this.sections.length;
     }
@@ -1835,6 +2248,23 @@
         windowHeight
       };
     }
+    countPendingRenderedContentMath() {
+      return this.readRenderedContentSummary().pendingMathCount;
+    }
+    readRenderedContentSummary() {
+      const summary = {
+        failedMathCount: 0,
+        pendingMathCount: 0,
+        totalMathCount: 0
+      };
+      for (const entry of this.sections) {
+        const stats = readRenderedContentHtmlStats(entry.html);
+        summary.failedMathCount += stats.failedMathCount;
+        summary.pendingMathCount += stats.pendingMathCount;
+        summary.totalMathCount += stats.totalMathCount;
+      }
+      return summary;
+    }
   };
   function buildDocumentWindowModelsFromLiveBlocks(blocks, metrics, documentScrollHeight, options = {}) {
     const measuredEntries = readLiveSectionModelEntries(blocks, metrics, documentScrollHeight, true, options);
@@ -1874,6 +2304,48 @@
       }
       return update;
     });
+  }
+  function readRenderedContentHtmlStats(html) {
+    if (typeof html !== "string" || !html.includes("data-tex")) {
+      return EMPTY_RENDERED_CONTENT_HTML_STATS;
+    }
+    if (typeof document === "undefined") {
+      return {
+        failedMathCount: 0,
+        pendingMathCount: 1,
+        totalMathCount: 1
+      };
+    }
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    const mathNodes = Array.from(template.content.querySelectorAll("[data-tex]"));
+    let failedMathCount = 0;
+    let pendingMathCount = 0;
+    for (const node of mathNodes) {
+      const state2 = node.dataset["mmMathRendered"];
+      if (state2 === "failed") {
+        failedMathCount++;
+      } else if (state2 !== "true") {
+        pendingMathCount++;
+      }
+    }
+    return {
+      failedMathCount,
+      pendingMathCount,
+      totalMathCount: mathNodes.length
+    };
+  }
+  var EMPTY_RENDERED_CONTENT_HTML_STATS = {
+    failedMathCount: 0,
+    pendingMathCount: 0,
+    totalMathCount: 0
+  };
+  function isRenderedFormulaFragmentResultConsistent(renderedHtml, result) {
+    const stats = readRenderedContentHtmlStats(renderedHtml);
+    if (stats.pendingMathCount > 0) {
+      return false;
+    }
+    return result.status === "ready-with-failures" ? stats.failedMathCount > 0 : stats.failedMathCount === 0;
   }
   function readLiveBlockOffsetMeasuredHeights(blocks) {
     const geometry = readVisibleBlockGeometry(blocks);
@@ -3256,16 +3728,8 @@
   }
 
   // RendererWeb/src/virtualizedFindProvider.ts
-  var FIND_VISIBLE_SKIP_SELECTOR = [
-    "aside",
-    ".mm-minimap",
-    ".mm-minimap-viewport",
-    ".mm-width-handle",
-    ".mm-drop-overlay",
-    ".katex-mathml",
-    "pre.mm-mermaid.is-rendered",
-    ".mm-find-bar"
-  ].join(",");
+  var FIND_RANGE_REAIM_FRAME_LIMIT = 3;
+  var FIND_SCROLL_EPSILON = 0.5;
   function createVirtualizedFindProvider(deps) {
     let view = null;
     let requestSequence = 0;
@@ -3323,6 +3787,7 @@
       const request = {
         query,
         requestId: ++requestSequence,
+        textDomain: RENDERED_FIND_TEXT_DOMAIN,
         type: "find-query"
       };
       if (context.renderId !== null) {
@@ -3332,16 +3797,20 @@
       deps.postHostMessage(request);
     };
     const handleFindResults = (message) => {
-      if (message.stale === true || message.requestId !== latestRequestId || message.query !== currentQuery) {
+      if (message.stale === true || message.requestId !== latestRequestId || message.query !== currentQuery || message.textDomain !== RENDERED_FIND_TEXT_DOMAIN) {
         return;
       }
       const context = deps.readContext();
       if (context.renderId !== null && message.renderId !== void 0 && message.renderId !== null && message.renderId !== context.renderId) {
         return;
       }
-      matches = message.matches.filter(isUsableDescriptor).slice().sort((left, right) => left.ordinal - right.ordinal);
+      if (message.status !== "ready") {
+        resetResults(currentQuery);
+        return;
+      }
+      matches = message.matches.filter(isUsableDescriptor).filter(hasUsableRenderedOffsetWhenLive).slice().sort((left, right) => left.ordinal - right.ordinal);
       totalCount = Math.max(0, Math.floor(message.totalCount));
-      currentIndex = selectInitialMatchIndex(matches, context);
+      currentIndex = matches.length === 0 ? -1 : 0;
       paintVisibleHighlights();
       if (currentIndex >= 0) {
         const sequence = ++navigationSequence;
@@ -3392,8 +3861,14 @@
           if (sequence !== navigationSequence || !operation.isCurrent()) {
             return;
           }
-          const currentRange = paintVisibleHighlights();
-          requestRangeLanding(context, operation, currentRange, targetElement ?? element);
+          paintVisibleHighlights();
+          requestElementLanding(context, operation, element ?? targetElement);
+          return scheduleRangeReaim(context, operation, () => {
+            if (sequence !== navigationSequence || !operation.isCurrent()) {
+              return null;
+            }
+            return paintVisibleHighlights();
+          });
         },
         actionKind: "navigate",
         controller: context.controller,
@@ -3402,10 +3877,27 @@
           if (sequence !== navigationSequence || !operation.isCurrent()) {
             return;
           }
-          const currentRange = paintVisibleHighlights();
-          operation.scheduleFrameTransaction(() => {
-            if (sequence === navigationSequence && operation.isCurrent()) {
-              requestRangeLanding(context, operation, currentRange, findLiveBlockElement(match.blockIndex));
+          return new Promise((resolve) => {
+            const scheduled = operation.scheduleFrameTransaction(() => {
+              if (sequence !== navigationSequence || !operation.isCurrent()) {
+                resolve();
+                return;
+              }
+              paintVisibleHighlights();
+              requestElementLanding(
+                context,
+                operation,
+                findLiveTopLevelBlockElement(match.blockIndex) ?? findLiveBlockElement(match.blockIndex)
+              );
+              void scheduleRangeReaim(context, operation, () => {
+                if (sequence !== navigationSequence || !operation.isCurrent()) {
+                  return null;
+                }
+                return paintVisibleHighlights();
+              }).then(resolve);
+            });
+            if (!scheduled) {
+              resolve();
             }
           });
         },
@@ -3446,38 +3938,22 @@
   function isUsableDescriptor(match) {
     return typeof match.matchId === "string" && Number.isFinite(match.blockIndex) && Number.isFinite(match.blockLocalOffset) && match.blockLocalOffset >= 0 && Number.isFinite(match.length) && match.length > 0 && typeof match.normalizedText === "string" && Number.isFinite(match.ordinal) && match.ordinal > 0;
   }
+  function hasUsableRenderedOffsetWhenLive(match) {
+    const block = findLiveBlockElement(match.blockIndex);
+    return block === null || rangeFromBlockLocalOffset(block, match.blockLocalOffset, match.length) !== null;
+  }
   function resolveLiveRangeForMatch(match) {
     const block = findLiveBlockElement(match.blockIndex);
     if (block === null) {
       return null;
     }
-    return rangeFromBlockLocalOffset(block, match.blockLocalOffset, match.length) ?? rangeFromNormalizedText(block, match.normalizedText);
+    return rangeFromBlockLocalOffset(block, match.blockLocalOffset, match.length);
   }
   function findLiveBlockElement(blockIndex) {
     return document.querySelector(`body > main.mm-document [data-mm-block-index="${blockIndex}"]`);
   }
-  function selectInitialMatchIndex(matches, context) {
-    if (matches.length === 0) {
-      return -1;
-    }
-    const model = context.model;
-    if (model === null) {
-      return 0;
-    }
-    const readingTop = Math.max(0, context.root.scrollTop);
-    for (let index = 0; index < matches.length; index++) {
-      const match = matches[index];
-      const entry = model.getEntryContainingBlockIndex(match.startBlockIndex ?? match.blockIndex) ?? model.getEntryByBlockIndex(match.blockIndex);
-      if (entry === void 0) {
-        continue;
-      }
-      const sectionTop = model.sectionTop(entry.sectionIndex);
-      const sectionBottom = sectionTop + model.sectionEffectiveHeight(entry.sectionIndex);
-      if (sectionBottom >= readingTop) {
-        return index;
-      }
-    }
-    return 0;
+  function findLiveTopLevelBlockElement(blockIndex) {
+    return findLiveBlockElement(blockIndex)?.closest("main.mm-document > *") ?? null;
   }
   function rangeFromBlockLocalOffset(block, offset, length) {
     const endOffset = offset + length;
@@ -3511,46 +3987,62 @@
     range.setEnd(endNode, endInNode);
     return range.toString().length === length ? range : null;
   }
-  function rangeFromNormalizedText(block, normalizedText) {
-    if (normalizedText.length === 0) {
-      return null;
-    }
-    for (const node of visibleTextNodes(block)) {
-      for (const [start, end] of findCaseInsensitiveMatchOffsets(node.nodeValue ?? "", normalizedText)) {
-        const range = document.createRange();
-        range.setStart(node, start);
-        range.setEnd(node, end);
-        return range;
-      }
-    }
-    return null;
-  }
   function visibleTextNodes(root) {
-    const out = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        const parent = node.parentElement;
-        if (parent === null || parent.closest(FIND_VISIBLE_SKIP_SELECTOR) !== null) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        return NodeFilter.FILTER_ACCEPT;
-      }
-    });
-    for (let current = walker.nextNode(); current !== null; current = walker.nextNode()) {
-      if (current.nodeType === Node.TEXT_NODE) {
-        out.push(current);
-      }
-    }
-    return out;
+    return walkVisibleTextNodes(root);
   }
-  function requestRangeLanding(context, operation, range, fallback) {
-    const host = range?.startContainer.parentElement?.closest("[data-mm-block-index]") ?? fallback;
-    if (host === null || !operation.isCurrent()) {
-      return;
+  function requestRangeLanding(context, operation, range) {
+    if (range === null || !operation.isCurrent()) {
+      return false;
     }
-    const rect = host.getBoundingClientRect();
+    const rect = range.getBoundingClientRect();
+    if (rect.height <= 0 && rect.width <= 0) {
+      return false;
+    }
+    return requestLandingForRect(context, operation, rect);
+  }
+  function requestElementLanding(context, operation, element) {
+    if (element === null || !operation.isCurrent()) {
+      return false;
+    }
+    return requestLandingForRect(context, operation, element.getBoundingClientRect());
+  }
+  function requestLandingForRect(context, operation, rect) {
     const target = context.root.scrollTop + rect.top - Math.max(0, (context.root.clientHeight - Math.max(0, rect.height)) / 2);
-    operation.requestScrollTop(Math.max(0, target), "find-navigation");
+    const scrollTop = Math.max(0, target);
+    if (Math.abs(scrollTop - context.root.scrollTop) <= FIND_SCROLL_EPSILON || !operation.isCurrent()) {
+      return false;
+    }
+    operation.requestScrollTop(scrollTop, "find-navigation");
+    return true;
+  }
+  function scheduleRangeReaim(context, operation, readRange) {
+    return new Promise((resolve) => {
+      let attempts = 0;
+      const scheduleNext = () => {
+        if (!operation.isCurrent() || attempts >= FIND_RANGE_REAIM_FRAME_LIMIT) {
+          resolve();
+          return;
+        }
+        const scheduled = operation.scheduleFrameTransaction(() => {
+          if (!operation.isCurrent()) {
+            resolve();
+            return;
+          }
+          attempts++;
+          const range = readRange();
+          const requested = requestRangeLanding(context, operation, range);
+          if ((requested || range === null) && attempts < FIND_RANGE_REAIM_FRAME_LIMIT) {
+            scheduleNext();
+            return;
+          }
+          resolve();
+        });
+        if (!scheduled) {
+          resolve();
+        }
+      };
+      scheduleNext();
+    });
   }
 
   // RendererWeb/src/sourceLineSync.ts
@@ -3817,6 +4309,187 @@
       current = nextOffsetParent instanceof HTMLElement ? nextOffsetParent : null;
     }
     return top;
+  }
+
+  // RendererWeb/src/modelRenderedContent.ts
+  var DEFAULT_MODEL_RENDERED_CONTENT_TIME_BUDGET_MS = 7;
+  async function prepareDocumentWindowModelRenderedContent(model, deps) {
+    const shouldContinue = deps.shouldContinue ?? (() => true);
+    const pendingEntryIndexes = model.getPendingRenderedContentEntryIndexes();
+    let renderedMathCount = 0;
+    let failedMathCount = 0;
+    let attemptedSectionCount = 0;
+    let committedSectionCount = 0;
+    if (pendingEntryIndexes.length === 0) {
+      return finish({
+        attemptedSectionCount,
+        cancelled: false,
+        committedSectionCount,
+        deps,
+        failedMathCount,
+        model,
+        renderedMathCount,
+        skippedNoKatex: false,
+        status: model.getRenderedContentState(),
+        type: "complete"
+      });
+    }
+    if (!deps.katex) {
+      return finish({
+        attemptedSectionCount,
+        cancelled: false,
+        committedSectionCount,
+        deps,
+        failedMathCount,
+        model,
+        renderedMathCount,
+        skippedNoKatex: true,
+        status: "unavailable",
+        type: "skipped-no-katex"
+      });
+    }
+    for (const sectionIndex of pendingEntryIndexes) {
+      if (!shouldContinue()) {
+        return finish({
+          attemptedSectionCount,
+          cancelled: true,
+          committedSectionCount,
+          deps,
+          failedMathCount,
+          model,
+          renderedMathCount,
+          skippedNoKatex: false,
+          status: "cancelled",
+          type: "cancelled"
+        });
+      }
+      const entry = model.sections[sectionIndex];
+      const section = entry === void 0 ? null : readPendingRenderedSection(entry, deps.ownerDocument);
+      if (section === null || section.pendingMathNodes.length === 0) {
+        continue;
+      }
+      attemptedSectionCount++;
+      let queue;
+      queue = new MathRenderQueue({
+        katex: deps.katex,
+        now: deps.now ?? readNow,
+        timeBudgetMs: deps.timeBudgetMs ?? DEFAULT_MODEL_RENDERED_CONTENT_TIME_BUDGET_MS,
+        yield: async () => {
+          await deps.yield();
+          if (!shouldContinue()) {
+            queue?.cancel();
+          }
+        }
+      });
+      const unsubscribe = queue.onTaskComplete((node) => {
+        renderedMathCount++;
+      });
+      for (const node of section.pendingMathNodes) {
+        queue.enqueue(readMathRenderTask(node), "low");
+      }
+      try {
+        await queue.start();
+      } finally {
+        unsubscribe();
+      }
+      if (!shouldContinue() || section.allMathNodes.some((node) => !isTerminalMathState(node.dataset["mmMathRendered"]))) {
+        return finish({
+          attemptedSectionCount,
+          cancelled: true,
+          committedSectionCount,
+          deps,
+          failedMathCount,
+          model,
+          renderedMathCount,
+          skippedNoKatex: false,
+          status: "cancelled",
+          type: "cancelled"
+        });
+      }
+      const sectionFailedCount = section.allMathNodes.filter((node) => node.dataset["mmMathRendered"] === "failed").length;
+      const renderedHtml = serializeRenderedSection(section.template);
+      const status = sectionFailedCount > 0 ? "ready-with-failures" : "ready";
+      const commit = model.commitRenderedFormulaFragment(sectionIndex, renderedHtml, { status });
+      if (commit.changed) {
+        committedSectionCount++;
+        failedMathCount += sectionFailedCount;
+      }
+      deps.onProgress?.({
+        committed: commit.changed,
+        failedMathCount,
+        pendingMathCount: commit.pendingMathCount,
+        renderedMathCount,
+        sectionIndex,
+        status: model.getRenderedContentState(),
+        type: "progress"
+      });
+    }
+    return finish({
+      attemptedSectionCount,
+      cancelled: false,
+      committedSectionCount,
+      deps,
+      failedMathCount,
+      model,
+      renderedMathCount,
+      skippedNoKatex: false,
+      status: model.getRenderedContentState(),
+      type: "complete"
+    });
+  }
+  function readPendingRenderedSection(entry, ownerDocument) {
+    if (typeof entry.html !== "string" || !entry.html.includes("data-tex")) {
+      return null;
+    }
+    const template = ownerDocument.createElement("template");
+    template.innerHTML = entry.html;
+    const allMathNodes = Array.from(template.content.querySelectorAll("[data-tex]"));
+    const pendingMathNodes = allMathNodes.filter((node) => !isTerminalMathState(node.dataset["mmMathRendered"]));
+    return { allMathNodes, pendingMathNodes, template };
+  }
+  function readMathRenderTask(node) {
+    return {
+      displayMode: node.classList.contains("math-display"),
+      node,
+      tex: node.dataset["tex"] ?? ""
+    };
+  }
+  function serializeRenderedSection(template) {
+    const firstElement = template.content.firstElementChild;
+    return firstElement instanceof HTMLElement ? firstElement.outerHTML : template.innerHTML;
+  }
+  function finish(args) {
+    const pendingMathCount = countPendingMath(args.model, args.deps.ownerDocument);
+    const completed = args.status === "not-needed" || args.status === "ready" || args.status === "ready-with-failures";
+    args.deps.onProgress?.({
+      failedMathCount: args.failedMathCount,
+      pendingMathCount,
+      renderedMathCount: args.renderedMathCount,
+      status: args.status,
+      type: args.type
+    });
+    return {
+      attemptedSectionCount: args.attemptedSectionCount,
+      cancelled: args.cancelled,
+      committedSectionCount: args.committedSectionCount,
+      completed,
+      failedMathCount: args.failedMathCount,
+      pendingMathCount,
+      renderedMathCount: args.renderedMathCount,
+      skippedNoKatex: args.skippedNoKatex,
+      status: args.status
+    };
+  }
+  function countPendingMath(model, ownerDocument) {
+    let pendingMathCount = 0;
+    for (const entry of model.sections) {
+      const section = readPendingRenderedSection(entry, ownerDocument);
+      pendingMathCount += section?.pendingMathNodes.length ?? 0;
+    }
+    return pendingMathCount;
+  }
+  function readNow() {
+    return typeof performance === "undefined" ? Date.now() : performance.now();
   }
 
   // RendererWeb/src/virtualizationFlags.ts
@@ -5081,6 +5754,7 @@
         window.clearTimeout(minimapContentRefreshTimer);
         minimapContentRefreshTimer = void 0;
       }
+      cancelModelRenderedContentCoordinator("teardown");
       resetVirtualizedDocumentWindow(false);
       scrollOwnershipControlPlane.dispose();
       getDocumentScrollRoot().removeAttribute("data-mm-virtualization-active");
@@ -5110,6 +5784,13 @@
   var cachedScrollRestoreCompletion = null;
   var finishCachedScrollRestore = null;
   var virtualizedWindowMathController = null;
+  var modelRenderedContentCoordinatorState = null;
+  var modelRenderedContentLeaseSerial = 0;
+  var minimapRenderedContentLease = null;
+  var renderedFindContentLease = null;
+  var renderedFindProjectionGeneration = 0;
+  var renderedFindProjectionRenderId = null;
+  var renderedFindProjectionRevision = 0;
   var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
   function cloneHeadingPayload(heading) {
     return {
@@ -5150,9 +5831,10 @@
     }
     processedDocumentCache.delete(cacheKey);
     processedDocumentCache.set(cacheKey, cached);
+    const restoredRenderedContentState = validateCachedRenderedContentState(cached);
     restoredCachedLayoutState = { ...cached.layoutState };
     restoredCachedHeadings = cached.headings.map(cloneHeadingPayload);
-    restoredCachedMinimapSnapshot = cached.minimapSnapshot;
+    restoredCachedMinimapSnapshot = restoredRenderedContentState === cached.renderedContentState ? cached.minimapSnapshot : null;
     return cached.fragment.cloneNode(true);
   }
   function setCurrentProcessedDocumentCacheKey(cacheKey) {
@@ -5169,6 +5851,63 @@
     } else {
       window.clearTimeout(handle.id);
     }
+  }
+  function isProcessedDocumentMinimapSnapshotEligible(renderedContentState) {
+    return renderedContentState === null || renderedContentState === "not-needed" || renderedContentState === "ready" || renderedContentState === "ready-with-failures";
+  }
+  function getCurrentProcessedDocumentRenderedContentState() {
+    return virtualizationEnabled && virtualizedDocumentWindowModel !== null ? virtualizedDocumentWindowModel.getRenderedContentState() : null;
+  }
+  function readRenderedContentStateFromFragment(fragment) {
+    const mathNodes = Array.from(fragment.querySelectorAll("[data-tex]"));
+    if (mathNodes.length === 0) {
+      return "not-needed";
+    }
+    let failedCount = 0;
+    for (const node of mathNodes) {
+      const state2 = node.dataset["mmMathRendered"];
+      if (state2 !== "true" && state2 !== "failed") {
+        return "unprepared";
+      }
+      if (state2 === "failed") {
+        failedCount++;
+      }
+    }
+    return failedCount > 0 ? "ready-with-failures" : "ready";
+  }
+  function validateCachedRenderedContentState(cached) {
+    if (cached.renderedContentState === null) {
+      return null;
+    }
+    const fragmentState = readRenderedContentStateFromFragment(cached.fragment);
+    if (cached.renderedContentState === "not-needed") {
+      return fragmentState === "not-needed" ? cached.renderedContentState : "unprepared";
+    }
+    if ((cached.renderedContentState === "ready" || cached.renderedContentState === "ready-with-failures") && fragmentState !== cached.renderedContentState) {
+      return "unprepared";
+    }
+    return cached.renderedContentState;
+  }
+  function isCurrentModelFragmentMinimapSnapshot(snapshot) {
+    const root = snapshot.content.firstElementChild;
+    return root instanceof HTMLElement && root.dataset["mmMinimapSource"] === "model-fragment" && snapshot.content.querySelector("[data-tex]") === null;
+  }
+  function captureProcessedDocumentMinimapPayload(renderedContentState) {
+    let minimapSnapshot = null;
+    if (isProcessedDocumentMinimapSnapshotEligible(renderedContentState)) {
+      const captured = captureMinimapSnapshot({
+        ownerDocument: document,
+        minimapContent,
+        minimapViewport,
+        documentHeight: minimapDocumentHeight,
+        lastPostedState: lastPostedMinimapState
+      });
+      minimapSnapshot = renderedContentState === null || captured === null || isCurrentModelFragmentMinimapSnapshot(captured) ? captured : null;
+    }
+    return {
+      minimapSnapshot,
+      renderedContentState
+    };
   }
   function captureCurrentProcessedDocumentCacheEntry(mode) {
     const main = document.querySelector("main.mm-document");
@@ -5206,13 +5945,9 @@
       }
       fragment.append(...sourceNodes);
     }
-    const minimapSnapshot = captureMinimapSnapshot({
-      ownerDocument: document,
-      minimapContent,
-      minimapViewport,
-      documentHeight: minimapDocumentHeight,
-      lastPostedState: lastPostedMinimapState
-    });
+    const minimapPayload = captureProcessedDocumentMinimapPayload(
+      getCurrentProcessedDocumentRenderedContentState()
+    );
     return {
       fragment,
       nodeCount: sourceNodes.length,
@@ -5221,7 +5956,8 @@
         ...virtualizedLayoutState
       } : { ...lastKnownLayoutState },
       headings: lastExtractedHeadings.map(cloneHeadingPayload),
-      minimapSnapshot
+      renderedContentState: minimapPayload.renderedContentState,
+      minimapSnapshot: minimapPayload.minimapSnapshot
     };
   }
   function storeProcessedDocumentCacheEntry(cacheKey, entry) {
@@ -5247,7 +5983,7 @@
     if (liveHeadingCount > cached.headings.length) {
       return true;
     }
-    return cached.minimapSnapshot === null && minimapContent !== null && minimapContent.childNodes.length > 0;
+    return cached.minimapSnapshot === null && isProcessedDocumentMinimapSnapshotEligible(getCurrentProcessedDocumentRenderedContentState()) && minimapContent !== null && minimapContent.childNodes.length > 0;
   }
   function refreshProcessedDocumentCacheState(cacheKey, markName) {
     const cached = processedDocumentCache.get(cacheKey);
@@ -5257,13 +5993,9 @@
     if (cachedFragmentIsBehindLiveDocument(cached)) {
       return false;
     }
-    const minimapSnapshot = captureMinimapSnapshot({
-      ownerDocument: document,
-      minimapContent,
-      minimapViewport,
-      documentHeight: minimapDocumentHeight,
-      lastPostedState: lastPostedMinimapState
-    });
+    const minimapPayload = captureProcessedDocumentMinimapPayload(
+      getCurrentProcessedDocumentRenderedContentState()
+    );
     processedDocumentCache.delete(cacheKey);
     processedDocumentCache.set(cacheKey, {
       ...cached,
@@ -5273,7 +6005,8 @@
         settledGeometryEpoch: scrollOwnershipControlPlane.captureGeometryEpoch()
       } : { ...lastKnownLayoutState },
       headings: lastExtractedHeadings.map(cloneHeadingPayload),
-      minimapSnapshot
+      renderedContentState: minimapPayload.renderedContentState,
+      minimapSnapshot: minimapPayload.minimapSnapshot
     });
     postPerfMark(markName, {
       entries: processedDocumentCache.size,
@@ -5547,6 +6280,239 @@
       }
     }
     postHostMessage(message);
+  }
+  function isTerminalModelRenderedContentStatus(status) {
+    return status === "not-needed" || status === "ready" || status === "ready-with-failures";
+  }
+  function readModelRenderedContentConsumers(state2) {
+    return Array.from(new Set(state2.leases.values())).sort();
+  }
+  function postModelRenderedContentMark(state2, name, detail = {}) {
+    postPerfMark(name, {
+      ...detail,
+      activeLeaseCount: state2.leases.size,
+      consumers: readModelRenderedContentConsumers(state2),
+      documentEpoch: state2.documentEpoch
+    });
+  }
+  function isCurrentModelRenderedContentState(state2) {
+    return state2.model === virtualizedDocumentWindowModel && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(state2.documentEpoch) === true;
+  }
+  function postModelRenderedContentCancellation(state2, reason) {
+    if (state2.cancelMarkPosted) {
+      return;
+    }
+    state2.cancelMarkPosted = true;
+    postModelRenderedContentMark(state2, "mm-model-rendered-content-cancel", {
+      reason,
+      status: state2.model.getRenderedContentState()
+    });
+  }
+  function cancelModelRenderedContentState(state2, reason) {
+    state2.cancelled = true;
+    state2.cancelReason = reason;
+    postModelRenderedContentCancellation(state2, reason);
+  }
+  function cancelModelRenderedContentCoordinator(reason) {
+    renderedFindProjectionGeneration++;
+    minimapRenderedContentLease = null;
+    renderedFindContentLease = null;
+    const state2 = modelRenderedContentCoordinatorState;
+    if (state2 !== null) {
+      state2.leases.clear();
+      if (state2.promise !== null && state2.model.getRenderedContentState() === "unprepared") {
+        cancelModelRenderedContentState(state2, reason);
+      }
+    }
+    modelRenderedContentCoordinatorState = null;
+  }
+  function yieldModelRenderedContentWork() {
+    return new Promise((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  }
+  function handleModelRenderedContentEvent(state2, event) {
+    if (event.type === "progress") {
+      postModelRenderedContentMark(state2, "mm-model-rendered-content-progress", {
+        committed: event.committed,
+        failedMathCount: event.failedMathCount,
+        pendingMathCount: event.pendingMathCount,
+        renderedMathCount: event.renderedMathCount,
+        sectionIndex: event.sectionIndex,
+        status: event.status
+      });
+      return;
+    }
+    const detail = {
+      failedMathCount: event.failedMathCount,
+      pendingMathCount: event.pendingMathCount,
+      renderedMathCount: event.renderedMathCount,
+      status: event.status
+    };
+    if (event.type === "complete") {
+      postModelRenderedContentMark(state2, "mm-model-rendered-content-end", detail);
+    } else if (event.type === "skipped-no-katex") {
+      postModelRenderedContentMark(state2, "mm-model-rendered-content-skipped-no-katex", detail);
+    } else {
+      postModelRenderedContentCancellation(state2, state2.cancelReason ?? "cancelled");
+    }
+  }
+  function ensureModelRenderedContentJob(state2) {
+    if (state2.promise !== null) {
+      return state2.promise;
+    }
+    const runSerial = ++state2.runSerial;
+    state2.cancelled = false;
+    state2.cancelReason = null;
+    state2.cancelMarkPosted = false;
+    postModelRenderedContentMark(state2, "mm-model-rendered-content-start", {
+      status: state2.model.getRenderedContentState()
+    });
+    const katex = hostWindow.katex;
+    const promise = prepareDocumentWindowModelRenderedContent(state2.model, {
+      katex,
+      now: () => performance.now(),
+      onProgress: (event) => handleModelRenderedContentEvent(state2, event),
+      ownerDocument: document,
+      shouldContinue: () => !state2.cancelled && state2.leases.size > 0 && isCurrentModelRenderedContentState(state2),
+      yield: yieldModelRenderedContentWork
+    }).then((result) => {
+      if (modelRenderedContentCoordinatorState === state2 && state2.runSerial === runSerial) {
+        state2.promise = null;
+        if (result.completed) {
+          scheduleCurrentProcessedDocumentCacheClone();
+        }
+      }
+      return result.status;
+    }, (error) => {
+      cancelModelRenderedContentState(state2, `error:${String(error)}`);
+      if (modelRenderedContentCoordinatorState === state2 && state2.runSerial === runSerial) {
+        state2.promise = null;
+      }
+      return "cancelled";
+    });
+    state2.promise = promise;
+    return promise;
+  }
+  function getCurrentModelRenderedContentState(model, documentEpoch) {
+    const existing = modelRenderedContentCoordinatorState;
+    if (existing !== null) {
+      if (existing.model === model && existing.documentEpoch === documentEpoch) {
+        return existing;
+      }
+      cancelModelRenderedContentState(existing, "stale-model");
+    }
+    const state2 = {
+      cancelMarkPosted: false,
+      cancelReason: null,
+      cancelled: false,
+      documentEpoch,
+      leases: /* @__PURE__ */ new Map(),
+      model,
+      promise: null,
+      runSerial: 0
+    };
+    modelRenderedContentCoordinatorState = state2;
+    return state2;
+  }
+  function acquireCurrentModelRenderedContentLease(consumer) {
+    const model = virtualizedDocumentWindowModel;
+    const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+    if (!virtualizationEnabled || model === null || documentEpoch === void 0 || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
+      return null;
+    }
+    const modelStatus = model.getRenderedContentState();
+    if (modelStatus !== "unprepared") {
+      return {
+        consumer,
+        documentEpoch,
+        model,
+        readiness: Promise.resolve(modelStatus),
+        release: () => {
+        }
+      };
+    }
+    const state2 = getCurrentModelRenderedContentState(model, documentEpoch);
+    const leaseId = ++modelRenderedContentLeaseSerial;
+    state2.leases.set(leaseId, consumer);
+    const readiness = ensureModelRenderedContentJob(state2);
+    let released = false;
+    return {
+      consumer,
+      documentEpoch,
+      model,
+      readiness,
+      release: () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        state2.leases.delete(leaseId);
+        if (state2.promise !== null && state2.leases.size === 0 && state2.model.getRenderedContentState() === "unprepared") {
+          cancelModelRenderedContentState(state2, "last-lease-released");
+        }
+      }
+    };
+  }
+  function releaseMinimapRenderedContentLease() {
+    const lease = minimapRenderedContentLease;
+    minimapRenderedContentLease = null;
+    lease?.release();
+  }
+  function releaseRenderedFindContentLease() {
+    const lease = renderedFindContentLease;
+    renderedFindContentLease = null;
+    lease?.release();
+  }
+  function startRenderedFindProjectionForCurrentModel() {
+    const model = virtualizedDocumentWindowModel;
+    const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+    const renderId = currentDocumentRenderId;
+    if (!virtualizationEnabled || model === null || documentEpoch === void 0 || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true || renderId === null || !Number.isSafeInteger(renderId) || renderId <= 0) {
+      return;
+    }
+    if (renderedFindProjectionRenderId !== renderId) {
+      renderedFindProjectionRenderId = renderId;
+      renderedFindProjectionRevision = 0;
+    }
+    const projectionRevision = ++renderedFindProjectionRevision;
+    const generation = ++renderedFindProjectionGeneration;
+    postHostMessage(createRenderedFindDomainBeginMessage({ renderId }));
+    releaseRenderedFindContentLease();
+    const lease = acquireCurrentModelRenderedContentLease("rendered-find-projection");
+    if (lease === null) {
+      return;
+    }
+    renderedFindContentLease = lease;
+    const shouldCancel = () => generation !== renderedFindProjectionGeneration || model !== virtualizedDocumentWindowModel || renderId !== currentDocumentRenderId || lease.documentEpoch !== documentEpoch || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true;
+    void publishRenderedFindProjection({
+      emit: (message) => {
+        postHostMessage(message);
+      },
+      projectionRevision,
+      readiness: lease.readiness,
+      renderId,
+      root: () => createFullDocumentFragmentFromWindowModel(document, model),
+      shouldCancel,
+      yieldControl: yieldModelRenderedContentWork
+    }).then((status) => {
+      postPerfMark("mm-find-projection-terminal", {
+        projectionRevision,
+        renderId,
+        status
+      });
+    }).catch((error) => {
+      postPerfMark("mm-find-projection-failed", {
+        projectionRevision,
+        renderId,
+        reason: String(error)
+      });
+    }).finally(() => {
+      if (renderedFindContentLease === lease) {
+        renderedFindContentLease = null;
+        lease.release();
+      }
+    });
   }
   function getLiveDocumentRoot() {
     return document.querySelector("body > main.mm-document");
@@ -6585,6 +7551,46 @@
   function writeVirtualizedProgrammaticNavigationScrollTop(operation, scrollTop, writer) {
     operation.requestScrollTop(Math.max(0, scrollTop), writer);
   }
+  var VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS = 200;
+  var VIRTUALIZED_NAVIGATION_FRAME_INTERVAL_MS = 1e3 / 60;
+  function easeVirtualizedNavigationProgress(progress) {
+    const clamped = Math.min(1, Math.max(0, progress));
+    return clamped < 0.5 ? 4 * clamped * clamped * clamped : 1 - Math.pow(-2 * clamped + 2, 3) / 2;
+  }
+  function scheduleVirtualizedProgrammaticNavigationSmoothTransition(input) {
+    if (!Number.isFinite(input.startScrollTop) || !Number.isFinite(input.destinationScrollTop) || !input.operation.isCurrent()) {
+      return false;
+    }
+    let frame = 0;
+    const advance = () => input.operation.scheduleFrameTransaction(() => {
+      if (!input.operation.isCurrent() || input.generation !== virtualizedProgrammaticNavigationGeneration) {
+        return;
+      }
+      frame++;
+      const elapsedMs = Math.min(
+        VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS,
+        frame * VIRTUALIZED_NAVIGATION_FRAME_INTERVAL_MS
+      );
+      const progress = elapsedMs / VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS;
+      const easedProgress = easeVirtualizedNavigationProgress(progress);
+      const scrollTop = input.startScrollTop + (input.destinationScrollTop - input.startScrollTop) * easedProgress;
+      writeVirtualizedProgrammaticNavigationScrollTop(
+        input.operation,
+        scrollTop,
+        "navigation-smooth"
+      );
+      if (elapsedMs < VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS) {
+        advance();
+        return;
+      }
+      void settleVirtualizedProgrammaticNavigationTarget(
+        { descriptor: input.descriptor, viewportOffsetY: input.viewportOffsetY },
+        input.generation,
+        input.operation
+      );
+    });
+    return advance();
+  }
   function resolveVirtualizedNavigationTargetSectionIndex(descriptor) {
     const model = virtualizedDocumentWindowModel;
     if (model === null) {
@@ -6669,24 +7675,29 @@
     writeVirtualizedProgrammaticNavigationScrollTop(operation, scrollTop, "navigation-initial");
     return true;
   }
-  function readVirtualizedProgrammaticNavigationResidual(context, viewportOffsetY) {
-    const targetElement = context.targetElement ?? context.element;
-    if (targetElement === null) {
+  function readVirtualizedProgrammaticNavigationResidual(context, descriptor, viewportOffsetY) {
+    const sectionElement = context.element;
+    if (sectionElement === null) {
       return null;
     }
-    const rectTop = targetElement.getBoundingClientRect().top;
-    if (!Number.isFinite(rectTop)) {
+    const sectionRectTop = sectionElement.getBoundingClientRect().top;
+    if (!Number.isFinite(sectionRectTop)) {
       return null;
     }
+    const targetLocalOffset = readVirtualizedTargetLocalOffset(context, descriptor);
     const normalizedViewportOffset = Number.isFinite(viewportOffsetY) ? Math.max(0, viewportOffsetY) : 0;
-    return rectTop - normalizedViewportOffset;
+    return sectionRectTop + targetLocalOffset - normalizedViewportOffset;
   }
   function correctVirtualizedProgrammaticNavigationResidual(input) {
     const context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
     if (context === null) {
       return false;
     }
-    const residual = readVirtualizedProgrammaticNavigationResidual(context, input.viewportOffsetY);
+    const residual = readVirtualizedProgrammaticNavigationResidual(
+      context,
+      input.descriptor,
+      input.viewportOffsetY
+    );
     if (residual === null) {
       return false;
     }
@@ -6801,7 +7812,11 @@
             resolve({ kind: "geometry-changed" });
             return;
           }
-          const residual = readVirtualizedProgrammaticNavigationResidual(context, input.viewportOffsetY);
+          const residual = readVirtualizedProgrammaticNavigationResidual(
+            context,
+            input.descriptor,
+            input.viewportOffsetY
+          );
           if (residual === null) {
             resolve({ kind: "missing-target" });
             return;
@@ -6924,6 +7939,7 @@
   function landVirtualizedProgrammaticNavigation(input) {
     startVirtualizedProgrammaticNavigationSettle({
       descriptor: input.descriptor,
+      behavior: input.behavior,
       initialContext: input.context,
       operation: input.operation,
       viewportOffsetY: input.viewportOffsetY
@@ -7006,6 +8022,29 @@
     virtualizedProgrammaticNavigationOperation = input.operation;
     virtualizedProgrammaticNavigationExternalShiftCount = 0;
     cancelVirtualizedCalibration();
+    rememberVirtualizedProgrammaticNavigationPostSettleTarget(input);
+    if (input.behavior === "smooth" && input.initialContext !== void 0) {
+      const destinationScrollTop = computeVirtualizedProgrammaticNavigationScrollTop(
+        input.initialContext,
+        input.descriptor,
+        input.viewportOffsetY
+      );
+      const transitionScheduled = scheduleVirtualizedProgrammaticNavigationSmoothTransition({
+        descriptor: input.descriptor,
+        destinationScrollTop,
+        generation,
+        operation: input.operation,
+        startScrollTop: getDocumentScrollRoot().scrollTop,
+        viewportOffsetY: input.viewportOffsetY
+      });
+      if (transitionScheduled) {
+        return;
+      }
+      postPerfMark("mm-virt-navigation-smooth-fallback", {
+        descriptorKind: input.descriptor.kind,
+        reason: "frame-transaction-unavailable"
+      });
+    }
     if (input.initialContext !== void 0) {
       applyVirtualizedProgrammaticNavigationContext(
         input.initialContext,
@@ -7014,7 +8053,6 @@
         input.operation
       );
     }
-    rememberVirtualizedProgrammaticNavigationPostSettleTarget(input);
     void settleVirtualizedProgrammaticNavigationTarget(input, generation, input.operation);
   }
   function cancelVirtualizedCalibration() {
@@ -7031,6 +8069,9 @@
   }
   function resetVirtualizedDocumentWindow(resetCalibrator = true) {
     cancelVirtualizedCalibration();
+    if (virtualizedDocumentWindowModel !== null) {
+      cancelModelRenderedContentCoordinator("stale-model");
+    }
     virtualizedWindowMathController?.cancel();
     virtualizedWindowMathController = null;
     virtualizedDocumentWindowController?.dispose();
@@ -7118,7 +8159,7 @@
       }
       return;
     }
-    const finish = () => {
+    const finish2 = () => {
       if (virtualizedWindowFontGeometryTicket !== ticket) {
         endVirtualizedGeometryWork(ticket);
         return;
@@ -7138,7 +8179,7 @@
         virtualizedWindowFontGeometryTicket = null;
       }
     };
-    void ready.then(finish, finish);
+    void ready.then(finish2, finish2);
   }
   function initializeVirtualizedDocumentWindow() {
     if (!virtualizationEnabled) {
@@ -7163,6 +8204,7 @@
     );
     virtualizedDocumentWindowModel = models.estimateOnlyModel;
     const documentEpoch = scrollOwnershipControlPlane.captureDocumentEpoch();
+    startRenderedFindProjectionForCurrentModel();
     virtualizedDocumentWindowController = createVirtualizedDocumentWindowController({
       beginWindowGeometryWork: (mountGeneration) => {
         const ticket = beginVirtualizedGeometryWork("window-render", mountGeneration);
@@ -7187,6 +8229,7 @@
       },
       onWindowMounted: (mountGeneration) => {
         virtualizedWindowMountGeneration = mountGeneration;
+        rebuildActiveHeadingObserverFromLiveDocument();
         scheduleVirtualizedWindowFontReadiness(mountGeneration);
       },
       prepareInsertedContent: prepareVirtualizedInsertedContent,
@@ -7717,12 +8760,12 @@
           topBlockIndex: findTopVisibleBlockIndex()
         });
       };
-      const finish = (status, reason, geometryStatus = status === "committed" ? "settled" : status) => {
+      const finish2 = (status, reason, geometryStatus = status === "committed" ? "settled" : status) => {
         if (completed) {
           return;
         }
         completed = true;
-        if (finishCachedScrollRestore === finish) {
+        if (finishCachedScrollRestore === finish2) {
           finishCachedScrollRestore = null;
         }
         if (operation.isCurrent()) {
@@ -7740,23 +8783,23 @@
         });
         resolve();
       };
-      finishCachedScrollRestore = finish;
+      finishCachedScrollRestore = finish2;
       const scheduleFrameWork = (work) => new Promise((completedWork) => {
         const attempt = () => {
           const plane = scrollOwnershipControlPlane;
           if (plane === null || !plane.isCurrentDocumentEpoch(documentEpoch)) {
-            finish("canceled", "stale-document");
+            finish2("canceled", "stale-document");
             completedWork(false);
             return;
           }
           if (!operation.isCurrent()) {
-            finish("canceled", "user-supersession", "canceled");
+            finish2("canceled", "user-supersession", "canceled");
             completedWork(false);
             return;
           }
           const scheduled = operation.scheduleFrameTransaction(() => {
             if (!operation.isCurrent() || !plane.isCurrentDocumentEpoch(documentEpoch)) {
-              finish("canceled", "stale-document");
+              finish2("canceled", "stale-document");
               completedWork(false);
               return;
             }
@@ -7764,7 +8807,7 @@
               work();
               completedWork(true);
             } catch {
-              finish("failed", "frame-work-failed", "failed");
+              finish2("failed", "frame-work-failed", "failed");
               completedWork(false);
             }
           });
@@ -7778,25 +8821,25 @@
         const attempt = () => {
           const plane = scrollOwnershipControlPlane;
           if (plane === null || !plane.isCurrentDocumentEpoch(documentEpoch)) {
-            finish("canceled", "stale-document");
+            finish2("canceled", "stale-document");
             completedWrite(null);
             return;
           }
           if (!operation.isCurrent()) {
-            finish("canceled", "user-supersession", "canceled");
+            finish2("canceled", "user-supersession", "canceled");
             completedWrite(null);
             return;
           }
           const scheduled = operation.scheduleFrameTransaction(() => {
             if (!operation.isCurrent() || !plane.isCurrentDocumentEpoch(documentEpoch)) {
-              finish("canceled", "stale-document");
+              finish2("canceled", "stale-document");
               completedWrite(null);
               return;
             }
             try {
               operation.requestScrollTop(target, writer);
             } catch {
-              finish("failed", "frame-work-failed", "failed");
+              finish2("failed", "frame-work-failed", "failed");
               completedWrite(null);
               return;
             }
@@ -7831,11 +8874,11 @@
         if (firstSettlement.status === "canceled") {
           const plane = scrollOwnershipControlPlane;
           if (firstSettlement.reason === "stale-document" || plane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
-            finish("canceled", "stale-document");
+            finish2("canceled", "stale-document");
           } else if (firstSettlement.reason === "non-converged") {
-            finish("failed", "non-converged", "non-converged");
+            finish2("failed", "non-converged", "non-converged");
           } else {
-            finish("canceled", "user-supersession", "canceled");
+            finish2("canceled", "user-supersession", "canceled");
           }
           return;
         }
@@ -7853,7 +8896,7 @@
         }
         const initialWrite = await initialReceipt.result;
         if (initialWrite.status !== "committed") {
-          finish("failed", initialWrite.reason, "failed");
+          finish2("failed", initialWrite.reason, "failed");
           return;
         }
         let afterEmission = firstSettlement.emission;
@@ -7861,22 +8904,22 @@
         while (!completed) {
           const plane = scrollOwnershipControlPlane;
           if (plane === null || !plane.isCurrentDocumentEpoch(documentEpoch)) {
-            finish("canceled", "stale-document");
+            finish2("canceled", "stale-document");
             return;
           }
           if (!operation.isCurrent()) {
-            finish("canceled", "user-supersession", "canceled");
+            finish2("canceled", "user-supersession", "canceled");
             return;
           }
           if (settlement === null) {
             const outcome = await waitForCurrentVirtualizedGeometry(operation, afterEmission);
             if (outcome.status === "canceled") {
               if (outcome.reason === "stale-document" || !plane.isCurrentDocumentEpoch(documentEpoch)) {
-                finish("canceled", "stale-document");
+                finish2("canceled", "stale-document");
               } else if (outcome.reason === "non-converged") {
-                finish("failed", "non-converged", "non-converged");
+                finish2("failed", "non-converged", "non-converged");
               } else {
-                finish("canceled", "user-supersession", "canceled");
+                finish2("canceled", "user-supersession", "canceled");
               }
               return;
             }
@@ -7897,7 +8940,7 @@
             }
             const correction = await correctionReceipt.result;
             if (correction.status !== "committed") {
-              finish("failed", correction.reason, "failed");
+              finish2("failed", correction.reason, "failed");
               return;
             }
             afterEmission = settlement.emission;
@@ -7907,11 +8950,11 @@
           const confirmation = await awaitConfirmedVirtualizedGeometry(operation, settlement);
           if (confirmation.status === "canceled") {
             if (confirmation.reason === "stale-document" || !plane.isCurrentDocumentEpoch(documentEpoch)) {
-              finish("canceled", "stale-document");
+              finish2("canceled", "stale-document");
             } else if (confirmation.reason === "non-converged") {
-              finish("failed", "non-converged", "non-converged");
+              finish2("failed", "non-converged", "non-converged");
             } else {
-              finish("canceled", "user-supersession", "canceled");
+              finish2("canceled", "user-supersession", "canceled");
             }
             return;
           }
@@ -7924,11 +8967,11 @@
             settlement = null;
             continue;
           }
-          finish("committed", target === null ? "cold-top-agreed" : semanticAnchorReadyReason, "settled");
+          finish2("committed", target === null ? "cold-top-agreed" : semanticAnchorReadyReason, "settled");
           return;
         }
       })().catch(() => {
-        finish("failed", "restore-pipeline-failed", "failed");
+        finish2("failed", "restore-pipeline-failed", "failed");
       });
     });
   }
@@ -8454,7 +9497,8 @@
       ...Array.from(root.querySelectorAll("*"))
     ];
     nodes.forEach((node) => {
-      if (node.hasAttribute("id")) node.removeAttribute("id");
+      const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
+      if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
       if (node.hasAttribute("data-tex")) node.removeAttribute("data-tex");
       for (const attribute of Array.from(node.attributes)) {
         if (attribute.name.startsWith("data-mm-")) {
@@ -8532,6 +9576,7 @@
     }
     const buildDecision = shouldBuildDetailedMinimapContent();
     if (!buildDecision.allowed) {
+      releaseMinimapRenderedContentLease();
       minimapSourceReady = false;
       minimapDocumentHeight = buildDecision.documentHeight;
       currentMinimapLayout = null;
@@ -8551,6 +9596,31 @@
     }
     currentMinimapLayout = null;
     const model = getModelMinimapSource();
+    if (model !== null && model.getRenderedContentState() === "unprepared") {
+      const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+      if (minimapRenderedContentLease !== null && minimapRenderedContentLease.model === model && minimapRenderedContentLease.documentEpoch === documentEpoch) {
+        return;
+      }
+      releaseMinimapRenderedContentLease();
+      const lease = acquireCurrentModelRenderedContentLease("minimap-detail");
+      if (lease === null) {
+        emitMark("mm-minimap-refresh-end", { phase, skipped: "model-rendered-content-unavailable" });
+        postPerfMark("mm-minimap-refresh-end", { phase, skipped: "model-rendered-content-unavailable" });
+        return;
+      }
+      minimapRenderedContentLease = lease;
+      void lease.readiness.then((status) => {
+        if (minimapRenderedContentLease === lease) {
+          minimapRenderedContentLease = null;
+          lease.release();
+        }
+        if (!isTerminalModelRenderedContentStatus(status) || getModelMinimapSource() !== model || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(lease.documentEpoch) !== true || !shouldBuildDetailedMinimapContent().allowed) {
+          return;
+        }
+        refreshMinimapContent(phase);
+      });
+      return;
+    }
     const clone = model === null ? cloneDocumentForMinimap(buildDecision.documentHeight) : cloneModelDocumentForMinimap(model, buildDecision.documentHeight);
     if (!clone) {
       emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
@@ -8572,7 +9642,11 @@
     scheduleCurrentProcessedDocumentCacheClone();
   }
   function ensureDetailedMinimapContentForVisiblePath(phase = "A") {
-    if (minimapSourceReady || !shouldBuildDetailedMinimapContent().allowed) {
+    if (minimapSourceReady) {
+      return;
+    }
+    if (!shouldBuildDetailedMinimapContent().allowed) {
+      releaseMinimapRenderedContentLease();
       return;
     }
     if (minimapContentRefreshTimer !== void 0) {
@@ -8709,6 +9783,11 @@
       main.querySelectorAll("h1, h2, h3, h4, h5, h6")
     );
   }
+  function rebuildActiveHeadingObserverFromLiveDocument() {
+    const main = document.querySelector("main.mm-document");
+    const nodes = main === null ? [] : readLiveHeadingNodes(main).filter((node) => !!node.id);
+    rebuildActiveHeadingObserver(nodes);
+  }
   function readLiveHeadingPayloads(main) {
     const nodes = readLiveHeadingNodes(main);
     return {
@@ -8832,15 +9911,19 @@
         postHostMessage({ type: "active-heading-changed", id });
       }
     };
-    activeHeadingObserver = new IntersectionObserver(callback, {
+    const observer = new IntersectionObserver(callback, {
       rootMargin: "0px 0px -85% 0px",
       threshold: [0, 1]
     });
+    activeHeadingObserver = observer;
     for (const node of headingNodes) {
-      activeHeadingObserver.observe(node);
+      observer.observe(node);
     }
     const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
     window.requestAnimationFrame(() => {
+      if (activeHeadingObserver !== observer) {
+        return;
+      }
       if (documentEpoch !== void 0 && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true) {
         return;
       }
@@ -9462,6 +10545,9 @@
       updateMinimapVisibility(true);
       updateWidthHandlePositionForCurrentLayout();
     }
+    if (!next.viewerChromeEnabled || next.minimapMode === "off") {
+      releaseMinimapRenderedContentLease();
+    }
     if (applyPrefsFrameRequested) return;
     applyPrefsFrameRequested = true;
     requestAnimationFrame(flushPendingReadingPreferences);
@@ -9516,12 +10602,18 @@
     const hadHostPreferences = hasReceivedHostPreferences;
     hasReceivedHostPreferences = true;
     lastAppliedReadingPreferences = next;
+    if (!shouldBuildDetailedMinimapContent().allowed) {
+      releaseMinimapRenderedContentLease();
+    }
     const layoutAffectingChange = fontFamilyChanged || fontSizeChanged || lineHeightChanged || maxWidthChanged || minimapModeChanged || viewerChromeChanged;
     if (layoutAffectingChange) {
       invalidateVirtualizationShadowModel();
       if (!minimapSourceReady && shouldBuildDetailedMinimapContent().allowed) {
         queueMinimapContentRefreshAfterLayoutSettles();
       } else {
+        if (!shouldBuildDetailedMinimapContent().allowed) {
+          releaseMinimapRenderedContentLease();
+        }
         scheduleHeavyLiveUpdate();
       }
     }
@@ -9596,6 +10688,7 @@
     void renderWindowTargetThenAct({
       action: (context) => {
         landVirtualizedProgrammaticNavigation({
+          behavior: options.behavior,
           context,
           descriptor,
           operation,
@@ -9657,6 +10750,9 @@
       if (!minimapSourceReady && shouldBuildDetailedMinimapContent().allowed) {
         queueMinimapContentRefreshAfterLayoutSettles();
       } else {
+        if (!shouldBuildDetailedMinimapContent().allowed) {
+          releaseMinimapRenderedContentLease();
+        }
         queueMinimapViewportUpdate();
       }
       return;
@@ -10006,6 +11102,7 @@
   function resetModuleGlobalsForLoadDocument() {
     finishCachedScrollRestore?.("canceled", "stale-document");
     cancelPendingVirtualizedMaintenance("stale-document");
+    cancelModelRenderedContentCoordinator("stale-document");
     scrollOwnershipControlPlane?.invalidateDocument();
     virtualizedWriteReceipts.clear();
     pendingInitialVirtualizedWindowWork = null;

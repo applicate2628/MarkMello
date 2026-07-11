@@ -2587,7 +2587,7 @@ describe("renderer scroll-family virtualization integration", () => {
   it("publishes the rendered find projection while detailed minimap is denied", async () => {
     const sectionCount = 120;
     const katex = makeRendererKatex();
-    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+    const { flushQueuedRafs, flushRafsUntil, highlights, load, messages } = await loadRendererHarness({
       katex,
       renderedSectionHeight: SECTION_PITCH,
       sectionCount,
@@ -2609,7 +2609,7 @@ describe("renderer scroll-family virtualization integration", () => {
     await flushQueuedRafs();
 
     load({ type: "open-find-bar" });
-    submitFindQuery("needle");
+    submitFindQuery("rendered:x_90");
     for (
       let pass = 0;
       pass < 128 && perfDetails(messages, "mm-find-projection-terminal").length === 0;
@@ -2662,6 +2662,47 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(perfDetails<{ source?: string }>(messages, "mm-minimap-refresh-end")
       .filter(detail => detail.source === "model-fragment")).toEqual([]);
     expect(getMinimapContent().childElementCount).toBe(0);
+
+    const query = findQueryMessages(messages).at(-1)!;
+    const projectionParts = messages
+      .filter((message): message is {
+        type: "find-text-index-chunk";
+        parts: Array<{
+          blockIndex: number;
+          blockLocalStart: number;
+          text: string;
+        }>;
+      } => typeof message === "object"
+        && message !== null
+        && (message as { type?: unknown }).type === "find-text-index-chunk")
+      .flatMap(message => message.parts);
+    const formulaPart = projectionParts.find(part => part.text.includes(query.query));
+    expect(formulaPart).toBeDefined();
+    const formulaOffset = formulaPart!.blockLocalStart + formulaPart!.text.indexOf(query.query);
+
+    load({
+      status: "ready",
+      textDomain: "rendered-dom-v1",
+      type: "find-results",
+      requestId: query.requestId,
+      query: query.query,
+      renderId: 41,
+      totalCount: 1,
+      matches: [{
+        blockIndex: formulaPart!.blockIndex,
+        blockLocalOffset: formulaOffset,
+        length: query.query.length,
+        matchId: "41:1:90:formula:1",
+        normalizedText: query.query,
+        ordinal: 1,
+      }],
+    });
+    await flushRafsUntil(() => document.querySelector('[data-mm-block-index="90"]') !== null);
+    await flushQueuedRafs();
+
+    expect(findBarCount().textContent).toBe("1 of 1");
+    expect(highlights.get("mm-find-all")?.map(range => range.toString())).toEqual([query.query]);
+    expect(highlights.get("mm-find-current")?.map(range => range.toString())).toEqual([query.query]);
   });
 
   it("shares one model rendered content job across minimap and find leases", async () => {
