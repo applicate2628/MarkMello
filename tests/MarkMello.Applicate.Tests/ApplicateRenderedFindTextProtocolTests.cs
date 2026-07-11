@@ -197,6 +197,40 @@ public sealed class ApplicateRenderedFindTextProtocolTests
     }
 
     [Fact]
+    public void DelayedOlderChunkDoesNotMutateNewerStaging()
+    {
+        var transfer = ApplicateRenderedFindTextProtocol.CreateTransferState(11);
+        AssertAccepted(transfer.Apply(StartJson(projectionRevision: 1)));
+        AssertAccepted(transfer.Apply(StartJson(projectionRevision: 2)));
+
+        Assert.Equal(
+            ApplicateRenderedFindProtocolApplyStatus.Stale,
+            transfer.Apply(ChunkJson(11, 1, 0, PartJson(0, 2, 0, 1, 0, "o"))).Status);
+
+        AssertAccepted(transfer.Apply(ChunkJson(11, 2, 0, PartJson(0, 2, 0, 1, 0, "x"))));
+        Assert.Equal(
+            ApplicateRenderedFindProtocolApplyStatus.Committed,
+            transfer.Apply(CompleteJson(projectionRevision: 2)).Status);
+    }
+
+    [Fact]
+    public void DelayedOlderCompleteDoesNotMutateNewerStaging()
+    {
+        var transfer = ApplicateRenderedFindTextProtocol.CreateTransferState(11);
+        AssertAccepted(transfer.Apply(StartJson(projectionRevision: 1)));
+        AssertAccepted(transfer.Apply(StartJson(projectionRevision: 2)));
+
+        Assert.Equal(
+            ApplicateRenderedFindProtocolApplyStatus.Stale,
+            transfer.Apply(CompleteJson(projectionRevision: 1)).Status);
+
+        AssertAccepted(transfer.Apply(ChunkJson(11, 2, 0, PartJson(0, 2, 0, 1, 0, "x"))));
+        Assert.Equal(
+            ApplicateRenderedFindProtocolApplyStatus.Committed,
+            transfer.Apply(CompleteJson(projectionRevision: 2)).Status);
+    }
+
+    [Fact]
     public void TransferRejectsMalformedSplitsAndNonmonotonicSegments()
     {
         var splitGap = ApplicateRenderedFindTextProtocol.CreateTransferState(currentRenderId: 11);

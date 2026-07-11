@@ -435,6 +435,12 @@ public sealed class ApplicateRenderedFindTransferState
 
         try
         {
+            if (validation.Message is ApplicateRenderedFindTransferMessage transferMessage &&
+                IsOlderThanCurrentProjection(transferMessage.ProjectionRevision))
+            {
+                return Stale();
+            }
+
             return validation.Message switch
             {
                 ApplicateRenderedFindTextStartMessage start => ApplyStart(start, validation.WireUtf8Bytes),
@@ -447,6 +453,12 @@ public sealed class ApplicateRenderedFindTransferState
         {
             return Reject("mm-find-transfer-budget-rejected");
         }
+    }
+
+    private bool IsOlderThanCurrentProjection(int projectionRevision)
+    {
+        var currentProjectionRevision = _staging?.Start.ProjectionRevision ?? _minimumProjectionRevision;
+        return projectionRevision < currentProjectionRevision;
     }
 
     private ApplicateRenderedFindProtocolApplyResult ApplyStart(
@@ -645,6 +657,12 @@ public sealed class ApplicateRenderedFindTransferState
 
     private static ApplicateRenderedFindProtocolApplyResult Accepted()
         => new(ApplicateRenderedFindProtocolApplyStatus.Accepted, null, null);
+
+    private static ApplicateRenderedFindProtocolApplyResult Stale()
+        => new(
+            ApplicateRenderedFindProtocolApplyStatus.Stale,
+            null,
+            new ApplicateRenderedFindProtocolRejection("mm-find-transfer-stale"));
 
     private sealed class TransferStaging(ApplicateRenderedFindTextStartMessage start, long wireUtf8Bytes)
     {
