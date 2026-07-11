@@ -97,14 +97,17 @@ public sealed class ApplicateWebHostMessagingTests
     {
         var source = File.ReadAllText(WebDocumentViewSourcePath);
         var handler = ExtractMethodBody(source, "private void OnWebMessageReceived(");
-        var renderedRoute = handler.IndexOf("TryHandleRenderedFindProtocolMessage(e.Body)", StringComparison.Ordinal);
-        var genericParse = handler.IndexOf("JsonDocument.Parse(e.Body)", StringComparison.Ordinal);
-        var rawBounds = handler.IndexOf("ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(e.Body)", StringComparison.Ordinal);
+        var renderedRoute = handler.IndexOf("TryHandleRenderedFindProtocolMessage(body)", StringComparison.Ordinal);
+        var genericParse = handler.IndexOf("JsonDocument.Parse(body)", StringComparison.Ordinal);
+        var rawBounds = handler.IndexOf("TryRejectInvalidRawRenderedFindMessage", StringComparison.Ordinal);
         var protocolRoute = ExtractMethodBody(source, "private bool TryHandleRenderedFindProtocolMessage(");
+        var rawBoundsRoute = ExtractMethodBody(source, "internal static bool TryRejectInvalidRawRenderedFindMessage(");
 
         Assert.True(renderedRoute >= 0, "Known rendered-find messages should have a dedicated host route.");
         Assert.True(rawBounds >= 0 && renderedRoute > rawBounds, "The callback-wide raw bound must run before routing or parsing.");
         Assert.True(genericParse > renderedRoute, "The strict rendered-find route must run before generic host parsing.");
+        Assert.DoesNotContain("IsNullOrWhiteSpace", handler, StringComparison.Ordinal);
+        Assert.Contains("ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body)", rawBoundsRoute, StringComparison.Ordinal);
         Assert.Contains("ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body)", protocolRoute, StringComparison.Ordinal);
         Assert.Contains("ApplicateRenderedFindRoutingClassification.Malformed", protocolRoute, StringComparison.Ordinal);
         Assert.Contains("_renderedFindDomain.ApplyProtocolMessage(body)", protocolRoute, StringComparison.Ordinal);
@@ -142,6 +145,38 @@ public sealed class ApplicateWebHostMessagingTests
         var legacyResult = ApplicateWebMarkdownDocumentView.RejectInvalidRenderedFindMessageIfCurrent(legacy, malformedGeneric);
         var receivingResult = ApplicateWebMarkdownDocumentView.RejectInvalidRenderedFindMessageIfCurrent(receiving, malformedGeneric);
         var readyResult = ApplicateWebMarkdownDocumentView.RejectInvalidRenderedFindMessageIfCurrent(ready, malformedGeneric);
+
+        Assert.Null(legacyResult);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.LegacyPlaintext, legacy.Status);
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, receivingResult!.ProtocolStatus);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, receiving.Status);
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, readyResult!.ProtocolStatus);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, ready.Status);
+        Assert.Equal(ApplicateRenderedFindResultStatus.Unavailable, readyResult.LatestQueryResult!.Status);
+        Assert.Empty(readyResult.LatestQueryResult.Matches);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("  \r\n\t")]
+    public void EmptyOrWhitespaceInboundBodyClearsRenderedStateButDropsInLegacy(string body)
+    {
+        var legacy = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        var receiving = CreateReceivingRenderedDomain();
+        var ready = CreateReadyRenderedDomain();
+
+        Assert.True(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+            legacy,
+            body,
+            out var legacyResult));
+        Assert.True(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+            receiving,
+            body,
+            out var receivingResult));
+        Assert.True(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+            ready,
+            body,
+            out var readyResult));
 
         Assert.Null(legacyResult);
         Assert.Equal(ApplicateRenderedFindDomainStatus.LegacyPlaintext, legacy.Status);

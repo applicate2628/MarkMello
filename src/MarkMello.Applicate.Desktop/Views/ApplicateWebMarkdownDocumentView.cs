@@ -1750,27 +1750,24 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void OnWebMessageReceived(object? sender, WebMessageReceivedEventArgs e)
     {
-        if (string.IsNullOrWhiteSpace(e.Body))
-        {
-            return;
-        }
-
+        var body = e.Body ?? string.Empty;
         try
         {
-            var rawBounds = ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(e.Body);
-            if (!rawBounds.Accepted)
+            if (TryRejectInvalidRawRenderedFindMessage(
+                    _renderedFindDomain,
+                    body,
+                    out var rejected))
             {
-                var rejected = RejectInvalidRenderedFindMessageIfCurrent(_renderedFindDomain, e.Body);
                 PostLatestRenderedFindResult(rejected?.LatestQueryResult);
                 return;
             }
 
-            if (TryHandleRenderedFindProtocolMessage(e.Body))
+            if (TryHandleRenderedFindProtocolMessage(body))
             {
                 return;
             }
 
-            using var document = JsonDocument.Parse(e.Body);
+            using var document = JsonDocument.Parse(body);
             // A valid-JSON-but-non-object payload ([], null, "x", 0) parses fine,
             // but TryGetProperty below throws InvalidOperationException on a
             // non-object root (the narrow JsonException catch would not catch it).
@@ -2444,6 +2441,24 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         return domain.ApplyProtocolMessage(body);
+    }
+
+    internal static bool TryRejectInvalidRawRenderedFindMessage(
+        ApplicateRenderedFindDomainState domain,
+        string body,
+        out ApplicateRenderedFindDomainApplyResult? result)
+    {
+        ArgumentNullException.ThrowIfNull(domain);
+        ArgumentNullException.ThrowIfNull(body);
+        var bounds = ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body);
+        if (bounds.Accepted && !string.IsNullOrWhiteSpace(body))
+        {
+            result = null;
+            return false;
+        }
+
+        result = RejectInvalidRenderedFindMessageIfCurrent(domain, body);
+        return true;
     }
 
     private void HandleFindQueryMessage(JsonElement root)
