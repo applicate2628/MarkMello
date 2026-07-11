@@ -75,6 +75,8 @@ const FIND_VISIBLE_SKIP_SELECTOR = [
   "pre.mm-mermaid.is-rendered",
   ".mm-find-bar",
 ].join(",");
+const FIND_RANGE_REAIM_FRAME_LIMIT = 3;
+const FIND_SCROLL_EPSILON = 0.5;
 
 export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps): VirtualizedFindProvider {
   let view: FindProviderView | null = null;
@@ -173,7 +175,7 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
       .slice()
       .sort((left, right) => left.ordinal - right.ordinal);
     totalCount = Math.max(0, Math.floor(message.totalCount));
-    currentIndex = selectInitialMatchIndex(matches, context);
+    currentIndex = matches.length === 0 ? -1 : 0;
     paintVisibleHighlights();
     if (currentIndex >= 0) {
       const sequence = ++navigationSequence;
@@ -233,8 +235,14 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
         if (sequence !== navigationSequence || !operation.isCurrent()) {
           return;
         }
-        const currentRange = paintVisibleHighlights();
-        requestRangeLanding(context, operation, currentRange, targetElement ?? element);
+        paintVisibleHighlights();
+        requestElementLanding(context, operation, element ?? targetElement);
+        return scheduleRangeReaim(context, operation, () => {
+          if (sequence !== navigationSequence || !operation.isCurrent()) {
+            return null;
+          }
+          return paintVisibleHighlights();
+        });
       },
       actionKind: "navigate",
       controller: context.controller,
@@ -243,10 +251,27 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
         if (sequence !== navigationSequence || !operation.isCurrent()) {
           return;
         }
-        const currentRange = paintVisibleHighlights();
-        operation.scheduleFrameTransaction(() => {
-          if (sequence === navigationSequence && operation.isCurrent()) {
-            requestRangeLanding(context, operation, currentRange, findLiveBlockElement(match.blockIndex));
+        return new Promise<void>(resolve => {
+          const scheduled = operation.scheduleFrameTransaction(() => {
+            if (sequence !== navigationSequence || !operation.isCurrent()) {
+              resolve();
+              return;
+            }
+            paintVisibleHighlights();
+            requestElementLanding(
+              context,
+              operation,
+              findLiveTopLevelBlockElement(match.blockIndex) ?? findLiveBlockElement(match.blockIndex)
+            );
+            void scheduleRangeReaim(context, operation, () => {
+              if (sequence !== navigationSequence || !operation.isCurrent()) {
+                return null;
+              }
+              return paintVisibleHighlights();
+            }).then(resolve);
+          });
+          if (!scheduled) {
+            resolve();
           }
         });
       },
@@ -312,36 +337,8 @@ function findLiveBlockElement(blockIndex: number): HTMLElement | null {
   return document.querySelector<HTMLElement>(`body > main.mm-document [data-mm-block-index="${blockIndex}"]`);
 }
 
-function selectInitialMatchIndex(
-  matches: readonly FindMatchDescriptor[],
-  context: VirtualizedFindContext
-): number {
-  if (matches.length === 0) {
-    return -1;
-  }
-
-  const model = context.model;
-  if (model === null) {
-    return 0;
-  }
-
-  const readingTop = Math.max(0, context.root.scrollTop);
-  for (let index = 0; index < matches.length; index++) {
-    const match = matches[index]!;
-    const entry = model.getEntryContainingBlockIndex(match.startBlockIndex ?? match.blockIndex)
-      ?? model.getEntryByBlockIndex(match.blockIndex);
-    if (entry === undefined) {
-      continue;
-    }
-
-    const sectionTop = model.sectionTop(entry.sectionIndex);
-    const sectionBottom = sectionTop + model.sectionEffectiveHeight(entry.sectionIndex);
-    if (sectionBottom >= readingTop) {
-      return index;
-    }
-  }
-
-  return 0;
+function findLiveTopLevelBlockElement(blockIndex: number): HTMLElement | null {
+  return findLiveBlockElement(blockIndex)?.closest<HTMLElement>("main.mm-document > *") ?? null;
 }
 
 function rangeFromBlockLocalOffset(block: HTMLElement, offset: number, length: number): Range | null {
@@ -420,16 +417,75 @@ function visibleTextNodes(root: HTMLElement): Text[] {
 function requestRangeLanding(
   context: VirtualizedFindContext,
   operation: WindowTargetOperation,
-  range: Range | null,
-  fallback: HTMLElement | null
-): void {
-  const host = range?.startContainer.parentElement?.closest<HTMLElement>("[data-mm-block-index]") ?? fallback;
-  if (host === null || !operation.isCurrent()) {
-    return;
+  range: Range | null
+): boolean {
+  if (range === null || !operation.isCurrent()) {
+    return false;
   }
-  const rect = host.getBoundingClientRect();
+  const rect = range.getBoundingClientRect();
+  if (rect.height <= 0 && rect.width <= 0) {
+    return false;
+  }
+  return requestLandingForRect(context, operation, rect);
+}
+
+function requestElementLanding(
+  context: VirtualizedFindContext,
+  operation: WindowTargetOperation,
+  element: HTMLElement | null
+): boolean {
+  if (element === null || !operation.isCurrent()) {
+    return false;
+  }
+  return requestLandingForRect(context, operation, element.getBoundingClientRect());
+}
+
+function requestLandingForRect(
+  context: VirtualizedFindContext,
+  operation: WindowTargetOperation,
+  rect: DOMRect
+): boolean {
   const target = context.root.scrollTop
     + rect.top
     - Math.max(0, (context.root.clientHeight - Math.max(0, rect.height)) / 2);
-  operation.requestScrollTop(Math.max(0, target), "find-navigation");
+  const scrollTop = Math.max(0, target);
+  if (Math.abs(scrollTop - context.root.scrollTop) <= FIND_SCROLL_EPSILON || !operation.isCurrent()) {
+    return false;
+  }
+  operation.requestScrollTop(scrollTop, "find-navigation");
+  return true;
+}
+
+function scheduleRangeReaim(
+  context: VirtualizedFindContext,
+  operation: WindowTargetOperation,
+  readRange: () => Range | null
+): Promise<void> {
+  return new Promise(resolve => {
+    let attempts = 0;
+    const scheduleNext = (): void => {
+      if (!operation.isCurrent() || attempts >= FIND_RANGE_REAIM_FRAME_LIMIT) {
+        resolve();
+        return;
+      }
+      const scheduled = operation.scheduleFrameTransaction(() => {
+        if (!operation.isCurrent()) {
+          resolve();
+          return;
+        }
+        attempts++;
+        const range = readRange();
+        const requested = requestRangeLanding(context, operation, range);
+        if ((requested || range === null) && attempts < FIND_RANGE_REAIM_FRAME_LIMIT) {
+          scheduleNext();
+          return;
+        }
+        resolve();
+      });
+      if (!scheduled) {
+        resolve();
+      }
+    };
+    scheduleNext();
+  });
 }

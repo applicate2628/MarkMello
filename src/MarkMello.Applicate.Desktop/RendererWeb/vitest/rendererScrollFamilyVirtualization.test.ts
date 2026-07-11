@@ -659,6 +659,20 @@ function buildFindDocument(count: number, matchIndexes: readonly number[]): stri
   }).join("");
 }
 
+function buildNestedFindDocument(count: number, ownerIndex: number, nestedIndex: number): string {
+  return Array.from({ length: count }, (_, index) => {
+    if (index === ownerIndex) {
+      return [
+        `<section data-mm-block-index="${index}" data-mm-block-kind="quote">`,
+        `<blockquote data-mm-block-index="${nestedIndex}">Nested needle ${nestedIndex}</blockquote>`,
+        `</section>`,
+      ].join("");
+    }
+
+    return `<p data-mm-block-index="${index}" data-mm-block-kind="paragraph">Block ${index} filler</p>`;
+  }).join("");
+}
+
 function buildClonePollutionDocument(count: number): string {
   return Array.from({ length: count }, (_, index) => {
     const nested = index === 88
@@ -843,6 +857,8 @@ type FindQueryMessage = {
 type FindMatchDescriptor = {
   matchId: string;
   blockIndex: number;
+  startBlockIndex?: number;
+  endBlockIndex?: number;
   blockLocalOffset: number;
   length: number;
   normalizedText: string;
@@ -895,6 +911,19 @@ function descriptorForBlock(blockIndex: number, ordinal: number): FindMatchDescr
     matchId: `b${blockIndex}-o${`Block ${blockIndex} `.length}-l6-n${ordinal}`,
     normalizedText: "needle",
     ordinal,
+  };
+}
+
+function descriptorForNestedNeedle(ownerIndex: number, nestedIndex: number, ordinal: number): FindMatchDescriptor {
+  return {
+    blockIndex: nestedIndex,
+    blockLocalOffset: "Nested ".length,
+    endBlockIndex: ownerIndex,
+    length: "needle".length,
+    matchId: `nested-${nestedIndex}-needle-${ordinal}`,
+    normalizedText: "needle",
+    ordinal,
+    startBlockIndex: ownerIndex,
   };
 }
 
@@ -2121,6 +2150,122 @@ describe("renderer scroll-family virtualization integration", () => {
     const target = document.querySelector<HTMLElement>("body > main.mm-document [data-mm-source-line='900']");
     expect(target).not.toBeNull();
     expect(target!.getBoundingClientRect().top).toBeCloseTo(VIEWPORT_HEIGHT * 0.38, 0);
+  });
+
+  it("starts host find navigation at the global first match even from a nonzero reading position", async () => {
+    const { flushQueuedRafs, flushRafsUntil, load, messages, root } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    load({ type: "load-document", html: buildFindDocument(120, [10, 90]), hasMermaid: false, hasHljs: false, renderId: 17 });
+    await flushQueuedRafs();
+    messages.length = 0;
+    root.scrollTop = 80 * SECTION_PITCH;
+    document.dispatchEvent(new Event("scroll"));
+    await flushQueuedRafs();
+
+    load({ type: "open-find-bar" });
+    submitFindQuery("needle");
+    const request = findQueryMessages(messages).at(-1);
+    expect(request).toMatchObject({ query: "needle", renderId: 17 });
+
+    load({
+      type: "find-results",
+      requestId: request!.requestId,
+      query: "needle",
+      renderId: 17,
+      totalCount: 2,
+      matches: [descriptorForBlock(10, 1), descriptorForBlock(90, 2)],
+    });
+
+    expect(findBarCount().textContent).toBe("1 of 2");
+    await flushRafsUntil(() => document.querySelector('[data-mm-block-index="10"]') !== null);
+    const firstTarget = document.querySelector<HTMLElement>('[data-mm-block-index="10"]');
+    expect(firstTarget).not.toBeNull();
+    expect(firstTarget!.getBoundingClientRect().top).toBeCloseTo((VIEWPORT_HEIGHT - SECTION_HEIGHT) / 2, 0);
+  });
+
+  it("lands nested host find matches by section first and then bounded Range re-aim", async () => {
+    const { flushQueuedRafs, flushRafsUntil, load, messages, root } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    const rangePrototype = window.Range.prototype as Range & { getBoundingClientRect?: () => DOMRect };
+    const originalRangeRect = Object.getOwnPropertyDescriptor(rangePrototype, "getBoundingClientRect");
+    const rangeRects = [
+      { height: 16, top: 140 },
+      { height: 16, top: (VIEWPORT_HEIGHT - 16) / 2 },
+    ];
+    let rangeRectIndex = 0;
+    const readRangeRect = vi.fn(() => {
+      const rect = rangeRects[Math.min(rangeRectIndex++, rangeRects.length - 1)]!;
+      return {
+        bottom: rect.top + rect.height,
+        height: rect.height,
+        left: 0,
+        right: 0,
+        top: rect.top,
+        width: 48,
+        x: 0,
+        y: rect.top,
+        toJSON: () => ({}),
+      } as DOMRect;
+    });
+    Object.defineProperty(rangePrototype, "getBoundingClientRect", {
+      configurable: true,
+      value: readRangeRect,
+    });
+
+    try {
+      load({
+        type: "load-document",
+        html: buildNestedFindDocument(120, 88, 8801),
+        hasMermaid: false,
+        hasHljs: false,
+        renderId: 18,
+      });
+      await flushQueuedRafs();
+      messages.length = 0;
+      root.scrollTop = 0;
+
+      load({ type: "open-find-bar" });
+      submitFindQuery("needle");
+      const request = findQueryMessages(messages).at(-1);
+      load({
+        type: "find-results",
+        requestId: request!.requestId,
+        query: "needle",
+        renderId: 18,
+        totalCount: 1,
+        matches: [descriptorForNestedNeedle(88, 8801, 1)],
+      });
+
+      await flushRafsUntil(() => document.querySelector('[data-mm-block-index="8801"]') !== null);
+      await flushQueuedRafs();
+
+      const owner = document.querySelector<HTMLElement>('body > main.mm-document > [data-mm-block-index="88"]');
+      expect(owner).not.toBeNull();
+      const writes = perfDetails<{ after: number; operationEpoch: number; writer?: string }>(
+        messages,
+        "mm-virt-scroll-write-committed"
+      ).filter(detail => detail.writer === "find-navigation");
+      const expectedSectionTarget = readSyntheticDocumentTop(owner!) - (VIEWPORT_HEIGHT - owner!.offsetHeight) / 2;
+      const expectedRangeTarget = expectedSectionTarget + 140 - (VIEWPORT_HEIGHT - 16) / 2;
+      expect(writes.map(write => write.after)).toEqual([
+        expectedSectionTarget,
+        expectedRangeTarget,
+      ]);
+      expect(new Set(writes.map(write => write.operationEpoch)).size).toBe(1);
+      expect(readRangeRect).toHaveBeenCalledTimes(2);
+    } finally {
+      if (originalRangeRect === undefined) {
+        delete rangePrototype.getBoundingClientRect;
+      } else {
+        Object.defineProperty(rangePrototype, "getBoundingClientRect", originalRangeRect);
+      }
+    }
   });
 
   it("uses host find results for a global count and navigates off-window matches through the window target seam", async () => {
