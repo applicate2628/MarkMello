@@ -1,3 +1,5 @@
+import { walkVisibleTextNodes } from "./findVisibleText";
+
 // Find-in-document feature (Ctrl+F). Renderer-side, CSS Custom Highlight API.
 //
 // Why CSS Custom Highlight API (not window.find / document Selection)?
@@ -51,25 +53,6 @@ const FIND_DEBOUNCE_MS = 150;
 // namespace these.
 const HIGHLIGHT_ALL = "mm-find-all";
 const HIGHLIGHT_CURRENT = "mm-find-current";
-
-// Tags whose text is decoration, not searchable content (skipped wholesale).
-const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "ASIDE"]);
-
-// Classes whose subtree is excluded: chrome (minimap/width-handle/drop-overlay/
-// the find bar itself) + `katex-mathml` (clip-hidden TeX source — invisible but
-// DOM-reachable; would phantom-match).
-const SKIP_CLASSES = new Set<string>([
-  "mm-minimap",
-  "mm-minimap-viewport",
-  "mm-width-handle",
-  "mm-drop-overlay",
-  "katex-mathml",
-  FIND_BAR_CLASS,
-]);
-
-// Compound hidden-source surface: a rendered Mermaid block is `display:none`
-// but its source text persists in the DOM (renderer.css `pre.mm-mermaid.is-rendered`).
-const SKIP_SELECTOR = "pre.mm-mermaid.is-rendered";
 
 export type FindBarController = {
   /** Open the find bar; focuses the input. If already open, refocuses. */
@@ -201,39 +184,17 @@ export function buildMatches(root: Node, needle: string): Range[] {
     return out;
   }
 
-  const visit = (node: Node): void => {
-    if (node.nodeType === Node.ELEMENT_NODE) {
-      const el = node as Element;
-      if (SKIP_TAGS.has(el.tagName)) {
-        return;
-      }
-      for (const cls of SKIP_CLASSES) {
-        if (el.classList.contains(cls)) {
-          return;
-        }
-      }
-      if (el.matches?.(SKIP_SELECTOR)) {
-        return;
-      }
-    } else if (node.nodeType === Node.TEXT_NODE) {
-      // Offsets come back valid in node.nodeValue (the ORIGINAL text), so
-      // setStart/setEnd can never overshoot the node — the old lowercased-offset
-      // math threw IndexSizeError on text containing length-expanding characters.
-      for (const [start, end] of findCaseInsensitiveMatchOffsets(node.nodeValue ?? "", needle)) {
-        const range = document.createRange();
-        range.setStart(node, start);
-        range.setEnd(node, end);
-        out.push(range);
-      }
-      return;
+  for (const node of walkVisibleTextNodes(root)) {
+    // Offsets come back valid in node.nodeValue (the ORIGINAL text), so
+    // setStart/setEnd can never overshoot the node — the old lowercased-offset
+    // math threw IndexSizeError on text containing length-expanding characters.
+    for (const [start, end] of findCaseInsensitiveMatchOffsets(node.nodeValue ?? "", needle)) {
+      const range = document.createRange();
+      range.setStart(node, start);
+      range.setEnd(node, end);
+      out.push(range);
     }
-
-    for (const child of Array.from(node.childNodes)) {
-      visit(child);
-    }
-  };
-
-  visit(root);
+  }
 
   return out;
 }

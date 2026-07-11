@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { findCaseInsensitiveMatchOffsets } from "../src/findBar";
+import { buildMatches, findCaseInsensitiveMatchOffsets } from "../src/findBar";
 
 // The match-offset logic — where the reported crash lived — is extracted into
 // the pure findCaseInsensitiveMatchOffsets and covered directly below.
@@ -49,5 +49,39 @@ describe("the crash mechanism this fixes (DOM Range bounds)", () => {
 
     // The fix's helper never produces that offset, so no range is created for it.
     expect(findCaseInsensitiveMatchOffsets("aİb", "b")).toEqual([]);
+  });
+});
+
+describe("flag-off visible text parity", () => {
+  it("keeps the release find skip policy after shared walker extraction", () => {
+    document.body.replaceChildren();
+    document.body.innerHTML = `
+      <main class="mm-document">
+        <section data-mm-block-index="1">
+          visible target
+          <aside>target aside</aside>
+          <script>target script</script>
+          <style>.target { color: red; }</style>
+          <noscript>target noscript</noscript>
+          <span class="katex-mathml">target mathml</span>
+          <pre class="mm-mermaid is-rendered">target mermaid source</pre>
+          <span class="mm-minimap">target minimap</span>
+          <span class="mm-minimap-viewport">target viewport</span>
+          <span class="mm-width-handle">target handle</span>
+          <span class="mm-drop-overlay">target overlay</span>
+          <span class="mm-find-bar">target find chrome</span>
+        </section>
+        <section data-mm-block-index="2">another target</section>
+      </main>`;
+
+    const ranges = buildMatches(document.body, "target");
+
+    expect(ranges.map(range => range.toString())).toEqual(["target", "target"]);
+    expect(
+      ranges.map(range =>
+        (range.startContainer.parentElement?.closest("[data-mm-block-index]") as HTMLElement | null)
+          ?.dataset.mmBlockIndex
+      )
+    ).toEqual(["1", "2"]);
   });
 });

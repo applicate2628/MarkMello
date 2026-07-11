@@ -1,0 +1,435 @@
+import {
+  walkVisibleTextNodesSliced,
+  type VisibleTextTraversalCheckpoint,
+} from "./findVisibleText";
+
+export const RENDERED_FIND_TEXT_DOMAIN = "rendered-dom-v1";
+export const RENDERED_FIND_SCHEMA_VERSION = 1;
+export const RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES = 262_144;
+export const RENDERED_FIND_MAX_MESSAGE_CODE_UNITS = 262_144;
+export const RENDERED_FIND_MAX_CHUNK_PARTS = 4_096;
+export const RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS = 65_536;
+export const RENDERED_FIND_MAX_PROJECTION_CODE_UNITS = 16_777_216;
+export const RENDERED_FIND_MAX_SEMANTIC_SEGMENTS = 524_288;
+export const RENDERED_FIND_MAX_TRANSFER_PARTS = 1_048_576;
+export const RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS = 7;
+
+export type RenderedFindTextSegment = {
+  segmentOrdinal: number;
+  blockIndex: number;
+  blockLocalStart: number;
+  segmentCodeUnitLength: number;
+  text: string;
+};
+
+export type RenderedFindDomainBeginMessage = {
+  type: "find-domain-begin";
+  schemaVersion: 1;
+  textDomain: "rendered-dom-v1";
+  renderId: number;
+};
+
+export type RenderedFindTextPart = {
+  segmentOrdinal: number;
+  blockIndex: number;
+  blockLocalStart: number;
+  segmentCodeUnitLength: number;
+  partOffset: number;
+  text: string;
+};
+
+export type RenderedFindTextIndexStartMessage = {
+  type: "find-text-index-start";
+  schemaVersion: 1;
+  textDomain: "rendered-dom-v1";
+  renderId: number;
+  projectionRevision: number;
+  transferId: string;
+  semanticSegmentCount: number;
+  totalCodeUnits: number;
+  chunkCount: number;
+  partCount: number;
+};
+
+export type RenderedFindTextIndexChunkMessage = {
+  type: "find-text-index-chunk";
+  schemaVersion: 1;
+  textDomain: "rendered-dom-v1";
+  renderId: number;
+  projectionRevision: number;
+  transferId: string;
+  chunkIndex: number;
+  parts: RenderedFindTextPart[];
+};
+
+export type RenderedFindTextIndexCompleteMessage = {
+  type: "find-text-index-complete";
+  schemaVersion: 1;
+  textDomain: "rendered-dom-v1";
+  renderId: number;
+  projectionRevision: number;
+  transferId: string;
+  semanticSegmentCount: number;
+  totalCodeUnits: number;
+  chunkCount: number;
+  partCount: number;
+};
+
+export type RenderedFindTransferMessage =
+  | RenderedFindTextIndexStartMessage
+  | RenderedFindTextIndexChunkMessage
+  | RenderedFindTextIndexCompleteMessage;
+
+export type RenderedFindTransferCheckpoint = "before-slice" | "after-yield" | "before-post";
+
+export type RenderedFindTransferOptions = {
+  renderId: number;
+  projectionRevision: number;
+  emit: (message: RenderedFindTransferMessage) => void;
+  shouldCancel: (checkpoint: RenderedFindTransferCheckpoint) => boolean;
+  yieldControl: () => Promise<void>;
+  now?: () => number;
+};
+
+export type RenderedFindTransferResult = "complete" | "cancelled";
+
+export type RenderedFindProjectionOptions = {
+  shouldCancel?: (checkpoint: VisibleTextTraversalCheckpoint) => boolean;
+  yieldControl?: () => Promise<void>;
+  now?: () => number;
+};
+
+export type RenderedFindProjectionResult =
+  | { status: "complete"; segments: RenderedFindTextSegment[] }
+  | { status: "cancelled"; segments: [] };
+
+export async function createRenderedFindProjection(
+  root: Node,
+  options: RenderedFindProjectionOptions = {}
+): Promise<RenderedFindProjectionResult> {
+  const segments: RenderedFindTextSegment[] = [];
+  const blockLengths = new Map<number, number>();
+  const walkOptions = {
+    shouldCancel: options.shouldCancel ?? (() => false),
+    sliceBudgetMs: RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS,
+    yieldControl: options.yieldControl ?? (async () => {}),
+  };
+
+  const result = await walkVisibleTextNodesSliced(root, options.now === undefined
+    ? walkOptions
+    : { ...walkOptions, now: options.now }, node => {
+    const text = node.nodeValue ?? "";
+    if (text.length === 0) {
+      return;
+    }
+
+    const block = node.parentElement?.closest<HTMLElement>("[data-mm-block-index]");
+    if (block === null || block === undefined) {
+      return;
+    }
+
+    const blockIndexText = block.dataset.mmBlockIndex;
+    if (blockIndexText === undefined) {
+      return;
+    }
+    const blockIndex = Number.parseInt(blockIndexText, 10);
+    if (!Number.isSafeInteger(blockIndex) || blockIndex < 0) {
+      return;
+    }
+
+    const blockLocalStart = blockLengths.get(blockIndex) ?? 0;
+    segments.push({
+      blockIndex,
+      blockLocalStart,
+      segmentCodeUnitLength: text.length,
+      segmentOrdinal: segments.length,
+      text,
+    });
+    blockLengths.set(blockIndex, blockLocalStart + text.length);
+  });
+
+  if (result === "cancelled") {
+    return { segments: [], status: "cancelled" };
+  }
+
+  return { segments, status: "complete" };
+}
+
+export function createRenderedFindDomainBeginMessage(input: { renderId: number }): RenderedFindDomainBeginMessage {
+  return {
+    renderId: input.renderId,
+    schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
+    textDomain: RENDERED_FIND_TEXT_DOMAIN,
+    type: "find-domain-begin",
+  };
+}
+
+export function createRenderedFindTextIndexChunkMessage(input: {
+  renderId: number;
+  projectionRevision: number;
+  chunkIndex: number;
+  parts: RenderedFindTextPart[];
+}): RenderedFindTextIndexChunkMessage {
+  return {
+    chunkIndex: input.chunkIndex,
+    parts: input.parts,
+    projectionRevision: input.projectionRevision,
+    renderId: input.renderId,
+    schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
+    textDomain: RENDERED_FIND_TEXT_DOMAIN,
+    transferId: transferId(input.renderId, input.projectionRevision),
+    type: "find-text-index-chunk",
+  };
+}
+
+export function measureRenderedFindMessage(message: unknown): { codeUnits: number; utf8Bytes: number } {
+  const serialized = JSON.stringify(message);
+  return {
+    codeUnits: serialized.length,
+    utf8Bytes: new TextEncoder().encode(serialized).length,
+  };
+}
+
+export function assertRenderedFindMessageWithinLimits(message: unknown): void {
+  const measurement = measureRenderedFindMessage(message);
+  if (measurement.codeUnits > RENDERED_FIND_MAX_MESSAGE_CODE_UNITS) {
+    throw new Error(`rendered find message exceeds UTF-16 limit: ${measurement.codeUnits}`);
+  }
+  if (measurement.utf8Bytes > RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES) {
+    throw new Error(`rendered find message exceeds UTF-8 limit: ${measurement.utf8Bytes}`);
+  }
+}
+
+export async function emitRenderedFindProjectionTransfer(
+  segments: RenderedFindTextSegment[],
+  options: RenderedFindTransferOptions
+): Promise<RenderedFindTransferResult> {
+  const now = options.now ?? (() => performance.now());
+  if (segments.length > RENDERED_FIND_MAX_SEMANTIC_SEGMENTS) {
+    throw new Error(`rendered find projection exceeds semantic segment limit: ${segments.length}`);
+  }
+  const plan = await buildTransferPlan(segments, options, now);
+  if (plan.status === "cancelled") {
+    return "cancelled";
+  }
+
+  const start = createStartMessage({
+    chunkCount: plan.chunks.length,
+    partCount: plan.partCount,
+    projectionRevision: options.projectionRevision,
+    renderId: options.renderId,
+    semanticSegmentCount: segments.length,
+    totalCodeUnits: plan.totalCodeUnits,
+  });
+  const complete = createCompleteMessage({
+    chunkCount: plan.chunks.length,
+    partCount: plan.partCount,
+    projectionRevision: options.projectionRevision,
+    renderId: options.renderId,
+    semanticSegmentCount: segments.length,
+    totalCodeUnits: plan.totalCodeUnits,
+  });
+  const messages: RenderedFindTransferMessage[] = [start, ...plan.chunks, complete];
+
+  for (const message of messages) {
+    if (options.shouldCancel("before-slice")) {
+      return "cancelled";
+    }
+    const sliceStart = now();
+    if (options.shouldCancel("before-post")) {
+      return "cancelled";
+    }
+    assertRenderedFindMessageWithinLimits(message);
+    options.emit(message);
+    await options.yieldControl();
+    if (options.shouldCancel("after-yield")) {
+      return "cancelled";
+    }
+  }
+
+  return "complete";
+}
+
+type TransferPlan =
+  | { status: "cancelled" }
+  | {
+      status: "ready";
+      chunks: RenderedFindTextIndexChunkMessage[];
+      partCount: number;
+      totalCodeUnits: number;
+    };
+
+async function buildTransferPlan(
+  segments: RenderedFindTextSegment[],
+  options: RenderedFindTransferOptions,
+  now: () => number
+): Promise<TransferPlan> {
+  const chunks: RenderedFindTextIndexChunkMessage[] = [];
+  let pending: RenderedFindTextPart[] = [];
+  let partCount = 0;
+  let totalCodeUnits = 0;
+  let sliceActive = false;
+  let sliceStart = 0;
+
+  const beginOrContinuePackingSlice = async (): Promise<boolean> => {
+    if (!sliceActive) {
+      if (options.shouldCancel("before-slice")) {
+        return true;
+      }
+      sliceStart = now();
+      sliceActive = true;
+      return false;
+    }
+    if (now() - sliceStart < RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS) {
+      return false;
+    }
+
+    await options.yieldControl();
+    if (options.shouldCancel("after-yield")) {
+      return true;
+    }
+    if (options.shouldCancel("before-slice")) {
+      return true;
+    }
+    sliceStart = now();
+    return false;
+  };
+
+  const flush = (): void => {
+    chunks.push(createRenderedFindTextIndexChunkMessage({
+      chunkIndex: chunks.length,
+      parts: pending,
+      projectionRevision: options.projectionRevision,
+      renderId: options.renderId,
+    }));
+    pending = [];
+  };
+
+  const appendPart = (part: RenderedFindTextPart): void => {
+    const candidate = [...pending, part];
+    if (candidate.length > RENDERED_FIND_MAX_CHUNK_PARTS) {
+      flush();
+      pending.push(part);
+      return;
+    }
+
+    const candidateMessage = createRenderedFindTextIndexChunkMessage({
+      chunkIndex: chunks.length,
+      parts: candidate,
+      projectionRevision: options.projectionRevision,
+      renderId: options.renderId,
+    });
+    const measurement = measureRenderedFindMessage(candidateMessage);
+    if (
+      pending.length > 0
+      && (
+        measurement.codeUnits > RENDERED_FIND_MAX_MESSAGE_CODE_UNITS
+        || measurement.utf8Bytes > RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES
+      )
+    ) {
+      flush();
+      pending.push(part);
+      return;
+    }
+    if (
+      pending.length === 0
+      && (
+        measurement.codeUnits > RENDERED_FIND_MAX_MESSAGE_CODE_UNITS
+        || measurement.utf8Bytes > RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES
+      )
+    ) {
+      throw new Error("rendered find text part cannot fit within one message");
+    }
+
+    pending = candidate;
+  };
+
+  for (const segment of segments) {
+    if (await beginOrContinuePackingSlice()) {
+      return { status: "cancelled" };
+    }
+    const text = segment.text;
+    const segmentLength = segment.segmentCodeUnitLength;
+    totalCodeUnits += segmentLength;
+    if (totalCodeUnits > RENDERED_FIND_MAX_PROJECTION_CODE_UNITS) {
+      throw new Error(`rendered find projection exceeds total UTF-16 limit: ${totalCodeUnits}`);
+    }
+
+    for (let offset = 0; offset < text.length; offset += RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS) {
+      if (await beginOrContinuePackingSlice()) {
+        return { status: "cancelled" };
+      }
+      appendPart({
+        blockIndex: segment.blockIndex,
+        blockLocalStart: segment.blockLocalStart,
+        partOffset: offset,
+        segmentCodeUnitLength: segmentLength,
+        segmentOrdinal: segment.segmentOrdinal,
+        text: text.slice(offset, offset + RENDERED_FIND_MAX_TEXT_PART_CODE_UNITS),
+      });
+      partCount++;
+      if (partCount > RENDERED_FIND_MAX_TRANSFER_PARTS) {
+        throw new Error(`rendered find projection exceeds transfer part limit: ${partCount}`);
+      }
+    }
+  }
+
+  if (pending.length > 0) {
+    flush();
+  }
+
+  return {
+    chunks,
+    partCount,
+    status: "ready",
+    totalCodeUnits,
+  };
+}
+
+function createStartMessage(input: {
+  renderId: number;
+  projectionRevision: number;
+  semanticSegmentCount: number;
+  totalCodeUnits: number;
+  chunkCount: number;
+  partCount: number;
+}): RenderedFindTextIndexStartMessage {
+  return {
+    chunkCount: input.chunkCount,
+    partCount: input.partCount,
+    projectionRevision: input.projectionRevision,
+    renderId: input.renderId,
+    schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
+    semanticSegmentCount: input.semanticSegmentCount,
+    textDomain: RENDERED_FIND_TEXT_DOMAIN,
+    totalCodeUnits: input.totalCodeUnits,
+    transferId: transferId(input.renderId, input.projectionRevision),
+    type: "find-text-index-start",
+  };
+}
+
+function createCompleteMessage(input: {
+  renderId: number;
+  projectionRevision: number;
+  semanticSegmentCount: number;
+  totalCodeUnits: number;
+  chunkCount: number;
+  partCount: number;
+}): RenderedFindTextIndexCompleteMessage {
+  return {
+    chunkCount: input.chunkCount,
+    partCount: input.partCount,
+    projectionRevision: input.projectionRevision,
+    renderId: input.renderId,
+    schemaVersion: RENDERED_FIND_SCHEMA_VERSION,
+    semanticSegmentCount: input.semanticSegmentCount,
+    textDomain: RENDERED_FIND_TEXT_DOMAIN,
+    totalCodeUnits: input.totalCodeUnits,
+    transferId: transferId(input.renderId, input.projectionRevision),
+    type: "find-text-index-complete",
+  };
+}
+
+function transferId(renderId: number, projectionRevision: number): string {
+  return `${renderId}:${projectionRevision}`;
+}
