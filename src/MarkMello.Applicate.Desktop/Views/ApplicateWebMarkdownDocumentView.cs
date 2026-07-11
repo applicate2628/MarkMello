@@ -1760,7 +1760,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             var rawBounds = ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(e.Body);
             if (!rawBounds.Accepted)
             {
-                var rejected = RejectOversizedRenderedFindMessageIfCurrent(_renderedFindDomain, e.Body);
+                var rejected = RejectInvalidRenderedFindMessageIfCurrent(_renderedFindDomain, e.Body);
                 PostLatestRenderedFindResult(rejected?.LatestQueryResult);
                 return;
             }
@@ -2419,17 +2419,20 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private bool TryHandleRenderedFindProtocolMessage(string body)
     {
-        if (!ApplicateRenderedFindTextProtocol.IsProtocolCandidateForRouting(body))
+        var classification = ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body);
+        if (classification == ApplicateRenderedFindRoutingClassification.NonProtocol)
         {
             return false;
         }
 
-        var result = _renderedFindDomain.ApplyProtocolMessage(body);
-        PostLatestRenderedFindResult(result.LatestQueryResult);
+        var result = classification == ApplicateRenderedFindRoutingClassification.Malformed
+            ? RejectInvalidRenderedFindMessageIfCurrent(_renderedFindDomain, body)
+            : _renderedFindDomain.ApplyProtocolMessage(body);
+        PostLatestRenderedFindResult(result?.LatestQueryResult);
         return true;
     }
 
-    internal static ApplicateRenderedFindDomainApplyResult? RejectOversizedRenderedFindMessageIfCurrent(
+    internal static ApplicateRenderedFindDomainApplyResult? RejectInvalidRenderedFindMessageIfCurrent(
         ApplicateRenderedFindDomainState domain,
         string body)
     {

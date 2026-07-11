@@ -113,12 +113,12 @@ public static class ApplicateRenderedFindTextProtocol
         }
     }
 
-    public static bool IsProtocolCandidateForRouting(string body)
+    public static ApplicateRenderedFindRoutingClassification ClassifyMessageForRouting(string body)
     {
         ArgumentNullException.ThrowIfNull(body);
         if (!ValidateRawMessageBounds(body).Accepted)
         {
-            return false;
+            return ApplicateRenderedFindRoutingClassification.Malformed;
         }
 
         try
@@ -131,7 +131,7 @@ public static class ApplicateRenderedFindTextProtocol
             });
             if (document.RootElement.ValueKind != JsonValueKind.Object)
             {
-                return false;
+                return ApplicateRenderedFindRoutingClassification.NonProtocol;
             }
 
             foreach (var property in document.RootElement.EnumerateObject())
@@ -141,19 +141,19 @@ public static class ApplicateRenderedFindTextProtocol
                     property.Value.GetString() is string type &&
                     IsKnownMessageType(type))
                 {
-                    return true;
+                    return ApplicateRenderedFindRoutingClassification.Candidate;
                 }
             }
 
-            return false;
+            return ApplicateRenderedFindRoutingClassification.NonProtocol;
         }
         catch (JsonException)
         {
-            return false;
+            return ApplicateRenderedFindRoutingClassification.Malformed;
         }
         catch (InvalidOperationException)
         {
-            return false;
+            return ApplicateRenderedFindRoutingClassification.Malformed;
         }
     }
 
@@ -747,6 +747,13 @@ public sealed record ApplicateRenderedFindProtocolValidation(
     int WireUtf8Bytes);
 
 public sealed record ApplicateRenderedFindProtocolRejection(string FailureId);
+
+public enum ApplicateRenderedFindRoutingClassification
+{
+    Candidate,
+    NonProtocol,
+    Malformed,
+}
 
 public enum ApplicateRenderedFindProtocolApplyStatus
 {

@@ -13,7 +13,9 @@ public sealed class ApplicateRenderedFindTextProtocolTests
     [InlineData("""{"type":"find-text-index-complete","type":"other"}""")]
     public void RoutingClassifierFindsAnySemanticReservedRootType(string body)
     {
-        Assert.True(ApplicateRenderedFindTextProtocol.IsProtocolCandidateForRouting(body));
+        Assert.Equal(
+            ApplicateRenderedFindRoutingClassification.Candidate,
+            ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body));
     }
 
     [Theory]
@@ -23,7 +25,22 @@ public sealed class ApplicateRenderedFindTextProtocolTests
     [InlineData("""{"type":"minimap-state","note":"\u0066ind-domain-begin"}""")]
     public void RoutingClassifierIgnoresUnknownNestedAndTypeLikeText(string body)
     {
-        Assert.False(ApplicateRenderedFindTextProtocol.IsProtocolCandidateForRouting(body));
+        Assert.Equal(
+            ApplicateRenderedFindRoutingClassification.NonProtocol,
+            ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body));
+    }
+
+    [Theory]
+    [InlineData("""{"type":"find-domain-begin",}""")]
+    [InlineData("""{"type":"find-domain-begin"/*comment*/}""")]
+    [InlineData("{\"type\":\"find-domain-begin\"")]
+    [InlineData("""{"type":"minimap-state"} trailing""")]
+    [InlineData("""{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"i":1}}}}}}}}}}""")]
+    public void RoutingClassifierSeparatesMalformedBodiesFromValidNonProtocolJson(string body)
+    {
+        Assert.Equal(
+            ApplicateRenderedFindRoutingClassification.Malformed,
+            ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body));
     }
 
     [Fact]
@@ -31,7 +48,9 @@ public sealed class ApplicateRenderedFindTextProtocolTests
     {
         const string body = """{"type":"other","\u0074ype":"\u0066ind-domain-begin","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11}""";
 
-        Assert.True(ApplicateRenderedFindTextProtocol.IsProtocolCandidateForRouting(body));
+        Assert.Equal(
+            ApplicateRenderedFindRoutingClassification.Candidate,
+            ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body));
         Assert.False(ApplicateRenderedFindTextProtocol.ParseMessage(
             body,
             new ApplicateRenderedFindProtocolContext(11)).Accepted);

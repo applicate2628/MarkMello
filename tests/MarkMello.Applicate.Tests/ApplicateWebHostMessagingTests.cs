@@ -105,7 +105,8 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.True(renderedRoute >= 0, "Known rendered-find messages should have a dedicated host route.");
         Assert.True(rawBounds >= 0 && renderedRoute > rawBounds, "The callback-wide raw bound must run before routing or parsing.");
         Assert.True(genericParse > renderedRoute, "The strict rendered-find route must run before generic host parsing.");
-        Assert.Contains("ApplicateRenderedFindTextProtocol.IsProtocolCandidateForRouting(body)", protocolRoute, StringComparison.Ordinal);
+        Assert.Contains("ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body)", protocolRoute, StringComparison.Ordinal);
+        Assert.Contains("ApplicateRenderedFindRoutingClassification.Malformed", protocolRoute, StringComparison.Ordinal);
         Assert.Contains("_renderedFindDomain.ApplyProtocolMessage(body)", protocolRoute, StringComparison.Ordinal);
         Assert.DoesNotContain("ApplicateTrace", protocolRoute, StringComparison.Ordinal);
         Assert.DoesNotContain("Console", protocolRoute, StringComparison.Ordinal);
@@ -120,14 +121,48 @@ public sealed class ApplicateWebHostMessagingTests
         var rendered = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
         rendered.BeginRenderedRender(11);
 
-        var legacyResult = ApplicateWebMarkdownDocumentView.RejectOversizedRenderedFindMessageIfCurrent(legacy, body);
-        var renderedResult = ApplicateWebMarkdownDocumentView.RejectOversizedRenderedFindMessageIfCurrent(rendered, body);
+        var legacyResult = ApplicateWebMarkdownDocumentView.RejectInvalidRenderedFindMessageIfCurrent(legacy, body);
+        var renderedResult = ApplicateWebMarkdownDocumentView.RejectInvalidRenderedFindMessageIfCurrent(rendered, body);
 
         Assert.Null(legacyResult);
         Assert.Equal(ApplicateRenderedFindDomainStatus.LegacyPlaintext, legacy.Status);
         Assert.NotNull(renderedResult);
         Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, renderedResult!.ProtocolStatus);
         Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, rendered.Status);
+    }
+
+    [Fact]
+    public void MalformedBoundedBodyClearsReceivingAndReadyRenderedStateButDropsInLegacy()
+    {
+        const string malformedGeneric = """{"type":"minimap-state""";
+        var legacy = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        var receiving = CreateReceivingRenderedDomain();
+        var ready = CreateReadyRenderedDomain();
+
+        var legacyResult = ApplicateWebMarkdownDocumentView.RejectInvalidRenderedFindMessageIfCurrent(legacy, malformedGeneric);
+        var receivingResult = ApplicateWebMarkdownDocumentView.RejectInvalidRenderedFindMessageIfCurrent(receiving, malformedGeneric);
+        var readyResult = ApplicateWebMarkdownDocumentView.RejectInvalidRenderedFindMessageIfCurrent(ready, malformedGeneric);
+
+        Assert.Null(legacyResult);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.LegacyPlaintext, legacy.Status);
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, receivingResult!.ProtocolStatus);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, receiving.Status);
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, readyResult!.ProtocolStatus);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, ready.Status);
+        Assert.Equal(ApplicateRenderedFindResultStatus.Unavailable, readyResult.LatestQueryResult!.Status);
+        Assert.Empty(readyResult.LatestQueryResult.Matches);
+    }
+
+    [Fact]
+    public void ValidUnrelatedMessageClassifiesAsNonProtocolWithoutMutatingRenderedState()
+    {
+        const string body = """{"type":"minimap-state","note":"find-domain-begin"}""";
+        var rendered = CreateReceivingRenderedDomain();
+
+        Assert.Equal(
+            ApplicateRenderedFindRoutingClassification.NonProtocol,
+            ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body));
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReceiving, rendered.Status);
     }
 
     [Fact]
@@ -575,6 +610,28 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("_paintGate.AfterTwoFrames", compositorSource, StringComparison.Ordinal);
         Assert.DoesNotContain(removedType, compositorSource, StringComparison.Ordinal);
         Assert.DoesNotContain(removedType, mainWindowSource, StringComparison.Ordinal);
+    }
+
+    private static ApplicateRenderedFindDomainState CreateReceivingRenderedDomain()
+    {
+        var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        state.BeginRenderedRender(11);
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Accepted, state.ApplyProtocolMessage(
+            """{"type":"find-domain-begin","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11}""").ProtocolStatus);
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Accepted, state.ApplyProtocolMessage(
+            """{"type":"find-text-index-start","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11,"projectionRevision":1,"transferId":"11:1","semanticSegmentCount":1,"totalCodeUnits":1,"chunkCount":1,"partCount":1}""").ProtocolStatus);
+        return state;
+    }
+
+    private static ApplicateRenderedFindDomainState CreateReadyRenderedDomain()
+    {
+        var state = CreateReceivingRenderedDomain();
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Accepted, state.ApplyProtocolMessage(
+            """{"type":"find-text-index-chunk","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11,"projectionRevision":1,"transferId":"11:1","chunkIndex":0,"parts":[{"segmentOrdinal":0,"blockIndex":0,"blockLocalStart":0,"segmentCodeUnitLength":1,"partOffset":0,"text":"x"}]}""").ProtocolStatus);
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Committed, state.ApplyProtocolMessage(
+            """{"type":"find-text-index-complete","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11,"projectionRevision":1,"transferId":"11:1","semanticSegmentCount":1,"totalCodeUnits":1,"chunkCount":1,"partCount":1}""").ProtocolStatus);
+        Assert.Equal(ApplicateRenderedFindResultStatus.Ready, state.QueryRendered(11, 1, "x").Status);
+        return state;
     }
 
     private static string ExtractFromMarker(string source, string marker)
