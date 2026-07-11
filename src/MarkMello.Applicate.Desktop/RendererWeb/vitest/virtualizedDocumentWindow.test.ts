@@ -845,6 +845,84 @@ describe("virtualized document window", () => {
     }
   });
 
+  it.each([
+    {
+      name: "real-ready",
+      settle: (blockNode: HTMLElement, bottomSpacer: HTMLElement, admission: number) => {
+        setElementLayout(blockNode, { height: () => 122 + admission * 10, top: () => 0 });
+        setElementLayout(bottomSpacer, { top: () => 144 + admission * 10 });
+      },
+      updatedCount: 1,
+    },
+    {
+      name: "equal-fallback noop",
+      settle: (blockNode: HTMLElement, bottomSpacer: HTMLElement) => {
+        setElementLayout(blockNode, { height: () => 82, top: () => 0 });
+        setElementLayout(bottomSpacer, { top: () => 104 });
+      },
+      updatedCount: 0,
+    },
+  ])("resets non-convergent realization history after $name convergence", ({ settle, updatedCount }) => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 400, 180);
+    const frames = installFrameQueue();
+    let frame = 0;
+    let admission = 0;
+    const traces: Array<{ id: string; details?: Readonly<Record<string, unknown>> }> = [];
+    const model = new DocumentWindowModel([
+      entry(0, 254, 104, {
+        html: '<section data-mm-block-index="254" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 254</section>',
+        occupiedNonContentHeight: 22,
+      }),
+    ]);
+    const controller = makeController({
+      model,
+      realization: { enabled: true },
+      root,
+      trace: event => traces.push(event),
+    });
+
+    const expireOnce = (blockNode: HTMLElement, expectedCycle: number): void => {
+      const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(blockNode, { height: () => 120 + frame * 3, top: () => 0 });
+      setElementLayout(bottomSpacer, { top: () => 142 + frame * 3 });
+      dispatchContentVisibilityState(blockNode, false);
+      for (let index = 0; index < 120; index++) {
+        frame++;
+        frames.flush();
+      }
+      expect(traces.filter(trace => trace.id === "mm-virt-realization-expired").at(-1)?.details)
+        .toMatchObject({ blockIndex: 254, cycles: expectedCycle });
+    };
+
+    const convergeOnce = (blockNode: HTMLElement): void => {
+      const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      settle(blockNode, bottomSpacer, admission++);
+      dispatchContentVisibilityState(blockNode, false);
+      frames.flush(2);
+      expect(controller.adoptRenderedHeights().updatedCount).toBe(updatedCount);
+    };
+
+    try {
+      controller.updateWindowForScroll();
+      const blockNode = document.querySelector<HTMLElement>("[data-mm-block-index='254']")!;
+
+      expireOnce(blockNode, 1);
+      expect(controller.recensusRealizationWatches()).toBe(false);
+      convergeOnce(blockNode);
+
+      expireOnce(blockNode, 1);
+      expect(controller.recensusRealizationWatches()).toBe(false);
+      convergeOnce(blockNode);
+
+      expireOnce(blockNode, 1);
+      expect(controller.recensusRealizationWatches()).toBe(false);
+      expect(traces.filter(trace => trace.id === "mm-virt-realization-quarantined")).toHaveLength(0);
+    } finally {
+      frames.restore();
+    }
+  });
+
   it("quarantines non-convergent realization after three cycles without adopting geometry", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { root } = setScrollRoot(0, 400, 180);

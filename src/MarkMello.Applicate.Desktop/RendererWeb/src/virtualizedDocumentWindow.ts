@@ -718,6 +718,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
 
     if (watch.stableFrameCount >= 2) {
       if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) <= 1) {
+        watch.nonconvergentCycles = 0;
         watch.state = "event-equal-fallback-noop";
         watch.readyMeasuredHeight = null;
         deps.onRealizationReady?.(watch.mountGeneration);
@@ -725,6 +726,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
       }
 
       if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) > 1) {
+        watch.nonconvergentCycles = 0;
         watch.state = "real-ready";
         watch.readyMeasuredHeight = Math.max(0, sample.occupiedHeight);
         deps.onRealizationReady?.(watch.mountGeneration);
