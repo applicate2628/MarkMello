@@ -2587,20 +2587,22 @@ function applyVirtualizedProgrammaticNavigationContext(
 
 function readVirtualizedProgrammaticNavigationResidual(
   context: WindowTargetContext,
+  descriptor: WindowTargetDescriptor,
   viewportOffsetY: number
 ): number | null {
-  const targetElement = context.targetElement ?? context.element;
-  if (targetElement === null) {
+  const sectionElement = context.element;
+  if (sectionElement === null) {
     return null;
   }
 
-  const rectTop = targetElement.getBoundingClientRect().top;
-  if (!Number.isFinite(rectTop)) {
+  const sectionRectTop = sectionElement.getBoundingClientRect().top;
+  if (!Number.isFinite(sectionRectTop)) {
     return null;
   }
 
+  const targetLocalOffset = readVirtualizedTargetLocalOffset(context, descriptor);
   const normalizedViewportOffset = Number.isFinite(viewportOffsetY) ? Math.max(0, viewportOffsetY) : 0;
-  return rectTop - normalizedViewportOffset;
+  return sectionRectTop + targetLocalOffset - normalizedViewportOffset;
 }
 
 function correctVirtualizedProgrammaticNavigationResidual(input: {
@@ -2613,7 +2615,11 @@ function correctVirtualizedProgrammaticNavigationResidual(input: {
     return false;
   }
 
-  const residual = readVirtualizedProgrammaticNavigationResidual(context, input.viewportOffsetY);
+  const residual = readVirtualizedProgrammaticNavigationResidual(
+    context,
+    input.descriptor,
+    input.viewportOffsetY
+  );
   if (residual === null) {
     return false;
   }
@@ -2771,7 +2777,11 @@ function scheduleVirtualizedProgrammaticNavigationFrame(
           resolve({ kind: "geometry-changed" });
           return;
         }
-        const residual = readVirtualizedProgrammaticNavigationResidual(context, input.viewportOffsetY);
+        const residual = readVirtualizedProgrammaticNavigationResidual(
+          context,
+          input.descriptor,
+          input.viewportOffsetY
+        );
         if (residual === null) {
           resolve({ kind: "missing-target" });
           return;

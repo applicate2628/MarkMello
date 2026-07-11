@@ -617,6 +617,21 @@ function buildNestedSourceLineDocument(count: number, ownerIndex: number, nested
   }).join("");
 }
 
+function buildInterpolatedSourceLineDocument(count: number, ownerIndex: number): string {
+  return Array.from({ length: count }, (_, index) => {
+    if (index === ownerIndex) {
+      return [
+        `<section data-mm-block-index="${index}" data-mm-block-kind="quote">`,
+        `<p data-mm-block-index="${ownerIndex * 100 + 1}" data-mm-source-line="${ownerIndex * 10}" data-mm-source-end-line="${ownerIndex * 10 + 10}">Interpolation start ${index}</p>`,
+        `<p data-mm-block-index="${ownerIndex * 100 + 2}" data-mm-source-line="${ownerIndex * 10 + 10}" data-mm-source-end-line="${ownerIndex * 10 + 10}">Interpolation end ${index}</p>`,
+        `</section>`,
+      ].join("");
+    }
+
+    return `<p data-mm-block-index="${index}" data-mm-block-kind="paragraph" data-mm-source-line="${index * 10}" data-mm-source-end-line="${index * 10 + 4}">Block ${index}</p>`;
+  }).join("");
+}
+
 function buildSparseSourceLineDocument(count: number, anchorEvery: number): string {
   return Array.from({ length: count }, (_, index) => {
     const sourceLineAttributes = index % anchorEvery === 0
@@ -1747,6 +1762,42 @@ describe("renderer scroll-family virtualization integration", () => {
     const target = document.querySelector<HTMLElement>('body > main.mm-document [data-mm-source-line="900"]');
     expect(target).not.toBeNull();
     expect(target!.getBoundingClientRect().top).toBeCloseTo(VIEWPORT_HEIGHT * 0.38, 0);
+  });
+
+  it("keeps an interpolated in-section source-line target at the preview anchor after settle", async () => {
+    const ownerIndex = 90;
+    const startBlockIndex = ownerIndex * 100 + 1;
+    const endBlockIndex = ownerIndex * 100 + 2;
+    const requestedSourceLine = ownerIndex * 10 + 4;
+    const { flushQueuedRafs, load } = await loadRendererHarness({
+      rectTopShiftByBlockIndex: {
+        [ownerIndex]: -64,
+        [startBlockIndex]: 0,
+        [endBlockIndex]: 100,
+      },
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({
+      type: "load-document",
+      html: buildInterpolatedSourceLineDocument(120, ownerIndex),
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await flushQueuedRafs();
+
+    load({ type: "scroll-to-source-line", sourceLine: requestedSourceLine });
+    await flushQueuedRafs();
+
+    const start = document.querySelector<HTMLElement>(`[data-mm-block-index="${startBlockIndex}"]`);
+    const end = document.querySelector<HTMLElement>(`[data-mm-block-index="${endBlockIndex}"]`);
+    expect(start).not.toBeNull();
+    expect(end).not.toBeNull();
+    const startTop = start!.getBoundingClientRect().top;
+    const endTop = end!.getBoundingClientRect().top;
+    const interpolatedTop = startTop + (endTop - startTop) * 0.4;
+    expect(interpolatedTop).toBeCloseTo(VIEWPORT_HEIGHT * 0.38, 0);
   });
 
   it("resolves nested source spans through their containing section before edit-to-preview scroll", async () => {
