@@ -6,6 +6,13 @@ public sealed class ApplicateRenderedFindDomainState
 {
     public const string RenderedTextDomain = "rendered-dom-v1";
 
+    private static readonly JsonDocumentOptions StrictDocumentOptions = new()
+    {
+        AllowTrailingCommas = false,
+        CommentHandling = JsonCommentHandling.Disallow,
+        MaxDepth = 8,
+    };
+
     private int? _currentRenderId;
     private ApplicateRenderedFindTransferState? _transfer;
     private ApplicateRenderedFindTextIndex? _committedIndex;
@@ -69,15 +76,38 @@ public sealed class ApplicateRenderedFindDomainState
     {
         ArgumentNullException.ThrowIfNull(body);
 
+        var bounds = ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body);
+        if (!bounds.Accepted)
+        {
+            return RejectWithoutTransfer(bounds.Rejection?.FailureId ?? "mm-find-transfer-budget-rejected");
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(body, StrictDocumentOptions);
+            return ApplyProtocolMessage(document, bounds.WireUtf8Bytes);
+        }
+        catch (JsonException)
+        {
+            return RejectWithoutTransfer("mm-find-transfer-invalid");
+        }
+    }
+
+    public ApplicateRenderedFindDomainApplyResult ApplyProtocolMessage(JsonDocument document, int wireUtf8Bytes)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+
+        var root = document.RootElement;
         var initialRenderId = 0;
-        if (_currentRenderId is null && !TryReadRenderId(body, out initialRenderId))
+        if (_currentRenderId is null && !TryReadRenderId(root, out initialRenderId))
         {
             return RejectWithoutTransfer("mm-find-transfer-invalid");
         }
 
         var renderId = _currentRenderId ?? initialRenderId;
-        var validation = ApplicateRenderedFindTextProtocol.ParseMessage(
-            body,
+        var validation = ApplicateRenderedFindTextProtocol.ValidateParsedMessage(
+            root,
+            wireUtf8Bytes,
             new ApplicateRenderedFindProtocolContext(renderId));
         if (!validation.Accepted)
         {
@@ -116,7 +146,7 @@ public sealed class ApplicateRenderedFindDomainState
         }
 
         _transfer ??= ApplicateRenderedFindTextProtocol.CreateTransferState(renderId);
-        var protocolResult = _transfer.Apply(body);
+        var protocolResult = _transfer.Apply(validation);
         switch (protocolResult.Status)
         {
             case ApplicateRenderedFindProtocolApplyStatus.Stale:
@@ -146,6 +176,21 @@ public sealed class ApplicateRenderedFindDomainState
             Status,
             BuildLatestQueryResultOrNull(),
             protocolResult.Rejection);
+    }
+
+    // Rejects the current rendered-find transfer from an already-known typed
+    // ingress failure, without reparsing a body the caller has proven malformed.
+    // Legacy-plaintext domains have no rendered-find state to reject (matching
+    // RejectInvalidRenderedFindMessageIfCurrent's guard), so they return null.
+    public ApplicateRenderedFindDomainApplyResult? RejectCurrentTransfer(string failureId)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(failureId);
+        if (Status == ApplicateRenderedFindDomainStatus.LegacyPlaintext)
+        {
+            return null;
+        }
+
+        return RejectWithoutTransfer(failureId);
     }
 
     private ApplicateRenderedFindDomainApplyResult RejectWithoutTransfer(string failureId)
@@ -206,32 +251,14 @@ public sealed class ApplicateRenderedFindDomainState
             result.TotalCount,
             result.Matches);
 
-    private static bool TryReadRenderId(string body, out int renderId)
+    private static bool TryReadRenderId(JsonElement root, out int renderId)
     {
         renderId = 0;
-        if (!ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body).Accepted)
-        {
-            return false;
-        }
-
-        try
-        {
-            using var document = JsonDocument.Parse(body, new JsonDocumentOptions
-            {
-                AllowTrailingCommas = false,
-                CommentHandling = JsonCommentHandling.Disallow,
-                MaxDepth = 8,
-            });
-            return document.RootElement.ValueKind == JsonValueKind.Object &&
-                   document.RootElement.TryGetProperty("renderId", out var property) &&
-                   property.ValueKind == JsonValueKind.Number &&
-                   property.TryGetInt32(out renderId) &&
-                   renderId > 0;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
+        return root.ValueKind == JsonValueKind.Object &&
+               root.TryGetProperty("renderId", out var property) &&
+               property.ValueKind == JsonValueKind.Number &&
+               property.TryGetInt32(out renderId) &&
+               renderId > 0;
     }
 }
 

@@ -23,8 +23,13 @@ public sealed class ApplicateRenderedFindTextProtocolTests
     [InlineData("""{"type":"find-domain-begin-extra"}""")]
     [InlineData("""{"type":"minimap-state","nested":{"type":"find-domain-begin"}}""")]
     [InlineData("""{"type":"minimap-state","note":"\u0066ind-domain-begin"}""")]
-    public void RoutingClassifierIgnoresUnknownNestedAndTypeLikeText(string body)
+    [InlineData("""{"type":"minimap-state"} trailing""")]
+    [InlineData("""{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"i":1}}}}}}}}}}""")]
+    public void RoutingClassifierIgnoresUnknownNestedTypeLikeAndMalformedNonFind(string body)
     {
+        // Malformed or trailing-garbage bodies WITHOUT a top-level find type are
+        // NonProtocol: they flow to generic dispatch and must never touch the find
+        // domain, so committed rendered-find state cannot be poisoned by them.
         Assert.Equal(
             ApplicateRenderedFindRoutingClassification.NonProtocol,
             ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body));
@@ -34,10 +39,10 @@ public sealed class ApplicateRenderedFindTextProtocolTests
     [InlineData("""{"type":"find-domain-begin",}""")]
     [InlineData("""{"type":"find-domain-begin"/*comment*/}""")]
     [InlineData("{\"type\":\"find-domain-begin\"")]
-    [InlineData("""{"type":"minimap-state"} trailing""")]
-    [InlineData("""{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"i":1}}}}}}}}}}""")]
-    public void RoutingClassifierSeparatesMalformedBodiesFromValidNonProtocolJson(string body)
+    public void RoutingClassifierMarksMalformedRecognizableFindBodies(string body)
     {
+        // A recognizable top-level find type that fails strict parsing is Malformed:
+        // fail-closed rendered-find traffic, not generic dispatch.
         Assert.Equal(
             ApplicateRenderedFindRoutingClassification.Malformed,
             ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body));

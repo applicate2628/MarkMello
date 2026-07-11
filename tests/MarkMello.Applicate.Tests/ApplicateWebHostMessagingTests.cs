@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Text;
+using System.Text.Json;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views;
 using Xunit;
@@ -93,30 +95,104 @@ public sealed class ApplicateWebHostMessagingTests
     }
 
     [Fact]
-    public void RenderedFindProtocolIsBoundedAndRoutedBeforeGenericMessageParsing()
+    public void WebMessageIngressClassifiesOnceAndReusesTypedOrGenericPayloads()
     {
-        var source = File.ReadAllText(WebDocumentViewSourcePath);
-        var handler = ExtractMethodBody(source, "private void OnWebMessageReceived(");
-        var renderedRoute = handler.IndexOf("TryHandleRenderedFindProtocolMessage(body)", StringComparison.Ordinal);
-        var genericParse = handler.IndexOf("JsonDocument.Parse(body)", StringComparison.Ordinal);
-        var rawBounds = handler.IndexOf("TryRejectInvalidRawRenderedFindMessage", StringComparison.Ordinal);
-        var protocolRoute = ExtractMethodBody(source, "private bool TryHandleRenderedFindProtocolMessage(");
-        var rawBoundsRoute = ExtractMethodBody(source, "internal static bool TryRejectInvalidRawRenderedFindMessage(");
+        var domain = CreateReadyRenderedDomain();
 
-        Assert.True(renderedRoute >= 0, "Known rendered-find messages should have a dedicated host route.");
-        Assert.True(rawBounds >= 0 && renderedRoute > rawBounds, "The callback-wide raw bound must run before routing or parsing.");
-        Assert.True(genericParse > renderedRoute, "The strict rendered-find route must run before generic host parsing.");
-        Assert.DoesNotContain("IsNullOrWhiteSpace", handler, StringComparison.Ordinal);
-        Assert.Contains("ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body)", rawBoundsRoute, StringComparison.Ordinal);
-        Assert.Contains("ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body)", protocolRoute, StringComparison.Ordinal);
-        Assert.Contains("ApplicateRenderedFindRoutingClassification.Malformed", protocolRoute, StringComparison.Ordinal);
-        Assert.Contains("_renderedFindDomain.ApplyProtocolMessage(body)", protocolRoute, StringComparison.Ordinal);
-        Assert.DoesNotContain("ApplicateTrace", protocolRoute, StringComparison.Ordinal);
-        Assert.DoesNotContain("Console", protocolRoute, StringComparison.Ordinal);
+        using var scroll = ApplicateWebMarkdownDocumentView.ClassifyWebMessageIngress(
+            domain,
+            """{"type":"scroll","ratio":0.5}""");
+        Assert.Equal(ApplicateWebMessageIngressKind.Generic, scroll.Kind);
+        Assert.NotNull(scroll.GenericDocument);
+        Assert.Equal("scroll", scroll.GenericDocument!.RootElement.GetProperty("type").GetString());
+
+        using var drop = ApplicateWebMarkdownDocumentView.ClassifyWebMessageIngress(
+            domain,
+            DropFileJson(new string('x', 1024 * 1024)));
+        Assert.Equal(ApplicateWebMessageIngressKind.Generic, drop.Kind);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReady, domain.Status);
+
+        using var begin = ApplicateWebMarkdownDocumentView.ClassifyWebMessageIngress(
+            BegunRenderedDomain(11),
+            """{"type":"find-domain-begin","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11}""");
+        Assert.Equal(ApplicateWebMessageIngressKind.RenderedFind, begin.Kind);
+        Assert.Null(begin.GenericDocument);
+
+        using var whitespace = ApplicateWebMarkdownDocumentView.ClassifyWebMessageIngress(domain, "  \r\n");
+        Assert.Equal(ApplicateWebMessageIngressKind.Ignore, whitespace.Kind);
+
+        using var malformed = ApplicateWebMarkdownDocumentView.ClassifyWebMessageIngress(
+            domain,
+            """{"type":"minimap-state""");
+        Assert.Equal(ApplicateWebMessageIngressKind.Ignore, malformed.Kind);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReady, domain.Status);
+        Assert.Equal(ApplicateRenderedFindResultStatus.Ready, domain.QueryRendered(11, 3, "x").Status);
     }
 
     [Fact]
-    public void OversizedInboundBodyDropsInLegacyAndFailsCurrentRenderedDomainClosed()
+    public void DeeplyNestedNonFindMessageRoutesToGenericAtDefaultParseDepth()
+    {
+        // Nested deeper than the bounded find protocol depth (8) but within the JSON
+        // default depth (64). Shipped generic dispatch parsed with the default depth
+        // (JsonDocument.Parse(body)); the ingress must keep that depth for non-find
+        // traffic instead of dropping it under the find protocol's tighter ceiling.
+        var domain = CreateReadyRenderedDomain();
+        var body = NestedNonFindJson(depth: 20);
+
+        using var ingress = ApplicateWebMarkdownDocumentView.ClassifyWebMessageIngress(domain, body);
+
+        Assert.Equal(ApplicateWebMessageIngressKind.Generic, ingress.Kind);
+        Assert.NotNull(ingress.GenericDocument);
+        Assert.Equal(
+            "minimap-state",
+            ingress.GenericDocument!.RootElement.GetProperty("type").GetString());
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReady, domain.Status);
+    }
+
+    [Fact]
+    public void OversizedNonFindDropFileBypassesFindBoundsInBothDomainStates()
+    {
+        var body = DropFileJson(new string('x', 1024 * 1024));
+        var legacy = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        var rendered = CreateReadyRenderedDomain();
+
+        Assert.False(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+            legacy,
+            body,
+            out var legacyResult));
+        Assert.False(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+            rendered,
+            body,
+            out var renderedResult));
+
+        Assert.Null(legacyResult);
+        Assert.Null(renderedResult);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.LegacyPlaintext, legacy.Status);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReady, rendered.Status);
+        Assert.Equal(ApplicateRenderedFindResultStatus.Ready, rendered.QueryRendered(11, 2, "x").Status);
+    }
+
+    [Fact]
+    public void DropFileTextContainingFindMarkerBypassesFindBoundsAndPreservesReadyState()
+    {
+        var body = DropFileJson("before \\\"type\\\":\\\"find-text-index-chunk\\\" after " + new string('x', 1024 * 1024));
+        var rendered = CreateReadyRenderedDomain();
+
+        Assert.False(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+            rendered,
+            body,
+            out var result));
+
+        Assert.Null(result);
+        Assert.Equal(
+            ApplicateRenderedFindRoutingClassification.NonProtocol,
+            ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body));
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReady, rendered.Status);
+        Assert.Equal(ApplicateRenderedFindResultStatus.Ready, rendered.QueryRendered(11, 2, "x").Status);
+    }
+
+    [Fact]
+    public void OversizedRecognizableFindMessageRejectsCurrentRenderedDomainClosed()
     {
         var body = new string(' ', ApplicateRenderedFindTextProtocol.MaxMessageCodeUnits) +
                    """{"\u0074ype":"\u0066ind-domain-begin","renderId":11}""";
@@ -135,57 +211,164 @@ public sealed class ApplicateWebHostMessagingTests
     }
 
     [Fact]
-    public void MalformedBoundedBodyClearsReceivingAndReadyRenderedStateButDropsInLegacy()
+    public void MalformedGenericJsonDoesNotPoisonCommittedRenderedState()
     {
         const string malformedGeneric = """{"type":"minimap-state""";
         var legacy = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
         var receiving = CreateReceivingRenderedDomain();
         var ready = CreateReadyRenderedDomain();
 
-        var legacyResult = ApplicateWebMarkdownDocumentView.RejectInvalidRenderedFindMessageIfCurrent(legacy, malformedGeneric);
-        var receivingResult = ApplicateWebMarkdownDocumentView.RejectInvalidRenderedFindMessageIfCurrent(receiving, malformedGeneric);
-        var readyResult = ApplicateWebMarkdownDocumentView.RejectInvalidRenderedFindMessageIfCurrent(ready, malformedGeneric);
+        Assert.Equal(
+            ApplicateRenderedFindRoutingClassification.NonProtocol,
+            ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(malformedGeneric));
+        Assert.False(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+            legacy,
+            malformedGeneric,
+            out var legacyResult));
+        Assert.False(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+            receiving,
+            malformedGeneric,
+            out var receivingResult));
+        Assert.False(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+            ready,
+            malformedGeneric,
+            out var readyResult));
 
         Assert.Null(legacyResult);
         Assert.Equal(ApplicateRenderedFindDomainStatus.LegacyPlaintext, legacy.Status);
-        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, receivingResult!.ProtocolStatus);
-        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, receiving.Status);
-        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, readyResult!.ProtocolStatus);
-        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, ready.Status);
-        Assert.Equal(ApplicateRenderedFindResultStatus.Unavailable, readyResult.LatestQueryResult!.Status);
-        Assert.Empty(readyResult.LatestQueryResult.Matches);
+        Assert.Null(receivingResult);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReceiving, receiving.Status);
+        Assert.Null(readyResult);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReady, ready.Status);
+        Assert.Equal(ApplicateRenderedFindResultStatus.Ready, ready.QueryRendered(11, 2, "x").Status);
     }
 
     [Theory]
     [InlineData("")]
     [InlineData("  \r\n\t")]
-    public void EmptyOrWhitespaceInboundBodyClearsRenderedStateButDropsInLegacy(string body)
+    public void EmptyOrWhitespaceInboundBodyIsIgnoredWithoutRenderedStateMutation(string body)
     {
         var legacy = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
         var receiving = CreateReceivingRenderedDomain();
         var ready = CreateReadyRenderedDomain();
 
-        Assert.True(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+        Assert.False(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
             legacy,
             body,
             out var legacyResult));
-        Assert.True(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+        Assert.False(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
             receiving,
             body,
             out var receivingResult));
-        Assert.True(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
+        Assert.False(ApplicateWebMarkdownDocumentView.TryRejectInvalidRawRenderedFindMessage(
             ready,
             body,
             out var readyResult));
 
         Assert.Null(legacyResult);
         Assert.Equal(ApplicateRenderedFindDomainStatus.LegacyPlaintext, legacy.Status);
+        Assert.Null(receivingResult);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReceiving, receiving.Status);
+        Assert.Null(readyResult);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReady, ready.Status);
+        Assert.Equal(ApplicateRenderedFindResultStatus.Ready, ready.QueryRendered(11, 2, "x").Status);
+    }
+
+    [Theory]
+    [InlineData("scroll")]
+    [InlineData("find-domain-begin")]
+    [InlineData("find-text-index-start")]
+    [InlineData("find-text-index-chunk")]
+    [InlineData("find-text-index-complete")]
+    public void WebMessageIngressParsesEachMessageBodyAtMostOnce(string scenario)
+    {
+        Assert.Equal(1, CountIngressRouteParsesForScenario(scenario));
+    }
+
+    [Theory]
+    [InlineData("scroll")]
+    [InlineData("find-domain-begin")]
+    public void WebMessageIngressClassifiesTopLevelShapeExactlyOnce(string scenario)
+    {
+        var (domain, body) = BuildIngressScenario(scenario);
+
+        Assert.Equal(1, CountIngressDiscriminatorScans(domain, body, out _));
+    }
+
+    [Fact]
+    public void OversizedNonFindDropFileClassifiesTopLevelShapeExactlyOnce()
+    {
+        var domain = CreateReadyRenderedDomain();
+        var body = DropFileJson(new string('x', 1024 * 1024));
+
+        var scans = CountIngressDiscriminatorScans(domain, body, out var kind);
+
+        Assert.Equal(1, scans);
+        Assert.Equal(ApplicateWebMessageIngressKind.Generic, kind);
+    }
+
+    [Fact]
+    public void WebMessageIngressThreadsAcceptedRawBoundsWithoutSecondValidation()
+    {
+        var source = File.ReadAllText(WebDocumentViewSourcePath);
+        var ingressClassifier = ExtractMethodBody(
+            source,
+            "internal static ApplicateWebMessageIngress ClassifyWebMessageIngress(",
+            occurrence: 2);
+
+        Assert.DoesNotContain(
+            "ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body)",
+            ingressClassifier,
+            StringComparison.Ordinal);
+        Assert.Contains("bounds.WireUtf8Bytes", ingressClassifier, StringComparison.Ordinal);
+        Assert.Contains("out var bounds", ingressClassifier, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MalformedRecognizableFindRejectsCurrentTransferWithoutReparsing()
+    {
+        // Within bounds, recognizable find type, but truncated JSON. The single
+        // ingress parse proves it malformed; the current transfer is rejected
+        // fail-closed from that known failure. The ingress parse runs exactly once,
+        // and RejectCurrentTransfer takes no body so it cannot reparse.
+        var rendered = CreateReceivingRenderedDomain();
+        const string body = """{"type":"find-text-index-chunk","renderId":11,""";
+        var parseCount = 0;
+
+        using var ingress = ApplicateWebMarkdownDocumentView.ClassifyWebMessageIngress(
+            rendered,
+            body,
+            (candidate, options) =>
+            {
+                parseCount++;
+                return JsonDocument.Parse(candidate, options);
+            },
+            RecognizesRenderedFind);
+
+        Assert.Equal(ApplicateWebMessageIngressKind.RenderedFind, ingress.Kind);
+        Assert.Equal(1, parseCount);
+        Assert.Equal(
+            ApplicateRenderedFindProtocolApplyStatus.Rejected,
+            ingress.RenderedFindResult!.ProtocolStatus);
+        Assert.Equal("mm-find-transfer-invalid", ingress.RenderedFindResult.Rejection!.FailureId);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, rendered.Status);
+    }
+
+    [Fact]
+    public void RejectCurrentTransferClosesRenderedStateWithoutABody()
+    {
+        var legacy = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        var receiving = CreateReceivingRenderedDomain();
+
+        var legacyResult = legacy.RejectCurrentTransfer("mm-find-transfer-invalid");
+        var receivingResult = receiving.RejectCurrentTransfer("mm-find-transfer-invalid");
+
+        Assert.Null(legacyResult);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.LegacyPlaintext, legacy.Status);
+        Assert.NotNull(receivingResult);
         Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, receivingResult!.ProtocolStatus);
+        Assert.Equal("mm-find-transfer-invalid", receivingResult.Rejection!.FailureId);
         Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, receiving.Status);
-        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, readyResult!.ProtocolStatus);
-        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, ready.Status);
-        Assert.Equal(ApplicateRenderedFindResultStatus.Unavailable, readyResult.LatestQueryResult!.Status);
-        Assert.Empty(readyResult.LatestQueryResult.Matches);
     }
 
     [Fact]
@@ -647,6 +830,89 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.DoesNotContain(removedType, mainWindowSource, StringComparison.Ordinal);
     }
 
+    private static string DropFileJson(string text)
+        => JsonSerializer.Serialize(new { type = "drop-file", name = "dropped.md", text });
+
+    // A non-find object whose "node" value nests `depth` levels deep: past the find
+    // protocol depth (8) yet within the default JSON depth (64).
+    private static string NestedNonFindJson(int depth)
+    {
+        var builder = new StringBuilder("""{"type":"minimap-state","node":""");
+        for (var level = 0; level < depth; level++)
+        {
+            builder.Append("""{"node":""");
+        }
+
+        builder.Append('0');
+        builder.Append('}', depth);
+        builder.Append('}');
+        return builder.ToString();
+    }
+
+    private static int CountIngressRouteParsesForScenario(string scenario)
+    {
+        var (domain, body) = BuildIngressScenario(scenario);
+        var parseCount = 0;
+        using var ingress = ApplicateWebMarkdownDocumentView.ClassifyWebMessageIngress(
+            domain,
+            body,
+            (candidate, options) =>
+            {
+                parseCount++;
+                return JsonDocument.Parse(candidate, options);
+            },
+            RecognizesRenderedFind);
+        return parseCount;
+    }
+
+    private static int CountIngressDiscriminatorScans(
+        ApplicateRenderedFindDomainState domain,
+        string body,
+        out ApplicateWebMessageIngressKind kind)
+    {
+        var classifyCount = 0;
+        using var ingress = ApplicateWebMarkdownDocumentView.ClassifyWebMessageIngress(
+            domain,
+            body,
+            static (candidate, options) => JsonDocument.Parse(candidate, options),
+            candidate =>
+            {
+                classifyCount++;
+                return RecognizesRenderedFind(candidate);
+            });
+        kind = ingress.Kind;
+        return classifyCount;
+    }
+
+    private static bool RecognizesRenderedFind(string body)
+        => ApplicateRenderedFindTextProtocol.TryGetTopLevelRenderedFindMessageType(body, out _);
+
+    private static (ApplicateRenderedFindDomainState Domain, string Body) BuildIngressScenario(string scenario)
+        => scenario switch
+        {
+            "scroll" => (CreateReadyRenderedDomain(), """{"type":"scroll","ratio":0.5,"renderId":11}"""),
+            "find-domain-begin" => (
+                BegunRenderedDomain(11),
+                """{"type":"find-domain-begin","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11}"""),
+            "find-text-index-start" => (
+                BegunRenderedDomain(11),
+                """{"type":"find-text-index-start","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11,"projectionRevision":1,"transferId":"11:1","semanticSegmentCount":1,"totalCodeUnits":1,"chunkCount":1,"partCount":1}"""),
+            "find-text-index-chunk" => (
+                CreateReceivingRenderedDomain(),
+                """{"type":"find-text-index-chunk","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11,"projectionRevision":1,"transferId":"11:1","chunkIndex":0,"parts":[{"segmentOrdinal":0,"blockIndex":0,"blockLocalStart":0,"segmentCodeUnitLength":1,"partOffset":0,"text":"x"}]}"""),
+            "find-text-index-complete" => (
+                CreateReceivingRenderedDomain(),
+                """{"type":"find-text-index-complete","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11,"projectionRevision":1,"transferId":"11:1","semanticSegmentCount":1,"totalCodeUnits":1,"chunkCount":1,"partCount":1}"""),
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario)),
+        };
+
+    private static ApplicateRenderedFindDomainState BegunRenderedDomain(int renderId)
+    {
+        var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        state.BeginRenderedRender(renderId);
+        return state;
+    }
+
     private static ApplicateRenderedFindDomainState CreateReceivingRenderedDomain()
     {
         var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
@@ -677,9 +943,17 @@ public sealed class ApplicateWebHostMessagingTests
     }
 
     private static string ExtractMethodBody(string source, string signature)
+        => ExtractMethodBody(source, signature, occurrence: 1);
+
+    private static string ExtractMethodBody(string source, string signature, int occurrence)
     {
-        var start = source.IndexOf(signature, StringComparison.Ordinal);
-        Assert.True(start >= 0, $"{signature} should exist.");
+        Assert.True(occurrence > 0, "Occurrence is one-based.");
+        var start = -1;
+        for (var index = 0; index < occurrence; index++)
+        {
+            start = source.IndexOf(signature, start + 1, StringComparison.Ordinal);
+            Assert.True(start >= 0, $"{signature} occurrence {occurrence} should exist.");
+        }
 
         var braceStart = source.IndexOf('{', start);
         Assert.True(braceStart >= 0, $"{signature} should have a body.");

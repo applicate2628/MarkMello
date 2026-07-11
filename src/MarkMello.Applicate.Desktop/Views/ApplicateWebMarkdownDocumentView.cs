@@ -40,6 +40,46 @@ public sealed class ApplicateWebThemeAppliedEventArgs(string theme, long request
     public long RequestId { get; } = requestId;
 }
 
+internal enum ApplicateWebMessageIngressKind
+{
+    Ignore,
+    Generic,
+    RenderedFind,
+}
+
+// Outcome of a single inbound web-message classification. Owns the one parsed
+// generic document (disposed with the ingress) or the typed rendered-find apply
+// result, so no downstream stage reparses the raw body.
+internal sealed class ApplicateWebMessageIngress : IDisposable
+{
+    private ApplicateWebMessageIngress(
+        ApplicateWebMessageIngressKind kind,
+        JsonDocument? genericDocument,
+        ApplicateRenderedFindDomainApplyResult? renderedFindResult)
+    {
+        Kind = kind;
+        GenericDocument = genericDocument;
+        RenderedFindResult = renderedFindResult;
+    }
+
+    public static ApplicateWebMessageIngress Ignore { get; } =
+        new(ApplicateWebMessageIngressKind.Ignore, null, null);
+
+    public ApplicateWebMessageIngressKind Kind { get; }
+
+    public JsonDocument? GenericDocument { get; }
+
+    public ApplicateRenderedFindDomainApplyResult? RenderedFindResult { get; }
+
+    public static ApplicateWebMessageIngress ForGeneric(JsonDocument document)
+        => new(ApplicateWebMessageIngressKind.Generic, document, null);
+
+    public static ApplicateWebMessageIngress ForRenderedFind(ApplicateRenderedFindDomainApplyResult? result)
+        => new(ApplicateWebMessageIngressKind.RenderedFind, null, result);
+
+    public void Dispose() => GenericDocument?.Dispose();
+}
+
 public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 {
     private const double MaxRendererReportedMinimapReservedWidth = 2000;
@@ -1753,21 +1793,25 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         var body = e.Body ?? string.Empty;
         try
         {
-            if (TryRejectInvalidRawRenderedFindMessage(
-                    _renderedFindDomain,
-                    body,
-                    out var rejected))
-            {
-                PostLatestRenderedFindResult(rejected?.LatestQueryResult);
-                return;
-            }
-
-            if (TryHandleRenderedFindProtocolMessage(body))
+            // One typed ingress classification per inbound message: whitespace is
+            // ignored, recognizable rendered-find traffic is bounded/parsed/applied
+            // exactly once, and every other message yields a single generic document
+            // reused by the dispatch below. Non-find traffic (drop-file, scroll,
+            // minimap, ...) is never subjected to rendered-find byte ceilings, so a
+            // 1 MiB drop-file reaches its handler in both flag states.
+            using var ingress = ClassifyWebMessageIngress(_renderedFindDomain, body);
+            if (ingress.Kind == ApplicateWebMessageIngressKind.Ignore)
             {
                 return;
             }
 
-            using var document = JsonDocument.Parse(body);
+            if (ingress.Kind == ApplicateWebMessageIngressKind.RenderedFind)
+            {
+                PostLatestRenderedFindResult(ingress.RenderedFindResult?.LatestQueryResult);
+                return;
+            }
+
+            var document = ingress.GenericDocument!;
             // A valid-JSON-but-non-object payload ([], null, "x", 0) parses fine,
             // but TryGetProperty below throws InvalidOperationException on a
             // non-object root (the narrow JsonException catch would not catch it).
@@ -2414,19 +2458,109 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _renderedFindDomain = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
     }
 
-    private bool TryHandleRenderedFindProtocolMessage(string body)
+    // Bounded depth for the rendered-find protocol parse only. The generic dispatch
+    // branch keeps System.Text.Json's default MaxDepth (64) so non-find traffic is
+    // parsed with the same depth it shipped with.
+    private static readonly JsonDocumentOptions RenderedFindIngressDocumentOptions = new()
     {
-        var classification = ApplicateRenderedFindTextProtocol.ClassifyMessageForRouting(body);
-        if (classification == ApplicateRenderedFindRoutingClassification.NonProtocol)
+        AllowTrailingCommas = false,
+        CommentHandling = JsonCommentHandling.Disallow,
+        MaxDepth = 8,
+    };
+
+    internal static ApplicateWebMessageIngress ClassifyWebMessageIngress(
+        ApplicateRenderedFindDomainState domain,
+        string body)
+        => ClassifyWebMessageIngress(
+            domain,
+            body,
+            static (candidate, options) => JsonDocument.Parse(candidate, options),
+            static candidate =>
+                ApplicateRenderedFindTextProtocol.TryGetTopLevelRenderedFindMessageType(candidate, out _));
+
+    // Single ownership point for inbound web-message classification. The top-level
+    // rendered-find discriminator runs once (classifyRenderedFindType) and is threaded
+    // through the raw-bounds gate and the parse decision, and the one JSON parse (via
+    // parseJsonDocument) is reused downstream: generic dispatch keeps the returned
+    // document, and rendered-find traffic hands the parsed element straight to the
+    // domain without reparsing the raw body. Both delegates are injected so parse-count
+    // and classify-count are directly observable in tests. The find branch parses with
+    // the bounded find depth; the generic branch parses with the default depth (64) it
+    // shipped with.
+    internal static ApplicateWebMessageIngress ClassifyWebMessageIngress(
+        ApplicateRenderedFindDomainState domain,
+        string body,
+        Func<string, JsonDocumentOptions, JsonDocument> parseJsonDocument,
+        Func<string, bool> classifyRenderedFindType)
+    {
+        ArgumentNullException.ThrowIfNull(domain);
+        ArgumentNullException.ThrowIfNull(body);
+        ArgumentNullException.ThrowIfNull(parseJsonDocument);
+        ArgumentNullException.ThrowIfNull(classifyRenderedFindType);
+
+        // Whitespace carries no message; ignore it without a discriminator scan and
+        // without touching find state (shipped behaviour in both flag states).
+        if (string.IsNullOrWhiteSpace(body))
         {
-            return false;
+            return ApplicateWebMessageIngress.Ignore;
         }
 
-        var result = classification == ApplicateRenderedFindRoutingClassification.Malformed
-            ? RejectInvalidRenderedFindMessageIfCurrent(_renderedFindDomain, body)
-            : _renderedFindDomain.ApplyProtocolMessage(body);
-        PostLatestRenderedFindResult(result?.LatestQueryResult);
-        return true;
+        // Classify the top-level message shape exactly once; the result is reused by
+        // the raw-bounds gate and the parse decision below, so a 1 MiB non-find body
+        // is never scanned twice.
+        var isRenderedFind = classifyRenderedFindType(body);
+
+        // Raw-invalid recognizable find traffic (oversized/blank-after-marker) is
+        // fail-closed before any parse; non-find bodies never hit find ceilings.
+        if (TryRejectInvalidRawRenderedFindMessage(
+                domain,
+                body,
+                isRenderedFind,
+                out var bounds,
+                out var rawRejection))
+        {
+            return ApplicateWebMessageIngress.ForRenderedFind(rawRejection);
+        }
+
+        if (isRenderedFind)
+        {
+            bounds = bounds
+                ?? throw new InvalidOperationException("Accepted rendered-find traffic must carry raw bounds.");
+            JsonDocument findDocument;
+            try
+            {
+                findDocument = parseJsonDocument(body, RenderedFindIngressDocumentOptions);
+            }
+            catch (JsonException)
+            {
+                // The single ingress parse already proved the body malformed; reject
+                // the current transfer from that known failure without reparsing it.
+                return ApplicateWebMessageIngress.ForRenderedFind(
+                    domain.RejectCurrentTransfer("mm-find-transfer-invalid"));
+            }
+
+            using (findDocument)
+            {
+                return ApplicateWebMessageIngress.ForRenderedFind(
+                    domain.ApplyProtocolMessage(findDocument, bounds.WireUtf8Bytes));
+            }
+        }
+
+        JsonDocument document;
+        try
+        {
+            // Non-find traffic keeps the shipped generic-dispatch parse depth
+            // (default MaxDepth=64); only the bounded find protocol uses depth 8.
+            document = parseJsonDocument(body, default);
+        }
+        catch (JsonException)
+        {
+            // Malformed non-find JSON is ignored by generic dispatch and never
+            // reaches the rendered-find domain, so it cannot poison committed state.
+            return ApplicateWebMessageIngress.Ignore;
+        }
+
+        return ApplicateWebMessageIngress.ForGeneric(document);
     }
 
     internal static ApplicateRenderedFindDomainApplyResult? RejectInvalidRenderedFindMessageIfCurrent(
@@ -2447,19 +2581,54 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ApplicateRenderedFindDomainState domain,
         string body,
         out ApplicateRenderedFindDomainApplyResult? result)
+        => TryRejectInvalidRawRenderedFindMessage(
+            domain,
+            body,
+            IsRecognizableRenderedFind(body),
+            out _,
+            out result);
+
+    // Ingress-path overload: the caller has already classified the top-level shape
+    // once and threads it in, so the body is not scanned for a find type again.
+    private static bool TryRejectInvalidRawRenderedFindMessage(
+        ApplicateRenderedFindDomainState domain,
+        string body,
+        bool isRenderedFind,
+        out ApplicateRenderedFindProtocolValidation? acceptedBounds,
+        out ApplicateRenderedFindDomainApplyResult? result)
     {
         ArgumentNullException.ThrowIfNull(domain);
         ArgumentNullException.ThrowIfNull(body);
-        var bounds = ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body);
-        if (bounds.Accepted && !string.IsNullOrWhiteSpace(body))
+        acceptedBounds = null;
+        result = null;
+
+        // Whitespace is ignored, not rejected: shipped behaviour leaves find state
+        // untouched in both flag states.
+        if (string.IsNullOrWhiteSpace(body))
         {
-            result = null;
+            return false;
+        }
+
+        // Non-find traffic (including drop-file) is not subject to rendered-find raw
+        // ceilings; only recognizable find traffic is bounded and fail-closed here.
+        if (!isRenderedFind)
+        {
+            return false;
+        }
+
+        var bounds = ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body);
+        if (bounds.Accepted)
+        {
+            acceptedBounds = bounds;
             return false;
         }
 
         result = RejectInvalidRenderedFindMessageIfCurrent(domain, body);
         return true;
     }
+
+    private static bool IsRecognizableRenderedFind(string body)
+        => ApplicateRenderedFindTextProtocol.TryGetTopLevelRenderedFindMessageType(body, out _);
 
     private void HandleFindQueryMessage(JsonElement root)
     {

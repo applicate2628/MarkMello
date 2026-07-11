@@ -17,6 +17,13 @@ public static class ApplicateRenderedFindTextProtocol
     private const string TextDomain = "rendered-dom-v1";
     private const int SchemaVersion = 1;
 
+    private static readonly JsonDocumentOptions StrictDocumentOptions = new()
+    {
+        AllowTrailingCommas = false,
+        CommentHandling = JsonCommentHandling.Disallow,
+        MaxDepth = 8,
+    };
+
     public static ApplicateRenderedFindProtocolValidation ValidateRawMessageBounds(string body)
     {
         if (string.IsNullOrEmpty(body) || body.Length > MaxMessageCodeUnits)
@@ -53,13 +60,25 @@ public static class ApplicateRenderedFindTextProtocol
 
         try
         {
-            using var document = JsonDocument.Parse(body, new JsonDocumentOptions
-            {
-                AllowTrailingCommas = false,
-                CommentHandling = JsonCommentHandling.Disallow,
-                MaxDepth = 8,
-            });
-            var root = document.RootElement;
+            using var document = JsonDocument.Parse(body, StrictDocumentOptions);
+            return ValidateParsedMessage(document.RootElement, bounds.WireUtf8Bytes, context);
+        }
+        catch (JsonException)
+        {
+            return Invalid("mm-find-transfer-invalid");
+        }
+    }
+
+    // Validates one already-parsed message element against protocol schema and the
+    // caller's render context. The ingress owner parses the body exactly once and
+    // reuses this element, so no downstream layer reparses the raw body (M4).
+    internal static ApplicateRenderedFindProtocolValidation ValidateParsedMessage(
+        JsonElement root,
+        int wireUtf8Bytes,
+        ApplicateRenderedFindProtocolContext context)
+    {
+        try
+        {
             if (root.ValueKind != JsonValueKind.Object ||
                 !TryGetUniqueProperties(root, out var properties) ||
                 !TryGetRequiredString(properties, "type", out var type) ||
@@ -77,7 +96,7 @@ public static class ApplicateRenderedFindTextProtocol
                     null,
                     new ApplicateRenderedFindProtocolRejection("mm-find-transfer-stale"),
                     true,
-                    bounds.WireUtf8Bytes);
+                    wireUtf8Bytes);
             }
 
             var parsed = type switch
@@ -93,11 +112,7 @@ public static class ApplicateRenderedFindTextProtocol
                 return Invalid("mm-find-transfer-invalid");
             }
 
-            return new ApplicateRenderedFindProtocolValidation(true, parsed, null, false, bounds.WireUtf8Bytes);
-        }
-        catch (JsonException)
-        {
-            return Invalid("mm-find-transfer-invalid");
+            return new ApplicateRenderedFindProtocolValidation(true, parsed, null, false, wireUtf8Bytes);
         }
         catch (InvalidOperationException)
         {
@@ -116,6 +131,16 @@ public static class ApplicateRenderedFindTextProtocol
     public static ApplicateRenderedFindRoutingClassification ClassifyMessageForRouting(string body)
     {
         ArgumentNullException.ThrowIfNull(body);
+
+        // A body is rendered-find traffic only when a top-level `type` property
+        // resolves (after unescaping) to a reserved find type. Anything else -
+        // including a `drop-file` whose text embeds a find marker, or malformed
+        // non-find JSON - is NonProtocol and must not touch the find domain (M4).
+        if (!TryGetTopLevelRenderedFindMessageType(body, out _))
+        {
+            return ApplicateRenderedFindRoutingClassification.NonProtocol;
+        }
+
         if (!ValidateRawMessageBounds(body).Accepted)
         {
             return ApplicateRenderedFindRoutingClassification.Malformed;
@@ -123,38 +148,293 @@ public static class ApplicateRenderedFindTextProtocol
 
         try
         {
-            using var document = JsonDocument.Parse(body, new JsonDocumentOptions
-            {
-                AllowTrailingCommas = false,
-                CommentHandling = JsonCommentHandling.Disallow,
-                MaxDepth = 8,
-            });
-            if (document.RootElement.ValueKind != JsonValueKind.Object)
-            {
-                return ApplicateRenderedFindRoutingClassification.NonProtocol;
-            }
-
-            foreach (var property in document.RootElement.EnumerateObject())
-            {
-                if (property.NameEquals("type") &&
-                    property.Value.ValueKind == JsonValueKind.String &&
-                    property.Value.GetString() is string type &&
-                    IsKnownMessageType(type))
-                {
-                    return ApplicateRenderedFindRoutingClassification.Candidate;
-                }
-            }
-
-            return ApplicateRenderedFindRoutingClassification.NonProtocol;
+            using var document = JsonDocument.Parse(body, StrictDocumentOptions);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                ? ApplicateRenderedFindRoutingClassification.Candidate
+                : ApplicateRenderedFindRoutingClassification.Malformed;
         }
         catch (JsonException)
         {
             return ApplicateRenderedFindRoutingClassification.Malformed;
         }
-        catch (InvalidOperationException)
+    }
+
+    // Bounded, string-aware top-level discriminator. Scans only depth-1 object
+    // properties (respecting JSON string escapes and skipping nested containers)
+    // and reports whether any top-level `type` resolves to a reserved find type.
+    // A find marker inside a string value (e.g. drop-file text) is never a top
+    // level type, so it cannot misclassify non-find traffic. No JsonDocument is
+    // built - the strict parse happens once downstream only when this returns true.
+    internal static bool TryGetTopLevelRenderedFindMessageType(string body, out string messageType)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        messageType = string.Empty;
+
+        var index = SkipWhitespace(body, 0);
+        if (index >= body.Length || body[index] != '{')
         {
-            return ApplicateRenderedFindRoutingClassification.Malformed;
+            return false;
         }
+
+        index++;
+        var expectProperty = true;
+        while (true)
+        {
+            index = SkipWhitespace(body, index);
+            if (index >= body.Length)
+            {
+                return false;
+            }
+
+            var current = body[index];
+            if (current == '}')
+            {
+                return false;
+            }
+
+            if (current == ',')
+            {
+                if (expectProperty)
+                {
+                    return false;
+                }
+
+                index++;
+                expectProperty = true;
+                continue;
+            }
+
+            if (!expectProperty || current != '"')
+            {
+                return false;
+            }
+
+            if (!TryReadJsonString(body, ref index, out var name))
+            {
+                return false;
+            }
+
+            index = SkipWhitespace(body, index);
+            if (index >= body.Length || body[index] != ':')
+            {
+                return false;
+            }
+
+            index = SkipWhitespace(body, index + 1);
+            if (index >= body.Length)
+            {
+                return false;
+            }
+
+            if (string.Equals(name, "type", StringComparison.Ordinal) && body[index] == '"')
+            {
+                if (!TryReadJsonString(body, ref index, out var value))
+                {
+                    return false;
+                }
+
+                if (IsKnownMessageType(value))
+                {
+                    messageType = value;
+                    return true;
+                }
+            }
+            else if (!TrySkipJsonValue(body, ref index))
+            {
+                return false;
+            }
+
+            expectProperty = false;
+        }
+    }
+
+    private static int SkipWhitespace(string body, int index)
+    {
+        while (index < body.Length)
+        {
+            var c = body[index];
+            if (c is not (' ' or '\t' or '\r' or '\n'))
+            {
+                break;
+            }
+
+            index++;
+        }
+
+        return index;
+    }
+
+    private static bool TryReadJsonString(string body, ref int index, out string value)
+    {
+        value = string.Empty;
+        if (index >= body.Length || body[index] != '"')
+        {
+            return false;
+        }
+
+        var builder = new StringBuilder();
+        index++;
+        while (index < body.Length)
+        {
+            var c = body[index++];
+            if (c == '"')
+            {
+                value = builder.ToString();
+                return true;
+            }
+
+            if (c == '\\')
+            {
+                if (!TryAppendEscape(body, ref index, builder))
+                {
+                    return false;
+                }
+            }
+            else if (c < ' ')
+            {
+                return false;
+            }
+            else
+            {
+                builder.Append(c);
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryAppendEscape(string body, ref int index, StringBuilder builder)
+    {
+        if (index >= body.Length)
+        {
+            return false;
+        }
+
+        var escape = body[index++];
+        switch (escape)
+        {
+            case '"': builder.Append('"'); return true;
+            case '\\': builder.Append('\\'); return true;
+            case '/': builder.Append('/'); return true;
+            case 'b': builder.Append('\b'); return true;
+            case 'f': builder.Append('\f'); return true;
+            case 'n': builder.Append('\n'); return true;
+            case 'r': builder.Append('\r'); return true;
+            case 't': builder.Append('\t'); return true;
+            case 'u':
+                if (index + 4 > body.Length ||
+                    !ushort.TryParse(
+                        body.AsSpan(index, 4),
+                        System.Globalization.NumberStyles.HexNumber,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out var code))
+                {
+                    return false;
+                }
+
+                builder.Append((char)code);
+                index += 4;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static bool TrySkipJsonValue(string body, ref int index)
+    {
+        index = SkipWhitespace(body, index);
+        if (index >= body.Length)
+        {
+            return false;
+        }
+
+        return body[index] switch
+        {
+            '"' => TrySkipJsonString(body, ref index),
+            '{' or '[' => TrySkipJsonContainer(body, ref index),
+            _ => TrySkipJsonScalar(body, ref index),
+        };
+    }
+
+    private static bool TrySkipJsonString(string body, ref int index)
+    {
+        index++;
+        while (index < body.Length)
+        {
+            var c = body[index++];
+            if (c == '"')
+            {
+                return true;
+            }
+
+            if (c == '\\')
+            {
+                if (index >= body.Length)
+                {
+                    return false;
+                }
+
+                index++;
+            }
+            else if (c < ' ')
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TrySkipJsonContainer(string body, ref int index)
+    {
+        var depth = 0;
+        while (index < body.Length)
+        {
+            var c = body[index];
+            if (c == '"')
+            {
+                if (!TrySkipJsonString(body, ref index))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (c is '{' or '[')
+            {
+                depth++;
+            }
+            else if (c is '}' or ']')
+            {
+                depth--;
+            }
+
+            index++;
+            if (depth == 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TrySkipJsonScalar(string body, ref int index)
+    {
+        var start = index;
+        while (index < body.Length)
+        {
+            var c = body[index];
+            if (c is ',' or '}' or ']' or ' ' or '\t' or '\r' or '\n')
+            {
+                break;
+            }
+
+            index++;
+        }
+
+        return index > start;
     }
 
     public static ApplicateRenderedFindTransferState CreateTransferState(
@@ -460,10 +740,13 @@ public sealed class ApplicateRenderedFindTransferState
     }
 
     public ApplicateRenderedFindProtocolApplyResult Apply(string body)
-    {
-        var validation = ApplicateRenderedFindTextProtocol.ParseMessage(
+        => Apply(ApplicateRenderedFindTextProtocol.ParseMessage(
             body,
-            new ApplicateRenderedFindProtocolContext(_currentRenderId));
+            new ApplicateRenderedFindProtocolContext(_currentRenderId)));
+
+    public ApplicateRenderedFindProtocolApplyResult Apply(ApplicateRenderedFindProtocolValidation validation)
+    {
+        ArgumentNullException.ThrowIfNull(validation);
         if (!validation.Accepted)
         {
             if (validation.IsStale)
