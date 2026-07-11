@@ -2672,11 +2672,13 @@ describe("renderer scroll-family virtualization integration", () => {
     const modelCloneSources = cloneSpy.mock.contexts.filter(
       (context): context is HTMLElement =>
         context instanceof window.HTMLElement
-        && context.dataset["mmMinimapSource"] === "model-fragment");
+        && context.classList.contains("mm-document")
+        && context.querySelectorAll("[data-mm-block-index]").length === sectionCount);
 
     expect(liveMain).not.toBeNull();
     expect(liveMain!.querySelectorAll("[data-mm-block-index]")).not.toHaveLength(sectionCount);
     expect(modelCloneSources).toHaveLength(1);
+    expect(modelCloneSources[0]!.dataset["mmMinimapSource"]).toBeUndefined();
     expect(modelCloneSources[0]!.querySelectorAll("[data-mm-block-index]")).toHaveLength(sectionCount);
     expect(cloneSpy).toHaveBeenCalledWith(true);
     expect(cloneSpy.mock.contexts).not.toContain(liveMain);
@@ -3184,8 +3186,15 @@ describe("renderer scroll-family virtualization integration", () => {
     const modelCloneCount = () => cloneSpy.mock.contexts.filter(
       (context): context is HTMLElement =>
         context instanceof window.HTMLElement
-        && context.dataset["mmMinimapSource"] === "model-fragment").length;
+        && context.classList.contains("mm-document")
+        && context.querySelectorAll("[data-mm-block-index]").length === sectionCount).length;
     expect(modelCloneCount()).toBe(1);
+    expect(cloneSpy.mock.contexts
+      .filter((context): context is HTMLElement =>
+        context instanceof window.HTMLElement
+        && context.classList.contains("mm-document")
+        && context.querySelectorAll("[data-mm-block-index]").length === sectionCount)
+      .every(context => context.dataset["mmMinimapSource"] === undefined)).toBe(true);
 
     root.scrollTop = 20 * SECTION_PITCH;
     document.dispatchEvent(new Event("scroll"));

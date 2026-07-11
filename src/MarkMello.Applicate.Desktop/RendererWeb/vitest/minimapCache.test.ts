@@ -5,6 +5,19 @@ import {
   type CachedMinimapSnapshot
 } from "../src/minimapCache";
 
+function captureWithUnsafeProvenance(provenance: unknown) {
+  const minimapContent = document.querySelector<HTMLElement>(".mm-minimap-content");
+  const minimapViewport = document.querySelector<HTMLElement>(".mm-minimap-viewport");
+  return captureMinimapSnapshot({
+    ownerDocument: document,
+    minimapContent,
+    minimapViewport,
+    documentHeight: 1234,
+    lastPostedState: { hasPosted: true, visible: true, reservedWidth: 168 },
+    provenance,
+  } as Parameters<typeof captureMinimapSnapshot>[0]);
+}
+
 describe("minimap cache", () => {
   it("clones rendered minimap content into a reusable snapshot without reading the source document", () => {
     document.body.innerHTML = `
@@ -23,6 +36,7 @@ describe("minimap cache", () => {
       minimapViewport,
       documentHeight: 1234,
       lastPostedState: { hasPosted: true, visible: true, reservedWidth: 168 },
+      provenance: { source: "live-dom", modelGeneration: null },
     });
 
     expect(snapshot).not.toBeNull();
@@ -58,5 +72,20 @@ describe("minimap cache", () => {
 
     expect(restoredAgain?.contentNodeCount).toBe(1);
     expect(restoredAgainContent.textContent).toContain("cached minimap tree");
+  });
+
+  it("rejects minimap snapshot capture when provenance is missing or malformed", () => {
+    document.body.innerHTML = `
+      <aside class="mm-minimap">
+        <div class="mm-minimap-content"><section>cached minimap tree</section></div>
+        <div class="mm-minimap-viewport"></div>
+      </aside>
+    `;
+
+    expect(captureWithUnsafeProvenance(undefined)).toBeNull();
+    expect(captureWithUnsafeProvenance(null)).toBeNull();
+    expect(captureWithUnsafeProvenance({})).toBeNull();
+    expect(captureWithUnsafeProvenance({ source: "live-dom", modelGeneration: 1 })).toBeNull();
+    expect(captureWithUnsafeProvenance({ source: "model-fragment", modelGeneration: null })).toBeNull();
   });
 });

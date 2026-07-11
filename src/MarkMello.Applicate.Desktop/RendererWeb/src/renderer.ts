@@ -41,7 +41,8 @@ import {
 import {
   captureMinimapSnapshot,
   restoreMinimapSnapshot,
-  type CachedMinimapSnapshot
+  type CachedMinimapSnapshot,
+  type MinimapSnapshotProvenance
 } from "./minimapCache";
 import {
   collectLiveDocumentBlockElements,
@@ -72,6 +73,7 @@ import {
 } from "./userInputWitness";
 import {
   captureReadingAnchor,
+  createDocumentWindowSectionNodeFromModel,
   createFullDocumentFragmentFromWindowModel,
   createVirtualizedDocumentWindowController,
   scrollTopForReadingAnchor,
@@ -479,6 +481,7 @@ let virtualizationShadowValidator: VirtualizationShadowValidator | null = null;
 let virtualizationShadowDocumentFinal = true;
 let virtualizedDocumentWindowController: VirtualizedDocumentWindowController | null = null;
 let virtualizedDocumentWindowModel: DocumentWindowModel | null = null;
+let virtualizedDocumentWindowModelGeneration = 0;
 let virtualizedFindProvider: VirtualizedFindProvider | null = null;
 const virtualizedIntrinsicCalibrator = createSectionIntrinsicCalibrator();
 let virtualizedMeasureFrameRequested = false;
@@ -579,6 +582,7 @@ let currentDocumentRenderId: number | null = null;
 let restoredCachedLayoutState: CachedLayoutState | null = null;
 let restoredCachedHeadings: HeadingPayload[] | null = null;
 let restoredCachedMinimapSnapshot: CachedMinimapSnapshot | null = null;
+let currentMinimapContentProvenance: MinimapSnapshotProvenance | null = null;
 let processedDocumentCacheCloneGeneration = 0;
 let processedDocumentCacheCloneHandle: { kind: "idle" | "timeout"; id: number } | null = null;
 let lastExtractedHeadings: HeadingPayload[] = [];
@@ -652,6 +656,12 @@ function getCurrentProcessedDocumentRenderedContentState(): RenderedContentState
     : null;
 }
 
+function markVirtualizedDocumentWindowModelChanged(model: DocumentWindowModel): void {
+  if (model === virtualizedDocumentWindowModel) {
+    virtualizedDocumentWindowModelGeneration++;
+  }
+}
+
 function readRenderedContentStateFromFragment(fragment: DocumentFragment): RenderedContentState {
   const mathNodes = Array.from(fragment.querySelectorAll<HTMLElement>("[data-tex]"));
   if (mathNodes.length === 0) {
@@ -689,10 +699,27 @@ function validateCachedRenderedContentState(cached: ProcessedDocumentCacheEntry)
 }
 
 function isCurrentModelFragmentMinimapSnapshot(snapshot: CachedMinimapSnapshot): boolean {
-  const root = snapshot.content.firstElementChild;
-  return root instanceof HTMLElement
-    && root.dataset["mmMinimapSource"] === "model-fragment"
+  return snapshot.provenance.source === "model-fragment"
+    && snapshot.provenance.modelGeneration === virtualizedDocumentWindowModelGeneration
     && snapshot.content.querySelector("[data-tex]") === null;
+}
+
+function createMinimapContentProvenance(model: DocumentWindowModel | null): MinimapSnapshotProvenance | null {
+  if (model === null) {
+    return { source: "live-dom", modelGeneration: null };
+  }
+  return model === virtualizedDocumentWindowModel
+    ? { source: "model-fragment", modelGeneration: virtualizedDocumentWindowModelGeneration }
+    : null;
+}
+
+function createRestoredMinimapContentProvenance(snapshot: CachedMinimapSnapshot): MinimapSnapshotProvenance | null {
+  if (snapshot.provenance.source === "live-dom") {
+    return { source: "live-dom", modelGeneration: null };
+  }
+  return virtualizedDocumentWindowModel === null
+    ? null
+    : { source: "model-fragment", modelGeneration: virtualizedDocumentWindowModelGeneration };
 }
 
 function captureProcessedDocumentMinimapPayload(
@@ -706,6 +733,7 @@ function captureProcessedDocumentMinimapPayload(
       minimapViewport,
       documentHeight: minimapDocumentHeight,
       lastPostedState: lastPostedMinimapState,
+      provenance: currentMinimapContentProvenance,
     });
     minimapSnapshot = renderedContentState === null || captured === null || isCurrentModelFragmentMinimapSnapshot(captured)
       ? captured
@@ -1267,6 +1295,9 @@ function handleModelRenderedContentEvent(
   event: ModelRenderedContentEvent
 ): void {
   if (event.type === "progress") {
+    if (event.committed) {
+      markVirtualizedDocumentWindowModelChanged(state.model);
+    }
     postModelRenderedContentMark(state, "mm-model-rendered-content-progress", {
       committed: event.committed,
       failedMathCount: event.failedMathCount,
@@ -1480,19 +1511,44 @@ function startRenderedFindProjectionPublication(options: {
     return;
   }
   renderedFindContentLease = lease;
+  let projectionModelGeneration: number | null = null;
   const shouldCancel = () =>
     generation !== renderedFindProjectionGeneration
     || model !== virtualizedDocumentWindowModel
+    || (
+      projectionModelGeneration !== null
+      && projectionModelGeneration !== virtualizedDocumentWindowModelGeneration
+    )
     || renderId !== currentDocumentRenderId
     || lease.documentEpoch !== documentEpoch
     || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true;
 
   void publishRenderedFindProjection({
     emit: message => { postHostMessage(message); },
+    onSectionProjected: event => {
+      if (event.overranSliceBudget) {
+        postPerfMark("mm-find-projection-section-overrun", {
+          durationMs: event.durationMs,
+          projectionRevision,
+          renderId,
+          sectionIndex: event.sectionIndex,
+        });
+      }
+    },
     projectionRevision,
     readiness: lease.readiness,
     renderId,
-    root: () => createFullDocumentFragmentFromWindowModel(document, model),
+    sectionRoots: {
+      createRoot: sectionIndex => {
+        if (projectionModelGeneration === null) {
+          projectionModelGeneration = virtualizedDocumentWindowModelGeneration;
+        }
+        return shouldCancel()
+          ? null
+          : createDocumentWindowSectionNodeFromModel(document, model, sectionIndex);
+      },
+      sectionCount: model.getSectionCount(),
+    },
     shouldCancel,
     yieldControl: yieldModelRenderedContentWork,
   }).then(status => {
@@ -3696,6 +3752,9 @@ function resetVirtualizedDocumentWindow(resetCalibrator = true): void {
   virtualizedWindowMathController = null;
   virtualizedDocumentWindowController?.dispose();
   virtualizedDocumentWindowController = null;
+  if (virtualizedDocumentWindowModel !== null) {
+    virtualizedDocumentWindowModelGeneration++;
+  }
   virtualizedDocumentWindowModel = null;
   endVirtualizedGeometryWork(virtualizedMeasuredHeightGeometryTicket);
   virtualizedMeasuredHeightGeometryTicket = null;
@@ -3855,6 +3914,7 @@ function initializeVirtualizedDocumentWindow(): void {
     root.scrollHeight,
     { intrinsicSizeCalibrator: virtualizedIntrinsicCalibrator });
   virtualizedDocumentWindowModel = models.estimateOnlyModel;
+  virtualizedDocumentWindowModelGeneration++;
   const documentEpoch = scrollOwnershipControlPlane!.captureDocumentEpoch();
   startRenderedFindProjectionForCurrentModel();
   virtualizedDocumentWindowController = createVirtualizedDocumentWindowController({
@@ -5530,9 +5590,6 @@ function cloneModelDocumentForMinimap(model: DocumentWindowModel, documentHeight
 
   const source = document.createElement(liveSource.localName) as HTMLElement;
   source.className = liveSource.className;
-  source.dataset["mmMinimapSource"] = "model-fragment";
-  source.dataset["mmModelMinimapSectionCount"] = String(model.getSectionCount());
-  source.dataset["mmModelMinimapTotalHeight"] = String(model.getTotalHeight());
   source.append(createFullDocumentFragmentFromWindowModel(document, model));
   const clone = cloneDocumentElementForMinimap(source, getComputedStyle(liveSource), documentHeight);
   return clone;
@@ -5554,6 +5611,7 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
     minimapSourceReady = false;
     minimapDocumentHeight = buildDecision.documentHeight;
     currentMinimapLayout = null;
+    currentMinimapContentProvenance = null;
     minimapContent.replaceChildren();
     updateMinimapVisibility(true);
     emitMark("mm-minimap-refresh-skipped", {
@@ -5608,6 +5666,7 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
     ? cloneDocumentForMinimap(buildDecision.documentHeight)
     : cloneModelDocumentForMinimap(model, buildDecision.documentHeight);
   if (!clone) {
+    currentMinimapContentProvenance = null;
     emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
     postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
     return;
@@ -5618,6 +5677,7 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
     minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
   }
   minimapContent.replaceChildren(clone);
+  currentMinimapContentProvenance = createMinimapContentProvenance(model);
   syncModelMinimapCloneMetadata();
   updateMinimapVisibility(true);
   updateMinimapViewport({ skipVisibilityUpdate: true });
@@ -5684,6 +5744,9 @@ function restoreCachedMinimapContent(): boolean {
   if (!snapshot) {
     return false;
   }
+  if (snapshot.provenance.source === "model-fragment" && !isCurrentModelFragmentMinimapSnapshot(snapshot)) {
+    return false;
+  }
 
   ensureMinimap();
   const restored = restoreMinimapSnapshot(snapshot, { minimapContent, minimapViewport });
@@ -5693,6 +5756,7 @@ function restoreCachedMinimapContent(): boolean {
 
   minimapDocumentHeight = restored.documentHeight;
   minimapSourceReady = true;
+  currentMinimapContentProvenance = createRestoredMinimapContentProvenance(snapshot);
   const restoredClone = minimapContent?.firstElementChild;
   if (restoredClone instanceof HTMLElement) {
     applyMinimapClonePaintHeightLimit(restoredClone, restored.documentHeight);
@@ -7671,6 +7735,7 @@ function resetModuleGlobalsForLoadDocument(): void {
   minimapDocumentHeight = 0;
   lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
   minimapSourceReady = false;
+  currentMinimapContentProvenance = null;
   currentMinimapLayout = null;
   // Polish #5 — reset the width-handle reveal gate so the next document's
   // initialVisibleReady has to fire again before the handle becomes visible

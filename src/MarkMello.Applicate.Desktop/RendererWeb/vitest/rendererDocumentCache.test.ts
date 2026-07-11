@@ -144,7 +144,6 @@ function seedPlaceholderMinimapSnapshot(): void {
   }
   const source = document.createElement("main");
   source.className = "mm-document";
-  source.dataset["mmMinimapSource"] = "model-fragment";
   source.innerHTML = `<section data-mm-block-index="90" data-mm-block-kind="paragraph"><span class="math-inline" data-tex="x_90">x_90</span></section>`;
   minimapContent.replaceChildren(source);
 }
@@ -153,6 +152,13 @@ function expectNoRestoredPlaceholderMinimap(messages: readonly unknown[]): void 
   expect(perfMarkNames(messages)).toContain("mm-load-document-cache-hit");
   expect(perfMarkNames(messages)).not.toContain("mm-minimap-cache-hit");
   expect(document.querySelector(".mm-minimap-content [data-tex]")).toBeNull();
+}
+
+function dataMmAttributeNames(root: ParentNode): string[] {
+  return Array.from(root.querySelectorAll<Element>("*"))
+    .flatMap(element => Array.from(element.attributes))
+    .map(attribute => attribute.name)
+    .filter(name => name.startsWith("data-mm-"));
 }
 
 function readRendererSource(): string {
@@ -809,25 +815,44 @@ describe("renderer document cache", () => {
     expect(refresh).toContain("layoutState: virtualizationEnabled");
   });
 
+  it("admits model-fragment minimap snapshots only for the current model generation", () => {
+    const source = readRendererSource();
+    const start = source.indexOf("function isCurrentModelFragmentMinimapSnapshot");
+    const end = source.indexOf("function createMinimapContentProvenance", start);
+    const admission = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(admission).toContain('snapshot.provenance.source === "model-fragment"');
+    expect(admission).toContain("snapshot.provenance.modelGeneration === virtualizedDocumentWindowModelGeneration");
+    expect(admission).toContain('snapshot.content.querySelector("[data-tex]") === null');
+  });
+
   it.each([
     ["ready", "ready"] as const,
     ["ready-with-failures", "ready-with-failures"] as const,
-  ])("restores a validated terminal %s model-fragment minimap snapshot", async (_label, formulaState) => {
+  ])("rejects a stale production terminal %s model-fragment minimap snapshot without DOM provenance markers", async (_label, formulaState) => {
     const sectionCount = 120;
     installVirtualizedDocumentLayout(80, 20, sectionCount);
     const { load, messages } = await loadRendererWithMessages({ virtualization: true });
     const firstHtml = buildVirtualizedFormulaDocument(sectionCount, [90], formulaState);
     const secondHtml = "<section data-mm-block-index='0' data-mm-block-kind='paragraph'>Second</section>";
 
-    load({ type: "reading-preferences", ...makeReadingPreferences("off") });
+    load({ type: "reading-preferences", ...makeReadingPreferences("on") });
+    load({
+      type: "minimap-policy",
+      minimapPolicy: {
+        maxDetailedDocumentHeight: 10000,
+        minHostWidth: 0,
+        minScrollableViewportRatio: 1,
+      },
+    });
     load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
     await letPipelineSettle();
     const minimapContent = document.querySelector<HTMLElement>(".mm-minimap-content");
     expect(minimapContent).not.toBeNull();
-    minimapContent!.replaceChildren(document.createElement("main"));
-    minimapContent!.firstElementChild!.className = "mm-document";
-    (minimapContent!.firstElementChild as HTMLElement).dataset["mmMinimapSource"] = "model-fragment";
-    minimapContent!.firstElementChild!.innerHTML = `<section><span class="katex">terminal:${formulaState}</span></section>`;
+    expect(minimapContent!.querySelector(".katex")?.textContent).toBe(`rendered:x_90`);
+    expect(dataMmAttributeNames(minimapContent!)).toEqual([]);
 
     load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
     await letPipelineSettle();
@@ -844,8 +869,10 @@ describe("renderer document cache", () => {
     await letPipelineSettle();
 
     expect(perfMarkNames(messages)).toContain("mm-load-document-cache-hit");
-    expect(perfMarkNames(messages)).toContain("mm-minimap-cache-hit");
-    expect(document.querySelector(".mm-minimap-content .katex")?.textContent).toBe(`terminal:${formulaState}`);
+    expect(perfMarkNames(messages)).not.toContain("mm-minimap-cache-hit");
+    expect(perfMarkNames(messages)).toContain("mm-minimap-refresh-start");
+    expect(document.querySelector(".mm-minimap-content .katex")?.textContent).toBe("rendered:x_90");
+    expect(dataMmAttributeNames(document.querySelector<HTMLElement>(".mm-minimap-content")!)).toEqual([]);
   });
 
   it("keeps every processed-document cache writer behind the shared minimap payload helper", () => {

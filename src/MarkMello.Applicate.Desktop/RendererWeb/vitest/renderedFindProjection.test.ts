@@ -61,7 +61,141 @@ async function collectTransfer(
   return { checkpoints, messages, result, yields };
 }
 
+async function drainManualYields<T>(
+  promise: Promise<T>,
+  yieldResolvers: Array<() => void>
+): Promise<T> {
+  const state: { settled: boolean; value?: T; error?: unknown } = { settled: false };
+  promise.then(
+    value => {
+      state.settled = true;
+      state.value = value;
+    },
+    error => {
+      state.settled = true;
+      state.error = error;
+    }
+  );
+
+  for (let pass = 0; pass < 40 && !state.settled; pass++) {
+    await Promise.resolve();
+    yieldResolvers.shift()?.();
+    await Promise.resolve();
+  }
+
+  if (!state.settled) {
+    throw new Error("projection publication did not settle while draining manual yields");
+  }
+  if (state.error !== undefined) {
+    throw state.error;
+  }
+  return state.value as T;
+}
+
 describe("rendered find visible text projection", () => {
+  it("defers section materialization until an explicit scheduler yield and eventually transfers", async () => {
+    const mod = await loadProjectionModule();
+    const publish = (mod as unknown as {
+      publishRenderedFindProjection: (options: {
+        emit: (message: { type: string }) => void;
+        projectionRevision: number;
+        readiness: Promise<"ready">;
+        renderId: number;
+        root: () => Node;
+        sectionRoots: {
+          sectionCount: number;
+          createRoot: (sectionIndex: number) => Node | null;
+        };
+        shouldCancel: () => boolean;
+        yieldControl: () => Promise<void>;
+      }) => Promise<"complete" | "cancelled" | "unavailable">;
+    }).publishRenderedFindProjection;
+    const messages: Array<{ type: string }> = [];
+    const yieldResolvers: Array<() => void> = [];
+    let fullRootMaterialized = 0;
+    const sectionMaterialized: number[] = [];
+
+    const publication = publish({
+      emit: message => { messages.push(message); },
+      projectionRevision: 1,
+      readiness: Promise.resolve("ready"),
+      renderId: 7,
+      root: () => {
+        fullRootMaterialized++;
+        return document.createElement("main");
+      },
+      sectionRoots: {
+        createRoot: sectionIndex => {
+          sectionMaterialized.push(sectionIndex);
+          const section = document.createElement("section");
+          section.dataset["mmBlockIndex"] = String(sectionIndex);
+          section.textContent = `needle ${sectionIndex}`;
+          return section;
+        },
+        sectionCount: 2,
+      },
+      shouldCancel: () => false,
+      yieldControl: () => new Promise(resolve => { yieldResolvers.push(resolve); }),
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fullRootMaterialized).toBe(0);
+    expect(sectionMaterialized).toEqual([]);
+    expect(messages).toEqual([]);
+
+    await expect(drainManualYields(publication, yieldResolvers)).resolves.toBe("complete");
+    expect(fullRootMaterialized).toBe(0);
+    expect(sectionMaterialized).toEqual([0, 1]);
+    expect(messages.map(message => message.type)).toEqual([
+      "find-text-index-start",
+      "find-text-index-chunk",
+      "find-text-index-complete",
+    ]);
+  });
+
+  it("projects one section per scheduling slice and cancels before later materialization", async () => {
+    const mod = await loadProjectionModule();
+    const projectSections = (mod as unknown as {
+      createRenderedFindProjectionFromSectionRoots?: (
+        sections: {
+          sectionCount: number;
+          createRoot: (sectionIndex: number) => Node | null;
+        },
+        options: {
+          now: () => number;
+          shouldCancel: (checkpoint: "before-work" | "after-yield") => boolean;
+          yieldControl: () => Promise<void>;
+        }
+      ) => Promise<{ status: "complete" | "cancelled"; segments: unknown[] }>;
+    }).createRenderedFindProjectionFromSectionRoots;
+    expect(projectSections).toBeTypeOf("function");
+
+    let now = 0;
+    let yielded = false;
+    const materialized: number[] = [];
+    const result = await projectSections!({
+      createRoot: sectionIndex => {
+        materialized.push(sectionIndex);
+        const section = document.createElement("section");
+        section.dataset["mmBlockIndex"] = String(sectionIndex);
+        section.textContent = `slice ${sectionIndex}`;
+        now += mod.RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS + 1;
+        return section;
+      },
+      sectionCount: 3,
+    }, {
+      now: () => now,
+      shouldCancel: checkpoint => checkpoint === "after-yield" && yielded,
+      yieldControl: async () => {
+        yielded = true;
+      },
+    });
+
+    expect(result).toEqual({ segments: [], status: "cancelled" });
+    expect(materialized).toEqual([0]);
+  });
+
   it("publishes the transfer only after readiness", async () => {
     const mod = await loadProjectionModule();
     const messages: Array<{ type: string }> = [];

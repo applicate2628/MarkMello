@@ -111,21 +111,35 @@ export type RenderedFindProjectionOptions = {
   shouldCancel?: (checkpoint: VisibleTextTraversalCheckpoint) => boolean;
   yieldControl?: () => Promise<void>;
   now?: () => number;
+  onSectionProjected?: (event: RenderedFindProjectionSectionEvent) => void;
 };
 
 export type RenderedFindProjectionResult =
   | { status: "complete"; segments: RenderedFindTextSegment[] }
   | { status: "cancelled"; segments: [] };
 
+export type RenderedFindProjectionSectionRoots = {
+  sectionCount: number;
+  createRoot: (sectionIndex: number) => Node | null;
+};
+
+export type RenderedFindProjectionSectionEvent = {
+  sectionIndex: number;
+  durationMs: number;
+  overranSliceBudget: boolean;
+};
+
 export type PublishRenderedFindProjectionOptions = {
   emit: (message: RenderedFindTransferMessage) => void;
   projectionRevision: number;
   readiness: Promise<"not-needed" | "ready" | "ready-with-failures" | "cancelled" | "unavailable" | "unprepared">;
   renderId: number;
-  root: () => Node;
+  root?: () => Node;
+  sectionRoots?: RenderedFindProjectionSectionRoots;
   shouldCancel: () => boolean;
   yieldControl: () => Promise<void>;
   now?: () => number;
+  onSectionProjected?: (event: RenderedFindProjectionSectionEvent) => void;
 };
 
 export async function publishRenderedFindProjection(
@@ -143,14 +157,24 @@ export async function publishRenderedFindProjection(
     return "unavailable";
   }
 
+  await options.yieldControl();
+  if (options.shouldCancel()) {
+    return "cancelled";
+  }
+
   const projectionOptions: RenderedFindProjectionOptions = {
     shouldCancel: () => options.shouldCancel(),
     yieldControl: options.yieldControl,
   };
+  if (options.onSectionProjected !== undefined) {
+    projectionOptions.onSectionProjected = options.onSectionProjected;
+  }
   if (options.now !== undefined) {
     projectionOptions.now = options.now;
   }
-  const projection = await createRenderedFindProjection(options.root(), projectionOptions);
+  const projection = options.sectionRoots !== undefined
+    ? await createRenderedFindProjectionFromSectionRoots(options.sectionRoots, projectionOptions)
+    : await createRenderedFindProjection(readProjectionRoot(options), projectionOptions);
   if (projection.status === "cancelled" || options.shouldCancel()) {
     return "cancelled";
   }
@@ -168,12 +192,103 @@ export async function publishRenderedFindProjection(
   return emitRenderedFindProjectionTransfer(projection.segments, transferOptions);
 }
 
+function readProjectionRoot(options: PublishRenderedFindProjectionOptions): Node {
+  if (options.root === undefined) {
+    throw new Error("rendered find projection root is unavailable");
+  }
+  return options.root();
+}
+
 export async function createRenderedFindProjection(
   root: Node,
   options: RenderedFindProjectionOptions = {}
 ): Promise<RenderedFindProjectionResult> {
-  const segments: RenderedFindTextSegment[] = [];
-  const blockLengths = new Map<number, number>();
+  const collector = createRenderedFindSegmentCollector();
+  const result = await appendRenderedFindProjectionRoot(root, options, collector);
+  if (result === "cancelled") {
+    return { segments: [], status: "cancelled" };
+  }
+
+  return { segments: collector.segments, status: "complete" };
+}
+
+export async function createRenderedFindProjectionFromSectionRoots(
+  sections: RenderedFindProjectionSectionRoots,
+  options: RenderedFindProjectionOptions = {}
+): Promise<RenderedFindProjectionResult> {
+  const collector = createRenderedFindSegmentCollector();
+  const now = options.now ?? (() => performance.now());
+  const shouldCancel = options.shouldCancel ?? (() => false);
+  const yieldControl = options.yieldControl ?? (async () => {});
+  const sectionCount = Math.max(0, Math.floor(sections.sectionCount));
+  let sliceActive = false;
+  let sliceStart = 0;
+
+  const beginOrContinueSectionSlice = async (): Promise<boolean> => {
+    if (!sliceActive) {
+      if (shouldCancel("before-work")) {
+        return true;
+      }
+      sliceStart = now();
+      sliceActive = true;
+      return false;
+    }
+    if (now() - sliceStart < RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS) {
+      return false;
+    }
+
+    await yieldControl();
+    if (shouldCancel("after-yield")) {
+      return true;
+    }
+    if (shouldCancel("before-work")) {
+      return true;
+    }
+    sliceStart = now();
+    return false;
+  };
+
+  for (let sectionIndex = 0; sectionIndex < sectionCount; sectionIndex++) {
+    if (await beginOrContinueSectionSlice()) {
+      return { segments: [], status: "cancelled" };
+    }
+
+    const sectionStart = now();
+    const root = sections.createRoot(sectionIndex);
+    if (root !== null) {
+      const result = await appendRenderedFindProjectionRoot(root, options, collector);
+      if (result === "cancelled") {
+        return { segments: [], status: "cancelled" };
+      }
+    }
+    const durationMs = Math.max(0, now() - sectionStart);
+    options.onSectionProjected?.({
+      durationMs,
+      overranSliceBudget: durationMs > RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS,
+      sectionIndex,
+    });
+  }
+
+  return { segments: collector.segments, status: "complete" };
+}
+
+type RenderedFindSegmentCollector = {
+  segments: RenderedFindTextSegment[];
+  blockLengths: Map<number, number>;
+};
+
+function createRenderedFindSegmentCollector(): RenderedFindSegmentCollector {
+  return {
+    blockLengths: new Map<number, number>(),
+    segments: [],
+  };
+}
+
+async function appendRenderedFindProjectionRoot(
+  root: Node,
+  options: RenderedFindProjectionOptions,
+  collector: RenderedFindSegmentCollector
+): Promise<"complete" | "cancelled"> {
   const walkOptions = {
     shouldCancel: options.shouldCancel ?? (() => false),
     sliceBudgetMs: RENDERED_FIND_PRODUCER_SLICE_BUDGET_MS,
@@ -202,22 +317,22 @@ export async function createRenderedFindProjection(
       return;
     }
 
-    const blockLocalStart = blockLengths.get(blockIndex) ?? 0;
-    segments.push({
+    const blockLocalStart = collector.blockLengths.get(blockIndex) ?? 0;
+    collector.segments.push({
       blockIndex,
       blockLocalStart,
       segmentCodeUnitLength: text.length,
-      segmentOrdinal: segments.length,
+      segmentOrdinal: collector.segments.length,
       text,
     });
-    blockLengths.set(blockIndex, blockLocalStart + text.length);
+    collector.blockLengths.set(blockIndex, blockLocalStart + text.length);
   });
 
   if (result === "cancelled") {
-    return { segments: [], status: "cancelled" };
+    return "cancelled";
   }
 
-  return { segments, status: "complete" };
+  return "complete";
 }
 
 export function createRenderedFindDomainBeginMessage(input: { renderId: number }): RenderedFindDomainBeginMessage {

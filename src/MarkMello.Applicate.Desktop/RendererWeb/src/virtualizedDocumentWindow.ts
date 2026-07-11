@@ -303,6 +303,15 @@ export function createFullDocumentFragmentFromWindowModel(
   return fragment;
 }
 
+export function createDocumentWindowSectionNodeFromModel(
+  ownerDocument: Document,
+  model: DocumentWindowModel,
+  sectionIndex: number
+): HTMLElement | null {
+  const entry = model.sections[sectionIndex];
+  return entry === undefined ? null : createSectionNode(ownerDocument, entry);
+}
+
 function collectExistingSections(main: HTMLElement): Map<number, ExistingSectionUnit> {
   const result = new Map<number, ExistingSectionUnit>();
   for (const element of collectLiveDocumentSectionElements(main)) {

@@ -10,12 +10,17 @@ type MinimapViewportStyle = {
   transform: string;
 };
 
+export type MinimapSnapshotProvenance =
+  | { source: "live-dom"; modelGeneration: null }
+  | { source: "model-fragment"; modelGeneration: number };
+
 export type CachedMinimapSnapshot = {
   content: DocumentFragment;
   documentHeight: number;
   lastPostedState: PostedMinimapState;
   contentStyle: MinimapElementStyle;
   viewportStyle: MinimapViewportStyle;
+  provenance: MinimapSnapshotProvenance;
 };
 
 export type RestoredMinimapSnapshot = {
@@ -24,14 +29,33 @@ export type RestoredMinimapSnapshot = {
   lastPostedState: PostedMinimapState;
 };
 
+function isMinimapSnapshotProvenance(value: unknown): value is MinimapSnapshotProvenance {
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as { modelGeneration?: unknown; source?: unknown };
+  if (candidate.source === "live-dom") {
+    return candidate.modelGeneration === null;
+  }
+  const modelGeneration = candidate.modelGeneration;
+  return candidate.source === "model-fragment"
+    && typeof modelGeneration === "number"
+    && Number.isSafeInteger(modelGeneration)
+    && modelGeneration >= 0;
+}
+
 export function captureMinimapSnapshot(input: {
   ownerDocument: Document;
   minimapContent: HTMLElement | null;
   minimapViewport: HTMLElement | null;
   documentHeight: number;
   lastPostedState: PostedMinimapState;
+  provenance: MinimapSnapshotProvenance | null;
 }): CachedMinimapSnapshot | null {
-  if (!input.minimapContent || input.minimapContent.childNodes.length === 0) {
+  if (!input.minimapContent
+    || input.minimapContent.childNodes.length === 0
+    || !isMinimapSnapshotProvenance(input.provenance)) {
     return null;
   }
 
@@ -47,6 +71,7 @@ export function captureMinimapSnapshot(input: {
       width: input.minimapContent.style.width,
       transform: input.minimapContent.style.transform,
     },
+    provenance: { ...input.provenance },
     viewportStyle: {
       height: input.minimapViewport?.style.height ?? "",
       transform: input.minimapViewport?.style.transform ?? "",
