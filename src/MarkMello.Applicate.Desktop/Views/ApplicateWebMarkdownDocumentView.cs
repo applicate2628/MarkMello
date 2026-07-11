@@ -1757,6 +1757,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         try
         {
+            var rawBounds = ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(e.Body);
+            if (!rawBounds.Accepted)
+            {
+                var rejected = RejectOversizedRenderedFindMessageIfCurrent(_renderedFindDomain, e.Body);
+                PostLatestRenderedFindResult(rejected?.LatestQueryResult);
+                return;
+            }
+
             if (TryHandleRenderedFindProtocolMessage(e.Body))
             {
                 return;
@@ -2411,30 +2419,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private bool TryHandleRenderedFindProtocolMessage(string body)
     {
-        // This token check only selects the strict protocol owner. It never accepts
-        // a message and deliberately treats the protocol's reserved type values as
-        // fail-closed even when an oversized body cannot be parsed safely here.
-        if (!ContainsRenderedFindProtocolTypeToken(body))
-        {
-            return false;
-        }
-
-        var bounds = ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body);
-        if (!bounds.Accepted)
-        {
-            var rejected = _renderedFindDomain.ApplyProtocolMessage(body);
-            PostLatestRenderedFindResult(rejected.LatestQueryResult);
-            return true;
-        }
-
-        if (!TryReadRenderedFindMessageType(body, out var type))
-        {
-            var rejected = _renderedFindDomain.ApplyProtocolMessage(body);
-            PostLatestRenderedFindResult(rejected.LatestQueryResult);
-            return true;
-        }
-
-        if (!IsRenderedFindProtocolType(type))
+        if (!ApplicateRenderedFindTextProtocol.IsProtocolCandidateForRouting(body))
         {
             return false;
         }
@@ -2444,70 +2429,19 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         return true;
     }
 
-    private static bool ContainsRenderedFindProtocolTypeToken(string body)
+    internal static ApplicateRenderedFindDomainApplyResult? RejectOversizedRenderedFindMessageIfCurrent(
+        ApplicateRenderedFindDomainState domain,
+        string body)
     {
-        return body.Contains("find-domain-begin", StringComparison.Ordinal)
-               || body.Contains("find-text-index-start", StringComparison.Ordinal)
-               || body.Contains("find-text-index-chunk", StringComparison.Ordinal)
-               || body.Contains("find-text-index-complete", StringComparison.Ordinal);
-    }
-
-    private static bool TryReadRenderedFindMessageType(string body, out string? type)
-    {
-        type = null;
-        try
+        ArgumentNullException.ThrowIfNull(domain);
+        ArgumentNullException.ThrowIfNull(body);
+        if (domain.Status == ApplicateRenderedFindDomainStatus.LegacyPlaintext)
         {
-            var utf8 = Encoding.UTF8.GetBytes(body);
-            var reader = new Utf8JsonReader(utf8, new JsonReaderOptions
-            {
-                AllowTrailingCommas = false,
-                CommentHandling = JsonCommentHandling.Disallow,
-                MaxDepth = 8,
-            });
-            if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject)
-            {
-                return false;
-            }
-
-            while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
-            {
-                if (reader.TokenType != JsonTokenType.PropertyName)
-                {
-                    return false;
-                }
-
-                var isType = reader.ValueTextEquals("type");
-                if (!reader.Read())
-                {
-                    return false;
-                }
-
-                if (isType)
-                {
-                    if (reader.TokenType != JsonTokenType.String || type is not null)
-                    {
-                        return false;
-                    }
-
-                    type = reader.GetString();
-                }
-
-                reader.Skip();
-            }
-
-            return type is not null;
+            return null;
         }
-        catch (JsonException)
-        {
-            return false;
-        }
+
+        return domain.ApplyProtocolMessage(body);
     }
-
-    private static bool IsRenderedFindProtocolType(string? type)
-        => type is "find-domain-begin"
-            or "find-text-index-start"
-            or "find-text-index-chunk"
-            or "find-text-index-complete";
 
     private void HandleFindQueryMessage(JsonElement root)
     {

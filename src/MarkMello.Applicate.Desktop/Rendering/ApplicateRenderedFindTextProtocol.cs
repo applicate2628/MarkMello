@@ -113,6 +113,50 @@ public static class ApplicateRenderedFindTextProtocol
         }
     }
 
+    public static bool IsProtocolCandidateForRouting(string body)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        if (!ValidateRawMessageBounds(body).Accepted)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(body, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = 8,
+            });
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (property.NameEquals("type") &&
+                    property.Value.ValueKind == JsonValueKind.String &&
+                    property.Value.GetString() is string type &&
+                    IsKnownMessageType(type))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
     public static ApplicateRenderedFindTransferState CreateTransferState(
         int currentRenderId,
         int minimumProjectionRevision = 0)

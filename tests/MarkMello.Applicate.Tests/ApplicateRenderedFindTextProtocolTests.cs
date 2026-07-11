@@ -5,6 +5,38 @@ namespace MarkMello.Applicate.Tests;
 
 public sealed class ApplicateRenderedFindTextProtocolTests
 {
+    [Theory]
+    [InlineData("""{"type":"\u0066ind-domain-begin","renderId":11}""")]
+    [InlineData("""{"\u0074ype":"find-domain-begin","renderId":11}""")]
+    [InlineData("""{ "renderId" : 11 , "type" : "find-text-index-start" }""")]
+    [InlineData("""{"type":"other","type":"\u0066ind-text-index-chunk"}""")]
+    [InlineData("""{"type":"find-text-index-complete","type":"other"}""")]
+    public void RoutingClassifierFindsAnySemanticReservedRootType(string body)
+    {
+        Assert.True(ApplicateRenderedFindTextProtocol.IsProtocolCandidateForRouting(body));
+    }
+
+    [Theory]
+    [InlineData("""{"type":"minimap-state","note":"find-domain-begin"}""")]
+    [InlineData("""{"type":"find-domain-begin-extra"}""")]
+    [InlineData("""{"type":"minimap-state","nested":{"type":"find-domain-begin"}}""")]
+    [InlineData("""{"type":"minimap-state","note":"\u0066ind-domain-begin"}""")]
+    public void RoutingClassifierIgnoresUnknownNestedAndTypeLikeText(string body)
+    {
+        Assert.False(ApplicateRenderedFindTextProtocol.IsProtocolCandidateForRouting(body));
+    }
+
+    [Fact]
+    public void EscapedReservedDuplicateRoutesToExactParserAndIsRejected()
+    {
+        const string body = """{"type":"other","\u0074ype":"\u0066ind-domain-begin","schemaVersion":1,"textDomain":"rendered-dom-v1","renderId":11}""";
+
+        Assert.True(ApplicateRenderedFindTextProtocol.IsProtocolCandidateForRouting(body));
+        Assert.False(ApplicateRenderedFindTextProtocol.ParseMessage(
+            body,
+            new ApplicateRenderedFindProtocolContext(11)).Accepted);
+    }
+
     [Fact]
     public void RawMessageBoundsAcceptExactEdgesAndRejectOneOver()
     {

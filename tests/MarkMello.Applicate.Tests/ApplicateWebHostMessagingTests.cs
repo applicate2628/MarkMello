@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using MarkMello.Applicate.Desktop.Rendering;
+using MarkMello.Applicate.Desktop.Views;
 using Xunit;
 
 namespace MarkMello.Applicate.Tests;
@@ -98,19 +99,35 @@ public sealed class ApplicateWebHostMessagingTests
         var handler = ExtractMethodBody(source, "private void OnWebMessageReceived(");
         var renderedRoute = handler.IndexOf("TryHandleRenderedFindProtocolMessage(e.Body)", StringComparison.Ordinal);
         var genericParse = handler.IndexOf("JsonDocument.Parse(e.Body)", StringComparison.Ordinal);
+        var rawBounds = handler.IndexOf("ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(e.Body)", StringComparison.Ordinal);
         var protocolRoute = ExtractMethodBody(source, "private bool TryHandleRenderedFindProtocolMessage(");
-        var protocolTypes = ExtractMethodBody(source, "private static bool ContainsRenderedFindProtocolTypeToken(");
 
         Assert.True(renderedRoute >= 0, "Known rendered-find messages should have a dedicated host route.");
+        Assert.True(rawBounds >= 0 && renderedRoute > rawBounds, "The callback-wide raw bound must run before routing or parsing.");
         Assert.True(genericParse > renderedRoute, "The strict rendered-find route must run before generic host parsing.");
-        Assert.Contains("ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body)", protocolRoute, StringComparison.Ordinal);
+        Assert.Contains("ApplicateRenderedFindTextProtocol.IsProtocolCandidateForRouting(body)", protocolRoute, StringComparison.Ordinal);
         Assert.Contains("_renderedFindDomain.ApplyProtocolMessage(body)", protocolRoute, StringComparison.Ordinal);
-        Assert.Contains("find-domain-begin", protocolTypes, StringComparison.Ordinal);
-        Assert.Contains("find-text-index-start", protocolTypes, StringComparison.Ordinal);
-        Assert.Contains("find-text-index-chunk", protocolTypes, StringComparison.Ordinal);
-        Assert.Contains("find-text-index-complete", protocolTypes, StringComparison.Ordinal);
         Assert.DoesNotContain("ApplicateTrace", protocolRoute, StringComparison.Ordinal);
         Assert.DoesNotContain("Console", protocolRoute, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OversizedInboundBodyDropsInLegacyAndFailsCurrentRenderedDomainClosed()
+    {
+        var body = new string(' ', ApplicateRenderedFindTextProtocol.MaxMessageCodeUnits) +
+                   """{"\u0074ype":"\u0066ind-domain-begin","renderId":11}""";
+        var legacy = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        var rendered = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        rendered.BeginRenderedRender(11);
+
+        var legacyResult = ApplicateWebMarkdownDocumentView.RejectOversizedRenderedFindMessageIfCurrent(legacy, body);
+        var renderedResult = ApplicateWebMarkdownDocumentView.RejectOversizedRenderedFindMessageIfCurrent(rendered, body);
+
+        Assert.Null(legacyResult);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.LegacyPlaintext, legacy.Status);
+        Assert.NotNull(renderedResult);
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, renderedResult!.ProtocolStatus);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedRejected, rendered.Status);
     }
 
     [Fact]
