@@ -17,8 +17,10 @@ type IntersectionObserverRecord = {
 
 type RendererHarness = {
   flushAnimationFrame: () => Promise<void>;
+  flushAnimationFrameAt: (timestamp: number) => Promise<void>;
   flushCanceledRafs: () => Promise<void>;
   flushNextRaf: () => Promise<void>;
+  flushNextRafAt: (timestamp: number) => Promise<void>;
   flushQueuedRafs: () => Promise<void>;
   flushRafsUntil: (predicate: () => boolean, maxFrames?: number) => Promise<void>;
   flushResizeRafsSynchronously: () => void;
@@ -387,7 +389,7 @@ async function loadRendererHarness(options: {
     }
   };
 
-  const flushNextRaf = async (): Promise<void> => {
+  const flushNextRafAt = async (timestamp: number): Promise<void> => {
     const frame = rafCallbacks.shift();
     if (!frame) {
       throw new Error("Expected a queued requestAnimationFrame callback");
@@ -396,14 +398,18 @@ async function loadRendererHarness(options: {
     if (options.deliverRealizationEventsAfterFrame !== true) {
       deliverMountedRealizationEvents();
     }
-    frame.callback(0);
+    frame.callback(timestamp);
     if (options.deliverRealizationEventsAfterFrame === true) {
       deliverMountedRealizationEvents();
     }
     await flushRendererMicrotasks();
   };
 
-  const flushAnimationFrame = async (): Promise<void> => {
+  const flushNextRaf = async (): Promise<void> => {
+    await flushNextRafAt(0);
+  };
+
+  const flushAnimationFrameAt = async (timestamp: number): Promise<void> => {
     const callbacks = rafCallbacks.splice(0, rafCallbacks.length);
     if (callbacks.length === 0) {
       throw new Error("Expected queued requestAnimationFrame callbacks for a frame");
@@ -412,13 +418,17 @@ async function loadRendererHarness(options: {
       deliverMountedRealizationEvents();
     }
     for (const frame of callbacks) {
-      frame.callback(0);
+      frame.callback(timestamp);
       await flushRendererMicrotasks();
     }
     if (options.deliverRealizationEventsAfterFrame === true) {
       deliverMountedRealizationEvents();
     }
     await flushRendererMicrotasks();
+  };
+
+  const flushAnimationFrame = async (): Promise<void> => {
+    await flushAnimationFrameAt(0);
   };
 
   const flushCanceledRafs = async (): Promise<void> => {
@@ -492,8 +502,10 @@ async function loadRendererHarness(options: {
 
   return {
     flushAnimationFrame,
+    flushAnimationFrameAt,
     flushCanceledRafs,
     flushNextRaf,
+    flushNextRafAt,
     flushQueuedRafs,
     flushRafsUntil,
     flushResizeRafsSynchronously,
@@ -1662,6 +1674,86 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(1);
   });
 
+  it("uses animation timestamps rather than frame count for smooth TOC duration", async () => {
+    const { flushAnimationFrameAt, flushQueuedRafs, load, messages } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    load({ type: "scroll-to-heading", id: "heading-95" });
+
+    const frameMs = 1000 / 120;
+    let timestamp = 1_000;
+    let firstSmoothTimestamp: number | null = null;
+    let lastSmoothTimestamp: number | null = null;
+    const smoothWriteCount = (): number => perfDetails<{ writer?: string }>(
+      messages,
+      "mm-virt-scroll-write-committed"
+    ).filter(detail => detail.writer === "navigation-smooth").length;
+    const settledCount = (): number => perfDetails(messages, "mm-virt-navigation-settled").length;
+
+    for (let frame = 0; frame < 80 && smoothWriteCount() < 12; frame++) {
+      const previousSmoothWrites = smoothWriteCount();
+      await flushAnimationFrameAt(timestamp);
+      if (smoothWriteCount() > previousSmoothWrites) {
+        firstSmoothTimestamp ??= timestamp;
+        lastSmoothTimestamp = timestamp;
+      }
+      timestamp += frameMs;
+    }
+
+    expect(firstSmoothTimestamp).not.toBeNull();
+    expect(lastSmoothTimestamp! - firstSmoothTimestamp!).toBeLessThanOrEqual(100);
+    expect(smoothWriteCount()).toBe(12);
+    expect(settledCount()).toBe(0);
+
+    for (let frame = 0; frame < 80 && settledCount() === 0; frame++) {
+      const previousSmoothWrites = smoothWriteCount();
+      await flushAnimationFrameAt(timestamp);
+      if (smoothWriteCount() > previousSmoothWrites) {
+        lastSmoothTimestamp = timestamp;
+      }
+      timestamp += frameMs;
+    }
+
+    expect(settledCount()).toBe(1);
+    expect(lastSmoothTimestamp! - firstSmoothTimestamp!).toBeGreaterThanOrEqual(195);
+    expect(lastSmoothTimestamp! - firstSmoothTimestamp!).toBeLessThanOrEqual(210);
+  });
+
+  it("treats a zero first smooth timestamp as the origin for a late frame", async () => {
+    const { flushAnimationFrameAt, flushQueuedRafs, load, messages, root } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+
+    load({ type: "scroll-to-heading", id: "heading-95" });
+
+    const smoothWriteCount = (): number => perfDetails<{ writer?: string }>(
+      messages,
+      "mm-virt-scroll-write-committed"
+    ).filter(detail => detail.writer === "navigation-smooth").length;
+    for (let frame = 0; frame < 40 && smoothWriteCount() === 0; frame++) {
+      await flushAnimationFrameAt(0);
+    }
+
+    expect(smoothWriteCount()).toBe(1);
+    expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(0);
+
+    await flushAnimationFrameAt(250);
+    expect(smoothWriteCount()).toBe(2);
+    await flushQueuedRafs();
+
+    expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(1);
+    expect(smoothWriteCount()).toBe(2);
+    expect(document.getElementById("heading-95")!.getBoundingClientRect().top).toBeCloseTo(0, 0);
+    expect(root.scrollTop).toBeGreaterThan(0);
+  });
+
   it("routes hash navigation through the virtualized heading landing owner", async () => {
     const { flushNextRaf, flushQueuedRafs, load, root, scrollCalls } = await loadRendererHarness({
       sectionCount: 120,
@@ -1715,7 +1807,7 @@ describe("renderer scroll-family virtualization integration", () => {
   });
 
   it("stops a smooth TOC transition after genuine user supersession", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, messages, root, scrollCalls, scrollWrites } = await loadRendererHarness({
+    const { flushAnimationFrameAt, flushQueuedRafs, load, messages, root, scrollCalls, scrollWrites } = await loadRendererHarness({
       sectionCount: 120,
       virtualization: true,
     });
@@ -1725,8 +1817,12 @@ describe("renderer scroll-family virtualization integration", () => {
     scrollWrites.length = 0;
 
     load({ type: "scroll-to-heading", id: "heading-95" });
-    await flushNextRaf();
-    await flushNextRaf();
+    for (const timestamp of [0, 16, 32, 48]) {
+      await flushAnimationFrameAt(timestamp);
+      if (scrollWrites.filter(value => value > 0).length > 0) {
+        break;
+      }
+    }
 
     expect(document.getElementById("heading-95")).not.toBeNull();
     expect(scrollWrites.filter(value => value > 0)).toHaveLength(1);

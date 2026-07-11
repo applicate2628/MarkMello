@@ -438,7 +438,10 @@ const scrollOwnershipControlPlane: ScrollOwnershipControlPlane | null = virtuali
     hasRecentUserInput: withinMs => userInputWitness!.hasRecentUserInput(withinMs),
     prepareGeometrySettleCandidate: () =>
       virtualizedDocumentWindowController?.recensusRealizationWatches() ?? true,
-    requestFrame: callback => window.requestAnimationFrame(callback),
+    requestFrame: callback => window.requestAnimationFrame(timestamp => {
+      virtualizedScrollControlFrameTimestamp = timestamp;
+      callback(timestamp);
+    }),
     root: getDocumentScrollRoot(),
     trace: event => postPerfMark(event.id, {
       ...event.details,
@@ -499,6 +502,7 @@ let virtualizedProgrammaticNavigationPostSettleTarget: {
   viewportOffsetY: number;
 } | null = null;
 let virtualizedProgrammaticNavigationOperation: VirtualizedScrollOperation | null = null;
+let virtualizedScrollControlFrameTimestamp: number | null = null;
 let minimapScrollOperation: VirtualizedScrollOperation | null = null;
 const virtualizedWriteReceipts = new Map<number, ScrollWriteReceipt>();
 let cachedScrollRestoreCompletion: Promise<void> | null = null;
@@ -3037,7 +3041,6 @@ function writeVirtualizedProgrammaticNavigationScrollTop(
 }
 
 const VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS = 200;
-const VIRTUALIZED_NAVIGATION_FRAME_INTERVAL_MS = 1000 / 60;
 
 function easeVirtualizedNavigationProgress(progress: number): number {
   const clamped = Math.min(1, Math.max(0, progress));
@@ -3062,7 +3065,7 @@ function scheduleVirtualizedProgrammaticNavigationSmoothTransition(input: {
     return false;
   }
 
-  let frame = 0;
+  let startTimestamp: number | null = null;
   const advance = (): boolean => input.operation.scheduleFrameTransaction(() => {
     if (
       !input.operation.isCurrent()
@@ -3071,10 +3074,15 @@ function scheduleVirtualizedProgrammaticNavigationSmoothTransition(input: {
       return;
     }
 
-    frame++;
+    const timestamp = virtualizedScrollControlFrameTimestamp;
+    if (timestamp === null || !Number.isFinite(timestamp)) {
+      advance();
+      return;
+    }
+    startTimestamp ??= timestamp;
     const elapsedMs = Math.min(
       VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS,
-      frame * VIRTUALIZED_NAVIGATION_FRAME_INTERVAL_MS
+      Math.max(0, timestamp - startTimestamp)
     );
     const progress = elapsedMs / VIRTUALIZED_NAVIGATION_SMOOTH_DURATION_MS;
     const easedProgress = easeVirtualizedNavigationProgress(progress);
