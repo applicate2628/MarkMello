@@ -103,6 +103,58 @@ export type RenderedFindProjectionResult =
   | { status: "complete"; segments: RenderedFindTextSegment[] }
   | { status: "cancelled"; segments: [] };
 
+export type PublishRenderedFindProjectionOptions = {
+  emit: (message: RenderedFindDomainBeginMessage | RenderedFindTransferMessage) => void;
+  projectionRevision: number;
+  readiness: Promise<"not-needed" | "ready" | "ready-with-failures" | "cancelled" | "unavailable" | "unprepared">;
+  renderId: number;
+  root: () => Node;
+  shouldCancel: () => boolean;
+  yieldControl: () => Promise<void>;
+  now?: () => number;
+};
+
+export async function publishRenderedFindProjection(
+  options: PublishRenderedFindProjectionOptions
+): Promise<RenderedFindTransferResult> {
+  if (options.shouldCancel()) {
+    return "cancelled";
+  }
+
+  options.emit(createRenderedFindDomainBeginMessage({ renderId: options.renderId }));
+  const readiness = await options.readiness;
+  if (
+    (readiness !== "not-needed" && readiness !== "ready" && readiness !== "ready-with-failures")
+    || options.shouldCancel()
+  ) {
+    return "cancelled";
+  }
+
+  const projectionOptions: RenderedFindProjectionOptions = {
+    shouldCancel: () => options.shouldCancel(),
+    yieldControl: options.yieldControl,
+  };
+  if (options.now !== undefined) {
+    projectionOptions.now = options.now;
+  }
+  const projection = await createRenderedFindProjection(options.root(), projectionOptions);
+  if (projection.status === "cancelled" || options.shouldCancel()) {
+    return "cancelled";
+  }
+
+  const transferOptions: RenderedFindTransferOptions = {
+    emit: message => { options.emit(message); },
+    projectionRevision: options.projectionRevision,
+    renderId: options.renderId,
+    shouldCancel: () => options.shouldCancel(),
+    yieldControl: options.yieldControl,
+  };
+  if (options.now !== undefined) {
+    transferOptions.now = options.now;
+  }
+  return emitRenderedFindProjectionTransfer(projection.segments, transferOptions);
+}
+
 export async function createRenderedFindProjection(
   root: Node,
   options: RenderedFindProjectionOptions = {}

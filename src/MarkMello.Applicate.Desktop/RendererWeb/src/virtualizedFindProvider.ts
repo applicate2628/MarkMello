@@ -1,13 +1,14 @@
 import {
   applyFindHighlights,
   clearFindHighlights,
-  findCaseInsensitiveMatchOffsets,
   type FindNavigationDirection,
   type FindProvider,
   type FindProviderStatus,
   type FindProviderView,
 } from "./findBar";
 import type { DocumentWindowModel } from "./documentWindow";
+import { walkVisibleTextNodes } from "./findVisibleText";
+import { RENDERED_FIND_TEXT_DOMAIN } from "./renderedFindProjection";
 import {
   renderWindowTargetThenAct,
   type WindowTargetDescriptor,
@@ -31,6 +32,7 @@ export type FindQueryMessage = {
   requestId: number;
   query: string;
   renderId?: number | null;
+  textDomain: "rendered-dom-v1";
 };
 
 export type FindResultsMessage = {
@@ -40,7 +42,9 @@ export type FindResultsMessage = {
   renderId?: number | null;
   totalCount: number;
   matches: FindMatchDescriptor[];
+  status: "pending" | "ready" | "unavailable";
   stale?: boolean;
+  textDomain: "rendered-dom-v1";
 };
 
 export type VirtualizedFindContext = {
@@ -65,16 +69,6 @@ export type VirtualizedFindProviderDeps = {
   readContext: () => VirtualizedFindContext;
 };
 
-const FIND_VISIBLE_SKIP_SELECTOR = [
-  "aside",
-  ".mm-minimap",
-  ".mm-minimap-viewport",
-  ".mm-width-handle",
-  ".mm-drop-overlay",
-  ".katex-mathml",
-  "pre.mm-mermaid.is-rendered",
-  ".mm-find-bar",
-].join(",");
 const FIND_RANGE_REAIM_FRAME_LIMIT = 3;
 const FIND_SCROLL_EPSILON = 0.5;
 
@@ -142,6 +136,7 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
     const request: FindQueryMessage = {
       query,
       requestId: ++requestSequence,
+      textDomain: RENDERED_FIND_TEXT_DOMAIN,
       type: "find-query",
     };
     if (context.renderId !== null) {
@@ -156,6 +151,7 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
       message.stale === true
       || message.requestId !== latestRequestId
       || message.query !== currentQuery
+      || message.textDomain !== RENDERED_FIND_TEXT_DOMAIN
     ) {
       return;
     }
@@ -170,8 +166,14 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
       return;
     }
 
+    if (message.status !== "ready") {
+      resetResults(currentQuery);
+      return;
+    }
+
     matches = message.matches
       .filter(isUsableDescriptor)
+      .filter(hasUsableRenderedOffsetWhenLive)
       .slice()
       .sort((left, right) => left.ordinal - right.ordinal);
     totalCount = Math.max(0, Math.floor(message.totalCount));
@@ -323,14 +325,19 @@ function isUsableDescriptor(match: FindMatchDescriptor): boolean {
     && match.ordinal > 0;
 }
 
+function hasUsableRenderedOffsetWhenLive(match: FindMatchDescriptor): boolean {
+  const block = findLiveBlockElement(match.blockIndex);
+  return block === null
+    || rangeFromBlockLocalOffset(block, match.blockLocalOffset, match.length) !== null;
+}
+
 function resolveLiveRangeForMatch(match: FindMatchDescriptor): Range | null {
   const block = findLiveBlockElement(match.blockIndex);
   if (block === null) {
     return null;
   }
 
-  return rangeFromBlockLocalOffset(block, match.blockLocalOffset, match.length)
-    ?? rangeFromNormalizedText(block, match.normalizedText);
+  return rangeFromBlockLocalOffset(block, match.blockLocalOffset, match.length);
 }
 
 function findLiveBlockElement(blockIndex: number): HTMLElement | null {
@@ -377,41 +384,8 @@ function rangeFromBlockLocalOffset(block: HTMLElement, offset: number, length: n
   return range.toString().length === length ? range : null;
 }
 
-function rangeFromNormalizedText(block: HTMLElement, normalizedText: string): Range | null {
-  if (normalizedText.length === 0) {
-    return null;
-  }
-
-  for (const node of visibleTextNodes(block)) {
-    for (const [start, end] of findCaseInsensitiveMatchOffsets(node.nodeValue ?? "", normalizedText)) {
-      const range = document.createRange();
-      range.setStart(node, start);
-      range.setEnd(node, end);
-      return range;
-    }
-  }
-
-  return null;
-}
-
 function visibleTextNodes(root: HTMLElement): Text[] {
-  const out: Text[] = [];
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode(node: Node): number {
-      const parent = node.parentElement;
-      if (parent === null || parent.closest(FIND_VISIBLE_SKIP_SELECTOR) !== null) {
-        return NodeFilter.FILTER_REJECT;
-      }
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
-
-  for (let current = walker.nextNode(); current !== null; current = walker.nextNode()) {
-    if (current.nodeType === Node.TEXT_NODE) {
-      out.push(current as Text);
-    }
-  }
-  return out;
+  return walkVisibleTextNodes(root);
 }
 
 function requestRangeLanding(

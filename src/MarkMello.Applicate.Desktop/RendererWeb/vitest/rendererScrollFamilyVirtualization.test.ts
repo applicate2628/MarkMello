@@ -852,6 +852,7 @@ type FindQueryMessage = {
   requestId: number;
   query: string;
   renderId?: number | null;
+  textDomain: "rendered-dom-v1";
 };
 
 type FindMatchDescriptor = {
@@ -2171,6 +2172,8 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(request).toMatchObject({ query: "needle", renderId: 17 });
 
     load({
+      status: "ready",
+      textDomain: "rendered-dom-v1",
       type: "find-results",
       requestId: request!.requestId,
       query: "needle",
@@ -2234,6 +2237,8 @@ describe("renderer scroll-family virtualization integration", () => {
       submitFindQuery("needle");
       const request = findQueryMessages(messages).at(-1);
       load({
+        status: "ready",
+        textDomain: "rendered-dom-v1",
         type: "find-results",
         requestId: request!.requestId,
         query: "needle",
@@ -2288,6 +2293,8 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(root.scrollTop).toBe(0);
 
     load({
+      status: "ready",
+      textDomain: "rendered-dom-v1",
       type: "find-results",
       requestId: request!.requestId,
       query: "needle",
@@ -2339,6 +2346,8 @@ describe("renderer scroll-family virtualization integration", () => {
     submitFindQuery("needle");
     const request = findQueryMessages(messages).at(-1)!;
     load({
+      status: "ready",
+      textDomain: "rendered-dom-v1",
       type: "find-results",
       requestId: request.requestId,
       query: "needle",
@@ -2379,6 +2388,8 @@ describe("renderer scroll-family virtualization integration", () => {
     submitFindQuery("needle");
     const request = findQueryMessages(messages).at(-1);
     load({
+      status: "ready",
+      textDomain: "rendered-dom-v1",
       type: "find-results",
       requestId: request!.requestId,
       query: "needle",
@@ -2425,6 +2436,8 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(findQueryMessages(messages)).toHaveLength(1);
     expect(root.scrollTop).toBe(0);
     load({
+      status: "ready",
+      textDomain: "rendered-dom-v1",
       type: "find-results",
       requestId: request!.requestId,
       query: "gamma",
@@ -2520,7 +2533,7 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(publishIndex).toBeGreaterThan(readinessEndIndex);
   });
 
-  it("runs rendered content readiness for find while detailed minimap is denied", async () => {
+  it("publishes the rendered find projection while detailed minimap is denied", async () => {
     const sectionCount = 120;
     const katex = makeRendererKatex();
     const { flushQueuedRafs, load, messages } = await loadRendererHarness({
@@ -2543,14 +2556,35 @@ describe("renderer scroll-family virtualization integration", () => {
       renderId: 41,
     });
     await flushQueuedRafs();
-    messages.length = 0;
-    katex.render.mockClear();
 
     load({ type: "open-find-bar" });
     submitFindQuery("needle");
-    await flushQueuedRafs();
+    for (
+      let pass = 0;
+      pass < 128 && perfDetails(messages, "mm-find-projection-terminal").length === 0;
+      pass++
+    ) {
+      await flushQueuedRafs();
+      await Promise.resolve();
+    }
 
-    expect(katex.render).toHaveBeenCalledTimes(1);
+    expect(katex.render).toHaveBeenCalledWith("x_90", expect.any(Element), expect.any(Object));
+    expect(findQueryMessages(messages)).toContainEqual(expect.objectContaining({
+      renderId: 41,
+      textDomain: "rendered-dom-v1",
+    }));
+    const protocolTypes = messages
+      .filter((message): message is { type: string } => typeof message === "object" && message !== null && "type" in message)
+      .map(message => message.type)
+      .filter(type => type.startsWith("find-domain-") || type.startsWith("find-text-index-"));
+    expect(perfDetails<{ status?: string }>(messages, "mm-find-projection-terminal"))
+      .toContainEqual(expect.objectContaining({ status: "complete" }));
+    expect(protocolTypes).toEqual([
+      "find-domain-begin",
+      "find-text-index-start",
+      "find-text-index-chunk",
+      "find-text-index-complete",
+    ]);
     expect(perfDetails<{ consumers?: string[] }>(messages, "mm-model-rendered-content-start"))
       .toEqual([expect.objectContaining({
         consumers: ["rendered-find-projection"],
@@ -2780,6 +2814,8 @@ describe("renderer scroll-family virtualization integration", () => {
         submitFindQuery("needle");
         const request = findQueryMessages(harness.messages).at(-1)!;
         harness.load({
+          status: "ready",
+          textDomain: "rendered-dom-v1",
           type: "find-results",
           requestId: request.requestId,
           query: "needle",

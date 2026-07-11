@@ -62,6 +62,77 @@ async function collectTransfer(
 }
 
 describe("rendered find visible text projection", () => {
+  it("posts the rendered domain begin before readiness and publishes only after readiness", async () => {
+    const mod = await loadProjectionModule();
+    const messages: Array<{ type: string }> = [];
+    let resolveReadiness!: (status: "ready") => void;
+    const readiness = new Promise<"ready">(resolve => { resolveReadiness = resolve; });
+    const root = document.createElement("main");
+    root.innerHTML = '<p data-mm-block-index="2">needle</p>';
+    const publish = (mod as unknown as {
+      publishRenderedFindProjection: (options: {
+        emit: (message: { type: string }) => void;
+        projectionRevision: number;
+        readiness: Promise<"ready">;
+        renderId: number;
+        root: () => Node;
+        shouldCancel: () => boolean;
+        yieldControl: () => Promise<void>;
+      }) => Promise<"complete" | "cancelled">;
+    }).publishRenderedFindProjection;
+
+    const result = publish({
+      emit: message => { messages.push(message); },
+      projectionRevision: 1,
+      readiness,
+      renderId: 7,
+      root: () => root,
+      shouldCancel: () => false,
+      yieldControl: async () => { },
+    });
+
+    expect(messages.map(message => message.type)).toEqual(["find-domain-begin"]);
+    resolveReadiness("ready");
+    await expect(result).resolves.toBe("complete");
+    expect(messages.map(message => message.type)).toEqual([
+      "find-domain-begin",
+      "find-text-index-start",
+      "find-text-index-chunk",
+      "find-text-index-complete",
+    ]);
+  });
+
+  it("cancels a stale rendered projection after readiness without transfer posts", async () => {
+    const mod = await loadProjectionModule();
+    const messages: Array<{ type: string }> = [];
+    let stale = false;
+    const publish = (mod as unknown as {
+      publishRenderedFindProjection: (options: {
+        emit: (message: { type: string }) => void;
+        projectionRevision: number;
+        readiness: Promise<"ready">;
+        renderId: number;
+        root: () => Node;
+        shouldCancel: () => boolean;
+        yieldControl: () => Promise<void>;
+      }) => Promise<"complete" | "cancelled">;
+    }).publishRenderedFindProjection;
+
+    const result = publish({
+      emit: message => { messages.push(message); },
+      projectionRevision: 1,
+      readiness: Promise.resolve("ready"),
+      renderId: 7,
+      root: () => document.createElement("main"),
+      shouldCancel: () => stale,
+      yieldControl: async () => { },
+    });
+    stale = true;
+
+    await expect(result).resolves.toBe("cancelled");
+    expect(messages.map(message => message.type)).toEqual(["find-domain-begin"]);
+  });
+
   beforeEach(() => {
     document.body.replaceChildren();
   });

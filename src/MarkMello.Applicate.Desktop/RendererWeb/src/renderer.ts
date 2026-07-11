@@ -75,6 +75,11 @@ import {
   type VirtualizedWindowOperation,
 } from "./virtualizedDocumentWindow";
 import {
+  publishRenderedFindProjection,
+  type RenderedFindDomainBeginMessage,
+  type RenderedFindTransferMessage,
+} from "./renderedFindProjection";
+import {
   createVirtualizationShadowValidator,
   readVirtualizationShadowFlag,
   type VirtualizationShadowValidator
@@ -163,6 +168,8 @@ type RendererMessage =
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number }
   | { type: "document-cache-miss"; renderId?: number; cacheKey?: string }
   | FindQueryMessage
+  | RenderedFindDomainBeginMessage
+  | RenderedFindTransferMessage
   // Mode-toggle reveal gate (2026-05-20). Posted in response to a host-sent
   // `mode-settle-probe` message after the renderer has applied pending reading
   // preferences and let layout chrome such as the minimap paint at the new slot
@@ -484,6 +491,9 @@ let modelRenderedContentCoordinatorState: ModelRenderedContentCoordinatorState |
 let modelRenderedContentLeaseSerial = 0;
 let minimapRenderedContentLease: ModelRenderedContentLease | null = null;
 let renderedFindContentLease: ModelRenderedContentLease | null = null;
+let renderedFindProjectionGeneration = 0;
+let renderedFindProjectionRenderId: number | null = null;
+let renderedFindProjectionRevision = 0;
 const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
 type ProcessedDocumentCacheEntry = {
   fragment: DocumentFragment;
@@ -1199,6 +1209,7 @@ function cancelModelRenderedContentState(
 }
 
 function cancelModelRenderedContentCoordinator(reason: string): void {
+  renderedFindProjectionGeneration++;
   minimapRenderedContentLease = null;
   renderedFindContentLease = null;
   const state = modelRenderedContentCoordinatorState;
@@ -1389,25 +1400,62 @@ function releaseRenderedFindContentLease(): void {
   lease?.release();
 }
 
-function requestRenderedFindModelReadiness(): void {
-  const current = renderedFindContentLease;
+function startRenderedFindProjectionForCurrentModel(): void {
   const model = virtualizedDocumentWindowModel;
   const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
+  const renderId = currentDocumentRenderId;
   if (
-    current !== null
-    && current.model === model
-    && current.documentEpoch === documentEpoch
+    !virtualizationEnabled
+    || model === null
+    || documentEpoch === undefined
+    || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
+    || renderId === null
+    || !Number.isSafeInteger(renderId)
+    || renderId <= 0
   ) {
     return;
   }
+
+  if (renderedFindProjectionRenderId !== renderId) {
+    renderedFindProjectionRenderId = renderId;
+    renderedFindProjectionRevision = 0;
+  }
+  const projectionRevision = ++renderedFindProjectionRevision;
+  const generation = ++renderedFindProjectionGeneration;
   releaseRenderedFindContentLease();
   const lease = acquireCurrentModelRenderedContentLease("rendered-find-projection");
-  if (lease === null || isTerminalModelRenderedContentStatus(lease.model.getRenderedContentState())) {
-    lease?.release();
+  if (lease === null) {
     return;
   }
   renderedFindContentLease = lease;
-  void lease.readiness.finally(() => {
+  const shouldCancel = () =>
+    generation !== renderedFindProjectionGeneration
+    || model !== virtualizedDocumentWindowModel
+    || renderId !== currentDocumentRenderId
+    || lease.documentEpoch !== documentEpoch
+    || scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true;
+
+  void publishRenderedFindProjection({
+    emit: message => { postHostMessage(message); },
+    projectionRevision,
+    readiness: lease.readiness,
+    renderId,
+    root: () => createFullDocumentFragmentFromWindowModel(document, model),
+    shouldCancel,
+    yieldControl: yieldModelRenderedContentWork,
+  }).then(status => {
+    postPerfMark("mm-find-projection-terminal", {
+      projectionRevision,
+      renderId,
+      status,
+    });
+  }).catch(error => {
+    postPerfMark("mm-find-projection-failed", {
+      projectionRevision,
+      renderId,
+      reason: String(error),
+    });
+  }).finally(() => {
     if (renderedFindContentLease === lease) {
       renderedFindContentLease = null;
       lease.release();
@@ -3617,6 +3665,7 @@ function initializeVirtualizedDocumentWindow(): void {
     { intrinsicSizeCalibrator: virtualizedIntrinsicCalibrator });
   virtualizedDocumentWindowModel = models.estimateOnlyModel;
   const documentEpoch = scrollOwnershipControlPlane!.captureDocumentEpoch();
+  startRenderedFindProjectionForCurrentModel();
   virtualizedDocumentWindowController = createVirtualizedDocumentWindowController({
     beginWindowGeometryWork: mountGeneration => {
       const ticket = beginVirtualizedGeometryWork("window-render", mountGeneration);
@@ -7934,10 +7983,7 @@ function wireFileDrop(): void {
 function wireFindBar(): void {
   virtualizedFindProvider = virtualizationEnabled
     ? createVirtualizedFindProvider({
-      postHostMessage: message => {
-        requestRenderedFindModelReadiness();
-        postHostMessage(message);
-      },
+      postHostMessage,
       readContext: readVirtualizedFindContext,
     })
     : null;
