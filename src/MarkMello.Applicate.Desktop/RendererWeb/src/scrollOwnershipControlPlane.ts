@@ -113,6 +113,7 @@ export type ScrollOwnershipControlPlaneDeps = {
   cancelFrame: (handle: number) => void;
   deliveredFrameBudget?: number;
   emitGeometrySettled: (payload: GeometrySettledPayload) => void;
+  hasRecentUserInput: (withinMs: number) => boolean;
   prepareGeometrySettleCandidate?: () => boolean;
   requestFrame: (callback: FrameRequestCallback) => number;
   root: ScrollRootPort;
@@ -223,6 +224,7 @@ type QuietCandidate = {
 const DEFAULT_DELIVERED_FRAME_BUDGET = 120;
 const MAX_RETIRED_ECHOES = 4;
 const RETIRED_ECHO_DELIVERED_FRAME_TTL = 2;
+const RECENT_USER_INPUT_WINDOW_MS = 250;
 const SELF_ECHO_TOLERANCE_PX = 0.5;
 
 export function createScrollOwnershipControlPlane(
@@ -244,6 +246,7 @@ export function createScrollOwnershipControlPlane(
   let operationEpoch = 0;
   let pendingWrite: PendingWrite | null = null;
   let pendingTraceFailures = 0;
+  let previousFiniteNativeScrollValue: number | null = null;
   let quietCandidate: QuietCandidate | null = null;
   let retiredEchoes: RetiredEcho[] = [];
   let scheduledFrame: number | null = null;
@@ -865,10 +868,15 @@ export function createScrollOwnershipControlPlane(
     value: number,
     source = "native-scroll"
   ): NativeScrollClassification => {
+    const finite = Number.isFinite(value);
+    const previousFiniteValue = previousFiniteNativeScrollValue;
+    if (finite) {
+      previousFiniteNativeScrollValue = value;
+    }
     const expected = expectedEcho;
     if (
       expected !== null
-      && Number.isFinite(value)
+      && finite
       && Math.abs(value - expected.value) <= SELF_ECHO_TOLERANCE_PX
     ) {
       expectedEcho = null;
@@ -887,7 +895,7 @@ export function createScrollOwnershipControlPlane(
     if (expected !== null) {
       trace(SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement, {
         expected: expected.value,
-        value: Number.isFinite(value) ? value : 0,
+        value: finite ? value : 0,
       });
       clearActiveOperation(
         "programmatic-supersession",
@@ -898,7 +906,7 @@ export function createScrollOwnershipControlPlane(
       operationEpoch++;
       return { expected: expected.value, kind: "unattributed-failure", value };
     }
-    if (!Number.isFinite(value)) {
+    if (!finite) {
       trace(SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement, { expected: null, value: 0 });
       clearActiveOperation(
         "programmatic-supersession",
@@ -908,6 +916,12 @@ export function createScrollOwnershipControlPlane(
       cancelDeferred("programmatic-supersession");
       operationEpoch++;
       return { expected: null, kind: "unattributed-failure", value };
+    }
+    if (!deps.hasRecentUserInput(RECENT_USER_INPUT_WINDOW_MS)) {
+      trace(SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement, {
+        delta: previousFiniteValue === null ? null : value - previousFiniteValue,
+        value,
+      });
     }
     supersedeByUser(source);
     return { kind: "user-supersession", value };
@@ -1054,6 +1068,7 @@ export function createScrollOwnershipControlPlane(
     geometryTickets.clear();
     frameTransaction = null;
     expectedEcho = null;
+    previousFiniteNativeScrollValue = null;
     retiredEchoes = [];
     documentEpoch++;
     geometryEpoch = 0;
@@ -1079,6 +1094,7 @@ export function createScrollOwnershipControlPlane(
     geometryTickets.clear();
     frameTransaction = null;
     expectedEcho = null;
+    previousFiniteNativeScrollValue = null;
     retiredEchoes = [];
     quietCandidate = null;
     disposed = true;

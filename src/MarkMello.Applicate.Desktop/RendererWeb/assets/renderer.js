@@ -1066,7 +1066,9 @@
     }
     const host = range.startContainer.parentElement;
     const block = host?.closest("main.mm-document > *") ?? host;
-    block?.scrollIntoView({ block: "center" });
+    if (block !== null && block !== void 0) {
+      s.legacyScrollWriter.legacyScrollIntoView(block, { block: "center" });
+    }
     let attempts = 0;
     const reaim = () => {
       if (++attempts > 3) {
@@ -1080,7 +1082,7 @@
       const viewport = window.innerHeight || document.documentElement.clientHeight;
       if (rect.top < 0 || rect.bottom > viewport) {
         const target = window.scrollY + rect.top - viewport / 2 + rect.height / 2;
-        window.scrollTo({ top: Math.max(0, target), behavior: "instant" });
+        s.legacyScrollWriter.legacyScrollTo(Math.max(0, target), { behavior: "instant" });
         window.requestAnimationFrame(reaim);
       }
     };
@@ -1150,7 +1152,7 @@
     scrollToCurrent(s);
     updateCountDisplay(s);
   }
-  function createFindBar(provider) {
+  function createFindBar(legacyScrollWriter2, provider) {
     let state2 = null;
     function buildDom() {
       const bar = document.createElement("div");
@@ -1203,7 +1205,8 @@
         matches: [],
         currentIndex: -1,
         matchesDirty: false,
-        observer: null
+        observer: null,
+        legacyScrollWriter: legacyScrollWriter2
       };
     }
     function connectObserver(s) {
@@ -1332,6 +1335,45 @@
       toggle,
       get isOpen() {
         return state2 !== null && state2.bar.classList.contains("mm-find-bar-open");
+      }
+    };
+  }
+
+  // RendererWeb/src/legacyScrollWriter.ts
+  var LEGACY_SCROLL_WRITER_TRACE_ID = "mm-virt-legacy-scroll-writer-flag-on";
+  function createLegacyScrollWriter(deps) {
+    function trace(operation) {
+      if (!deps.virtualizationEnabled || !deps.developmentDiagnosticsEnabled) {
+        return;
+      }
+      try {
+        deps.trace?.({ id: LEGACY_SCROLL_WRITER_TRACE_ID, operation });
+      } catch {
+      }
+    }
+    return {
+      legacyScrollTo(top, options) {
+        trace("legacyScrollTo");
+        const init = { top };
+        if (options?.left !== void 0) {
+          init.left = options.left;
+        }
+        if (options?.behavior !== void 0) {
+          init.behavior = options.behavior;
+        }
+        deps.ownerWindow.scrollTo(init);
+      },
+      legacyScrollBy(delta) {
+        trace("legacyScrollBy");
+        deps.ownerWindow.scrollBy({ top: delta, behavior: "instant" });
+      },
+      legacyScrollIntoView(element, options) {
+        trace("legacyScrollIntoView");
+        element.scrollIntoView(options);
+      },
+      legacySetScrollTop(element, value) {
+        trace("legacySetScrollTop");
+        element.scrollTop = value;
       }
     };
   }
@@ -4573,6 +4615,83 @@
     }
   }
 
+  // RendererWeb/src/userInputWitness.ts
+  var SCROLL_KEYS = /* @__PURE__ */ new Set([
+    "ArrowUp",
+    "ArrowDown",
+    "PageUp",
+    "PageDown",
+    "Home",
+    "End",
+    " ",
+    "Spacebar"
+  ]);
+  function createUserInputWitness(deps) {
+    let recordedAt = null;
+    return {
+      hasRecentUserInput: (withinMs) => {
+        if (!Number.isFinite(withinMs) || withinMs < 0 || recordedAt === null) {
+          return false;
+        }
+        const elapsed = deps.now() - recordedAt;
+        return Number.isFinite(recordedAt) && Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= withinMs;
+      },
+      recordUserInput: () => {
+        recordedAt = deps.now();
+      }
+    };
+  }
+  function isEditableTarget(target) {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+    if (target.closest("input, textarea, select") !== null) {
+      return true;
+    }
+    for (let element = target; element !== null; element = element.parentElement) {
+      if (element instanceof HTMLElement) {
+        const attribute = element.getAttribute("contenteditable");
+        if (element.isContentEditable || element.contentEditable === "true" || attribute !== null && attribute.toLowerCase() !== "false") {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+  function installUserInputWitnessListeners(deps) {
+    const record = () => deps.witness.recordUserInput();
+    const onKeyDown = (event) => {
+      if (event.ctrlKey || event.metaKey || event.altKey || !SCROLL_KEYS.has(event.key) || isEditableTarget(event.target)) {
+        return;
+      }
+      record();
+    };
+    const onPointerDown = (event) => {
+      if (event.button === 0 && event.clientX >= deps.document.documentElement.clientWidth && event.clientX < deps.ownerWindow.innerWidth && event.clientY >= 0 && event.clientY < deps.ownerWindow.innerHeight) {
+        record();
+      }
+    };
+    const options = { capture: true, passive: true };
+    deps.document.addEventListener("wheel", record, options);
+    deps.document.addEventListener("touchstart", record, options);
+    deps.document.addEventListener("touchmove", record, options);
+    deps.document.addEventListener("keydown", onKeyDown, options);
+    deps.document.addEventListener("pointerdown", onPointerDown, options);
+    let disposed = false;
+    return () => {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      const removeOptions = { capture: true };
+      deps.document.removeEventListener("wheel", record, removeOptions);
+      deps.document.removeEventListener("touchstart", record, removeOptions);
+      deps.document.removeEventListener("touchmove", record, removeOptions);
+      deps.document.removeEventListener("keydown", onKeyDown, removeOptions);
+      deps.document.removeEventListener("pointerdown", onPointerDown, removeOptions);
+    };
+  }
+
   // RendererWeb/src/virtualizationShadow.ts
   var SHADOW_FLAG_NAME = "MARKMELLO_VIRT_SHADOW";
   function readVirtualizationShadowFlag(ownerWindow = window, ownerDocument = document) {
@@ -4863,6 +4982,7 @@
   var DEFAULT_DELIVERED_FRAME_BUDGET = 120;
   var MAX_RETIRED_ECHOES = 4;
   var RETIRED_ECHO_DELIVERED_FRAME_TTL = 2;
+  var RECENT_USER_INPUT_WINDOW_MS = 250;
   var SELF_ECHO_TOLERANCE_PX = 0.5;
   function createScrollOwnershipControlPlane(deps) {
     const deliveredFrameBudget = readDeliveredFrameBudget(deps.deliveredFrameBudget);
@@ -4881,6 +5001,7 @@
     let operationEpoch = 0;
     let pendingWrite = null;
     let pendingTraceFailures = 0;
+    let previousFiniteNativeScrollValue = null;
     let quietCandidate = null;
     let retiredEchoes = [];
     let scheduledFrame = null;
@@ -5428,8 +5549,13 @@
       invalidateSettleCandidate();
     };
     const classifyNativeScroll = (value, source = "native-scroll") => {
+      const finite = Number.isFinite(value);
+      const previousFiniteValue = previousFiniteNativeScrollValue;
+      if (finite) {
+        previousFiniteNativeScrollValue = value;
+      }
       const expected = expectedEcho;
-      if (expected !== null && Number.isFinite(value) && Math.abs(value - expected.value) <= SELF_ECHO_TOLERANCE_PX) {
+      if (expected !== null && finite && Math.abs(value - expected.value) <= SELF_ECHO_TOLERANCE_PX) {
         expectedEcho = null;
         ensureFrame();
         return { expected: expected.value, kind: "self-echo", value };
@@ -5446,7 +5572,7 @@
       if (expected !== null) {
         trace(SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement, {
           expected: expected.value,
-          value: Number.isFinite(value) ? value : 0
+          value: finite ? value : 0
         });
         clearActiveOperation(
           "programmatic-supersession",
@@ -5457,7 +5583,7 @@
         operationEpoch++;
         return { expected: expected.value, kind: "unattributed-failure", value };
       }
-      if (!Number.isFinite(value)) {
+      if (!finite) {
         trace(SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement, { expected: null, value: 0 });
         clearActiveOperation(
           "programmatic-supersession",
@@ -5467,6 +5593,12 @@
         cancelDeferred("programmatic-supersession");
         operationEpoch++;
         return { expected: null, kind: "unattributed-failure", value };
+      }
+      if (!deps.hasRecentUserInput(RECENT_USER_INPUT_WINDOW_MS)) {
+        trace(SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement, {
+          delta: previousFiniteValue === null ? null : value - previousFiniteValue,
+          value
+        });
       }
       supersedeByUser(source);
       return { kind: "user-supersession", value };
@@ -5589,6 +5721,7 @@
       geometryTickets.clear();
       frameTransaction = null;
       expectedEcho = null;
+      previousFiniteNativeScrollValue = null;
       retiredEchoes = [];
       documentEpoch++;
       geometryEpoch = 0;
@@ -5613,6 +5746,7 @@
       geometryTickets.clear();
       frameTransaction = null;
       expectedEcho = null;
+      previousFiniteNativeScrollValue = null;
       retiredEchoes = [];
       quietCandidate = null;
       disposed = true;
@@ -5759,11 +5893,20 @@
   var liveDocumentBlockElements = [];
   var liveDocumentBlockElementsStale = true;
   var virtualizationEnabled = readVirtualizationFlag(window, document);
+  var userInputWitness = virtualizationEnabled ? createUserInputWitness({ now: () => performance.now() }) : null;
+  var disposeUserInputWitness = userInputWitness === null ? null : installUserInputWitnessListeners({ document, ownerWindow: window, witness: userInputWitness });
+  var legacyScrollWriter = createLegacyScrollWriter({
+    developmentDiagnosticsEnabled: true,
+    ownerWindow: window,
+    trace: (event) => postPerfMark(event.id, { operation: event.operation }),
+    virtualizationEnabled
+  });
   var scrollOwnershipControlPlane = virtualizationEnabled ? createScrollOwnershipControlPlane({
     cancelFrame: (handle) => window.cancelAnimationFrame(handle),
     emitGeometrySettled: (payload) => {
       document.dispatchEvent(new CustomEvent(GEOMETRY_SETTLED_EVENT, { detail: payload }));
     },
+    hasRecentUserInput: (withinMs) => userInputWitness.hasRecentUserInput(withinMs),
     prepareGeometrySettleCandidate: () => virtualizedDocumentWindowController?.recensusRealizationWatches() ?? true,
     requestFrame: (callback) => window.requestAnimationFrame(callback),
     root: getDocumentScrollRoot(),
@@ -5797,6 +5940,7 @@
       }
       cancelModelRenderedContentCoordinator("teardown");
       resetVirtualizedDocumentWindow(false);
+      disposeUserInputWitness?.();
       scrollOwnershipControlPlane.dispose();
       getDocumentScrollRoot().removeAttribute("data-mm-virtualization-active");
     }, { once: true });
@@ -6123,7 +6267,7 @@
           operation.requestScrollTop(0, "scroll-disabled-reset");
         });
       } else {
-        window.scrollTo({ left: 0, top: 0, behavior: "instant" });
+        legacyScrollWriter.legacyScrollTo(0, { left: 0, behavior: "instant" });
       }
     }
   }
@@ -8521,11 +8665,13 @@
     }
     pendingSourceLineTarget = sourceLine;
     suppressPreviewSourceLinePost();
-    window.scrollTo({
-      left: 0,
-      top: Math.max(0, scrollTop - getViewportAnchorY()),
-      behavior: "instant"
-    });
+    legacyScrollWriter.legacyScrollTo(
+      Math.max(0, scrollTop - getViewportAnchorY()),
+      {
+        left: 0,
+        behavior: "instant"
+      }
+    );
   }
   function scheduleVirtualizedSourceLineLanding(operation, sourceLine) {
     if (sourceLineAnchors.length === 0) {
@@ -8770,9 +8916,8 @@
   function restoreCachedScrollPosition() {
     const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
     if (!virtualizationEnabled) {
-      window.scrollTo({
+      legacyScrollWriter.legacyScrollTo(layoutState.scrollTop, {
         left: 0,
-        top: layoutState.scrollTop,
         behavior: "instant"
       });
       updateVirtualizedWindowForScroll({ force: true });
@@ -10245,7 +10390,7 @@
       const firstTarget = docScrollTopForCloneY(root, cloneYTarget);
       if (firstTarget !== null) {
         if (!virtualizationEnabled) {
-          window.scrollTo({ top: firstTarget, behavior: "instant" });
+          legacyScrollWriter.legacyScrollTo(firstTarget, { behavior: "instant" });
           let attempts = 0;
           const refine = () => {
             if (++attempts > 3) {
@@ -10253,7 +10398,7 @@
             }
             const next = docScrollTopForCloneY(root, cloneYTarget);
             if (next !== null && Math.abs(next - root.scrollTop) > 2) {
-              window.scrollTo({ top: next, behavior: "instant" });
+              legacyScrollWriter.legacyScrollTo(next, { behavior: "instant" });
               window.requestAnimationFrame(refine);
             }
           };
@@ -10279,7 +10424,7 @@
         }
       }
     } else {
-      window.scrollTo({ top: clamped, behavior: "instant" });
+      legacyScrollWriter.legacyScrollTo(clamped, { behavior: "instant" });
     }
   }
   function scrollToProgress(progressPercent) {
@@ -10291,7 +10436,7 @@
         operation.requestScrollTop(maximum * (progress / 100), "host-progress");
       });
     } else {
-      window.scrollTo({ top: maximum * (progress / 100), behavior: "instant" });
+      legacyScrollWriter.legacyScrollTo(maximum * (progress / 100), { behavior: "instant" });
     }
   }
   function requestMinimapScrollTarget(target, writer) {
@@ -10391,7 +10536,10 @@
         if (virtualizationEnabled) {
           requestMinimapScrollTarget(Math.max(0, Math.min(maxScrollTop, target)), "minimap-drag");
         } else {
-          window.scrollTo({ top: Math.max(0, Math.min(maxScrollTop, target)), behavior: "instant" });
+          legacyScrollWriter.legacyScrollTo(
+            Math.max(0, Math.min(maxScrollTop, target)),
+            { behavior: "instant" }
+          );
         }
         const pinnedTop = Math.max(0, Math.min(currentMinimapLayout.thumbTravel, desiredThumbTop));
         minimapViewport.style.transform = `translateY(${pinnedTop}px)`;
@@ -10405,7 +10553,7 @@
     if (virtualizationEnabled) {
       requestMinimapScrollTarget(clampedScrollTop, "minimap-drag-fallback");
     } else {
-      window.scrollTo({ top: clampedScrollTop, behavior: "instant" });
+      legacyScrollWriter.legacyScrollTo(clampedScrollTop, { behavior: "instant" });
     }
     event.preventDefault();
   }
@@ -10703,7 +10851,10 @@
     }, HEAVY_LIVE_UPDATE_DEBOUNCE_MS);
   }
   function scrollLegacyHeadingAnchor(anchor, options) {
-    document.getElementById(anchor)?.scrollIntoView(options);
+    const element = document.getElementById(anchor);
+    if (element !== null) {
+      legacyScrollWriter.legacyScrollIntoView(element, options);
+    }
   }
   function scrollToHeadingAnchor(anchor, options) {
     if (anchor.length === 0) {
@@ -10838,7 +10989,7 @@
           operation.requestScrollTop(root.scrollTop + message.deltaY, "host-scroll-by");
         });
       } else {
-        window.scrollBy({ top: message.deltaY, behavior: "instant" });
+        legacyScrollWriter.legacyScrollBy(message.deltaY);
       }
       return;
     }
@@ -10848,7 +10999,7 @@
           `[data-mm-block-index="${message.blockIndex}"]`
         );
         if (target) {
-          target.scrollIntoView({ block: "start", behavior: "instant" });
+          legacyScrollWriter.legacyScrollIntoView(target, { block: "start", behavior: "instant" });
         }
         return;
       }
@@ -11292,7 +11443,7 @@
             operation.requestScrollTop(0, "cold-load-reset");
           });
         } else {
-          window.scrollTo({ left: 0, top: 0, behavior: "instant" });
+          legacyScrollWriter.legacyScrollTo(0, { left: 0, behavior: "instant" });
         }
       },
       // Mirror selected renderer-side perf marks into the host's
@@ -11578,7 +11729,7 @@
       postHostMessage,
       readContext: readVirtualizedFindContext
     }) : null;
-    findBarController = createFindBar(virtualizedFindProvider ?? void 0);
+    findBarController = createFindBar(legacyScrollWriter, virtualizedFindProvider ?? void 0);
     window.addEventListener(
       "keydown",
       (event) => {

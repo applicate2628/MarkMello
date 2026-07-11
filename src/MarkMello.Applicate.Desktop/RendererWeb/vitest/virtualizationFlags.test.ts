@@ -98,6 +98,21 @@ describe("renderer virtualization flags", () => {
       .toBeUndefined();
   });
 
+  it("creates and installs the recording witness only inside the flag-on composition branch", () => {
+    const source = readRendererSource();
+    const composition = sliceBetween(
+      source,
+      "const virtualizationEnabled = readVirtualizationFlag(window, document);",
+      "const virtualizationShadowEnabled"
+    );
+
+    expect(composition).toContain("const userInputWitness = virtualizationEnabled");
+    expect(composition).toContain("? createUserInputWitness");
+    expect(composition).toContain("const disposeUserInputWitness = userInputWitness === null");
+    expect(composition).toContain("? null\n  : installUserInputWitnessListeners");
+    expect(composition).toContain("disposeUserInputWitness?.();");
+  });
+
   it("flags unset install no control plane tickets listeners watches reservations font tickets or H3 observer", () => {
     const source = readRendererSource();
     const initialization = sliceBetween(

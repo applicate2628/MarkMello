@@ -74,7 +74,10 @@ type Harness = {
   traces: ScrollOwnershipTraceEvent[];
 };
 
-function createHarness(deliveredFrameBudget = 120): Harness {
+function createHarness(
+  deliveredFrameBudget = 120,
+  hasRecentUserInput: (withinMs: number) => boolean = () => true
+): Harness {
   const events: GeometrySettledPayload[] = [];
   const frames = new FakeFrameQueue();
   const root = new FakeScrollRoot();
@@ -83,6 +86,7 @@ function createHarness(deliveredFrameBudget = 120): Harness {
     cancelFrame: frames.cancel,
     deliveredFrameBudget,
     emitGeometrySettled: payload => events.push(payload),
+    hasRecentUserInput,
     requestFrame: frames.request,
     root,
     trace: event => traces.push(event),
@@ -304,6 +308,75 @@ describe("scroll ownership control plane", () => {
     expect(plane.holds(lease)).toBe(true);
     expect(plane.classifyNativeScroll(260).kind).toBe("user-supersession");
     expect(plane.holds(lease)).toBe(false);
+  });
+
+  it("traces finite no-echo movement without a recent user-input witness", () => {
+    const witnessWindows: number[] = [];
+    const { plane, traces } = createHarness(120, withinMs => {
+      witnessWindows.push(withinMs);
+      return false;
+    });
+
+    const classification = plane.classifyNativeScroll(260);
+
+    expect(classification).toEqual({ kind: "user-supersession", value: 260 });
+    expect(witnessWindows).toEqual([250]);
+    expect(traces.filter(trace => trace.id === SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement))
+      .toHaveLength(1);
+    expect(traces.at(-1)?.details).toEqual({ delta: null, value: 260 });
+  });
+
+  it("keeps finite no-echo classification unchanged when user input is recent", () => {
+    const { plane, traces } = createHarness(120, () => true);
+
+    expect(plane.classifyNativeScroll(260)).toEqual({ kind: "user-supersession", value: 260 });
+    expect(traces.some(trace => trace.id === SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement))
+      .toBe(false);
+  });
+
+  it("computes unattributed delta from the prior finite classified value", async () => {
+    const { frames, plane, traces } = createHarness(120, () => false);
+    const lease = acquired(plane.acquire("navigation", "defer"));
+    const receipt = plane.write(lease, { target: 180, writer: "navigation" });
+    plane.scheduleFrameTransaction(lease, () => undefined);
+    frames.deliverFrame();
+    await receipt.result;
+
+    expect(plane.classifyNativeScroll(180).kind).toBe("self-echo");
+    expect(plane.classifyNativeScroll(260).kind).toBe("user-supersession");
+    expect(traces.findLast(trace => trace.id === SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement))
+      .toMatchObject({
+      details: { delta: 80, value: 260 },
+      id: SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement,
+    });
+  });
+
+  it("resets the prior finite native-scroll baseline on document invalidation", () => {
+    const { plane, traces } = createHarness(120, () => false);
+
+    plane.classifyNativeScroll(100);
+    plane.invalidateDocument();
+    plane.classifyNativeScroll(140);
+
+    const movements = traces.filter(
+      trace => trace.id === SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement
+    );
+    expect(movements).toHaveLength(2);
+    expect(movements[1]?.details).toEqual({ delta: null, value: 140 });
+  });
+
+  it("resets the prior finite native-scroll baseline on disposal", () => {
+    const { plane, traces } = createHarness(120, () => false);
+
+    plane.classifyNativeScroll(100);
+    plane.dispose();
+    plane.classifyNativeScroll(140);
+
+    const movements = traces.filter(
+      trace => trace.id === SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement
+    );
+    expect(movements).toHaveLength(2);
+    expect(movements[1]?.details).toEqual({ delta: null, value: 140 });
   });
 
   it("classifies an expected mismatch as unattributed failure", async () => {
@@ -749,6 +822,7 @@ describe("scroll ownership control plane", () => {
     const plane = createScrollOwnershipControlPlane({
       cancelFrame: frames.cancel,
       emitGeometrySettled: () => undefined,
+      hasRecentUserInput: () => true,
       requestFrame: frames.request,
       root,
       trace: event => {
@@ -776,6 +850,7 @@ describe("scroll ownership control plane", () => {
     const plane = createScrollOwnershipControlPlane({
       cancelFrame: frames.cancel,
       emitGeometrySettled: () => undefined,
+      hasRecentUserInput: () => true,
       requestFrame: frames.request,
       root,
       trace: () => {
@@ -808,6 +883,7 @@ describe("scroll ownership control plane", () => {
             throw new Error("emit failed");
           }
         },
+        hasRecentUserInput: () => true,
         requestFrame: frames.request,
         root,
         trace: event => traces.push(event),

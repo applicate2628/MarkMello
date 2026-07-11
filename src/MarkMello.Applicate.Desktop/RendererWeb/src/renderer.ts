@@ -67,6 +67,10 @@ import {
 } from "./sectionIntrinsicSize";
 import { readVirtualizationFlag } from "./virtualizationFlags";
 import {
+  createUserInputWitness,
+  installUserInputWitnessListeners,
+} from "./userInputWitness";
+import {
   captureReadingAnchor,
   createFullDocumentFragmentFromWindowModel,
   createVirtualizedDocumentWindowController,
@@ -399,6 +403,12 @@ let lastPostedPreviewSourceLine: number | null = null;
 let liveDocumentBlockElements: HTMLElement[] = [];
 let liveDocumentBlockElementsStale = true;
 const virtualizationEnabled = readVirtualizationFlag(window, document);
+const userInputWitness = virtualizationEnabled
+  ? createUserInputWitness({ now: () => performance.now() })
+  : null;
+const disposeUserInputWitness = userInputWitness === null
+  ? null
+  : installUserInputWitnessListeners({ document, ownerWindow: window, witness: userInputWitness });
 const legacyScrollWriter: LegacyScrollWriter = createLegacyScrollWriter({
   developmentDiagnosticsEnabled: __MM_RENDERER_DEV_DIAGNOSTICS__,
   ownerWindow: window,
@@ -411,6 +421,7 @@ const scrollOwnershipControlPlane: ScrollOwnershipControlPlane | null = virtuali
     emitGeometrySettled: payload => {
       document.dispatchEvent(new CustomEvent(GEOMETRY_SETTLED_EVENT, { detail: payload }));
     },
+    hasRecentUserInput: withinMs => userInputWitness!.hasRecentUserInput(withinMs),
     prepareGeometrySettleCandidate: () =>
       virtualizedDocumentWindowController?.recensusRealizationWatches() ?? true,
     requestFrame: callback => window.requestAnimationFrame(callback),
@@ -446,6 +457,7 @@ if (scrollOwnershipControlPlane !== null) {
     }
     cancelModelRenderedContentCoordinator("teardown");
     resetVirtualizedDocumentWindow(false);
+    disposeUserInputWitness?.();
     scrollOwnershipControlPlane.dispose();
     getDocumentScrollRoot().removeAttribute("data-mm-virtualization-active");
   }, { once: true });
