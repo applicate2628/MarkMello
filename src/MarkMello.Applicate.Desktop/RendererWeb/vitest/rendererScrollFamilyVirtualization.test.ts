@@ -620,6 +620,26 @@ function buildClonePollutionDocument(count: number): string {
   }).join("");
 }
 
+function buildCloneHtmlIdentityDocument(count: number): string {
+  return Array.from({ length: count }, (_, index) => [
+    `<section id="html-section-${index}" data-mm-block-index="${index}" data-mm-block-kind="paragraph">`,
+    `<p id="html-paragraph-${index}">Block ${index} with SVG paint identity</p>`,
+    `</section>`,
+  ].join("")).join("");
+}
+
+function buildSvgPaintIdentityAppendBlock(blockIndex: number): string {
+  return [
+    `<section id="html-svg-section" data-mm-block-index="${blockIndex}" data-mm-block-kind="paragraph">`,
+    `<p id="html-svg-paragraph">Block with SVG paint identity</p>`,
+    `<svg id="svg-root" viewBox="0 0 10 10" role="img">`,
+    `<defs><linearGradient id="paint-gradient"><stop offset="100%" stop-color="red"></stop></linearGradient></defs>`,
+    `<rect id="paint-rect" width="10" height="10" fill="url(#paint-gradient)"></rect>`,
+    `</svg>`,
+    `</section>`,
+  ].join("");
+}
+
 function loadMinimapPolicy(load: HostBridge): void {
   load({
     type: "minimap-policy",
@@ -816,6 +836,10 @@ function dataMmAttributeNames(root: ParentNode): string[] {
     .filter(name => name.startsWith("data-mm-"));
 }
 
+function isHtmlNamespaceElement(element: Element): boolean {
+  return element.namespaceURI === "http://www.w3.org/1999/xhtml" || element.namespaceURI === null;
+}
+
 function countTextMatches(root: Node, needle: string): number {
   let count = 0;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -831,7 +855,10 @@ function countTextMatches(root: Node, needle: string): number {
 
 function expectMinimapCloneIdentitySanitized(): void {
   const minimapContent = getMinimapContent();
-  expect(minimapContent.querySelectorAll("[id]")).toHaveLength(0);
+  const htmlIds = Array.from(minimapContent.querySelectorAll<Element>("[id]"))
+    .filter(isHtmlNamespaceElement)
+    .map(element => element.id);
+  expect(htmlIds).toEqual([]);
   expect(minimapContent.querySelectorAll("[data-tex]")).toHaveLength(0);
   expect(dataMmAttributeNames(minimapContent)).toEqual([]);
 }
@@ -1698,6 +1725,46 @@ describe("renderer scroll-family virtualization integration", () => {
     );
     expectMinimapCloneIdentitySanitized();
     expectMinimapCloneTextRetained("gamma", sectionCount);
+  });
+
+  it("preserves SVG paint identities while stripping HTML IDs from minimap clones", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("requestIdleCallback", undefined);
+    vi.stubGlobal("cancelIdleCallback", undefined);
+    const sectionCount = 20;
+    const { flushQueuedRafs, load } = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      virtualization: false,
+    });
+    await enableDetailedMinimap(load, flushQueuedRafs);
+    load({ type: "load-document", html: buildCloneHtmlIdentityDocument(sectionCount), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    load({
+      type: "append-document",
+      html: buildSvgPaintIdentityAppendBlock(sectionCount),
+      hasMermaid: false,
+      hasHljs: false,
+      isFinal: true,
+    });
+    await vi.advanceTimersByTimeAsync(200);
+    await flushQueuedRafs();
+
+    const minimapContent = getMinimapContent();
+    const htmlIds = Array.from(minimapContent.querySelectorAll<Element>("[id]"))
+      .filter(isHtmlNamespaceElement)
+      .map(element => element.id);
+    const svg = minimapContent.querySelector<SVGSVGElement>("svg");
+    const gradient = minimapContent.querySelector<SVGElement>("linearGradient");
+    const rect = minimapContent.querySelector<SVGElement>("rect");
+
+    expect(htmlIds).toEqual([]);
+    expect(svg).not.toBeNull();
+    expect(gradient).not.toBeNull();
+    expect(rect).not.toBeNull();
+    expect(svg!.getAttribute("id")).toBe("svg-root");
+    expect(gradient!.getAttribute("id")).toBe("paint-gradient");
+    expect(rect!.getAttribute("id")).toBe("paint-rect");
   });
 
   it("keeps clone-active programmatic landings anchored to the live window", async () => {

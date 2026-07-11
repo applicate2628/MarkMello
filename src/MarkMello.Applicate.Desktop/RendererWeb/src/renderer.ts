@@ -4814,7 +4814,8 @@ function sanitizeMinimapCloneTree(root: ParentNode): void {
     ...Array.from(root.querySelectorAll<Element>("*")),
   ];
   nodes.forEach((node) => {
-    if (node.hasAttribute("id")) node.removeAttribute("id");
+    const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
+    if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
     if (node.hasAttribute("data-tex")) node.removeAttribute("data-tex");
     for (const attribute of Array.from(node.attributes)) {
       if (attribute.name.startsWith("data-mm-")) {
@@ -4867,8 +4868,9 @@ function cloneDocumentElementForMinimap(
   clone.style.paddingLeft = "0";
   applyMinimapClonePaintHeightLimit(clone, documentHeight);
   registerMinimapCloneMetadata(source, clone);
-  // Minimap clone invariant: no node inside `.mm-minimap-content` may carry
-  // lookup-visible identity (`id`, `data-mm-*`, `data-tex`). Text stays intact
+  // Minimap clone invariant: HTML nodes inside `.mm-minimap-content` must not
+  // carry lookup-visible identity (`id`, `data-mm-*`, `data-tex`). SVG IDs stay
+  // available for paint-local references such as `url(#...)`. Text stays intact
   // because the rail is scaled real content; search paths must exclude the
   // minimap subtree at their own root/filter instead of destroying clone paint.
   sanitizeMinimapCloneTree(clone);
