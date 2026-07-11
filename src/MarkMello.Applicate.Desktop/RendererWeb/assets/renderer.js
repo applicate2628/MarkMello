@@ -2842,6 +2842,12 @@
   var TOP_SPACER = "top";
   var BOTTOM_SPACER = "bottom";
   var SPACER_CLASS = "mm-virtual-spacer";
+  var REALIZATION_FRAME_BUDGET = 120;
+  var REALIZATION_QUARANTINE_CYCLES = 3;
+  var REALIZATION_TRACE_IDS = {
+    expired: "mm-virt-realization-expired",
+    quarantined: "mm-virt-realization-quarantined"
+  };
   var EMPTY_HEIGHT_UPDATE = {
     maxAbsDelta: 0,
     totalDelta: 0,
@@ -3133,6 +3139,9 @@
       if (watch === void 0 || watch.element !== target || !deps.main.contains(target)) {
         return;
       }
+      if (watch.state === "quarantined-nonconvergent") {
+        return;
+      }
       const stateEvent = event;
       if (stateEvent.skipped === true) {
         watch.skipped = true;
@@ -3144,7 +3153,7 @@
         return;
       }
       watch.skipped = false;
-      watch.frameBudget = 120;
+      watch.frameBudget = REALIZATION_FRAME_BUDGET;
       watch.stableFrameCount = 0;
       watch.lastOffsetHeight = null;
       watch.lastOccupiedHeight = null;
@@ -3191,11 +3200,12 @@
         watches.set(block, {
           blockIndex,
           element: block,
-          frameBudget: 120,
+          frameBudget: REALIZATION_FRAME_BUDGET,
           frameRequested: false,
           lastOccupiedHeight: null,
           lastOffsetHeight: null,
           mountGeneration: currentMountGeneration,
+          nonconvergentCycles: 0,
           readyMeasuredHeight: null,
           skipped: true,
           stableFrameCount: 0,
@@ -3290,8 +3300,16 @@
     function expireOrContinue(watch) {
       watch.frameBudget--;
       if (watch.frameBudget <= 0) {
+        watch.nonconvergentCycles++;
         watch.state = "expired-nonconvergent";
         watch.readyMeasuredHeight = null;
+        deps.trace?.({
+          id: REALIZATION_TRACE_IDS.expired,
+          details: {
+            blockIndex: watch.blockIndex,
+            cycles: watch.nonconvergentCycles
+          }
+        });
         return;
       }
       scheduleSample(watch);
@@ -3304,7 +3322,30 @@
       let ready = true;
       for (const watch of watches.values()) {
         const intersecting = isStrictlyIntersecting(watch.element);
-        if (intersecting && watch.state !== "real-ready" && watch.state !== "event-equal-fallback-noop") {
+        if (intersecting && watch.state === "expired-nonconvergent") {
+          if (watch.nonconvergentCycles < REALIZATION_QUARANTINE_CYCLES) {
+            watch.frameBudget = REALIZATION_FRAME_BUDGET;
+            watch.stableFrameCount = 0;
+            watch.lastOffsetHeight = null;
+            watch.lastOccupiedHeight = null;
+            watch.readyMeasuredHeight = null;
+            watch.state = "event-observed-settling";
+            scheduleSample(watch);
+            ready = false;
+          } else {
+            watch.state = "quarantined-nonconvergent";
+            deps.trace?.({
+              id: REALIZATION_TRACE_IDS.quarantined,
+              details: {
+                blockIndex: watch.blockIndex,
+                cycles: watch.nonconvergentCycles,
+                mountGeneration: watch.mountGeneration
+              }
+            });
+          }
+          continue;
+        }
+        if (intersecting && watch.state !== "real-ready" && watch.state !== "event-equal-fallback-noop" && watch.state !== "quarantined-nonconvergent") {
           if (watch.state === "placeholder-not-intersecting" || watch.state === "realized-then-skipped") {
             watch.state = "intersecting-await-event";
           }
@@ -8237,7 +8278,8 @@
       // The delegated contentvisibilityautostatechange listener is installed only
       // by this flag-on controller path.
       realization: { enabled: true },
-      root
+      root,
+      trace: (event) => postPerfMark(event.id, { ...event.details })
     });
     const initialOperation = acquireVirtualizedScrollOperation("initial-window", "supersede-programmatic");
     if (initialOperation !== null) {

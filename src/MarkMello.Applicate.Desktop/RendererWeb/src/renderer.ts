@@ -3787,6 +3787,7 @@ function initializeVirtualizedDocumentWindow(): void {
     // by this flag-on controller path.
     realization: { enabled: true },
     root,
+    trace: event => postPerfMark(event.id, { ...event.details }),
   });
 
   const initialOperation = acquireVirtualizedScrollOperation("initial-window", "supersede-programmatic");

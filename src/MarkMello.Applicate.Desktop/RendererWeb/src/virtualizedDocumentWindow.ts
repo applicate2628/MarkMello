@@ -16,6 +16,17 @@ import { readReadyMermaidProxy } from "./mermaidRender";
 const TOP_SPACER = "top";
 const BOTTOM_SPACER = "bottom";
 const SPACER_CLASS = "mm-virtual-spacer";
+const REALIZATION_FRAME_BUDGET = 120;
+const REALIZATION_QUARANTINE_CYCLES = 3;
+const REALIZATION_TRACE_IDS = {
+  expired: "mm-virt-realization-expired",
+  quarantined: "mm-virt-realization-quarantined",
+} as const;
+
+export type VirtualizedRealizationTraceEvent = {
+  id: typeof REALIZATION_TRACE_IDS[keyof typeof REALIZATION_TRACE_IDS];
+  details: Readonly<Record<string, unknown>>;
+};
 
 export type VirtualizedDocumentWindowDeps = {
   beginWindowGeometryWork?: (mountGeneration: number) => VirtualizedWindowGeometryWork | null;
@@ -31,6 +42,7 @@ export type VirtualizedDocumentWindowDeps = {
   onWindowMounted?: (mountGeneration: number) => void;
   readMeasuredHeights?: (blocks: readonly HTMLElement[]) => MeasuredHeightUpdate[];
   realization?: VirtualizedRealizationOptions;
+  trace?: (event: VirtualizedRealizationTraceEvent) => void;
 };
 
 export type VirtualizedDocumentWindowController = {
@@ -91,12 +103,14 @@ type RealizationWatchState =
   | "real-ready"
   | "event-equal-fallback-noop"
   | "realized-then-skipped"
-  | "expired-nonconvergent";
+  | "expired-nonconvergent"
+  | "quarantined-nonconvergent";
 
 type RealizationWatch = {
   element: HTMLElement;
   blockIndex: number;
   mountGeneration: number;
+  nonconvergentCycles: number;
   state: RealizationWatchState;
   frameBudget: number;
   frameRequested: boolean;
@@ -499,6 +513,9 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
     if (watch === undefined || watch.element !== target || !deps.main.contains(target)) {
       return;
     }
+    if (watch.state === "quarantined-nonconvergent") {
+      return;
+    }
 
     const stateEvent = event as ContentVisibilityAutoStateChangeLike;
     if (stateEvent.skipped === true) {
@@ -512,7 +529,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
     }
 
     watch.skipped = false;
-    watch.frameBudget = 120;
+    watch.frameBudget = REALIZATION_FRAME_BUDGET;
     watch.stableFrameCount = 0;
     watch.lastOffsetHeight = null;
     watch.lastOccupiedHeight = null;
@@ -576,11 +593,12 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
       watches.set(block, {
         blockIndex,
         element: block,
-        frameBudget: 120,
+        frameBudget: REALIZATION_FRAME_BUDGET,
         frameRequested: false,
         lastOccupiedHeight: null,
         lastOffsetHeight: null,
         mountGeneration: currentMountGeneration,
+        nonconvergentCycles: 0,
         readyMeasuredHeight: null,
         skipped: true,
         stableFrameCount: 0,
@@ -712,8 +730,16 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
   function expireOrContinue(watch: RealizationWatch): void {
     watch.frameBudget--;
     if (watch.frameBudget <= 0) {
+      watch.nonconvergentCycles++;
       watch.state = "expired-nonconvergent";
       watch.readyMeasuredHeight = null;
+      deps.trace?.({
+        id: REALIZATION_TRACE_IDS.expired,
+        details: {
+          blockIndex: watch.blockIndex,
+          cycles: watch.nonconvergentCycles,
+        },
+      });
       return;
     }
 
@@ -728,10 +754,34 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
     let ready = true;
     for (const watch of watches.values()) {
       const intersecting = isStrictlyIntersecting(watch.element);
+      if (intersecting && watch.state === "expired-nonconvergent") {
+        if (watch.nonconvergentCycles < REALIZATION_QUARANTINE_CYCLES) {
+          watch.frameBudget = REALIZATION_FRAME_BUDGET;
+          watch.stableFrameCount = 0;
+          watch.lastOffsetHeight = null;
+          watch.lastOccupiedHeight = null;
+          watch.readyMeasuredHeight = null;
+          watch.state = "event-observed-settling";
+          scheduleSample(watch);
+          ready = false;
+        } else {
+          watch.state = "quarantined-nonconvergent";
+          deps.trace?.({
+            id: REALIZATION_TRACE_IDS.quarantined,
+            details: {
+              blockIndex: watch.blockIndex,
+              cycles: watch.nonconvergentCycles,
+              mountGeneration: watch.mountGeneration,
+            },
+          });
+        }
+        continue;
+      }
       if (
         intersecting
         && watch.state !== "real-ready"
         && watch.state !== "event-equal-fallback-noop"
+        && watch.state !== "quarantined-nonconvergent"
       ) {
         if (
           watch.state === "placeholder-not-intersecting"

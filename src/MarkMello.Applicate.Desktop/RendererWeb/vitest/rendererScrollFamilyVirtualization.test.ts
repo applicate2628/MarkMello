@@ -26,6 +26,7 @@ type RendererHarness = {
   intersectionObservers: IntersectionObserverRecord[];
   load: HostBridge;
   messages: unknown[];
+  pendingRafCount: () => number;
   root: HTMLElement;
   scrollCalls: ScrollCall[];
   scrollWrites: number[];
@@ -81,6 +82,7 @@ const makeReadingPreferences = (
 
 async function loadRendererHarness(options: {
   controllerFaults?: ControllerFaults;
+  deliverRealizationEventsAfterFrame?: boolean;
   fontsReady?: Promise<unknown>;
   intersectionObserverAvailable?: boolean;
   katex?: TestKatexApi;
@@ -365,8 +367,13 @@ async function loadRendererHarness(options: {
       throw new Error("Expected a queued requestAnimationFrame callback");
     }
 
-    deliverMountedRealizationEvents();
+    if (options.deliverRealizationEventsAfterFrame !== true) {
+      deliverMountedRealizationEvents();
+    }
     frame.callback(0);
+    if (options.deliverRealizationEventsAfterFrame === true) {
+      deliverMountedRealizationEvents();
+    }
     await flushRendererMicrotasks();
   };
 
@@ -375,10 +382,15 @@ async function loadRendererHarness(options: {
     if (callbacks.length === 0) {
       throw new Error("Expected queued requestAnimationFrame callbacks for a frame");
     }
-    deliverMountedRealizationEvents();
+    if (options.deliverRealizationEventsAfterFrame !== true) {
+      deliverMountedRealizationEvents();
+    }
     for (const frame of callbacks) {
       frame.callback(0);
       await flushRendererMicrotasks();
+    }
+    if (options.deliverRealizationEventsAfterFrame === true) {
+      deliverMountedRealizationEvents();
     }
     await flushRendererMicrotasks();
   };
@@ -399,10 +411,15 @@ async function loadRendererHarness(options: {
         break;
       }
       const callbacks = rafCallbacks.splice(0, rafCallbacks.length);
-      deliverMountedRealizationEvents();
+      if (options.deliverRealizationEventsAfterFrame !== true) {
+        deliverMountedRealizationEvents();
+      }
       for (const frame of callbacks) {
         frame.callback(i * 16);
         await flushRendererMicrotasks();
+      }
+      if (options.deliverRealizationEventsAfterFrame === true) {
+        deliverMountedRealizationEvents();
       }
     }
     if (rafCallbacks.length > 0) {
@@ -414,10 +431,15 @@ async function loadRendererHarness(options: {
   const flushRafsUntil = async (predicate: () => boolean, maxFrames = 40): Promise<void> => {
     for (let i = 0; i < maxFrames && !predicate() && rafCallbacks.length > 0; i++) {
       const callbacks = rafCallbacks.splice(0, rafCallbacks.length);
-      deliverMountedRealizationEvents();
+      if (options.deliverRealizationEventsAfterFrame !== true) {
+        deliverMountedRealizationEvents();
+      }
       for (const frame of callbacks) {
         frame.callback(i * 16);
         await flushRendererMicrotasks();
+      }
+      if (options.deliverRealizationEventsAfterFrame === true) {
+        deliverMountedRealizationEvents();
       }
     }
     await flushRendererMicrotasks();
@@ -453,6 +475,7 @@ async function loadRendererHarness(options: {
     intersectionObservers,
     load,
     messages,
+    pendingRafCount: () => rafCallbacks.length,
     root,
     scrollCalls,
     scrollWrites,
@@ -1268,6 +1291,70 @@ afterEach(() => {
 });
 
 describe("renderer scroll-family virtualization integration", () => {
+  it("emits geometry settled after a non-convergent realization watch is quarantined", async () => {
+    const sectionCount = 120;
+    const harness = await loadRendererHarness({
+      deliverRealizationEventsAfterFrame: true,
+      sectionCount,
+      virtualization: true,
+    });
+    harness.load({
+      type: "load-document",
+      html: Array.from({ length: sectionCount }, (_, index) =>
+        `<h2 id="heading-${index}" data-mm-block-index="${index}" data-mm-block-kind="heading" style="content-visibility:auto">Heading ${index}</h2>`
+      ).join(""),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 91,
+    });
+
+    for (let frame = 0; frame < 400; frame++) {
+      if (perfMarkMessageIndex(harness.messages, "mm-virt-realization-quarantined") >= 0) {
+        break;
+      }
+      if (harness.pendingRafCount() === 0) {
+        harness.load({ type: "scroll-to-block", blockIndex: 0 });
+      }
+      expect(harness.pendingRafCount()).toBeGreaterThan(0);
+      harness.setRenderedSectionHeight(SECTION_HEIGHT + frame * 3);
+      await harness.flushAnimationFrame();
+    }
+
+    const expiredCycles = perfDetails<{ blockIndex?: number; cycles?: number }>(
+      harness.messages,
+      "mm-virt-realization-expired"
+    ).filter(detail => detail.blockIndex === 0).map(detail => detail.cycles);
+    expect(expiredCycles).toEqual([1, 2, 3]);
+    const quarantineIndex = perfMarkMessageIndex(
+      harness.messages,
+      "mm-virt-realization-quarantined"
+    );
+    expect(quarantineIndex).toBeGreaterThanOrEqual(0);
+
+    for (let frame = 0; frame < 40; frame++) {
+      if (perfMarkMessageIndex(
+        harness.messages,
+        "mm-virt-geometry-settled",
+        () => true,
+        quarantineIndex + 1
+      ) >= 0) {
+        break;
+      }
+      if (harness.pendingRafCount() === 0) {
+        harness.load({ type: "scroll-to-block", blockIndex: 0 });
+      }
+      expect(harness.pendingRafCount()).toBeGreaterThan(0);
+      await harness.flushAnimationFrame();
+    }
+
+    expect(perfMarkMessageIndex(
+      harness.messages,
+      "mm-virt-geometry-settled",
+      () => true,
+      quarantineIndex + 1
+    )).toBeGreaterThan(quarantineIndex);
+  });
+
   it("keeps progressive enhancement scheduling fire-and-forget when virtualization is off", async () => {
     let nextIdleId = 1;
     const requestIdleCallback = vi.fn(() => nextIdleId++);

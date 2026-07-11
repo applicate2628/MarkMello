@@ -97,6 +97,7 @@ function makeController(input: {
   measure?: () => MeasuredHeightUpdate[];
   prepare?: (root: ParentNode) => void;
   realization?: unknown;
+  trace?: (event: { id: string; details?: Readonly<Record<string, unknown>> }) => void;
 }): VirtualizedDocumentWindowController {
   const main = document.querySelector<HTMLElement>("main.mm-document")!;
   return createVirtualizedDocumentWindowController({
@@ -113,6 +114,7 @@ function makeController(input: {
       minBelowPx: 0,
     },
     root: input.root,
+    trace: input.trace,
   } as Parameters<typeof createVirtualizedDocumentWindowController>[0]);
 }
 
@@ -843,11 +845,12 @@ describe("virtualized document window", () => {
     }
   });
 
-  it("keeps non-convergent event geometry fail-closed after the delivered-frame budget", () => {
+  it("quarantines non-convergent realization after three cycles without adopting geometry", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { root } = setScrollRoot(0, 400, 180);
     const frames = installFrameQueue();
     let frame = 0;
+    const traces: Array<{ id: string; details?: Readonly<Record<string, unknown>> }> = [];
     const model = new DocumentWindowModel([
       entry(0, 246, 104, {
         html: '<section data-mm-block-index="246" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 246</section>',
@@ -858,6 +861,7 @@ describe("virtualized document window", () => {
       model,
       realization: { enabled: true },
       root,
+      trace: event => traces.push(event),
     });
 
     try {
@@ -868,14 +872,81 @@ describe("virtualized document window", () => {
       setElementLayout(bottomSpacer, { top: () => 142 + frame * 3 });
 
       dispatchContentVisibilityState(blockNode, false);
-      for (let index = 0; index < 120; index++) {
-        frame++;
-        frames.flush();
+      for (let cycle = 1; cycle <= 3; cycle++) {
+        for (let index = 0; index < 120; index++) {
+          frame++;
+          frames.flush();
+        }
+        expect(traces.filter(trace => trace.id === "mm-virt-realization-expired").at(-1)?.details)
+          .toMatchObject({ blockIndex: 246, cycles: cycle });
+        expect(controller.recensusRealizationWatches()).toBe(cycle === 3);
       }
 
       expect(controller.adoptRenderedHeights().updatedCount).toBe(0);
       expect(model.getEntryByBlockIndex(246)?.measuredHeight).toBeUndefined();
-      expect(controller.recensusRealizationWatches()).toBe(false);
+      expect(traces.filter(trace => trace.id === "mm-virt-realization-quarantined")).toEqual([
+        expect.objectContaining({
+          details: expect.objectContaining({ blockIndex: 246, cycles: 3, mountGeneration: 1 }),
+        }),
+      ]);
+
+      dispatchContentVisibilityState(blockNode, false);
+      expect(frames.pending()).toBe(0);
+      expect(controller.recensusRealizationWatches()).toBe(true);
+      expect(traces.filter(trace => trace.id === "mm-virt-realization-quarantined")).toHaveLength(1);
+    } finally {
+      frames.restore();
+    }
+  });
+
+  it("creates a fresh realization watch after a quarantined block is remounted", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root, setScrollTop } = setScrollRoot(0, 600, 100);
+    const frames = installFrameQueue();
+    let frame = 0;
+    const model = new DocumentWindowModel([
+      entry(0, 246, 100, {
+        html: '<section data-mm-block-index="246" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 246</section>',
+        occupiedNonContentHeight: 22,
+      }),
+      entry(1, 247, 100, {
+        html: '<section data-mm-block-index="247" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 247</section>',
+        occupiedNonContentHeight: 22,
+      }),
+    ]);
+    const controller = makeController({ model, realization: { enabled: true }, root });
+
+    try {
+      controller.updateWindowForScroll();
+      const quarantinedNode = document.querySelector<HTMLElement>("[data-mm-block-index='246']")!;
+      const initialBottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
+      setElementLayout(quarantinedNode, { height: () => 120 + frame * 3, top: () => 0 });
+      setElementLayout(initialBottomSpacer, { top: () => 142 + frame * 3 });
+      dispatchContentVisibilityState(quarantinedNode, false);
+      for (let cycle = 1; cycle <= 3; cycle++) {
+        for (let index = 0; index < 120; index++) {
+          frame++;
+          frames.flush();
+        }
+        expect(controller.recensusRealizationWatches()).toBe(cycle === 3);
+      }
+
+      setScrollTop(140);
+      controller.updateWindowForScroll({ force: true });
+      expect(document.body.contains(quarantinedNode)).toBe(false);
+      setScrollTop(0);
+      controller.updateWindowForScroll({ force: true });
+
+      const remountedNode = document.querySelector<HTMLElement>("[data-mm-block-index='246']")!;
+      const remountedSuccessor = document.querySelector<HTMLElement>("[data-mm-block-index='247']")!;
+      expect(remountedNode).not.toBe(quarantinedNode);
+      setElementLayout(remountedNode, { height: () => 122, top: () => 0 });
+      setElementLayout(remountedSuccessor, { height: () => 100, top: () => 144 });
+      dispatchContentVisibilityState(remountedNode, false);
+      frames.flush(2);
+
+      expect(controller.adoptRenderedHeights().updatedCount).toBe(1);
+      expect(model.getEntryByBlockIndex(246)?.measuredHeight).toBe(144);
     } finally {
       frames.restore();
     }
