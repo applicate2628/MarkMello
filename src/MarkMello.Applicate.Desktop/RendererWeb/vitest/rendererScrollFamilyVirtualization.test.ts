@@ -8,6 +8,13 @@ type ScrollCall = {
   options?: ScrollIntoViewOptions | boolean;
 };
 
+type IntersectionObserverRecord = {
+  disconnected: boolean;
+  observed: Element[];
+  rootMargin: string;
+  unobserved: Element[];
+};
+
 type RendererHarness = {
   flushAnimationFrame: () => Promise<void>;
   flushCanceledRafs: () => Promise<void>;
@@ -16,6 +23,7 @@ type RendererHarness = {
   flushRafsUntil: (predicate: () => boolean, maxFrames?: number) => Promise<void>;
   flushResizeRafsSynchronously: () => void;
   highlights: Map<string, Range[]>;
+  intersectionObservers: IntersectionObserverRecord[];
   load: HostBridge;
   messages: unknown[];
   root: HTMLElement;
@@ -32,6 +40,7 @@ type ControllerFaults = {
   adoptRenderedHeights?: boolean;
   ensureSectionRendered?: boolean;
   onAdoptRenderedHeights?: () => void;
+  onCreated?: (controller: import("../src/virtualizedDocumentWindow").VirtualizedDocumentWindowController) => void;
 };
 
 const SECTION_HEIGHT = 80;
@@ -116,6 +125,7 @@ async function loadRendererHarness(options: {
           deps: Parameters<typeof actual.createVirtualizedDocumentWindowController>[0]
         ) => {
           const controller = actual.createVirtualizedDocumentWindowController(deps);
+          controllerFaults.onCreated?.(controller);
           const adoptRenderedHeights = controller.adoptRenderedHeights.bind(controller);
           const ensureSectionRendered = controller.ensureSectionRendered.bind(controller);
           controller.adoptRenderedHeights = adoptOptions => {
@@ -185,14 +195,32 @@ async function loadRendererHarness(options: {
     value: cancelAnimationFrameStub,
   });
 
+  const intersectionObservers: IntersectionObserverRecord[] = [];
   class TestIntersectionObserver implements IntersectionObserver {
-    readonly root: Element | Document | null = null;
-    readonly rootMargin = "0px";
-    readonly thresholds: ReadonlyArray<number> = [];
-    disconnect(): void { }
-    observe(): void { }
+    readonly root: Element | Document | null;
+    readonly rootMargin: string;
+    readonly thresholds: ReadonlyArray<number>;
+    private readonly record: IntersectionObserverRecord;
+
+    constructor(_callback: IntersectionObserverCallback, init?: IntersectionObserverInit) {
+      this.root = init?.root ?? null;
+      this.rootMargin = init?.rootMargin ?? "0px";
+      this.thresholds = Array.isArray(init?.threshold)
+        ? init.threshold
+        : [init?.threshold ?? 0];
+      this.record = {
+        disconnected: false,
+        observed: [],
+        rootMargin: this.rootMargin,
+        unobserved: [],
+      };
+      intersectionObservers.push(this.record);
+    }
+
+    disconnect(): void { this.record.disconnected = true; }
+    observe(target: Element): void { this.record.observed.push(target); }
     takeRecords(): IntersectionObserverEntry[] { return []; }
-    unobserve(): void { }
+    unobserve(target: Element): void { this.record.unobserved.push(target); }
   }
   vi.stubGlobal(
     "IntersectionObserver",
@@ -412,6 +440,7 @@ async function loadRendererHarness(options: {
     flushRafsUntil,
     flushResizeRafsSynchronously,
     highlights,
+    intersectionObservers,
     load,
     messages,
     root,
@@ -721,6 +750,20 @@ function highestRenderedHeadingIndex(): number {
     .map(element => Number.parseInt(element.id.replace("heading-", ""), 10))
     .filter(Number.isFinite)
     .reduce((max, index) => Math.max(max, index), -1);
+}
+
+function activeHeadingObserverRecords(harness: RendererHarness): IntersectionObserverRecord[] {
+  return harness.intersectionObservers.filter(record => record.rootMargin === "0px 0px -85% 0px");
+}
+
+function activeHeadingChangedIds(messages: readonly unknown[]): string[] {
+  return messages
+    .filter((message): message is { id: string; type: "active-heading-changed" } =>
+      typeof message === "object"
+      && message !== null
+      && (message as { type?: unknown }).type === "active-heading-changed"
+      && typeof (message as { id?: unknown }).id === "string")
+    .map(message => message.id);
 }
 
 function pointerEvent(type: string, clientY: number): PointerEvent {
@@ -1279,6 +1322,66 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(document.getElementById("heading-999")).toBeNull();
     expect(headings).toHaveLength(headingCount);
     expect(headings.at(-1)).toMatchObject({ id: "heading-1004" });
+  });
+
+  it("re-arms the active-heading observer with live headings after virtual window replacement", async () => {
+    const sectionCount = 120;
+    const harness = await loadRendererHarness({
+      sectionCount,
+      virtualization: true,
+    });
+
+    harness.load({ type: "load-document", html: buildHeadingDocument(sectionCount), hasMermaid: false, hasHljs: false });
+    await harness.flushQueuedRafs();
+
+    const initialObserver = activeHeadingObserverRecords(harness).at(-1);
+    expect(initialObserver).toBeDefined();
+
+    harness.root.scrollTop = 90 * SECTION_PITCH;
+    document.dispatchEvent(new Event("scroll"));
+    await harness.flushRafsUntil(() => document.getElementById("heading-90") !== null);
+    await harness.flushQueuedRafs();
+
+    const liveHeadings = Array.from(
+      document.querySelectorAll<HTMLHeadingElement>("body > main.mm-document [id^='heading-']")
+    );
+    const latestObserver = activeHeadingObserverRecords(harness).at(-1);
+    expect(liveHeadings.length).toBeGreaterThan(0);
+    expect(latestObserver).toBeDefined();
+    expect(latestObserver).not.toBe(initialObserver);
+    expect(initialObserver!.disconnected).toBe(true);
+    expect(latestObserver!.observed).toEqual(liveHeadings);
+    expect(latestObserver!.observed.every(node => node.isConnected)).toBe(true);
+  });
+
+  it("does not post an active heading from a superseded virtual window", async () => {
+    let controller: import("../src/virtualizedDocumentWindow").VirtualizedDocumentWindowController | null = null;
+    const harness = await loadRendererHarness({
+      controllerFaults: {
+        onCreated: created => { controller = created; },
+      },
+      sectionCount: 120,
+      virtualization: true,
+    });
+
+    harness.load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
+    expect(controller).not.toBeNull();
+    controller!.ensureSectionRendered(90, { force: true, preserveAnchor: false });
+    controller!.ensureSectionRendered(0, { force: true, preserveAnchor: false });
+
+    const liveHeadingIds = new Set(
+      Array.from(document.querySelectorAll<HTMLHeadingElement>("body > main.mm-document [id^='heading-']"))
+        .map(node => node.id)
+    );
+    expect(liveHeadingIds.has("heading-0")).toBe(true);
+    expect(liveHeadingIds.has("heading-90")).toBe(false);
+    harness.messages.length = 0;
+
+    await harness.flushQueuedRafs();
+
+    const postedIds = activeHeadingChangedIds(harness.messages);
+    expect(postedIds.length).toBeGreaterThan(0);
+    expect(postedIds.every(id => liveHeadingIds.has(id))).toBe(true);
   });
 
   it("renders an off-window anchor target before handling a scroll-to anchor message", async () => {

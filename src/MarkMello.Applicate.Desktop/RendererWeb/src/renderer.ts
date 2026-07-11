@@ -3245,6 +3245,7 @@ function initializeVirtualizedDocumentWindow(): void {
     },
     onWindowMounted: mountGeneration => {
       virtualizedWindowMountGeneration = mountGeneration;
+      rebuildActiveHeadingObserverFromLiveDocument();
       scheduleVirtualizedWindowFontReadiness(mountGeneration);
     },
     prepareInsertedContent: prepareVirtualizedInsertedContent,
@@ -5137,6 +5138,12 @@ function readLiveHeadingNodes(main: HTMLElement): HTMLHeadingElement[] {
   );
 }
 
+function rebuildActiveHeadingObserverFromLiveDocument(): void {
+  const main = document.querySelector<HTMLElement>("main.mm-document");
+  const nodes = main === null ? [] : readLiveHeadingNodes(main).filter((node) => !!node.id);
+  rebuildActiveHeadingObserver(nodes);
+}
+
 function readLiveHeadingPayloads(main: HTMLElement): { headings: HeadingPayload[]; nodes: HTMLHeadingElement[] } {
   const nodes = readLiveHeadingNodes(main);
   return {
@@ -5295,18 +5302,22 @@ function rebuildActiveHeadingObserver(headingNodes: HTMLHeadingElement[]): void 
 
   // rootMargin: top=0 (count any heading whose top crossed the viewport
   // top); bottom = -(viewport-50) so observers only fire near the top.
-  activeHeadingObserver = new IntersectionObserver(callback, {
+  const observer = new IntersectionObserver(callback, {
     rootMargin: "0px 0px -85% 0px",
     threshold: [0, 1],
   });
+  activeHeadingObserver = observer;
   for (const node of headingNodes) {
-    activeHeadingObserver.observe(node);
+    observer.observe(node);
   }
 
   // Emit an initial active-heading guess so the TOC highlights the right
   // row before the user scrolls.
   const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
   window.requestAnimationFrame(() => {
+    if (activeHeadingObserver !== observer) {
+      return;
+    }
     if (
       documentEpoch !== undefined
       && scrollOwnershipControlPlane?.isCurrentDocumentEpoch(documentEpoch) !== true
