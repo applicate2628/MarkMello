@@ -1,6 +1,9 @@
-"use strict";
 (() => {
-  // RendererWeb/src/minimapState.ts
+  var __defProp = Object.defineProperty;
+  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+  var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/minimapState.ts
   var DEFAULT_MINIMAP_POST_EPSILON = 0.5;
   function shouldPostMinimapState(previous, next, force = false, epsilon = DEFAULT_MINIMAP_POST_EPSILON) {
     if (force || !previous.hasPosted || previous.visible !== next.visible) {
@@ -9,7 +12,7 @@
     return Math.abs(next.reservedWidth - previous.reservedWidth) >= epsilon;
   }
 
-  // RendererWeb/src/minimapLayout.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/minimapLayout.ts
   var DEFAULT_MINIMUM_THUMB_HEIGHT = 22;
   function calculateMinimapDocumentWidth(input) {
     const width = input.borderBoxWidth - input.paddingLeft - input.paddingRight;
@@ -48,7 +51,7 @@
     };
   }
 
-  // RendererWeb/src/widthResizerVisibility.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/widthResizerVisibility.ts
   function normalizeWidthResizerVisibility(raw) {
     return raw === "always" ? "always" : "on-hover";
   }
@@ -58,7 +61,7 @@
     };
   }
 
-  // RendererWeb/src/mermaidRender.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/mermaidRender.ts
   var MERMAID_PROXY_LIFECYCLE_OWNER = /* @__PURE__ */ Symbol("mm-mermaid-proxy-lifecycle-owner");
   function isMermaidNodeNearViewport(node, viewportHeight, marginPx) {
     const rect = node.getBoundingClientRect();
@@ -208,7 +211,7 @@
     }
   }
 
-  // RendererWeb/src/hljsLanguage.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/hljsLanguage.ts
   var ALIASES = {
     js: "javascript",
     ts: "typescript",
@@ -226,7 +229,7 @@
     return ALIASES[lower] ?? lower;
   }
 
-  // RendererWeb/src/frameYield.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/frameYield.ts
   var FRAME_YIELD_FALLBACK_MS = 32;
   function yieldAnimationFrameOrTimeout() {
     return new Promise((resolve) => {
@@ -253,7 +256,7 @@
     });
   }
 
-  // RendererWeb/src/initialRenderPipeline.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/initialRenderPipeline.ts
   var DEFAULT_INITIAL_VISIBLE_READY_TIMEOUT_MS = 1200;
   var DEFAULT_INITIAL_VISUAL_SETTLE_TIMEOUT_MS = 1800;
   function deferPostReadyWork(deps, work) {
@@ -360,7 +363,7 @@
     });
   }
 
-  // RendererWeb/src/loadDocument.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/loadDocument.ts
   function applyLoadDocument(message, deps) {
     const main = document.querySelector("main.mm-document");
     if (!main) {
@@ -437,7 +440,7 @@
     }
   }
 
-  // RendererWeb/src/performanceMarks.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/performanceMarks.ts
   var state = {
     marks: [],
     pendingStarts: /* @__PURE__ */ new Map(),
@@ -529,22 +532,22 @@
     };
   }
 
-  // RendererWeb/src/mathRenderQueue.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/mathRenderQueue.ts
   function isTerminalMathState(state2) {
     return state2 === "true" || state2 === "failed";
   }
   var MathRenderQueue = class {
     constructor(deps) {
-      this.deps = deps;
-      this.high = [];
-      this.low = [];
-      this.inQueue = /* @__PURE__ */ new Map();
-      this.taskListeners = /* @__PURE__ */ new Set();
-      this.cancelled = false;
-      this.processing = false;
-      this.idlePromise = null;
-      this.idleResolver = null;
-      this.sliceCounter = 0;
+      __publicField(this, "deps", deps);
+      __publicField(this, "high", []);
+      __publicField(this, "low", []);
+      __publicField(this, "inQueue", /* @__PURE__ */ new Map());
+      __publicField(this, "taskListeners", /* @__PURE__ */ new Set());
+      __publicField(this, "cancelled", false);
+      __publicField(this, "processing", false);
+      __publicField(this, "idlePromise", null);
+      __publicField(this, "idleResolver", null);
+      __publicField(this, "sliceCounter", 0);
     }
     enqueue(task, priority) {
       if (this.cancelled) return;
@@ -660,7 +663,7 @@
     }
   };
 
-  // RendererWeb/src/mathRenderInit.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/mathRenderInit.ts
   var INITIAL_LOOKAHEAD_PX = 500;
   var INITIAL_PAST_VIEWPORT_SCAN_LIMIT = 8;
   function complexityScore(tex) {
@@ -812,7 +815,7 @@
     };
   }
 
-  // RendererWeb/src/schematicMinimap.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/schematicMinimap.ts
   var PHASE_B_HEIGHT_DELTA_THRESHOLD_PX = 100;
   function shouldTriggerPhaseB(currentHeight, cachedHeight) {
     if (cachedHeight <= 0) return false;
@@ -838,7 +841,7 @@
     });
   }
 
-  // RendererWeb/src/scrollCoalescer.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/scrollCoalescer.ts
   function createScrollCoalescer(deps) {
     let pending = false;
     return function queuePostScroll2() {
@@ -851,7 +854,7 @@
     };
   }
 
-  // RendererWeb/src/widthHandleLayout.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/widthHandleLayout.ts
   function clampWidthHandleLeft(input) {
     const hitArea = Math.max(0, input.hitArea);
     const minimapReservedWidth = Math.max(0, input.minimapReservedWidth);
@@ -872,7 +875,7 @@
     });
   }
 
-  // RendererWeb/src/findVisibleText.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/findVisibleText.ts
   var FIND_VISIBLE_SKIP_TAGS = /* @__PURE__ */ new Set(["SCRIPT", "STYLE", "NOSCRIPT", "ASIDE"]);
   var FIND_VISIBLE_SKIP_CLASSES = /* @__PURE__ */ new Set([
     "mm-minimap",
@@ -964,7 +967,7 @@
     return "complete";
   }
 
-  // RendererWeb/src/findBar.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/findBar.ts
   var FIND_BAR_CLASS = "mm-find-bar";
   var FIND_INPUT_CLASS = "mm-find-input";
   var FIND_COUNT_CLASS = "mm-find-count";
@@ -1366,7 +1369,7 @@
     };
   }
 
-  // RendererWeb/src/legacyScrollWriter.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/legacyScrollWriter.ts
   var LEGACY_SCROLL_WRITER_TRACE_ID = "mm-virt-legacy-scroll-writer-flag-on";
   function createLegacyScrollWriter(deps) {
     function trace(operation) {
@@ -1405,7 +1408,7 @@
     };
   }
 
-  // RendererWeb/src/renderedFindProjection.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/renderedFindProjection.ts
   var RENDERED_FIND_TEXT_DOMAIN = "rendered-dom-v1";
   var RENDERED_FIND_SCHEMA_VERSION = 1;
   var RENDERED_FIND_MAX_MESSAGE_UTF8_BYTES = 262144;
@@ -1842,7 +1845,7 @@
     return `${renderId}:${projectionRevision}`;
   }
 
-  // RendererWeb/src/sectionIntrinsicSize.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/sectionIntrinsicSize.ts
   var MODEL_GAP_PX = 44;
   var DEFAULT_LINE_HEIGHT_PX = 30;
   var DEFAULT_DISPLAY_MATH_CONTENT_PX = 120;
@@ -1966,8 +1969,9 @@
   }
   var SectionIntrinsicCalibrator = class {
     constructor(options = {}) {
-      this.buckets = /* @__PURE__ */ new Map();
-      this.bucketKeyByBlockIndex = /* @__PURE__ */ new Map();
+      __publicField(this, "buckets", /* @__PURE__ */ new Map());
+      __publicField(this, "bucketKeyByBlockIndex", /* @__PURE__ */ new Map());
+      __publicField(this, "minSamplesPerBucket");
       this.minSamplesPerBucket = Math.max(1, Math.floor(options.minSamplesPerBucket ?? DEFAULT_MIN_SAMPLES_PER_BUCKET));
     }
     reset() {
@@ -2087,7 +2091,7 @@
     return (sorted[middle - 1] + sorted[middle]) / 2;
   }
 
-  // RendererWeb/src/blockGeometryMeasurement.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/blockGeometryMeasurement.ts
   var BLOCK_AXIS_PADDING_BORDER_PROPERTIES = [
     "padding-top",
     "padding-bottom",
@@ -2231,7 +2235,7 @@
     return { bottom: top + height, top };
   }
 
-  // RendererWeb/src/documentWindow.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/documentWindow.ts
   var ESTIMATE_ERROR_KIND_ORDER = [
     "heading",
     "paragraph",
@@ -2257,14 +2261,16 @@
   }
   var DocumentWindowModel = class {
     constructor(entries, options = {}) {
-      this.sectionIndexByBlockIndex = /* @__PURE__ */ new Map();
-      this.containingSectionIndexByBlockIndex = /* @__PURE__ */ new Map();
-      this.sectionIndexByHeadingAnchor = /* @__PURE__ */ new Map();
-      this.headingAnchorPositions = [];
-      this.sourceLineSpans = [];
-      this.renderedContentStatsBySection = [];
-      this.renderedContentSummary = createEmptyRenderedContentMathStats();
-      this.totalHeight = 0;
+      __publicField(this, "sections");
+      __publicField(this, "sectionIndexByBlockIndex", /* @__PURE__ */ new Map());
+      __publicField(this, "containingSectionIndexByBlockIndex", /* @__PURE__ */ new Map());
+      __publicField(this, "sectionIndexByHeadingAnchor", /* @__PURE__ */ new Map());
+      __publicField(this, "headingAnchorPositions", []);
+      __publicField(this, "sourceLineSpans", []);
+      __publicField(this, "renderedContentStatsBySection", []);
+      __publicField(this, "renderedContentSummary", createEmptyRenderedContentMathStats());
+      __publicField(this, "leadingOffset");
+      __publicField(this, "totalHeight", 0);
       this.leadingOffset = options.leadingOffset ?? 0;
       this.sections = entries.slice().sort((a, b) => a.sectionIndex - b.sectionIndex).map((entry) => ({ ...entry }));
       for (let index = 0; index < this.sections.length; index++) {
@@ -2455,9 +2461,6 @@
         }
         const entry = this.sections[index];
         const occupiedNonContentHeight = update.occupiedNonContentHeight;
-        if (typeof occupiedNonContentHeight === "number" && Number.isFinite(occupiedNonContentHeight)) {
-          entry.occupiedNonContentHeight = occupiedNonContentHeight;
-        }
         if (update.measuredHeightPlaceholder === true) {
           continue;
         }
@@ -2465,6 +2468,16 @@
           continue;
         }
         const previous = effectiveHeight(entry);
+        const nextOccupiedNonContentHeight = typeof occupiedNonContentHeight === "number" && Number.isFinite(occupiedNonContentHeight) ? occupiedNonContentHeight : entry.occupiedNonContentHeight;
+        const changed = !Object.is(entry.measuredHeight, update.measuredHeight) || !Object.is(entry.occupiedNonContentHeight, nextOccupiedNonContentHeight) || entry.geometryOwner !== update.geometryOwner || entry.measuredHeightPlaceholder === true;
+        if (!changed) {
+          continue;
+        }
+        if (nextOccupiedNonContentHeight === void 0) {
+          delete entry.occupiedNonContentHeight;
+        } else {
+          entry.occupiedNonContentHeight = nextOccupiedNonContentHeight;
+        }
         entry.measuredHeight = update.measuredHeight;
         if (update.geometryOwner === void 0) {
           delete entry.geometryOwner;
@@ -2926,7 +2939,8 @@
       if (measurement.occupiedNonContentHeight !== void 0) {
         entry.occupiedNonContentHeight = measurement.occupiedNonContentHeight;
       }
-      if (measured && measurement.measuredHeightPlaceholder) {
+      const acceptsRememberedIntrinsicSizeMeasurement = options.acceptRememberedIntrinsicSizeMeasurements === true && semanticElement.style.containIntrinsicSize.trim().length > 0;
+      if (measured && measurement.measuredHeightPlaceholder && !acceptsRememberedIntrinsicSizeMeasurement) {
         entry.measuredHeight = void 0;
         entry.measuredHeightPlaceholder = true;
       }
@@ -3190,7 +3204,7 @@
     return parsed !== null && parsed >= 0 ? parsed : null;
   }
 
-  // RendererWeb/src/virtualizedDocumentWindow.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/virtualizedDocumentWindow.ts
   var TOP_SPACER = "top";
   var BOTTOM_SPACER = "bottom";
   var SPACER_CLASS = "mm-virtual-spacer";
@@ -3284,21 +3298,30 @@
         const preserveSectionIndex = normalizeSectionIndex(options.preserveSectionIndex, deps.model.getSectionCount());
         const reanchor = options.reanchor !== false;
         const preMutationScrollTop = deps.root.scrollTop;
-        const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(deps.root.scrollTop) : null;
+        const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(preMutationScrollTop) : null;
         const blocks = collectLiveDocumentSectionElements(deps.main);
         const liveAnchor = preserveSectionIndex === null ? captureReadingAnchor(blocks) : null;
+        const liveAnchorEntry = liveAnchor === null ? void 0 : deps.model.getEntryByBlockIndex(liveAnchor.blockIndex);
+        const viewportAnchor = preserveSectionIndex === null && options.modelAnchor === void 0 ? deps.model.captureAnchor(preMutationScrollTop) : null;
+        const modelAnchor = options.modelAnchor ?? (liveAnchorEntry !== void 0 && liveAnchor !== null ? {
+          sectionIndex: liveAnchorEntry.sectionIndex,
+          targetLocalOffset: liveAnchor.intraOffsetPx
+        } : viewportAnchor !== null && viewportAnchor.sectionIndex >= 0 ? {
+          sectionIndex: viewportAnchor.sectionIndex,
+          targetLocalOffset: viewportAnchor.intraOffset
+        } : void 0);
         const updates = deps.readMeasuredHeights ? deps.readMeasuredHeights(blocks) : readLiveBlockOffsetMeasuredHeights(blocks);
         const result = deps.model.updateMeasuredHeightsByBlockIndex(
           realizationTracker?.filterRealizedUpdates(blocks, updates) ?? updates,
-          options.modelAnchor
+          modelAnchor
         );
         if (result.updatedCount === 0) {
-          return options.modelAnchor === void 0 ? EMPTY_HEIGHT_UPDATE : { ...EMPTY_HEIGHT_UPDATE, anchorShift: 0 };
+          return modelAnchor === void 0 ? EMPTY_HEIGHT_UPDATE : { ...EMPTY_HEIGHT_UPDATE, anchorShift: 0 };
         }
         if (result.maxAbsDelta <= Number.EPSILON && Math.abs(result.totalDelta) <= Number.EPSILON) {
           return result;
         }
-        const desiredScrollTop = options.modelAnchor !== void 0 ? preMutationScrollTop + (result.anchorShift ?? 0) : preserveSectionIndex !== null ? deps.model.sectionTop(preserveSectionIndex) : scrollTopForReadingAnchor(deps.model, liveAnchor) ?? deps.model.scrollTopForAnchor(anchor);
+        const desiredScrollTop = modelAnchor !== void 0 ? preMutationScrollTop + (result.anchorShift ?? 0) : preserveSectionIndex !== null ? deps.model.sectionTop(preserveSectionIndex) : scrollTopForReadingAnchor(deps.model, liveAnchor) ?? deps.model.scrollTopForAnchor(anchor);
         renderRange(computeRange(desiredScrollTop));
         if (reanchor) {
           options.operation?.requestScrollTop(desiredScrollTop, "measured-height-adoption");
@@ -3744,7 +3767,7 @@
     return Math.max(0, Math.min(sectionCount - 1, Math.floor(sectionIndex)));
   }
 
-  // RendererWeb/src/windowTargetResolver.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/windowTargetResolver.ts
   async function renderWindowTargetThenAct(input) {
     const model = input.model;
     const controller = input.controller;
@@ -4027,7 +4050,7 @@
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
   }
 
-  // RendererWeb/src/virtualizedFindProvider.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/virtualizedFindProvider.ts
   var FIND_RANGE_REAIM_FRAME_LIMIT = 3;
   var FIND_SCROLL_EPSILON = 0.5;
   function createVirtualizedFindProvider(deps) {
@@ -4361,7 +4384,7 @@
     });
   }
 
-  // RendererWeb/src/sourceLineSync.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/sourceLineSync.ts
   var SOURCE_LINE_ANCHOR_SELECTOR = "[data-mm-source-line]";
   function readSourceLineAnchors(root = document, scrollY = window.scrollY) {
     const anchors = [];
@@ -4496,7 +4519,7 @@
     return Math.max(0, Math.min(1, value));
   }
 
-  // RendererWeb/src/minimapCache.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/minimapCache.ts
   function isMinimapSnapshotProvenance(value) {
     if (value === null || typeof value !== "object") {
       return false;
@@ -4549,7 +4572,7 @@
     };
   }
 
-  // RendererWeb/src/topVisibleBlockIndex.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/topVisibleBlockIndex.ts
   var LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]";
   function collectLiveDocumentBlockElements(ownerDocument) {
     return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR)).filter(hasVisibleBlockBox);
@@ -4621,7 +4644,7 @@
     return getComputedStyle(block).display === "none";
   }
 
-  // RendererWeb/src/modelRenderedContent.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/modelRenderedContent.ts
   var DEFAULT_MODEL_RENDERED_CONTENT_TIME_BUDGET_MS = 7;
   async function prepareDocumentWindowModelRenderedContent(model, deps) {
     const shouldContinue = deps.shouldContinue ?? (() => true);
@@ -4801,13 +4824,13 @@
     return typeof performance === "undefined" ? Date.now() : performance.now();
   }
 
-  // RendererWeb/src/modelActiveHeading.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/modelActiveHeading.ts
   var ACTIVE_HEADING_VIEWPORT_ANCHOR_OFFSET_PX = 10;
   var ModelActiveHeadingPublisher = class {
     constructor(post) {
-      this.post = post;
-      this.activeModel = null;
-      this.lastPostedHeadingId = null;
+      __publicField(this, "post", post);
+      __publicField(this, "activeModel", null);
+      __publicField(this, "lastPostedHeadingId", null);
     }
     update(model, scrollY) {
       if (model !== this.activeModel) {
@@ -4828,7 +4851,7 @@
     }
   };
 
-  // RendererWeb/src/virtualizationFlags.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/virtualizationFlags.ts
   function readRendererBooleanFlag(input) {
     return isTrueFlagValue(readWindowFlag(input.ownerWindow, input.globalName)) || isTrueFlagValue(input.ownerDocument.documentElement.dataset[input.dataKey]) || input.storageName !== void 0 && isTrueFlagValue(readLocalStorageFlag(input.ownerWindow, input.storageName));
   }
@@ -4868,7 +4891,7 @@
     }
   }
 
-  // RendererWeb/src/userInputWitness.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/userInputWitness.ts
   var SCROLL_KEYS = /* @__PURE__ */ new Set([
     "ArrowUp",
     "ArrowDown",
@@ -4978,7 +5001,7 @@
     };
   }
 
-  // RendererWeb/src/heldOperationScrollPolicy.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/heldOperationScrollPolicy.ts
   function createHeldOperationScrollPolicy() {
     let active = null;
     const matches = (identity) => active !== null && active.documentEpoch === identity.documentEpoch && active.operationEpoch === identity.operationEpoch;
@@ -5020,7 +5043,7 @@
     };
   }
 
-  // RendererWeb/src/virtualizationShadow.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/virtualizationShadow.ts
   var SHADOW_FLAG_NAME = "MARKMELLO_VIRT_SHADOW";
   function readVirtualizationShadowFlag(ownerWindow = window, ownerDocument = document) {
     return readRendererBooleanFlag({
@@ -5280,7 +5303,7 @@
     };
   }
 
-  // RendererWeb/src/scrollOwnershipControlPlane.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/scrollOwnershipControlPlane.ts
   var GEOMETRY_SETTLED_EVENT = "mm-virt-geometry-settled";
   var SCROLL_OWNERSHIP_TRACE_IDS = {
     geometryMutated: "mm-virt-geometry-mutated",
@@ -6216,7 +6239,7 @@
     return Number.isFinite(value) ? value : null;
   }
 
-  // RendererWeb/src/virtualizedScrollCoordination.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/virtualizedScrollCoordination.ts
   var VIRTUALIZED_MAINTENANCE_RETRY_REASON = "frame-transaction-occupied";
   function createVirtualizedScrollCoordinator(deps) {
     const virtualizedMaintenanceByOwner = /* @__PURE__ */ new Map();
@@ -6723,7 +6746,7 @@
     };
   }
 
-  // RendererWeb/src/renderer.ts
+  // .scratch/owner-fix-bundle-31f3a50/src/MarkMello.Applicate.Desktop/RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
   var MINIMAP_VIEWPORT_CLASS = "mm-minimap-viewport";
@@ -9086,7 +9109,7 @@
     };
     void ready.then(finish2, finish2);
   }
-  function initializeVirtualizedDocumentWindow() {
+  function initializeVirtualizedDocumentWindow(useCachedDocumentState = false) {
     if (!virtualizationEnabled) {
       return;
     }
@@ -9105,9 +9128,12 @@
       blocks,
       readIntrinsicSizeMetrics(main),
       root.scrollHeight,
-      { intrinsicSizeCalibrator: virtualizedIntrinsicCalibrator }
+      {
+        acceptRememberedIntrinsicSizeMeasurements: useCachedDocumentState,
+        intrinsicSizeCalibrator: virtualizedIntrinsicCalibrator
+      }
     );
-    virtualizedDocumentWindowModel = models.estimateOnlyModel;
+    virtualizedDocumentWindowModel = useCachedDocumentState ? models.measuredModel : models.estimateOnlyModel;
     virtualizedDocumentWindowModelGeneration++;
     const documentEpoch = scrollOwnershipControlPlane.captureDocumentEpoch();
     startRenderedFindProjectionForCurrentModel();
@@ -9822,8 +9848,9 @@
         let target = model !== null && controller !== null && entry !== void 0 ? scrollTopForReadingAnchor(model, anchor) : null;
         const prepared = await scheduleFrameWork(() => {
           consumePendingInitialVirtualizedWindow(operation);
-          if (target !== null && entry !== void 0) {
-            controller?.ensureSectionRendered(entry.sectionIndex, {
+          if (target !== null && entry !== void 0 && model !== null) {
+            const restoreRange = model.computeWindowRange(target, getDocumentScrollRoot().clientHeight);
+            controller?.ensureSectionRangeRendered(restoreRange.start, restoreRange.end, {
               force: true,
               operation,
               preserveAnchor: false
@@ -12255,7 +12282,7 @@
     if (options.allowVirtualization === false) {
       resetVirtualizedDocumentWindow(false);
     } else {
-      initializeVirtualizedDocumentWindow();
+      initializeVirtualizedDocumentWindow(useCachedDocumentState);
     }
     refreshTopVisibleBlockIndexCache();
     updateWidthHandlePositionForCurrentLayout();
