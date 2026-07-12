@@ -41,16 +41,6 @@ export type SectionModelEntry = {
 
 export type RenderedContentState = "not-needed" | "unprepared" | "ready" | "ready-with-failures";
 
-export type RenderedSectionHtmlUpdate = {
-  sectionIndex: number;
-  html: string;
-};
-
-export type RenderedSectionHtmlAdoptionResult = {
-  updatedCount: number;
-  pendingMathCount: number;
-};
-
 export type RenderedContentMathStats = {
   failedMathCount: number;
   pendingMathCount: number;
@@ -249,27 +239,6 @@ export class DocumentWindowModel {
       }
     }
     return pendingIndexes;
-  }
-
-  adoptRenderedSectionHtml(updates: Iterable<RenderedSectionHtmlUpdate>): RenderedSectionHtmlAdoptionResult {
-    let updatedCount = 0;
-    for (const update of updates) {
-      const entry = this.sections[update.sectionIndex];
-      if (entry === undefined || typeof update.html !== "string") {
-        continue;
-      }
-      if (entry.html === update.html) {
-        continue;
-      }
-
-      this.replaceRenderedContentHtml(update.sectionIndex, update.html, readRenderedContentHtmlStats(update.html));
-      updatedCount++;
-    }
-
-    return {
-      pendingMathCount: this.countPendingRenderedContentMath(),
-      updatedCount,
-    };
   }
 
   commitRenderedFormulaFragment(
