@@ -39,6 +39,25 @@ describe("user input witness", () => {
     });
   });
 
+  it("notifies evidence subscribers synchronously at ingress", () => {
+    const witness = createUserInputWitness({ now: () => 0 });
+    const observed: string[] = [];
+    const dispose = witness.subscribeEvidence(evidence => {
+      observed.push(`callback:${evidence.kind}:${evidence.sequence}`);
+    });
+
+    observed.push("before");
+    const evidence = witness.recordUserInput("wheel");
+    observed.push("after");
+
+    expect(evidence).toEqual({ kind: "wheel", sequence: 1 });
+    expect(observed).toEqual(["before", "callback:wheel:1", "after"]);
+
+    dispose();
+    witness.recordUserInput("scroll-key");
+    expect(observed).toEqual(["before", "callback:wheel:1", "after"]);
+  });
+
   it("suppresses compatibility touch evidence while an owned pointer is active", () => {
     const witness = createUserInputWitness({ now: () => 0 });
     const dispose = installUserInputWitnessListeners({ document, ownerWindow: window, witness });

@@ -5,40 +5,36 @@ export type HeldOperationIdentity = Readonly<{
 
 export type ActiveHeldOperationMode = "gesture" | "navigation" | "restore";
 
-export type ActiveHeldOperationRegistration<TTarget> = HeldOperationIdentity & Readonly<{
+export type ActiveHeldOperationState = Readonly<{
   mode: ActiveHeldOperationMode;
-  target: TTarget;
 }>;
 
-export type HeldOperationTargetResolution<TTarget> =
+export type ActiveHeldOperationRegistration<TState extends ActiveHeldOperationState> =
+  HeldOperationIdentity & TState;
+
+export type HeldOperationTargetResolution<TState extends ActiveHeldOperationState> =
   | Readonly<{
       kind: "active";
-      registration: ActiveHeldOperationRegistration<TTarget>;
-    }>
-  | Readonly<{
-      kind: "retained-navigation";
-      target: TTarget;
+      registration: ActiveHeldOperationRegistration<TState>;
     }>
   | Readonly<{ kind: "generic" }>;
 
-export type HeldOperationScrollPolicy<TTarget> = Readonly<{
+export type HeldOperationScrollPolicy<TState extends ActiveHeldOperationState> = Readonly<{
   clear: (identity: HeldOperationIdentity) => boolean;
-  read: (identity: HeldOperationIdentity) => ActiveHeldOperationRegistration<TTarget> | null;
-  readActive: () => ActiveHeldOperationRegistration<TTarget> | null;
+  read: (identity: HeldOperationIdentity) => ActiveHeldOperationRegistration<TState> | null;
+  readActive: () => ActiveHeldOperationRegistration<TState> | null;
   register: (
     identity: HeldOperationIdentity,
-    mode: ActiveHeldOperationMode,
-    target: TTarget
-  ) => ActiveHeldOperationRegistration<TTarget>;
-  resolve: (
-    identity: HeldOperationIdentity,
-    retainedNavigationTarget: TTarget | null
-  ) => HeldOperationTargetResolution<TTarget>;
-  update: (identity: HeldOperationIdentity, target: TTarget) => boolean;
+    state: TState
+  ) => ActiveHeldOperationRegistration<TState>;
+  resolve: (identity: HeldOperationIdentity) => HeldOperationTargetResolution<TState>;
+  update: (identity: HeldOperationIdentity, state: TState) => boolean;
 }>;
 
-export function createHeldOperationScrollPolicy<TTarget>(): HeldOperationScrollPolicy<TTarget> {
-  let active: ActiveHeldOperationRegistration<TTarget> | null = null;
+export function createHeldOperationScrollPolicy<
+  TState extends ActiveHeldOperationState
+>(): HeldOperationScrollPolicy<TState> {
+  let active: ActiveHeldOperationRegistration<TState> | null = null;
 
   const matches = (identity: HeldOperationIdentity): boolean =>
     active !== null
@@ -55,28 +51,29 @@ export function createHeldOperationScrollPolicy<TTarget>(): HeldOperationScrollP
     },
     read: identity => matches(identity) ? active : null,
     readActive: () => active,
-    register: (identity, mode, target) => {
+    register: (identity, state) => {
       active = Object.freeze({
         documentEpoch: identity.documentEpoch,
-        mode,
         operationEpoch: identity.operationEpoch,
-        target,
-      });
+        ...state,
+      }) as ActiveHeldOperationRegistration<TState>;
       return active;
     },
-    resolve: (identity, retainedNavigationTarget) => {
+    resolve: identity => {
       if (matches(identity) && active !== null) {
         return { kind: "active", registration: active };
       }
-      return retainedNavigationTarget === null
-        ? { kind: "generic" }
-        : { kind: "retained-navigation", target: retainedNavigationTarget };
+      return { kind: "generic" };
     },
-    update: (identity, target) => {
+    update: (identity, state) => {
       if (!matches(identity) || active === null) {
         return false;
       }
-      active = Object.freeze({ ...active, target });
+      active = Object.freeze({
+        documentEpoch: active.documentEpoch,
+        operationEpoch: active.operationEpoch,
+        ...state,
+      }) as ActiveHeldOperationRegistration<TState>;
       return true;
     },
   };

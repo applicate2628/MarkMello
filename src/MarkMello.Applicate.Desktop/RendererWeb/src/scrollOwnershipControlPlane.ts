@@ -95,6 +95,7 @@ export type NativeScrollClassification =
   | { kind: "self-echo"; expected: number; value: number }
   | { kind: "stale-self-echo"; expected: number; value: number }
   | { kind: "gesture-owned"; operationEpoch: number; value: number }
+  | { kind: "navigation-owned"; operationEpoch: number; value: number }
   | { evidence?: HeldGestureEvidence; kind: "user-supersession"; value: number }
   | { kind: "unattributed-failure"; expected: number | null; value: number };
 
@@ -1011,6 +1012,14 @@ export function createScrollOwnershipControlPlane(
         value,
       });
       return { expected: retired.value, kind: "stale-self-echo", value };
+    }
+    if (activeLease !== null && heldMode === "navigation" && finite) {
+      ensureFrame();
+      return {
+        kind: "navigation-owned",
+        operationEpoch: activeLease.operationEpoch,
+        value,
+      };
     }
     if (expected !== null) {
       trace(SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement, {

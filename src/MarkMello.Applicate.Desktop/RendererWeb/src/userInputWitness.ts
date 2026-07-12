@@ -5,6 +5,8 @@ export type UserInputEvidence = Readonly<{
   sequence: number;
 }>;
 
+export type UserInputEvidenceListener = (evidence: UserInputEvidence) => void;
+
 export type UserInputWitness = {
   beginOwnedPointer: (pointerId: number) => void;
   captureSequence: () => number;
@@ -13,6 +15,7 @@ export type UserInputWitness = {
   hasOwnedPointer: () => boolean;
   readEvidenceAfter: (sequence: number) => UserInputEvidence | null;
   recordUserInput: (kind: UserInputEvidenceKind) => UserInputEvidence;
+  subscribeEvidence: (listener: UserInputEvidenceListener) => () => void;
 };
 
 export type UserInputWitnessListenerDeps = {
@@ -37,6 +40,7 @@ export function createUserInputWitness(deps: { now: () => number }): UserInputWi
   let recordedAt: number | null = null;
   let sequence = 0;
   const ownedPointers = new Set<number>();
+  const evidenceListeners = new Set<UserInputEvidenceListener>();
 
   return {
     beginOwnedPointer: pointerId => {
@@ -65,7 +69,14 @@ export function createUserInputWitness(deps: { now: () => number }): UserInputWi
     recordUserInput: kind => {
       recordedAt = deps.now();
       evidence = Object.freeze({ kind, sequence: ++sequence });
+      for (const listener of evidenceListeners) {
+        listener(evidence);
+      }
       return evidence;
+    },
+    subscribeEvidence: listener => {
+      evidenceListeners.add(listener);
+      return () => { evidenceListeners.delete(listener); };
     },
   };
 }

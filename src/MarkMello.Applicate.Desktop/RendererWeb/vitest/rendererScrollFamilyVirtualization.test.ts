@@ -1469,21 +1469,25 @@ afterEach(() => {
 });
 
 describe("renderer scroll-family virtualization integration", () => {
-  it("folds in-flight navigation ownership into one lease-backed session with a retained target", () => {
+  it("stores navigation lifetime and phase only in the held-operation policy", () => {
     const rendererSource = readFileSync("RendererWeb/src/renderer.ts", "utf8");
 
-    expect(rendererSource).toContain("let navigationSessionRef: VirtualizedNavigationSession | null = null;");
-    expect(rendererSource).toContain(
-      "let virtualizedProgrammaticNavigationPostSettleTarget: VirtualizedNavigationAnchor | null = null;"
-    );
-    expect(rendererSource).not.toMatch(/type VirtualizedNavigationSession = \{[^}]*postSettleTarget:/);
+    expect(rendererSource).not.toContain("navigationSessionRef");
+    expect(rendererSource).not.toContain("virtualizedProgrammaticNavigationPostSettleTarget");
+    expect(rendererSource).toContain('mode: "navigation"');
+    expect(rendererSource).toContain('phase: "settling"');
+    expect(rendererSource).toContain('phase: "post-settle-hold"');
+    expect(rendererSource).toContain("semanticTarget:");
+    expect(rendererSource).toContain("modelAnchor:");
+    expect(rendererSource).toContain("witnessSequence:");
+    expect(rendererSource).toContain("geometryRevision:");
     expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationInProgress\b/);
     expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationGeneration\b/);
     expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationExternalShiftCount\b/);
     expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationOperation\b/);
   });
 
-  it("keeps active held-operation targets separate from retained navigation", () => {
+  it("routes every held mode through the single policy registration", () => {
     const rendererSource = readFileSync("RendererWeb/src/renderer.ts", "utf8");
     const adoption = rendererSource.slice(
       rendererSource.indexOf("function adoptVirtualizedRenderedHeights"),
@@ -1498,12 +1502,10 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(rendererSource).toMatch(/virtualizedHeldOperationScrollPolicy\?\.register/);
     expect(adoption).toContain("resolveVirtualizedCorrectionTarget(operation)");
     expect(calibration).toContain("resolveVirtualizedCorrectionTarget(operation)");
-    expect(rendererSource).toContain(
-      "let virtualizedProgrammaticNavigationPostSettleTarget: VirtualizedNavigationAnchor | null = null;"
-    );
+    expect(rendererSource).not.toContain("retained-navigation");
   });
 
-  it("matches the baseline post-settle target clear set", () => {
+  it("transitions successful navigation to a passive hold and clears only at terminals", () => {
     const rendererSource = readFileSync("RendererWeb/src/renderer.ts", "utf8");
     const smoothTransition = rendererSource.slice(
       rendererSource.indexOf("function scheduleVirtualizedProgrammaticNavigationSmoothTransition"),
@@ -1518,11 +1520,19 @@ describe("renderer scroll-family virtualization integration", () => {
       rendererSource.indexOf("function landVirtualizedProgrammaticNavigation")
     );
 
-    expect(release).toContain("clearPostSettleTarget = false");
-    expect(release).toContain("if (clearPostSettleTarget)");
+    expect(release).not.toContain("clearPostSettleTarget");
+    expect(release).toContain("virtualizedHeldOperationScrollPolicy?.clear(operation)");
     expect(settle.match(/releaseVirtualizedProgrammaticNavigationOperation\(operation, true\)/g))
+      .toBeNull();
+    expect(settle.match(/releaseVirtualizedProgrammaticNavigationOperation\(operation\)/g))
       .toHaveLength(2);
     expect(settle).not.toContain("clearVirtualizedNavigationSession(operation)");
+    const finish = rendererSource.slice(
+      rendererSource.indexOf("function finishVirtualizedProgrammaticNavigationCorrection"),
+      rendererSource.indexOf("type VirtualizedNavigationFrameOutcome")
+    );
+    expect(finish).toContain('phase: "post-settle-hold"');
+    expect(finish).not.toContain("releaseVirtualizedProgrammaticNavigationOperation");
     expect(smoothTransition).not.toContain("clearVirtualizedNavigationSession(input.operation)");
   });
 
@@ -2043,6 +2053,7 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(scrollWrites.filter(value => value > 0)).toHaveLength(1);
     expect(scrollCalls).toEqual([]);
 
+    document.dispatchEvent(new WheelEvent("wheel"));
     root.scrollTop += 333;
     document.dispatchEvent(new Event("scroll"));
     await Promise.resolve();
@@ -2108,6 +2119,7 @@ describe("renderer scroll-family virtualization integration", () => {
       expect(document.querySelector<HTMLElement>('[data-mm-block-index="8801"]')).not.toBeNull();
 
       if (shiftDuringNavigation) {
+        document.dispatchEvent(new WheelEvent("wheel"));
         root.scrollTop -= 693;
         document.dispatchEvent(new Event("scroll"));
       }
@@ -2190,6 +2202,7 @@ describe("renderer scroll-family virtualization integration", () => {
       }
     }
 
+    document.dispatchEvent(new WheelEvent("wheel"));
     root.scrollTop += 333;
     document.dispatchEvent(new Event("scroll"));
     await Promise.resolve();
@@ -2306,6 +2319,7 @@ describe("renderer scroll-family virtualization integration", () => {
       expect(perfDetails(harness.messages, "mm-virt-navigation-settled")).toHaveLength(1);
 
       if (clearPath === "user-scroll") {
+        document.dispatchEvent(new WheelEvent("wheel"));
         harness.root.scrollTop += 240;
         document.dispatchEvent(new Event("scroll"));
         await Promise.resolve();
@@ -2349,6 +2363,36 @@ describe("renderer scroll-family virtualization integration", () => {
         || detail.supersessionSource === "unattributed-external-movement"
       ))).toEqual([]);
     expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(1);
+  });
+
+  it("releases a settled navigation synchronously on later witness evidence before target-equal scroll", async () => {
+    const { flushQueuedRafs, load, messages, root } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    load({ type: "scroll-to-block", blockIndex: 90 });
+    await flushQueuedRafs();
+    expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(1);
+    messages.length = 0;
+
+    const landedScrollTop = root.scrollTop;
+    document.dispatchEvent(new WheelEvent("wheel"));
+
+    expect(perfDetails<{ owner?: string; supersessionSource?: string }>(
+      messages,
+      "mm-virt-scroll-lease-superseded"
+    )).toContainEqual(expect.objectContaining({
+      owner: "block-navigation",
+      supersessionSource: "native-scroll",
+    }));
+
+    document.dispatchEvent(new Event("scroll"));
+    await flushQueuedRafs();
+    expect(root.scrollTop).toBe(landedScrollTop);
+    expect(perfDetails<{ writer?: string }>(messages, "mm-virt-scroll-write-committed")
+      .filter(detail => detail.writer?.startsWith("navigation-") === true)).toEqual([]);
   });
 
   it("corrects a deep block landing after estimated and rendered heights diverge", async () => {
@@ -4345,7 +4389,7 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(maintenanceLifecycleEvents(harness.messages)).toEqual([]);
   });
 
-  it("navigation nominal zero waits for same-epoch confirmation before release", async () => {
+  it("navigation nominal zero reaches same-epoch confirmation without releasing its passive hold", async () => {
     const harness = await loadMaintenanceLifecycleHarness();
     harness.load({ type: "scroll-to-block", blockIndex: 90 });
     await harness.flushQueuedRafs();
@@ -4355,9 +4399,10 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(settled.at(-1)?.geometryEpoch).toBe(settled.at(-2)?.geometryEpoch);
     const secondSettleIndex = perfMarkMessageIndex(harness.messages, "mm-virt-geometry-settled", detail =>
       detail["geometryEpoch"] === settled.at(-1)?.geometryEpoch);
-    const releaseIndex = perfMarkMessageIndex(harness.messages, "mm-virt-scroll-lease-released", detail =>
-      detail["owner"] === "block-navigation");
-    expect(releaseIndex).toBeGreaterThan(secondSettleIndex);
+    expect(secondSettleIndex).toBeGreaterThanOrEqual(0);
+    expect(perfDetails<{ owner?: string }>(harness.messages, "mm-virt-scroll-lease-released")
+      .filter(detail => detail.owner === "block-navigation")).toEqual([]);
+    expect(perfDetails(harness.messages, "mm-virt-navigation-settled")).toHaveLength(1);
   });
 
   it("minimap nominal zero waits for same-epoch confirmation before release", async () => {

@@ -340,6 +340,24 @@ describe("scroll ownership control plane", () => {
     expect(plane.holds(gestureLease)).toBe(false);
   });
 
+  it("keeps declared navigation held until witness ingress explicitly supersedes it", () => {
+    let navigationLease: ScrollLease | null = null;
+    const { plane } = createHarness(120, () => false, {
+      readHeldOperationMode: lease => lease === navigationLease ? "navigation" : null,
+    });
+    navigationLease = acquired(plane.acquire("block-navigation", "supersede-programmatic"));
+
+    expect(plane.classifyNativeScroll(333)).toEqual({
+      kind: "navigation-owned",
+      operationEpoch: navigationLease.operationEpoch,
+      value: 333,
+    });
+    expect(plane.holds(navigationLease)).toBe(true);
+
+    plane.supersedeByUser("native-scroll");
+    expect(plane.holds(navigationLease)).toBe(false);
+  });
+
   it("keeps an unregistered supersede-as-user host operation on value matching", async () => {
     const { frames, plane } = createHarness(120, () => true, {
       readHeldGestureEvidence: () => null,

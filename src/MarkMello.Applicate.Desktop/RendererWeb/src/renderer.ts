@@ -71,9 +71,11 @@ import { readVirtualizationFlag } from "./virtualizationFlags";
 import {
   createUserInputWitness,
   installUserInputWitnessListeners,
+  type UserInputEvidence,
 } from "./userInputWitness";
 import {
   createHeldOperationScrollPolicy,
+  type ActiveHeldOperationRegistration,
   type HeldOperationTargetResolution,
 } from "./heldOperationScrollPolicy";
 import {
@@ -428,7 +430,7 @@ const virtualizationEnabled = readVirtualizationFlag(window, document);
 const userInputWitness = virtualizationEnabled
   ? createUserInputWitness({ now: () => performance.now() })
   : null;
-const disposeUserInputWitness = userInputWitness === null
+const disposeUserInputWitnessListeners = userInputWitness === null
   ? null
   : installUserInputWitnessListeners({ document, ownerWindow: window, witness: userInputWitness });
 const legacyScrollWriter: LegacyScrollWriter = createLegacyScrollWriter({
@@ -462,6 +464,13 @@ const scrollOwnershipControlPlane: ScrollOwnershipControlPlane | null = virtuali
     }),
   })
   : null;
+const disposeNavigationWitness = userInputWitness?.subscribeEvidence(
+  evidence => handleVirtualizedNavigationUserInputEvidence(evidence)
+) ?? null;
+const disposeUserInputWitness = (): void => {
+  disposeNavigationWitness?.();
+  disposeUserInputWitnessListeners?.();
+};
 if (scrollOwnershipControlPlane !== null) {
   const virtualizationRoot = getDocumentScrollRoot();
   if (virtualizationRoot instanceof HTMLElement) {
@@ -484,7 +493,7 @@ if (scrollOwnershipControlPlane !== null) {
     }
     cancelModelRenderedContentCoordinator("teardown");
     resetVirtualizedDocumentWindow(false);
-    disposeUserInputWitness?.();
+    disposeUserInputWitness();
     scrollOwnershipControlPlane.dispose();
     getDocumentScrollRoot().removeAttribute("data-mm-virtualization-active");
   }, { once: true });
@@ -504,34 +513,57 @@ let virtualizedCalibrationHandle: { kind: "idle" | "timeout"; id: number } | nul
 let virtualizedCalibrationGeometryTicket: GeometryWorkTicket | null = null;
 let virtualizedWindowMountGeneration = 0;
 let virtualizedWindowFontGeometryTicket: GeometryWorkTicket | null = null;
-type VirtualizedNavigationAnchor = {
+type VirtualizedNavigationSemanticTarget = {
   descriptor: WindowTargetDescriptor;
   viewportOffsetY: number;
 };
-type VirtualizedNavigationSession = {
-  anchor: VirtualizedNavigationAnchor;
-  externalShiftCount: number;
-  operation: VirtualizedScrollOperation;
+type VirtualizedNavigationModelAnchor = {
+  blockIndex: number;
+  sectionIndex: number;
+  targetLocalOffset: number;
+  viewportOffset: number;
 };
-type VirtualizedHeldOperationCorrectionTarget =
+type VirtualizedNavigationPhase = "post-settle-hold" | "preserving-geometry" | "settling";
+type VirtualizedHeldOperationState =
   | Readonly<{
       anchor: ReadingAnchor | null;
       kind: "restore";
+      mode: "restore";
       operation: VirtualizedScrollOperation;
     }>
   | Readonly<{
       kind: "gesture";
       latestTarget: number;
+      mode: "gesture";
       operation: VirtualizedScrollOperation;
       witnessSequence: number;
+    }>
+  | Readonly<{
+      externalShiftCount: number;
+      geometryRevision: number;
+      mode: "navigation";
+      modelAnchor: VirtualizedNavigationModelAnchor;
+      operation: VirtualizedScrollOperation;
+      phase: VirtualizedNavigationPhase;
+      semanticTarget: VirtualizedNavigationSemanticTarget;
+      witnessSequence: number;
     }>;
-let navigationSessionRef: VirtualizedNavigationSession | null = null;
-let virtualizedProgrammaticNavigationPostSettleTarget: VirtualizedNavigationAnchor | null = null;
+type VirtualizedNavigationRegistration = Extract<
+  ActiveHeldOperationRegistration<VirtualizedHeldOperationState>,
+  { mode: "navigation" }
+>;
+type VirtualizedRestoreRegistration = Extract<
+  ActiveHeldOperationRegistration<VirtualizedHeldOperationState>,
+  { mode: "restore" }
+>;
+let pendingNavigationWitnessReverseSync = false;
 const virtualizedHeldOperationScrollPolicy = virtualizationEnabled
-  ? createHeldOperationScrollPolicy<
-      VirtualizedHeldOperationCorrectionTarget | VirtualizedNavigationAnchor
-    >()
+  ? createHeldOperationScrollPolicy<VirtualizedHeldOperationState>()
   : null;
+/*
+ * Navigation state deliberately has no parallel session or retained-target
+ * storage. The policy registration remains current through post-settle hold.
+ */
 let virtualizedScrollControlFrameTimestamp: number | null = null;
 let minimapScrollOperation: VirtualizedScrollOperation | null = null;
 let minimapOwnedPointerId: number | null = null;
@@ -2455,15 +2487,9 @@ function acquireVirtualizedScrollOperation(
   const activeHeldTarget = virtualizedHeldOperationScrollPolicy?.readActive() ?? null;
   if (
     activeHeldTarget !== null
-    && (
-      !("operation" in activeHeldTarget.target)
-      || activeHeldTarget.target.operation.isCurrent() !== true
-    )
+    && activeHeldTarget.operation.isCurrent() !== true
   ) {
     virtualizedHeldOperationScrollPolicy?.clear(activeHeldTarget);
-  }
-  if (navigationSessionRef !== null && !navigationSessionRef.operation.isCurrent()) {
-    clearVirtualizedNavigationSession();
   }
   return operation;
 }
@@ -2521,7 +2547,8 @@ function readVirtualizedFindContext(): import("./virtualizedFindProvider").Virtu
 }
 
 function isVirtualizedProgrammaticNavigationInProgress(): boolean {
-  return navigationSessionRef?.operation.isCurrent() === true;
+  const registration = readCurrentVirtualizedNavigationRegistration();
+  return registration?.phase === "settling";
 }
 
 function isVirtualizedHeldRestoreInProgress(): boolean {
@@ -2714,6 +2741,19 @@ function computeVirtualizedProgrammaticNavigationScrollTop(
   return Math.max(0, context.sectionTop + targetLocalOffset - normalizedViewportOffset);
 }
 
+function createVirtualizedNavigationModelAnchor(
+  context: WindowTargetContext,
+  descriptor: WindowTargetDescriptor,
+  viewportOffsetY: number
+): VirtualizedNavigationModelAnchor {
+  return Object.freeze({
+    blockIndex: context.entry.blockIndex,
+    sectionIndex: context.sectionIndex,
+    targetLocalOffset: readVirtualizedTargetLocalOffset(context, descriptor),
+    viewportOffset: Number.isFinite(viewportOffsetY) ? Math.max(0, viewportOffsetY) : 0,
+  });
+}
+
 function applyVirtualizedProgrammaticNavigationContext(
   context: WindowTargetContext,
   descriptor: WindowTargetDescriptor,
@@ -2783,7 +2823,7 @@ function correctVirtualizedProgrammaticNavigationResidual(input: {
 
 function applyVirtualizedRenderedHeightAdoptionEffects(
   result: MeasuredHeightUpdateResult,
-  options: { alignPostSettleTarget?: boolean; scheduleCalibration?: boolean } = {}
+  options: { reassertPendingTarget?: boolean; scheduleCalibration?: boolean } = {}
 ): void {
   if (!hasMeasuredHeightGeometryDelta(result)) {
     return;
@@ -2791,15 +2831,12 @@ function applyVirtualizedRenderedHeightAdoptionEffects(
 
   invalidateTopVisibleBlockIndexCache();
   invalidateSourceLineAnchors({
-    reassertPendingTarget: options.alignPostSettleTarget !== false,
+    reassertPendingTarget: options.reassertPendingTarget !== false,
   });
   refreshVirtualizedFindHighlights();
   if (getModelMinimapSource() !== null && minimapSourceReady) {
     syncModelMinimapCloneMetadata();
     updateMinimapViewport({ skipVisibilityUpdate: true });
-  }
-  if (options.alignPostSettleTarget !== false) {
-    alignVirtualizedProgrammaticNavigationPostSettleTarget();
   }
   if (options.scheduleCalibration !== false) {
     scheduleVirtualizedCalibration();
@@ -2836,7 +2873,7 @@ function adoptVirtualizedProgrammaticNavigationRenderedHeights(
       mutateVirtualizedGeometry(ticket);
     }
     applyVirtualizedRenderedHeightAdoptionEffects(result, {
-      alignPostSettleTarget: false,
+      reassertPendingTarget: false,
       scheduleCalibration: false,
     });
     return hasMeasuredHeightGeometryDelta(result);
@@ -2846,13 +2883,9 @@ function adoptVirtualizedProgrammaticNavigationRenderedHeights(
 }
 
 function releaseVirtualizedProgrammaticNavigationOperation(
-  operation: VirtualizedScrollOperation,
-  clearPostSettleTarget = false
+  operation: VirtualizedScrollOperation
 ): void {
-  clearVirtualizedNavigationSession(operation);
-  if (clearPostSettleTarget) {
-    clearVirtualizedProgrammaticNavigationPostSettleTarget();
-  }
+  virtualizedHeldOperationScrollPolicy?.clear(operation);
   releaseVirtualizedScrollOperation(operation);
 }
 
@@ -2865,23 +2898,32 @@ function finishVirtualizedProgrammaticNavigationCorrection(
   }
 ): void {
   if (!operation.isCurrent()) {
-    clearVirtualizedNavigationSession(operation);
+    virtualizedHeldOperationScrollPolicy?.clear(operation);
     return;
   }
-  const session = navigationSessionRef;
-  if (session === null) {
+  const registration = readCurrentVirtualizedNavigationRegistration(operation);
+  if (registration === null) {
     return;
   }
+  virtualizedHeldOperationScrollPolicy?.update(operation, Object.freeze({
+    externalShiftCount: registration.externalShiftCount,
+    geometryRevision: registration.geometryRevision,
+    mode: "navigation",
+    modelAnchor: registration.modelAnchor,
+    operation,
+    phase: "post-settle-hold",
+    semanticTarget: registration.semanticTarget,
+    witnessSequence: registration.witnessSequence,
+  }));
 
   postPerfMark("mm-virt-navigation-settled", {
     descriptorKind: input.descriptor.kind,
-    externalShiftCount: session.externalShiftCount,
+    externalShiftCount: registration.externalShiftCount,
     passCount: input.passCount,
     residual: input.residual,
   });
   updateMinimapViewport({ skipVisibilityUpdate: true });
   postScroll();
-  releaseVirtualizedProgrammaticNavigationOperation(operation);
 }
 
 type VirtualizedNavigationFrameOutcome =
@@ -3002,7 +3044,7 @@ async function settleVirtualizedProgrammaticNavigationTarget(
       return;
     }
     if (frame.kind === "missing-target") {
-      releaseVirtualizedProgrammaticNavigationOperation(operation, true);
+      releaseVirtualizedProgrammaticNavigationOperation(operation);
       return;
     }
     if (frame.kind === "geometry-changed") {
@@ -3018,7 +3060,7 @@ async function settleVirtualizedProgrammaticNavigationTarget(
         reason: "residual-non-converged",
         residual: frame.residual,
       });
-      releaseVirtualizedProgrammaticNavigationOperation(operation, true);
+      releaseVirtualizedProgrammaticNavigationOperation(operation);
       return;
     }
     if (frame.kind === "written") {
@@ -3134,71 +3176,60 @@ function tryRestoreVirtualizedReadingAnchor(
   return true;
 }
 
-function readCurrentVirtualizedNavigationSession(): VirtualizedNavigationSession | null {
-  const session = navigationSessionRef;
-  return session?.operation.isCurrent() === true ? session : null;
+function readCurrentVirtualizedNavigationRegistration(
+  operation?: Pick<VirtualizedScrollOperation, "documentEpoch" | "operationEpoch">
+): VirtualizedNavigationRegistration | null {
+  const registration = operation === undefined
+    ? virtualizedHeldOperationScrollPolicy?.readActive() ?? null
+    : virtualizedHeldOperationScrollPolicy?.read(operation) ?? null;
+  return registration?.mode === "navigation"
+    && registration.operation.isCurrent()
+    ? registration
+    : null;
 }
 
-function clearVirtualizedNavigationSession(operation?: VirtualizedScrollOperation): void {
-  if (operation === undefined || navigationSessionRef?.operation === operation) {
-    navigationSessionRef = null;
-  }
+function clearVirtualizedNavigationRegistration(
+  operation?: Pick<VirtualizedScrollOperation, "documentEpoch" | "operationEpoch">
+): boolean {
+  const registration = operation === undefined
+    ? readCurrentVirtualizedNavigationRegistration()
+    : readCurrentVirtualizedNavigationRegistration(operation);
+  return registration === null
+    ? false
+    : virtualizedHeldOperationScrollPolicy?.clear(registration) ?? false;
 }
 
-function clearVirtualizedProgrammaticNavigationPostSettleTarget(): void {
-  virtualizedProgrammaticNavigationPostSettleTarget = null;
+function hasVirtualizedNavigationRegistration(): boolean {
+  return readCurrentVirtualizedNavigationRegistration() !== null;
 }
 
-function reassertVirtualizedProgrammaticNavigationPostSettleTarget(): void {
-  const session = readCurrentVirtualizedNavigationSession();
-  const target = virtualizedProgrammaticNavigationPostSettleTarget;
-  if (session === null || target === null) {
+function handleVirtualizedNavigationUserInputEvidence(evidence: UserInputEvidence): void {
+  const registration = readCurrentVirtualizedNavigationRegistration();
+  if (registration === null || evidence.sequence <= registration.witnessSequence) {
     return;
   }
-
-  forceRenderVirtualizedNavigationTarget(target.descriptor);
-  correctVirtualizedProgrammaticNavigationResidual({ ...target, operation: session.operation });
-}
-
-function alignVirtualizedProgrammaticNavigationPostSettleTarget(): void {
-  const session = readCurrentVirtualizedNavigationSession();
-  const target = virtualizedProgrammaticNavigationPostSettleTarget;
-  if (session !== null && target !== null) {
-    correctVirtualizedProgrammaticNavigationResidual({ ...target, operation: session.operation });
+  if (virtualizedHeldOperationScrollPolicy?.clear(registration) !== true) {
+    return;
   }
-}
-
-function getVirtualizedProgrammaticNavigationPostSettleSectionIndex(): number | null {
-  const target = virtualizedProgrammaticNavigationPostSettleTarget;
-  return target === null ? null : resolveVirtualizedNavigationTargetSectionIndex(target.descriptor);
+  pendingNavigationWitnessReverseSync = true;
+  cancelPendingVirtualizedMaintenance("user-supersession");
+  scrollOwnershipControlPlane?.supersedeByUser("native-scroll");
 }
 
 function resolveVirtualizedCorrectionTarget(
   operation: VirtualizedScrollOperation
-): HeldOperationTargetResolution<
-  VirtualizedHeldOperationCorrectionTarget | VirtualizedNavigationAnchor
-> {
+): HeldOperationTargetResolution<VirtualizedHeldOperationState> {
   if (virtualizedHeldOperationScrollPolicy === null) {
-    return virtualizedProgrammaticNavigationPostSettleTarget === null
-      ? { kind: "generic" }
-      : {
-          kind: "retained-navigation",
-          target: virtualizedProgrammaticNavigationPostSettleTarget,
-        };
+    return { kind: "generic" };
   }
-  return virtualizedHeldOperationScrollPolicy.resolve(
-    operation,
-    virtualizedProgrammaticNavigationPostSettleTarget
-  );
+  return virtualizedHeldOperationScrollPolicy.resolve(operation);
 }
 
 function readVirtualizedHeldOperationRegistration(
   operation: Pick<VirtualizedScrollOperation, "documentEpoch" | "operationEpoch">
 ) {
   const registration = virtualizedHeldOperationScrollPolicy?.read(operation) ?? null;
-  return registration !== null && "operation" in registration.target
-    ? registration
-    : null;
+  return registration?.operation.isCurrent() === true ? registration : null;
 }
 
 function readVirtualizedHeldOperationMode(
@@ -3211,12 +3242,8 @@ function readVirtualizedHeldGestureEvidence(
   operation: Pick<VirtualizedScrollOperation, "documentEpoch" | "operationEpoch">
 ) {
   const registration = readVirtualizedHeldOperationRegistration(operation);
-  const target = registration?.target;
   return registration?.mode === "gesture"
-    && target !== undefined
-    && "kind" in target
-    && target.kind === "gesture"
-    ? userInputWitness?.readEvidenceAfter(target.witnessSequence) ?? null
+    ? userInputWitness?.readEvidenceAfter(registration.witnessSequence) ?? null
     : null;
 }
 
@@ -3226,23 +3253,21 @@ function readVirtualizedCorrectionTargetSectionIndex(
   if (resolution.kind === "generic") {
     return null;
   }
-  const target = resolution.kind === "active"
-    ? resolution.registration.target
-    : resolution.target;
-  if ("kind" in target && target.kind === "restore") {
-    const blockIndex = target.anchor?.blockIndex;
+  const registration = resolution.registration;
+  if (registration.mode === "restore") {
+    const blockIndex = registration.anchor?.blockIndex;
     return blockIndex === undefined
       ? null
       : virtualizedDocumentWindowModel?.getEntryByBlockIndex(blockIndex)?.sectionIndex ?? null;
   }
-  if ("kind" in target && target.kind === "gesture") {
+  if (registration.mode === "gesture") {
     return null;
   }
-  return resolveVirtualizedNavigationTargetSectionIndex(target.descriptor);
+  return registration.modelAnchor.sectionIndex;
 }
 
 function correctVirtualizedHeldRestoreTarget(
-  target: Extract<VirtualizedHeldOperationCorrectionTarget, { kind: "restore" }>,
+  target: VirtualizedRestoreRegistration,
   operation: VirtualizedScrollOperation
 ): void {
   const model = virtualizedDocumentWindowModel;
@@ -3276,16 +3301,30 @@ function startVirtualizedProgrammaticNavigationSettle(input: {
     return;
   }
 
-  const anchor = {
+  const targetContext = input.initialContext
+    ?? readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
+  if (targetContext === null || scrollOwnershipControlPlane === null || userInputWitness === null) {
+    releaseVirtualizedProgrammaticNavigationOperation(input.operation);
+    return;
+  }
+  const semanticTarget = Object.freeze({
     descriptor: input.descriptor,
     viewportOffsetY: input.viewportOffsetY,
-  };
-  navigationSessionRef = {
-    anchor,
+  });
+  virtualizedHeldOperationScrollPolicy?.register(input.operation, Object.freeze({
     externalShiftCount: 0,
+    geometryRevision: scrollOwnershipControlPlane.captureGeometryEpoch(),
+    mode: "navigation",
+    modelAnchor: createVirtualizedNavigationModelAnchor(
+      targetContext,
+      input.descriptor,
+      input.viewportOffsetY
+    ),
     operation: input.operation,
-  };
-  virtualizedProgrammaticNavigationPostSettleTarget = anchor;
+    phase: "settling",
+    semanticTarget,
+    witnessSequence: userInputWitness.captureSequence(),
+  }));
   cancelVirtualizedCalibration();
   if (input.behavior === "smooth" && input.initialContext !== undefined) {
     const destinationScrollTop = computeVirtualizedProgrammaticNavigationScrollTop(
@@ -3352,8 +3391,8 @@ function resetVirtualizedDocumentWindow(resetCalibrator = true): void {
   virtualizedWindowFontGeometryTicket = null;
   virtualizedWindowMountGeneration++;
   virtualizedMeasureFrameRequested = false;
-  clearVirtualizedNavigationSession();
-  clearVirtualizedProgrammaticNavigationPostSettleTarget();
+  clearVirtualizedNavigationRegistration();
+  pendingNavigationWitnessReverseSync = false;
   if (resetCalibrator) {
     virtualizedIntrinsicCalibrator.reset();
   }
@@ -3391,7 +3430,7 @@ function prepareVirtualizedInsertedContent(root: ParentNode, mountGeneration: nu
     }
 
     invalidateSourceLineAnchors({
-      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
+      reassertPendingTarget: !hasVirtualizedNavigationRegistration(),
     });
     refreshVirtualizedFindHighlights();
     scheduleVirtualizedMeasuredHeightAdoption();
@@ -3586,7 +3625,7 @@ function updateVirtualizedWindowForScroll(options: { force?: boolean } = {}): vo
     if (controller.updateWindowForScroll({ ...options, operation })) {
       invalidateTopVisibleBlockIndexCache();
       invalidateSourceLineAnchors({
-        reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
+        reassertPendingTarget: !hasVirtualizedNavigationRegistration(),
       });
       refreshVirtualizedFindHighlights();
       scheduleVirtualizedMeasuredHeightAdoption();
@@ -3660,7 +3699,6 @@ function adoptVirtualizedRenderedHeights(ticket: GeometryWorkTicket | null): voi
       return;
     }
     const correctionTarget = resolveVirtualizedCorrectionTarget(operation);
-    const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
     const preserveSectionIndex = readVirtualizedCorrectionTargetSectionIndex(correctionTarget);
     const preservesCorrectionTarget = correctionTarget.kind !== "generic";
     const result = controller.adoptRenderedHeights(
@@ -3679,18 +3717,15 @@ function adoptVirtualizedRenderedHeights(ticket: GeometryWorkTicket | null): voi
       mutateVirtualizedGeometry(ticket);
     }
     applyVirtualizedRenderedHeightAdoptionEffects(result, {
-      alignPostSettleTarget: correctionTarget.kind === "generic",
+      reassertPendingTarget: correctionTarget.kind === "generic",
     });
     if (correctionTarget.kind === "active") {
-      const target = correctionTarget.registration.target;
-      if ("kind" in target && target.kind === "restore") {
-        correctVirtualizedHeldRestoreTarget(target, operation);
-      }
-    } else if (correctionTarget.kind === "retained-navigation" && operation.isCurrent()) {
-      const target = correctionTarget.target;
-      if (!("kind" in target)) {
+      const registration = correctionTarget.registration;
+      if (registration.mode === "restore") {
+        correctVirtualizedHeldRestoreTarget(registration, operation);
+      } else if (registration.mode === "navigation") {
         correctVirtualizedProgrammaticNavigationResidual({
-          ...target,
+          ...registration.semanticTarget,
           operation,
         });
       }
@@ -3749,7 +3784,6 @@ function runVirtualizedCalibration(documentEpoch: number, ticket: GeometryWorkTi
     }
     const correctionTarget = resolveVirtualizedCorrectionTarget(operation);
     const preserveSectionIndex = readVirtualizedCorrectionTargetSectionIndex(correctionTarget);
-    const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
     const anchor = correctionTarget.kind === "generic"
       ? captureCurrentVirtualizedReadingAnchor()
       : null;
@@ -3763,35 +3797,31 @@ function runVirtualizedCalibration(documentEpoch: number, ticket: GeometryWorkTi
     }
     mutateVirtualizedGeometry(ticket);
     const target = correctionTarget.kind === "active"
-      && "kind" in correctionTarget.registration.target
-      && correctionTarget.registration.target.kind === "restore"
-      ? correctionTarget.registration.target.anchor === null
+      && correctionTarget.registration.mode === "restore"
+      ? correctionTarget.registration.anchor === null
         ? 0
-        : scrollTopForReadingAnchor(model, correctionTarget.registration.target.anchor) ?? 0
+        : scrollTopForReadingAnchor(model, correctionTarget.registration.anchor) ?? 0
       : correctionTarget.kind === "active"
-        && "kind" in correctionTarget.registration.target
-        && correctionTarget.registration.target.kind === "gesture"
-        ? correctionTarget.registration.target.latestTarget
+        && correctionTarget.registration.mode === "gesture"
+        ? correctionTarget.registration.latestTarget
         : preserveSectionIndex !== null
           ? model.sectionTop(preserveSectionIndex)
           : scrollTopForReadingAnchor(model, anchor) ?? 0;
     controller.updateWindowForScroll({ desiredScrollTop: target, force: true });
     if (correctionTarget.kind === "generic") {
       operation.requestScrollTop(target, "calibration");
-    } else if (correctionTarget.kind === "retained-navigation" && !("kind" in correctionTarget.target)) {
+    } else if (correctionTarget.registration.mode === "navigation") {
       correctVirtualizedProgrammaticNavigationResidual({
-        ...correctionTarget.target,
+        ...correctionTarget.registration.semanticTarget,
         operation,
       });
     } else if (
-      correctionTarget.kind === "active"
-      && "kind" in correctionTarget.registration.target
-      && correctionTarget.registration.target.kind === "restore"
+      correctionTarget.registration.mode === "restore"
     ) {
-      correctVirtualizedHeldRestoreTarget(correctionTarget.registration.target, operation);
+      correctVirtualizedHeldRestoreTarget(correctionTarget.registration, operation);
     }
     invalidateTopVisibleBlockIndexCache();
-    invalidateSourceLineAnchors({ reassertPendingTarget: postSettleTarget === null });
+    invalidateSourceLineAnchors({ reassertPendingTarget: !hasVirtualizedNavigationRegistration() });
     postPerfMark("mm-virt-window-calibrated", {
       maxAbsDelta: result.maxAbsDelta,
       recordedCount,
@@ -4198,9 +4228,10 @@ function restoreCachedScrollPosition(): void {
   const restoreTarget = Object.freeze({
     anchor: layoutState.readingAnchor ?? null,
     kind: "restore" as const,
+    mode: "restore" as const,
     operation,
   });
-  virtualizedHeldOperationScrollPolicy?.register(operation, "restore", restoreTarget);
+  virtualizedHeldOperationScrollPolicy?.register(operation, restoreTarget);
   const documentEpoch = operation.documentEpoch;
   cachedScrollRestoreCompletion = new Promise(resolve => {
     let completed = false;
@@ -6210,14 +6241,13 @@ function requestMinimapScrollTarget(target: number, writer: string): boolean {
     return false;
   }
   const registration = readVirtualizedHeldOperationRegistration(operation);
-  if (
-    registration?.mode === "gesture"
-    && "kind" in registration.target
-    && registration.target.kind === "gesture"
-  ) {
+  if (registration?.mode === "gesture") {
     virtualizedHeldOperationScrollPolicy?.update(operation, Object.freeze({
-      ...registration.target,
+      kind: "gesture",
       latestTarget: target,
+      mode: "gesture",
+      operation,
+      witnessSequence: registration.witnessSequence,
     }));
   }
   operation.requestHeldOperationTarget(target, writer);
@@ -6304,7 +6334,7 @@ function handleMinimapPointerDown(event: PointerEvent): void {
       userInputWitness?.endOwnedPointer(minimapOwnedPointerId);
       minimapOwnedPointerId = null;
     }
-    clearVirtualizedProgrammaticNavigationPostSettleTarget();
+    clearVirtualizedNavigationRegistration();
     pendingSourceLineTarget = null;
     minimapScrollOperation = acquireVirtualizedScrollOperation("minimap-gesture", "supersede-as-user");
     const operation = minimapScrollOperation;
@@ -6312,9 +6342,10 @@ function handleMinimapPointerDown(event: PointerEvent): void {
       const witnessSequence = userInputWitness!.captureSequence();
       minimapOwnedPointerId = event.pointerId;
       userInputWitness!.beginOwnedPointer(event.pointerId);
-      virtualizedHeldOperationScrollPolicy?.register(operation, "gesture", Object.freeze({
+      virtualizedHeldOperationScrollPolicy?.register(operation, Object.freeze({
         kind: "gesture",
         latestTarget: root.scrollTop,
+        mode: "gesture",
         operation,
         witnessSequence,
       }));
@@ -8060,7 +8091,7 @@ function runLegacyResizeObserverWork(documentEpoch: number | undefined): void {
   queueMinimapRefreshAfterLayoutSettles();
   scheduleResizeReactions(documentEpoch);
   invalidateSourceLineAnchors({
-    reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
+    reassertPendingTarget: !hasVirtualizedNavigationRegistration(),
   });
   scheduleVirtualizedMeasuredHeightAdoption();
   window.requestAnimationFrame(() => {
@@ -8082,7 +8113,7 @@ function runLegacyDocumentFontsReadyWork(documentEpoch: number | undefined): voi
   }
   queueMinimapRefreshAfterLayoutSettles();
   invalidateSourceLineAnchors({
-    reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
+    reassertPendingTarget: !hasVirtualizedNavigationRegistration(),
   });
   scheduleVirtualizedMeasuredHeightAdoption();
 }
@@ -8186,33 +8217,41 @@ const queuePostScroll = createScrollCoalescer({
 });
 
 document.addEventListener("scroll", () => {
+  const postNavigationWitnessSourceLine = pendingNavigationWitnessReverseSync;
   if (scrollOwnershipControlPlane !== null) {
-    const navigationSession = readCurrentVirtualizedNavigationSession();
+    const navigationRegistration = readCurrentVirtualizedNavigationRegistration();
     const classification = scrollOwnershipControlPlane.classifyNativeScroll(
       getDocumentScrollRoot().scrollTop,
       "native-scroll"
     );
     if (classification.kind === "user-supersession") {
       cancelPendingVirtualizedMaintenance("user-supersession");
-      clearVirtualizedNavigationSession();
-      clearVirtualizedProgrammaticNavigationPostSettleTarget();
+      clearVirtualizedNavigationRegistration();
       queuePreviewSourceLinePost();
     } else if (classification.kind === "unattributed-failure") {
       cancelPendingVirtualizedMaintenance("unattributed-failure");
-      if (navigationSession !== null) {
-        navigationSession.externalShiftCount++;
+      if (navigationRegistration !== null) {
+        virtualizedHeldOperationScrollPolicy?.update(navigationRegistration, Object.freeze({
+          externalShiftCount: navigationRegistration.externalShiftCount + 1,
+          geometryRevision: navigationRegistration.geometryRevision,
+          mode: "navigation",
+          modelAnchor: navigationRegistration.modelAnchor,
+          operation: navigationRegistration.operation,
+          phase: navigationRegistration.phase,
+          semanticTarget: navigationRegistration.semanticTarget,
+          witnessSequence: navigationRegistration.witnessSequence,
+        }));
       }
-      clearVirtualizedNavigationSession();
-      clearVirtualizedProgrammaticNavigationPostSettleTarget();
+      clearVirtualizedNavigationRegistration();
     }
   } else {
-    const programmaticNavigationScroll = isVirtualizedProgrammaticNavigationInProgress();
-    if (!programmaticNavigationScroll) {
-      clearVirtualizedProgrammaticNavigationPostSettleTarget();
-    }
     queuePostScroll();
     queuePreviewSourceLinePost();
     return;
+  }
+  if (postNavigationWitnessSourceLine) {
+    pendingNavigationWitnessReverseSync = false;
+    queuePreviewSourceLinePost();
   }
   queuePostScroll();
 }, { passive: true });
