@@ -4825,8 +4825,20 @@
     "Spacebar"
   ]);
   function createUserInputWitness(deps) {
+    let evidence = null;
     let recordedAt = null;
+    let sequence = 0;
+    const ownedPointers = /* @__PURE__ */ new Set();
     return {
+      beginOwnedPointer: (pointerId) => {
+        if (Number.isFinite(pointerId)) {
+          ownedPointers.add(pointerId);
+        }
+      },
+      captureSequence: () => sequence,
+      endOwnedPointer: (pointerId) => {
+        ownedPointers.delete(pointerId);
+      },
       hasRecentUserInput: (withinMs) => {
         if (!Number.isFinite(withinMs) || withinMs < 0 || recordedAt === null) {
           return false;
@@ -4834,8 +4846,12 @@
         const elapsed = deps.now() - recordedAt;
         return Number.isFinite(recordedAt) && Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= withinMs;
       },
-      recordUserInput: () => {
+      hasOwnedPointer: () => ownedPointers.size > 0,
+      readEvidenceAfter: (capturedSequence) => Number.isSafeInteger(capturedSequence) && capturedSequence >= 0 && evidence !== null && evidence.sequence > capturedSequence ? evidence : null,
+      recordUserInput: (kind) => {
         recordedAt = deps.now();
+        evidence = Object.freeze({ kind, sequence: ++sequence });
+        return evidence;
       }
     };
   }
@@ -4857,22 +4873,29 @@
     return false;
   }
   function installUserInputWitnessListeners(deps) {
-    const record = () => deps.witness.recordUserInput();
+    const onWheel = () => {
+      deps.witness.recordUserInput("wheel");
+    };
+    const onTouch = () => {
+      if (!deps.witness.hasOwnedPointer()) {
+        deps.witness.recordUserInput("touch");
+      }
+    };
     const onKeyDown = (event) => {
       if (event.ctrlKey || event.metaKey || event.altKey || !SCROLL_KEYS.has(event.key) || isEditableTarget(event.target)) {
         return;
       }
-      record();
+      deps.witness.recordUserInput("scroll-key");
     };
     const onPointerDown = (event) => {
       if (event.button === 0 && event.clientX >= deps.document.documentElement.clientWidth && event.clientX < deps.ownerWindow.innerWidth && event.clientY >= 0 && event.clientY < deps.ownerWindow.innerHeight) {
-        record();
+        deps.witness.recordUserInput("scrollbar-gutter");
       }
     };
     const options = { capture: true, passive: true };
-    deps.document.addEventListener("wheel", record, options);
-    deps.document.addEventListener("touchstart", record, options);
-    deps.document.addEventListener("touchmove", record, options);
+    deps.document.addEventListener("wheel", onWheel, options);
+    deps.document.addEventListener("touchstart", onTouch, options);
+    deps.document.addEventListener("touchmove", onTouch, options);
     deps.document.addEventListener("keydown", onKeyDown, options);
     deps.document.addEventListener("pointerdown", onPointerDown, options);
     let disposed = false;
@@ -4882,11 +4905,50 @@
       }
       disposed = true;
       const removeOptions = { capture: true };
-      deps.document.removeEventListener("wheel", record, removeOptions);
-      deps.document.removeEventListener("touchstart", record, removeOptions);
-      deps.document.removeEventListener("touchmove", record, removeOptions);
+      deps.document.removeEventListener("wheel", onWheel, removeOptions);
+      deps.document.removeEventListener("touchstart", onTouch, removeOptions);
+      deps.document.removeEventListener("touchmove", onTouch, removeOptions);
       deps.document.removeEventListener("keydown", onKeyDown, removeOptions);
       deps.document.removeEventListener("pointerdown", onPointerDown, removeOptions);
+    };
+  }
+
+  // RendererWeb/src/heldOperationScrollPolicy.ts
+  function createHeldOperationScrollPolicy() {
+    let active = null;
+    const matches = (identity) => active !== null && active.documentEpoch === identity.documentEpoch && active.operationEpoch === identity.operationEpoch;
+    return {
+      clear: (identity) => {
+        if (!matches(identity)) {
+          return false;
+        }
+        active = null;
+        return true;
+      },
+      read: (identity) => matches(identity) ? active : null,
+      readActive: () => active,
+      register: (identity, mode, target) => {
+        active = Object.freeze({
+          documentEpoch: identity.documentEpoch,
+          mode,
+          operationEpoch: identity.operationEpoch,
+          target
+        });
+        return active;
+      },
+      resolve: (identity, retainedNavigationTarget) => {
+        if (matches(identity) && active !== null) {
+          return { kind: "active", registration: active };
+        }
+        return retainedNavigationTarget === null ? { kind: "generic" } : { kind: "retained-navigation", target: retainedNavigationTarget };
+      },
+      update: (identity, target) => {
+        if (!matches(identity) || active === null) {
+          return false;
+        }
+        active = Object.freeze({ ...active, target });
+        return true;
+      }
     };
   }
 
@@ -5193,6 +5255,7 @@
     let geometryEpoch = 0;
     let lastEmittedPayload = null;
     let lastEmittedRevision = 0;
+    let lastOperationWaitCancellation = null;
     let nextGeometryTicketId = 1;
     let operationEpoch = 0;
     let pendingWrite = null;
@@ -5204,6 +5267,8 @@
     let settleEmission = 0;
     let settleRevision = 0;
     let watchdogDeliveredFrames = 0;
+    let watchdogDocumentEpoch = documentEpoch;
+    let watchdogOperationEpoch = operationEpoch;
     const geometryTickets = /* @__PURE__ */ new Map();
     const waiters = /* @__PURE__ */ new Set();
     const createTraceEvent = (id, details) => {
@@ -5306,19 +5371,29 @@
       }
       trace(id, details);
     };
+    const rejectWrite = (pending, reason) => {
+      pending.resolve({ reason, status: "rejected" });
+      traceWrite(
+        SCROLL_OWNERSHIP_TRACE_IDS.writeRejected,
+        pending.writer,
+        finiteOrNull(deps.root.scrollTop),
+        null,
+        pending.supersessionSource,
+        reason
+      );
+    };
     const rejectPendingWrite = (reason) => {
       const pending = pendingWrite;
       pendingWrite = null;
       if (pending !== null) {
-        pending.resolve({ reason, status: "rejected" });
-        traceWrite(
-          SCROLL_OWNERSHIP_TRACE_IDS.writeRejected,
-          pending.writer,
-          finiteOrNull(deps.root.scrollTop),
-          null,
-          pending.supersessionSource,
-          reason
-        );
+        rejectWrite(pending, reason);
+      }
+    };
+    const rejectFrameTargetWrite = (transaction, reason) => {
+      const target = transaction.heldTargetWrite;
+      transaction.heldTargetWrite = null;
+      if (target !== null) {
+        rejectWrite(target, reason);
       }
     };
     const cancelWaiters = (reason, predicate = () => true) => {
@@ -5356,10 +5431,16 @@
       }
       activeLease = null;
       activeSupersessionSource = null;
+      lastOperationWaitCancellation = {
+        documentEpoch: previous.documentEpoch,
+        operationEpoch: previous.operationEpoch,
+        reason: waiterReason
+      };
       if (pendingWrite?.lease === previous) {
         rejectPendingWrite(reason);
       }
       if (frameTransaction?.lease === previous) {
+        rejectFrameTargetWrite(frameTransaction, reason);
         frameTransaction = null;
       }
       if (expectedEcho?.lease === previous) {
@@ -5377,7 +5458,6 @@
     };
     const createLease = (owner, supersessionSource = null) => {
       operationEpoch++;
-      watchdogDeliveredFrames = 0;
       const lease = Object.freeze({
         [LEASE_BRAND]: true,
         documentEpoch,
@@ -5445,7 +5525,6 @@
       lastEmittedPayload = payload;
       lastEmittedRevision = settleRevision;
       quietCandidate = null;
-      watchdogDeliveredFrames = 0;
       for (const waiter of [...waiters]) {
         if (waiter.documentEpoch !== documentEpoch || settleEmission <= waiter.afterEmission) {
           continue;
@@ -5479,6 +5558,16 @@
       quietCandidate = null;
       lastEmittedRevision = settleRevision;
       watchdogDeliveredFrames = 0;
+    };
+    const consumeDeliveredFrameBudget = () => {
+      const currentOperationEpoch = activeLease?.operationEpoch ?? operationEpoch;
+      if (watchdogDocumentEpoch !== documentEpoch || watchdogOperationEpoch !== currentOperationEpoch) {
+        watchdogDocumentEpoch = documentEpoch;
+        watchdogOperationEpoch = currentOperationEpoch;
+        watchdogDeliveredFrames = 0;
+      }
+      watchdogDeliveredFrames++;
+      return watchdogDeliveredFrames;
     };
     const commitPendingWrite = (lease) => {
       const pending = pendingWrite;
@@ -5572,9 +5661,12 @@
       frameTransaction = null;
       if (transaction !== null && holds(transaction.lease)) {
         try {
-          transaction.work();
+          for (const work of transaction.works) {
+            work();
+          }
         } catch {
           trace(SCROLL_OWNERSHIP_TRACE_IDS.frameTransactionRejected, { reason: "frame-work-failed" });
+          rejectFrameTargetWrite(transaction, "programmatic-supersession");
           clearActiveOperation(
             "programmatic-supersession",
             "programmatic-supersession",
@@ -5582,13 +5674,17 @@
           );
         }
         if (holds(transaction.lease)) {
+          if (transaction.heldTargetWrite !== null) {
+            rejectPendingWrite("coalesced");
+            pendingWrite = transaction.heldTargetWrite;
+            transaction.heldTargetWrite = null;
+          }
           commitPendingWrite(transaction.lease);
         }
       }
       const emitted = emitSettled();
       if (!emitted && needsSettlementProgress()) {
-        watchdogDeliveredFrames++;
-        if (watchdogDeliveredFrames >= deliveredFrameBudget) {
+        if (consumeDeliveredFrameBudget() >= deliveredFrameBudget) {
           failNonConvergence();
         }
       }
@@ -5645,6 +5741,7 @@
         rejectPendingWrite("released");
       }
       if (frameTransaction?.lease === lease) {
+        rejectFrameTargetWrite(frameTransaction, "released");
         frameTransaction = null;
       }
       if (expectedEcho?.lease === lease) {
@@ -5688,9 +5785,6 @@
       if (maxScrollTop === null) {
         return rejected("non-finite-root-range");
       }
-      if (pendingWrite !== null) {
-        rejectPendingWrite("coalesced");
-      }
       if (expectedEcho?.lease === lease) {
         retireEcho(expectedEcho);
         expectedEcho = null;
@@ -5699,13 +5793,43 @@
       const result = new Promise((completed) => {
         resolve = completed;
       });
-      pendingWrite = {
+      const writeRequest = {
         requestedTarget: request.target,
         lease,
         resolve,
         supersessionSource: activeSupersessionSource,
         writer: request.writer
       };
+      const heldMode = deps.readHeldOperationMode?.(lease) ?? null;
+      if (request.composition === "held-operation-target" && heldMode === "gesture") {
+        if (frameTransaction === null) {
+          frameTransaction = {
+            heldTargetWrite: writeRequest,
+            lease,
+            works: []
+          };
+        } else if (frameTransaction.lease === lease) {
+          rejectFrameTargetWrite(frameTransaction, "coalesced");
+          frameTransaction.heldTargetWrite = writeRequest;
+        } else {
+          rejectWrite(writeRequest, "coalesced");
+          return { ...receiptBase, result };
+        }
+        invalidateSettleCandidate();
+        traceWrite(
+          SCROLL_OWNERSHIP_TRACE_IDS.writeRequest,
+          request.writer,
+          finiteOrNull(deps.root.scrollTop),
+          writeRequest.requestedTarget,
+          writeRequest.supersessionSource
+        );
+        ensureFrame();
+        return { ...receiptBase, result };
+      }
+      if (pendingWrite !== null) {
+        rejectPendingWrite("coalesced");
+      }
+      pendingWrite = writeRequest;
       invalidateSettleCandidate();
       traceWrite(
         SCROLL_OWNERSHIP_TRACE_IDS.writeRequest,
@@ -5725,10 +5849,16 @@
         return false;
       }
       if (frameTransaction !== null) {
+        if (frameTransaction.lease === lease && deps.readHeldOperationMode?.(lease) === "gesture") {
+          frameTransaction.works.push(work);
+          invalidateSettleCandidate();
+          ensureFrame();
+          return true;
+        }
         trace(SCROLL_OWNERSHIP_TRACE_IDS.writeRejected, { reason: "frame-transaction-already-scheduled" });
         return false;
       }
-      frameTransaction = { lease, work };
+      frameTransaction = { heldTargetWrite: null, lease, works: [work] };
       invalidateSettleCandidate();
       ensureFrame();
       return true;
@@ -5742,6 +5872,8 @@
       cancelWaiters("user-supersession");
       operationEpoch++;
       watchdogDeliveredFrames = 0;
+      watchdogDocumentEpoch = documentEpoch;
+      watchdogOperationEpoch = operationEpoch;
       invalidateSettleCandidate();
     };
     const classifyNativeScroll = (value, source = "native-scroll") => {
@@ -5751,6 +5883,23 @@
         previousFiniteNativeScrollValue = value;
       }
       const expected = expectedEcho;
+      const heldMode = activeLease === null ? null : deps.readHeldOperationMode?.(activeLease) ?? null;
+      if (activeLease !== null && heldMode === "gesture" && finite) {
+        const evidence = deps.readHeldGestureEvidence?.(activeLease) ?? null;
+        if (evidence !== null) {
+          supersedeByUser(`user-input:${evidence.kind}`);
+          return { evidence, kind: "user-supersession", value };
+        }
+        if (expectedEcho?.lease === activeLease) {
+          expectedEcho = null;
+        }
+        ensureFrame();
+        return {
+          kind: "gesture-owned",
+          operationEpoch: activeLease.operationEpoch,
+          value
+        };
+      }
       if (expected !== null && finite && Math.abs(value - expected.value) <= SELF_ECHO_TOLERANCE_PX) {
         expectedEcho = null;
         ensureFrame();
@@ -5865,7 +6014,7 @@
       ensureFrame();
       return true;
     };
-    const waitForGeometrySettled = (capturedDocumentEpoch, afterEmission = 0) => {
+    const waitForGeometrySettled = (capturedDocumentEpoch, afterEmission = 0, capturedOperationEpoch = activeLease?.operationEpoch ?? operationEpoch) => {
       if (disposed) {
         return Promise.resolve({ reason: "disposed", status: "canceled" });
       }
@@ -5874,6 +6023,12 @@
       }
       if (!Number.isSafeInteger(afterEmission) || afterEmission < 0) {
         return Promise.resolve({ reason: "invalid-after-emission", status: "canceled" });
+      }
+      if (lastOperationWaitCancellation?.documentEpoch === capturedDocumentEpoch && lastOperationWaitCancellation.operationEpoch === capturedOperationEpoch) {
+        return Promise.resolve({
+          reason: lastOperationWaitCancellation.reason,
+          status: "canceled"
+        });
       }
       if (lastEmittedPayload !== null && lastEmittedPayload.documentEpoch === documentEpoch && lastEmittedRevision === settleRevision && settleEmission > afterEmission && !hasSettlementBlocker()) {
         return Promise.resolve({
@@ -5892,7 +6047,7 @@
       waiters.add({
         afterEmission,
         documentEpoch: capturedDocumentEpoch,
-        operationEpoch: activeLease?.operationEpoch ?? operationEpoch,
+        operationEpoch: capturedOperationEpoch,
         resolve
       });
       ensureFrame();
@@ -5925,7 +6080,10 @@
       settleRevision++;
       lastEmittedRevision = settleRevision;
       lastEmittedPayload = null;
+      lastOperationWaitCancellation = null;
       watchdogDeliveredFrames = 0;
+      watchdogDocumentEpoch = documentEpoch;
+      watchdogOperationEpoch = operationEpoch;
     };
     const dispose = () => {
       if (disposed) {
@@ -6015,23 +6173,29 @@
       if (plane === null) {
         return null;
       }
+      const requestScroll = (target, writer, composition) => {
+        if (!plane.isCurrentDocumentEpoch(lease.documentEpoch) || !plane.holds(lease)) {
+          return;
+        }
+        const receipt = plane.write(lease, {
+          ...composition === void 0 ? {} : { composition },
+          target,
+          writer
+        });
+        virtualizedWriteReceipts.set(lease.operationEpoch, receipt);
+        void receipt.result.then(() => {
+          if (virtualizedWriteReceipts.get(lease.operationEpoch) === receipt) {
+            virtualizedWriteReceipts.delete(lease.operationEpoch);
+          }
+        });
+      };
       return {
         documentEpoch: lease.documentEpoch,
         operationEpoch: lease.operationEpoch,
         lease,
         isCurrent: () => plane.isCurrentDocumentEpoch(lease.documentEpoch) && plane.holds(lease),
-        requestScrollTop: (target, writer) => {
-          if (!plane.isCurrentDocumentEpoch(lease.documentEpoch) || !plane.holds(lease)) {
-            return;
-          }
-          const receipt = plane.write(lease, { target, writer });
-          virtualizedWriteReceipts.set(lease.operationEpoch, receipt);
-          void receipt.result.then(() => {
-            if (virtualizedWriteReceipts.get(lease.operationEpoch) === receipt) {
-              virtualizedWriteReceipts.delete(lease.operationEpoch);
-            }
-          });
-        },
+        requestHeldOperationTarget: (target, writer) => requestScroll(target, writer, "held-operation-target"),
+        requestScrollTop: (target, writer) => requestScroll(target, writer),
         scheduleFrameTransaction: (work) => plane.scheduleFrameTransaction(lease, work)
       };
     }
@@ -6131,10 +6295,6 @@
         }
       });
     }
-    function runEmptyCommitRetainOperation(request) {
-      const scheduled = request.operation.scheduleFrameTransaction(() => void 0);
-      return { operation: request.operation, scheduled };
-    }
     function runFrameTransaction(request) {
       switch (request.kind) {
         case "acquire":
@@ -6143,8 +6303,6 @@
           return runExistingReleaseAfterWrite(request);
         case "element-landing":
           return runElementLandingReleaseAfterWrite(request);
-        case "empty-commit":
-          return runEmptyCommitRetainOperation(request);
       }
     }
     function virtualizedMaintenanceDetail(request) {
@@ -6611,6 +6769,8 @@
     },
     hasRecentUserInput: (withinMs) => userInputWitness.hasRecentUserInput(withinMs),
     prepareGeometrySettleCandidate: () => virtualizedDocumentWindowController?.recensusRealizationWatches() ?? true,
+    readHeldGestureEvidence: (lease) => readVirtualizedHeldGestureEvidence(lease),
+    readHeldOperationMode: (lease) => readVirtualizedHeldOperationMode(lease),
     requestFrame: (callback) => window.requestAnimationFrame((timestamp) => {
       virtualizedScrollControlFrameTimestamp = timestamp;
       callback(timestamp);
@@ -6668,8 +6828,10 @@
   var virtualizedWindowFontGeometryTicket = null;
   var navigationSessionRef = null;
   var virtualizedProgrammaticNavigationPostSettleTarget = null;
+  var virtualizedHeldOperationScrollPolicy = virtualizationEnabled ? createHeldOperationScrollPolicy() : null;
   var virtualizedScrollControlFrameTimestamp = null;
   var minimapScrollOperation = null;
+  var minimapOwnedPointerId = null;
   var cachedScrollRestoreCompletion = null;
   var finishCachedScrollRestore = null;
   var virtualizedWindowMathController = null;
@@ -8040,19 +8202,27 @@
   }
   async function waitForCurrentVirtualizedGeometry(operation, afterEmission) {
     const plane = scrollOwnershipControlPlane;
-    if (plane === null || !operation.isCurrent()) {
+    if (plane === null) {
       return { reason: "programmatic-supersession", status: "canceled" };
     }
-    return plane.waitForGeometrySettled(operation.documentEpoch, afterEmission);
+    return plane.waitForGeometrySettled(
+      operation.documentEpoch,
+      afterEmission,
+      operation.operationEpoch
+    );
   }
   async function awaitConfirmedVirtualizedGeometry(operation, nominal) {
     const plane = scrollOwnershipControlPlane;
-    if (plane === null || !operation.isCurrent()) {
+    if (plane === null) {
       return { reason: "programmatic-supersession", status: "canceled" };
     }
     const documentEpoch = operation.documentEpoch;
     const afterEmission = nominal.emission;
-    const confirmation = await plane.waitForGeometrySettled(documentEpoch, afterEmission);
+    const confirmation = await plane.waitForGeometrySettled(
+      documentEpoch,
+      afterEmission,
+      operation.operationEpoch
+    );
     if (confirmation.status === "canceled") {
       return confirmation;
     }
@@ -8066,6 +8236,10 @@
   }
   function acquireVirtualizedScrollOperation(owner, policy) {
     const operation = virtualizedScrollCoordinator.acquireOperation(owner, policy);
+    const activeHeldTarget = virtualizedHeldOperationScrollPolicy?.readActive() ?? null;
+    if (activeHeldTarget !== null && (!("operation" in activeHeldTarget.target) || activeHeldTarget.target.operation.isCurrent() !== true)) {
+      virtualizedHeldOperationScrollPolicy?.clear(activeHeldTarget);
+    }
     if (navigationSessionRef !== null && !navigationSessionRef.operation.isCurrent()) {
       clearVirtualizedNavigationSession();
     }
@@ -8075,7 +8249,11 @@
     virtualizedScrollCoordinator.releaseOperationAfterWrite(operation);
   }
   function releaseVirtualizedScrollOperation(operation) {
-    return virtualizedScrollCoordinator.releaseOperation(operation);
+    const released = virtualizedScrollCoordinator.releaseOperation(operation);
+    if (released) {
+      virtualizedHeldOperationScrollPolicy?.clear(operation);
+    }
+    return released;
   }
   function scheduleVirtualizedMaintenance(owner, work, onTerminal = null) {
     return virtualizedScrollCoordinator.scheduleMaintenance(
@@ -8111,6 +8289,9 @@
   }
   function isVirtualizedProgrammaticNavigationInProgress() {
     return navigationSessionRef?.operation.isCurrent() === true;
+  }
+  function isVirtualizedHeldRestoreInProgress() {
+    return virtualizedHeldOperationScrollPolicy?.readActive()?.mode === "restore";
   }
   function writeVirtualizedProgrammaticNavigationScrollTop(operation, scrollTop, writer) {
     operation.requestScrollTop(Math.max(0, scrollTop), writer);
@@ -8579,9 +8760,53 @@
       correctVirtualizedProgrammaticNavigationResidual({ ...target, operation: session.operation });
     }
   }
-  function getVirtualizedProgrammaticNavigationPostSettleSectionIndex() {
-    const target = virtualizedProgrammaticNavigationPostSettleTarget;
-    return target === null ? null : resolveVirtualizedNavigationTargetSectionIndex(target.descriptor);
+  function resolveVirtualizedCorrectionTarget(operation) {
+    if (virtualizedHeldOperationScrollPolicy === null) {
+      return virtualizedProgrammaticNavigationPostSettleTarget === null ? { kind: "generic" } : {
+        kind: "retained-navigation",
+        target: virtualizedProgrammaticNavigationPostSettleTarget
+      };
+    }
+    return virtualizedHeldOperationScrollPolicy.resolve(
+      operation,
+      virtualizedProgrammaticNavigationPostSettleTarget
+    );
+  }
+  function readVirtualizedHeldOperationRegistration(operation) {
+    const registration = virtualizedHeldOperationScrollPolicy?.read(operation) ?? null;
+    return registration !== null && "operation" in registration.target ? registration : null;
+  }
+  function readVirtualizedHeldOperationMode(operation) {
+    return readVirtualizedHeldOperationRegistration(operation)?.mode ?? null;
+  }
+  function readVirtualizedHeldGestureEvidence(operation) {
+    const registration = readVirtualizedHeldOperationRegistration(operation);
+    const target = registration?.target;
+    return registration?.mode === "gesture" && target !== void 0 && "kind" in target && target.kind === "gesture" ? userInputWitness?.readEvidenceAfter(target.witnessSequence) ?? null : null;
+  }
+  function readVirtualizedCorrectionTargetSectionIndex(resolution) {
+    if (resolution.kind === "generic") {
+      return null;
+    }
+    const target = resolution.kind === "active" ? resolution.registration.target : resolution.target;
+    if ("kind" in target && target.kind === "restore") {
+      const blockIndex = target.anchor?.blockIndex;
+      return blockIndex === void 0 ? null : virtualizedDocumentWindowModel?.getEntryByBlockIndex(blockIndex)?.sectionIndex ?? null;
+    }
+    if ("kind" in target && target.kind === "gesture") {
+      return null;
+    }
+    return resolveVirtualizedNavigationTargetSectionIndex(target.descriptor);
+  }
+  function correctVirtualizedHeldRestoreTarget(target, operation) {
+    const model = virtualizedDocumentWindowModel;
+    if (model === null || !operation.isCurrent()) {
+      return;
+    }
+    const scrollTop = target.anchor === null ? 0 : scrollTopForReadingAnchor(model, target.anchor) ?? 0;
+    if (Math.abs(getDocumentScrollRoot().scrollTop - scrollTop) > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
+      operation.requestScrollTop(scrollTop, "cache-restore-correction");
+    }
   }
   function startVirtualizedProgrammaticNavigationSettle(input) {
     if (!virtualizationEnabled || !input.operation.isCurrent() || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
@@ -8846,7 +9071,7 @@
     if (!virtualizationEnabled || virtualizedDocumentWindowController === null) {
       return;
     }
-    if (options.force !== true && isVirtualizedProgrammaticNavigationInProgress()) {
+    if (options.force !== true && (isVirtualizedProgrammaticNavigationInProgress() || isVirtualizedHeldRestoreInProgress())) {
       return;
     }
     const controller = virtualizedDocumentWindowController;
@@ -8923,26 +9148,39 @@
       if (controller !== virtualizedDocumentWindowController) {
         return;
       }
+      const correctionTarget = resolveVirtualizedCorrectionTarget(operation);
       const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
-      const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
+      const preserveSectionIndex = readVirtualizedCorrectionTargetSectionIndex(correctionTarget);
+      const preservesCorrectionTarget = correctionTarget.kind !== "generic";
       const result = controller.adoptRenderedHeights(
-        preserveSectionIndex === null ? { operation } : {
+        preserveSectionIndex === null ? {
+          operation,
+          ...preservesCorrectionTarget ? { reanchor: false } : {}
+        } : {
           operation,
           preserveSectionIndex,
-          ...postSettleTarget === null ? {} : { reanchor: false }
+          ...preservesCorrectionTarget ? { reanchor: false } : {}
         }
       );
       if (hasMeasuredHeightGeometryDelta(result)) {
         mutateVirtualizedGeometry(ticket);
       }
       applyVirtualizedRenderedHeightAdoptionEffects(result, {
-        alignPostSettleTarget: postSettleTarget === null
+        alignPostSettleTarget: correctionTarget.kind === "generic"
       });
-      if (postSettleTarget !== null && operation.isCurrent()) {
-        correctVirtualizedProgrammaticNavigationResidual({
-          ...postSettleTarget,
-          operation
-        });
+      if (correctionTarget.kind === "active") {
+        const target = correctionTarget.registration.target;
+        if ("kind" in target && target.kind === "restore") {
+          correctVirtualizedHeldRestoreTarget(target, operation);
+        }
+      } else if (correctionTarget.kind === "retained-navigation" && operation.isCurrent()) {
+        const target = correctionTarget.target;
+        if (!("kind" in target)) {
+          correctVirtualizedProgrammaticNavigationResidual({
+            ...target,
+            operation
+          });
+        }
       }
     }, closeTicket);
     if (!scheduled) {
@@ -8986,9 +9224,10 @@
       if (!operation.isCurrent() || operation.documentEpoch !== documentEpoch || model !== virtualizedDocumentWindowModel || controller !== virtualizedDocumentWindowController) {
         return;
       }
-      const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
+      const correctionTarget = resolveVirtualizedCorrectionTarget(operation);
+      const preserveSectionIndex = readVirtualizedCorrectionTargetSectionIndex(correctionTarget);
       const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
-      const anchor = preserveSectionIndex === null ? captureCurrentVirtualizedReadingAnchor() : null;
+      const anchor = correctionTarget.kind === "generic" ? captureCurrentVirtualizedReadingAnchor() : null;
       const recordedCount = model.recordIntrinsicSizeCalibrationSamples(virtualizedIntrinsicCalibrator);
       if (recordedCount === 0) {
         return;
@@ -8998,15 +9237,17 @@
         return;
       }
       mutateVirtualizedGeometry(ticket);
-      const target = preserveSectionIndex !== null ? model.sectionTop(preserveSectionIndex) : scrollTopForReadingAnchor(model, anchor) ?? 0;
+      const target = correctionTarget.kind === "active" && "kind" in correctionTarget.registration.target && correctionTarget.registration.target.kind === "restore" ? correctionTarget.registration.target.anchor === null ? 0 : scrollTopForReadingAnchor(model, correctionTarget.registration.target.anchor) ?? 0 : correctionTarget.kind === "active" && "kind" in correctionTarget.registration.target && correctionTarget.registration.target.kind === "gesture" ? correctionTarget.registration.target.latestTarget : preserveSectionIndex !== null ? model.sectionTop(preserveSectionIndex) : scrollTopForReadingAnchor(model, anchor) ?? 0;
       controller.updateWindowForScroll({ desiredScrollTop: target, force: true });
-      if (postSettleTarget === null) {
+      if (correctionTarget.kind === "generic") {
         operation.requestScrollTop(target, "calibration");
-      } else {
+      } else if (correctionTarget.kind === "retained-navigation" && !("kind" in correctionTarget.target)) {
         correctVirtualizedProgrammaticNavigationResidual({
-          ...postSettleTarget,
+          ...correctionTarget.target,
           operation
         });
+      } else if (correctionTarget.kind === "active" && "kind" in correctionTarget.registration.target && correctionTarget.registration.target.kind === "restore") {
+        correctVirtualizedHeldRestoreTarget(correctionTarget.registration.target, operation);
       }
       invalidateTopVisibleBlockIndexCache();
       invalidateSourceLineAnchors({ reassertPendingTarget: postSettleTarget === null });
@@ -9134,7 +9375,7 @@
     if (pendingSourceLineTarget !== null && options.reassertPendingTarget !== false) {
       const target = pendingSourceLineTarget;
       if (virtualizationEnabled) {
-        if (isVirtualizedProgrammaticNavigationInProgress()) {
+        if (isVirtualizedProgrammaticNavigationInProgress() || isVirtualizedHeldRestoreInProgress()) {
           return;
         }
         const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();
@@ -9329,6 +9570,12 @@
       cachedScrollRestoreCompletion = Promise.resolve();
       return;
     }
+    const restoreTarget = Object.freeze({
+      anchor: layoutState.readingAnchor ?? null,
+      kind: "restore",
+      operation
+    });
+    virtualizedHeldOperationScrollPolicy?.register(operation, "restore", restoreTarget);
     const documentEpoch = operation.documentEpoch;
     cachedScrollRestoreCompletion = new Promise((resolve) => {
       let completed = false;
@@ -9352,6 +9599,7 @@
         if (finishCachedScrollRestore === finish2) {
           finishCachedScrollRestore = null;
         }
+        virtualizedHeldOperationScrollPolicy?.clear(operation);
         if (operation.isCurrent()) {
           releaseVirtualizedScrollOperation(operation);
         }
@@ -9484,6 +9732,8 @@
           return;
         }
         let afterEmission = firstSettlement.emission;
+        let correctionPass = 0;
+        let previousResidualAbs = Number.POSITIVE_INFINITY;
         let settlement = null;
         while (!completed) {
           const plane = scrollOwnershipControlPlane;
@@ -9514,7 +9764,12 @@
           entry = anchor === null ? void 0 : model?.getEntryByBlockIndex(anchor.blockIndex);
           target = model !== null && controller !== null && entry !== void 0 ? scrollTopForReadingAnchor(model, anchor) : null;
           const expectedTarget = target ?? 0;
-          if (Math.abs(getDocumentScrollRoot().scrollTop - expectedTarget) > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
+          const residualAbs = Math.abs(getDocumentScrollRoot().scrollTop - expectedTarget);
+          if (residualAbs > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
+            if (correctionPass >= VIRTUALIZED_NAVIGATION_CORRECTION_MAX_PASSES || correctionPass > 0 && residualAbs >= previousResidualAbs - VIRTUALIZED_NAVIGATION_CORRECTION_MIN_SHRINK_PX) {
+              finish2("failed", "residual-non-converged", "non-converged");
+              return;
+            }
             const correctionReceipt = await scheduleWrite(
               expectedTarget,
               target === null ? "cache-cold-top" : "cache-restore-correction"
@@ -9527,6 +9782,8 @@
               finish2("failed", correction.reason, "failed");
               return;
             }
+            correctionPass++;
+            previousResidualAbs = residualAbs;
             afterEmission = settlement.emission;
             settlement = null;
             continue;
@@ -10855,12 +11112,15 @@
     if (operation === null || !operation.isCurrent()) {
       return false;
     }
-    operation.requestScrollTop(target, writer);
-    virtualizedScrollCoordinator.runFrameTransaction({
-      kind: "empty-commit",
-      operation,
-      policy: "empty-commit-retain-operation"
-    });
+    const registration = readVirtualizedHeldOperationRegistration(operation);
+    if (registration?.mode === "gesture" && "kind" in registration.target && registration.target.kind === "gesture") {
+      virtualizedHeldOperationScrollPolicy?.update(operation, Object.freeze({
+        ...registration.target,
+        latestTarget: target
+      }));
+    }
+    operation.requestHeldOperationTarget(target, writer);
+    queuePreviewSourceLinePost();
     return true;
   }
   async function settleMinimapScrollOperation(operation, readRefinedTarget) {
@@ -10910,16 +11170,39 @@
       minimapScrollOperation = null;
     }
     if (operation !== null) {
+      virtualizedHeldOperationScrollPolicy?.clear(operation);
       releaseVirtualizedScrollOperationAfterWrite(operation);
+    }
+    if (minimapOwnedPointerId !== null) {
+      userInputWitness?.endOwnedPointer(minimapOwnedPointerId);
+      minimapOwnedPointerId = null;
     }
   }
   function handleMinimapPointerDown(event) {
+    const root = document.scrollingElement ?? document.documentElement;
     if (virtualizationEnabled) {
+      if (minimapOwnedPointerId !== null) {
+        userInputWitness?.endOwnedPointer(minimapOwnedPointerId);
+        minimapOwnedPointerId = null;
+      }
+      clearVirtualizedProgrammaticNavigationPostSettleTarget();
+      pendingSourceLineTarget = null;
       minimapScrollOperation = acquireVirtualizedScrollOperation("minimap-gesture", "supersede-as-user");
+      const operation = minimapScrollOperation;
+      if (operation !== null) {
+        const witnessSequence = userInputWitness.captureSequence();
+        minimapOwnedPointerId = event.pointerId;
+        userInputWitness.beginOwnedPointer(event.pointerId);
+        virtualizedHeldOperationScrollPolicy?.register(operation, "gesture", Object.freeze({
+          kind: "gesture",
+          latestTarget: root.scrollTop,
+          operation,
+          witnessSequence
+        }));
+      }
     }
     minimapDragging = true;
     minimapDragStartClientY = event.clientY;
-    const root = document.scrollingElement ?? document.documentElement;
     minimapDragStartScrollTop = root.scrollTop;
     minimapDragMode = "tentative";
     minimapDragGrabOffset = 0;
@@ -10980,6 +11263,10 @@
     minimapDragging = false;
     minimapDragStartClientY = null;
     minimapDragMode = "tentative";
+    if (minimapOwnedPointerId !== null) {
+      userInputWitness?.endOwnedPointer(minimapOwnedPointerId);
+      minimapOwnedPointerId = null;
+    }
     try {
       minimapRoot?.releasePointerCapture(event.pointerId);
     } catch {
