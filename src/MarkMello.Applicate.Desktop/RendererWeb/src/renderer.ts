@@ -2524,6 +2524,10 @@ function isVirtualizedProgrammaticNavigationInProgress(): boolean {
   return navigationSessionRef?.operation.isCurrent() === true;
 }
 
+function isVirtualizedHeldRestoreInProgress(): boolean {
+  return virtualizedHeldOperationScrollPolicy?.readActive()?.mode === "restore";
+}
+
 function writeVirtualizedProgrammaticNavigationScrollTop(
   operation: VirtualizedScrollOperation,
   scrollTop: number,
@@ -3564,7 +3568,13 @@ function updateVirtualizedWindowForScroll(options: { force?: boolean } = {}): vo
     return;
   }
 
-  if (options.force !== true && isVirtualizedProgrammaticNavigationInProgress()) {
+  if (
+    options.force !== true
+    && (
+      isVirtualizedProgrammaticNavigationInProgress()
+      || isVirtualizedHeldRestoreInProgress()
+    )
+  ) {
     return;
   }
 
@@ -3934,7 +3944,10 @@ function invalidateSourceLineAnchors(
   if (pendingSourceLineTarget !== null && options.reassertPendingTarget !== false) {
     const target = pendingSourceLineTarget;
     if (virtualizationEnabled) {
-      if (isVirtualizedProgrammaticNavigationInProgress()) {
+      if (
+        isVirtualizedProgrammaticNavigationInProgress()
+        || isVirtualizedHeldRestoreInProgress()
+      ) {
         return;
       }
       const documentEpoch = scrollOwnershipControlPlane?.captureDocumentEpoch();

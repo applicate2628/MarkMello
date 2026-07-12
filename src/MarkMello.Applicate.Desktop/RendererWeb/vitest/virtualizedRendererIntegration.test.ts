@@ -369,13 +369,37 @@ describe("renderer virtualization wiring", () => {
     expect(windowController).toContain("recensusRealizationWatches");
   });
 
+  it("holds scroll-window and source-line reassert only for active restore mode", () => {
+    const source = readRendererSource();
+    const scrollWindow = sliceBetween(
+      source,
+      "function updateVirtualizedWindowForScroll",
+      "function finishVirtualizedMeasuredHeightTerminalSubscribers"
+    );
+    const sourceLine = sliceBetween(
+      source,
+      "function invalidateSourceLineAnchors",
+      "function suppressPreviewSourceLinePost"
+    );
+
+    expect(source).toContain("function isVirtualizedHeldRestoreInProgress");
+    expect(source).toContain('readActive()?.mode === "restore"');
+    expect(scrollWindow).toContain("isVirtualizedHeldRestoreInProgress()");
+    expect(sourceLine).toContain("isVirtualizedHeldRestoreInProgress()");
+    expect(source.match(
+      /reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null/g
+    )).toHaveLength(4);
+    expect(source.match(/reassertPendingTarget: postSettleTarget === null/g)).toHaveLength(1);
+  });
+
   it("navigation cache and minimap consume same-epoch confirmation settlement", () => {
     const source = readRendererSource();
     const cacheRestore = sliceBetween(source, "function restoreCachedScrollPosition", "function scheduleLayoutReady");
     const cachedReady = sliceBetween(source, "function postCachedLayoutReady", "function flushPostLayoutReadyWork");
 
     expect(source).toContain("awaitConfirmedVirtualizedGeometry");
-    expect(source).toContain("waitForGeometrySettled(documentEpoch, afterEmission)");
+    expect(source).toContain("waitForGeometrySettled(");
+    expect(source).toContain("operation.operationEpoch");
     expect(source).toContain("plane.holds(operation.lease, confirmation.payload.geometryEpoch)");
     expect(cacheRestore).not.toContain("queueCachedGeometryRefresh(");
     expect(cachedReady).toContain("if (!virtualizationEnabled && cachedLayoutState !== null)");

@@ -43,7 +43,11 @@ let clearPendingRendererRafs: (() => void) | null = null;
 type ControllerFaults = {
   adoptRenderedHeights?: boolean;
   ensureSectionRendered?: boolean;
-  onAdoptRenderedHeights?: () => void;
+  onAdoptRenderedHeights?: (
+    options: Parameters<
+      import("../src/virtualizedDocumentWindow").VirtualizedDocumentWindowController["adoptRenderedHeights"]
+    >[0]
+  ) => void;
   onCreated?: (controller: import("../src/virtualizedDocumentWindow").VirtualizedDocumentWindowController) => void;
 };
 
@@ -206,7 +210,7 @@ async function loadRendererHarness(options: {
               throw new Error("injected adoptRenderedHeights failure");
             }
             const result = adoptRenderedHeights(adoptOptions);
-            controllerFaults.onAdoptRenderedHeights?.();
+            controllerFaults.onAdoptRenderedHeights?.(adoptOptions);
             return result;
           };
           controller.ensureSectionRendered = (sectionIndex, ensureOptions) => {
@@ -4805,8 +4809,52 @@ describe("renderer scroll-family virtualization integration", () => {
       await harness.flushQueuedRafs();
       expect(perfDetails<{ writer?: string }>(harness.messages, "mm-virt-scroll-write-committed")
         .filter(detail => detail.writer === "navigation-residual")).toEqual([]);
+
+      harness.messages.length = 0;
+      harness.load({ type: "scroll-to-source-line", sourceLine: 200 });
+      await harness.flushQueuedRafs();
+      expect(perfDetails<{ owner?: string }>(harness.messages, "mm-virt-scroll-lease-acquired"))
+        .toContainEqual(expect.objectContaining({ owner: "source-line-navigation" }));
+      expect(perfDetails(harness.messages, "mm-virt-navigation-settled")).toHaveLength(1);
     }
   );
+
+  it("keeps held-gesture adoption reanchor-free and composer-owned through calibration", async () => {
+    vi.useFakeTimers();
+    const adoptionOptions: Array<Parameters<
+      import("../src/virtualizedDocumentWindow").VirtualizedDocumentWindowController["adoptRenderedHeights"]
+    >[0]> = [];
+    const harness = await loadMaintenanceLifecycleHarness({
+      onAdoptRenderedHeights: options => adoptionOptions.push(options),
+    });
+    adoptionOptions.length = 0;
+    const minimap = beginMinimapMaintenanceLease(harness);
+    harness.messages.length = 0;
+
+    harness.setRenderedSectionHeight(SECTION_HEIGHT + 80);
+    harness.triggerResize();
+    minimap.dispatchEvent(pointerEvent("pointermove", 588));
+    await harness.flushQueuedRafs();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await harness.flushQueuedRafs();
+
+    expect(adoptionOptions).toContainEqual(expect.objectContaining({
+      operation: expect.any(Object),
+      reanchor: false,
+    }));
+    expect(perfDetails(harness.messages, "mm-virt-window-calibrated").length).toBeGreaterThan(0);
+    const committedWriters = perfDetails<{ writer?: string }>(
+      harness.messages,
+      "mm-virt-scroll-write-committed"
+    ).map(detail => detail.writer);
+    expect(committedWriters.some(writer => writer?.startsWith("minimap-") === true)).toBe(true);
+    expect(committedWriters).not.toContain("measured-height-adoption");
+    expect(committedWriters).not.toContain("calibration");
+    expect(committedWriters).not.toContain("navigation-residual");
+
+    minimap.dispatchEvent(pointerEvent("pointerup", 588));
+    await harness.flushQueuedRafs();
+  });
 
   it.each(["wheel", "scroll-key", "scrollbar-gutter"] as const)(
     "revokes a held minimap gesture on later %s evidence",
