@@ -1,4 +1,5 @@
 import type { MathReadinessController } from "./initialRenderPipeline";
+import { yieldAnimationFrameOrTimeout } from "./frameYield";
 import { MathRenderQueue, isTerminalMathState, type MathRenderTask } from "./mathRenderQueue";
 
 type KatexLike = {
@@ -15,7 +16,6 @@ export type RenderMathDeps = {
 };
 
 const INITIAL_LOOKAHEAD_PX = 500;
-const MATH_RENDER_FRAME_FALLBACK_MS = 32;
 const INITIAL_PAST_VIEWPORT_SCAN_LIMIT = 8;
 
 function complexityScore(tex: string): number {
@@ -40,29 +40,6 @@ function getVisibilityElement(node: HTMLElement): HTMLElement {
     return node.parentElement ?? node;
   }
   return node;
-}
-
-function rafYield(): Promise<void> {
-  return new Promise(resolve => {
-    let resolved = false;
-    let timeout: number | undefined;
-    const finish = () => {
-      if (resolved) return;
-      resolved = true;
-      if (timeout !== undefined) {
-        window.clearTimeout(timeout);
-      }
-      resolve();
-    };
-
-    if (typeof window.requestAnimationFrame === "function") {
-      timeout = window.setTimeout(finish, MATH_RENDER_FRAME_FALLBACK_MS);
-      window.requestAnimationFrame(finish);
-      return;
-    }
-
-    timeout = window.setTimeout(finish, 0);
-  });
 }
 
 export function renderMath(deps: RenderMathDeps): MathReadinessController {
@@ -92,7 +69,7 @@ export function renderMath(deps: RenderMathDeps): MathReadinessController {
     katex,
     timeBudgetMs: 7,
     now: () => performance.now(),
-    yield: rafYield,
+    yield: yieldAnimationFrameOrTimeout,
   });
 
   // 3. Freeze initial-visible set via getBoundingClientRect of the

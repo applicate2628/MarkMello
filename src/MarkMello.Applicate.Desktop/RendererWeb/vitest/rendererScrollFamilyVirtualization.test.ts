@@ -94,6 +94,7 @@ async function loadRendererHarness(options: {
   renderedSectionHeight?: number;
   sectionCount: number;
   staleRenderedFindLeaseAcquisition?: boolean;
+  suppressModelRenderedContentRaf?: boolean;
   virtualization: boolean;
 }): Promise<RendererHarness> {
   vi.resetModules();
@@ -215,6 +216,12 @@ async function loadRendererHarness(options: {
   let nextRafId = 1;
   const requestAnimationFrameStub = (callback: FrameRequestCallback) => {
     const id = nextRafId++;
+    if (
+      options.suppressModelRenderedContentRaf === true
+      && (new Error().stack ?? "").includes("yieldModelRenderedContentWork")
+    ) {
+      return id;
+    }
     rafCallbacks.push({ callback, id });
     return id;
   };
@@ -3299,6 +3306,53 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(findBarCount().textContent).toBe("1 of 1");
     expect(highlights.get("mm-find-all")?.map(range => range.toString())).toEqual([query.query]);
     expect(highlights.get("mm-find-current")?.map(range => range.toString())).toEqual([query.query]);
+  });
+
+  it("publishes rendered find after the timeout fallback when model-content frames are suppressed", async () => {
+    vi.useFakeTimers();
+    const sectionCount = 20;
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+      katex: makeRendererKatex(),
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount,
+      suppressModelRenderedContentRaf: true,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    load({ type: "reading-preferences", ...makeReadingPreferences("auto") });
+    await flushQueuedRafs();
+    loadMinimapPolicy(load);
+    load({
+      type: "load-document",
+      html: buildModelRenderedMathDocument(sectionCount, [10]),
+      hasMermaid: false,
+      hasHljs: false,
+      renderId: 42,
+    });
+    await flushQueuedRafs();
+
+    expect(perfDetails(messages, "mm-model-rendered-content-end")).toEqual([]);
+    await vi.advanceTimersByTimeAsync(31);
+    expect(perfDetails(messages, "mm-model-rendered-content-end")).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    for (
+      let pass = 0;
+      pass < 16 && perfDetails(messages, "mm-find-projection-terminal").length === 0;
+      pass++
+    ) {
+      await vi.advanceTimersByTimeAsync(32);
+      await flushQueuedRafs();
+    }
+
+    expect(perfDetails<{ status?: string }>(messages, "mm-model-rendered-content-end"))
+      .toContainEqual(expect.objectContaining({ status: "ready" }));
+    expect(perfDetails<{ status?: string }>(messages, "mm-find-projection-terminal"))
+      .toContainEqual(expect.objectContaining({ status: "complete" }));
+    expect(renderedFindProtocolMessages(messages)).toContainEqual(expect.objectContaining({
+      renderId: 42,
+      type: "find-text-index-complete",
+    }));
   });
 
   it("retries the current rendered-find generation twice from host NACKs and then posts terminal unavailable", async () => {

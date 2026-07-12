@@ -16,6 +16,7 @@ import {
   type MermaidApiLike,
 } from "./mermaidRender";
 import { normalizeHljsLanguage } from "./hljsLanguage";
+import { yieldAnimationFrameOrTimeout } from "./frameYield";
 import { runInitialRenderPipeline, type MathReadinessController, type RendererTheme } from "./initialRenderPipeline";
 import { applyLoadDocument, clearDocumentState } from "./loadDocument";
 import { renderMath as renderMathInit } from "./mathRenderInit";
@@ -1307,9 +1308,7 @@ function cancelModelRenderedContentCoordinator(reason: string): void {
 }
 
 function yieldModelRenderedContentWork(): Promise<void> {
-  return new Promise(resolve => {
-    window.requestAnimationFrame(() => resolve());
-  });
+  return yieldAnimationFrameOrTimeout();
 }
 
 function handleModelRenderedContentEvent(
