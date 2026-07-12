@@ -5985,6 +5985,497 @@
     return Number.isFinite(value) ? value : null;
   }
 
+  // RendererWeb/src/virtualizedScrollCoordination.ts
+  var defaultVirtualizedMaintenanceRetryReason = () => "frame-transaction-occupied";
+  function createVirtualizedScrollCoordinator(deps) {
+    const virtualizedMaintenanceByOwner = /* @__PURE__ */ new Map();
+    const virtualizedMaintenanceReleaseHolds = /* @__PURE__ */ new Map();
+    const virtualizedMaintenanceDeferredPromotionOwners = /* @__PURE__ */ new Set();
+    const virtualizedWriteReceipts = /* @__PURE__ */ new Map();
+    let virtualizedMaintenanceCancellationBatchDepth = 0;
+    let virtualizedMaintenanceRequestSerial = 0;
+    let pendingInitialVirtualizedWindowWork = null;
+    function consumePendingInitialVirtualizedWindow2(operation) {
+      const work = pendingInitialVirtualizedWindowWork;
+      pendingInitialVirtualizedWindowWork = null;
+      if (work === null || !operation.isCurrent()) {
+        return false;
+      }
+      work(operation);
+      return true;
+    }
+    function createVirtualizedScrollOperation(lease) {
+      const plane = deps.getPlane();
+      if (plane === null) {
+        return null;
+      }
+      return {
+        documentEpoch: lease.documentEpoch,
+        operationEpoch: lease.operationEpoch,
+        lease,
+        isCurrent: () => plane.isCurrentDocumentEpoch(lease.documentEpoch) && plane.holds(lease),
+        requestScrollTop: (target, writer) => {
+          if (!plane.isCurrentDocumentEpoch(lease.documentEpoch) || !plane.holds(lease)) {
+            return;
+          }
+          const receipt = plane.write(lease, { target, writer });
+          virtualizedWriteReceipts.set(lease.operationEpoch, receipt);
+          void receipt.result.then(() => {
+            if (virtualizedWriteReceipts.get(lease.operationEpoch) === receipt) {
+              virtualizedWriteReceipts.delete(lease.operationEpoch);
+            }
+          });
+        },
+        scheduleFrameTransaction: (work) => plane.scheduleFrameTransaction(lease, work)
+      };
+    }
+    function acquireVirtualizedScrollOperation2(owner, policy) {
+      const maintenanceCutoff = virtualizedMaintenanceRequestSerial;
+      const acquired = deps.getPlane()?.acquire(owner, policy);
+      if (acquired?.status !== "acquired") {
+        return null;
+      }
+      const operation = createVirtualizedScrollOperation(acquired.lease);
+      if (operation !== null && policy !== "defer") {
+        cancelVirtualizedMaintenanceThrough(
+          maintenanceCutoff,
+          policy === "supersede-as-user" ? "user-supersession" : "programmatic-supersession"
+        );
+      }
+      return operation;
+    }
+    function releaseVirtualizedScrollOperationAfterWrite2(operation) {
+      const plane = deps.getPlane();
+      if (plane === null) {
+        return;
+      }
+      const receipt = virtualizedWriteReceipts.get(operation.operationEpoch);
+      if (receipt === void 0) {
+        if (operation.isCurrent()) {
+          releaseVirtualizedScrollOperation2(operation);
+        }
+        return;
+      }
+      void receipt.result.then(() => {
+        if (operation.isCurrent()) {
+          releaseVirtualizedScrollOperation2(operation);
+        }
+      });
+    }
+    function releaseVirtualizedScrollOperation2(operation) {
+      const plane = deps.getPlane();
+      const hold = virtualizedMaintenanceReleaseHolds.get(operation.operationEpoch);
+      if (hold !== void 0 && hold.requestSerials.size > 0) {
+        hold.releaseRequested = true;
+        return true;
+      }
+      if (plane === null || !plane.release(operation.lease)) {
+        return false;
+      }
+      return true;
+    }
+    function scheduleVirtualizedStandaloneOperation2(owner, policy, work) {
+      const operation = acquireVirtualizedScrollOperation2(owner, policy);
+      if (operation === null) {
+        return null;
+      }
+      const scheduled = operation.scheduleFrameTransaction(() => {
+        if (!operation.isCurrent()) {
+          return;
+        }
+        work(operation);
+        releaseVirtualizedScrollOperationAfterWrite2(operation);
+      });
+      if (!scheduled) {
+        releaseVirtualizedScrollOperation2(operation);
+        return null;
+      }
+      return operation;
+    }
+    function scheduleExistingVirtualizedOperation2(operation, work, releaseAfterWrite = false) {
+      const scheduled = operation.scheduleFrameTransaction(() => {
+        if (!operation.isCurrent()) {
+          return;
+        }
+        work();
+        if (releaseAfterWrite) {
+          releaseVirtualizedScrollOperationAfterWrite2(operation);
+        }
+      });
+      if (!scheduled && releaseAfterWrite && operation.isCurrent()) {
+        releaseVirtualizedScrollOperation2(operation);
+      }
+      return scheduled;
+    }
+    function scheduleVirtualizedElementLanding2(operation, element, writer, viewportOffsetY = 0) {
+      if (element === null) {
+        if (operation.isCurrent()) {
+          releaseVirtualizedScrollOperation2(operation);
+        }
+        return false;
+      }
+      return scheduleExistingVirtualizedOperation2(operation, () => {
+        const target = deps.readElementDocumentTop(element) - Math.max(0, viewportOffsetY);
+        operation.requestScrollTop(target, writer);
+      }, true);
+    }
+    function virtualizedMaintenanceDetail(request) {
+      return {
+        documentEpoch: request.documentEpoch,
+        owner: request.owner,
+        requestId: request.requestId,
+        requestSerial: request.requestId.requestSerial,
+        workRevision: request.workRevision
+      };
+    }
+    function postVirtualizedMaintenanceEvent(name, request, detail = {}) {
+      deps.trace(name, {
+        ...virtualizedMaintenanceDetail(request),
+        ...detail
+      });
+    }
+    function isLiveVirtualizedMaintenanceRequest(request) {
+      if (request.terminal !== null || request.phase === "terminal") {
+        return false;
+      }
+      const slot = virtualizedMaintenanceByOwner.get(request.owner);
+      return slot?.active === request || slot?.successor === request;
+    }
+    function isActiveVirtualizedMaintenanceRequest(request) {
+      return isLiveVirtualizedMaintenanceRequest(request) && virtualizedMaintenanceByOwner.get(request.owner)?.active === request;
+    }
+    function createVirtualizedMaintenanceRequest(owner, documentEpoch, work, onTerminal, retryReason) {
+      const requestSerial = ++virtualizedMaintenanceRequestSerial;
+      return {
+        binding: null,
+        documentEpoch,
+        executionCount: 0,
+        owner,
+        onTerminal,
+        phase: "pending",
+        requestId: Object.freeze({ documentEpoch, requestSerial }),
+        retryFrame: null,
+        retryReason,
+        terminal: null,
+        work,
+        workRevision: 1
+      };
+    }
+    function postVirtualizedMaintenanceRequested(request) {
+      postVirtualizedMaintenanceEvent("mm-virt-maintenance-requested", request);
+    }
+    function coalesceVirtualizedMaintenanceRequest(request, work, onTerminal, retryReason) {
+      if (!isLiveVirtualizedMaintenanceRequest(request)) {
+        return;
+      }
+      const replacedTerminal = request.onTerminal;
+      request.onTerminal = onTerminal;
+      request.retryReason = retryReason;
+      request.work = work;
+      request.workRevision++;
+      replacedTerminal?.({ reason: "coalesced", status: "canceled" });
+      postVirtualizedMaintenanceEvent("mm-virt-maintenance-coalesced", request);
+    }
+    function registerVirtualizedMaintenanceReleaseHold(request, binding) {
+      let hold = virtualizedMaintenanceReleaseHolds.get(binding.operationEpoch);
+      if (hold === void 0) {
+        hold = {
+          operation: binding.operation,
+          releaseRequested: false,
+          requestSerials: /* @__PURE__ */ new Set()
+        };
+        virtualizedMaintenanceReleaseHolds.set(binding.operationEpoch, hold);
+      }
+      hold.requestSerials.add(request.requestId.requestSerial);
+    }
+    function detachVirtualizedMaintenanceBinding(request, terminal) {
+      const binding = request.binding;
+      if (binding === null) {
+        return null;
+      }
+      if (binding.ownsLease) {
+        if (terminal.status === "completed") {
+          return { afterWrite: true, operation: binding.operation };
+        }
+        if (terminal.status === "canceled" && binding.operation.isCurrent()) {
+          return { afterWrite: false, operation: binding.operation };
+        }
+        return null;
+      }
+      const hold = virtualizedMaintenanceReleaseHolds.get(binding.operationEpoch);
+      if (hold === void 0) {
+        return null;
+      }
+      hold.requestSerials.delete(request.requestId.requestSerial);
+      if (hold.requestSerials.size > 0) {
+        return null;
+      }
+      virtualizedMaintenanceReleaseHolds.delete(binding.operationEpoch);
+      return hold.releaseRequested && hold.operation.isCurrent() ? { afterWrite: true, operation: hold.operation } : null;
+    }
+    function promoteVirtualizedMaintenanceSuccessor(owner) {
+      const slot = virtualizedMaintenanceByOwner.get(owner);
+      if (slot === void 0 || slot.active !== null) {
+        return;
+      }
+      const successor = slot.successor;
+      slot.successor = null;
+      if (successor === null) {
+        virtualizedMaintenanceByOwner.delete(owner);
+        return;
+      }
+      slot.active = successor;
+      attemptVirtualizedMaintenance(successor);
+    }
+    function flushVirtualizedMaintenancePromotions() {
+      if (virtualizedMaintenanceCancellationBatchDepth !== 0) {
+        return;
+      }
+      const owners = [...virtualizedMaintenanceDeferredPromotionOwners];
+      virtualizedMaintenanceDeferredPromotionOwners.clear();
+      for (const owner of owners) {
+        promoteVirtualizedMaintenanceSuccessor(owner);
+      }
+    }
+    function finishVirtualizedMaintenance(request, status, reason) {
+      if (request.terminal !== null || request.phase === "terminal") {
+        return false;
+      }
+      const terminal = Object.freeze({ reason, status });
+      request.terminal = terminal;
+      request.phase = "terminal";
+      const onTerminal = request.onTerminal;
+      request.onTerminal = null;
+      if (request.retryFrame !== null) {
+        deps.cancelFrame(request.retryFrame);
+        request.retryFrame = null;
+      }
+      const releaseAction = detachVirtualizedMaintenanceBinding(request, terminal);
+      const slot = virtualizedMaintenanceByOwner.get(request.owner);
+      if (slot?.active === request) {
+        slot.active = null;
+      } else if (slot?.successor === request) {
+        slot.successor = null;
+      }
+      if (slot !== void 0 && slot.active === null && slot.successor === null) {
+        virtualizedMaintenanceByOwner.delete(request.owner);
+      }
+      deps.trace("mm-virt-maintenance-terminal", {
+        ...virtualizedMaintenanceDetail(request),
+        executionCount: request.executionCount,
+        reason,
+        status
+      });
+      onTerminal?.(terminal);
+      if (releaseAction !== null) {
+        if (releaseAction.afterWrite) {
+          releaseVirtualizedScrollOperationAfterWrite2(releaseAction.operation);
+        } else {
+          releaseVirtualizedScrollOperation2(releaseAction.operation);
+        }
+      }
+      if (slot?.active === null && slot.successor !== null) {
+        if (status === "failed") {
+          finishVirtualizedMaintenance(slot.successor, "canceled", reason);
+        } else if (virtualizedMaintenanceCancellationBatchDepth === 0) {
+          promoteVirtualizedMaintenanceSuccessor(request.owner);
+        } else {
+          virtualizedMaintenanceDeferredPromotionOwners.add(request.owner);
+        }
+      }
+      return true;
+    }
+    function cancelVirtualizedMaintenanceRequests(predicate, reason) {
+      const selected = [];
+      for (const slot of virtualizedMaintenanceByOwner.values()) {
+        for (const request of [slot.active, slot.successor]) {
+          if (request !== null && isLiveVirtualizedMaintenanceRequest(request) && predicate(request)) {
+            selected.push(request);
+          }
+        }
+      }
+      virtualizedMaintenanceCancellationBatchDepth++;
+      try {
+        for (const request of selected) {
+          finishVirtualizedMaintenance(request, "canceled", reason);
+        }
+      } finally {
+        virtualizedMaintenanceCancellationBatchDepth--;
+        flushVirtualizedMaintenancePromotions();
+      }
+    }
+    function cancelPendingVirtualizedMaintenance2(reason) {
+      cancelVirtualizedMaintenanceRequests(() => true, reason);
+    }
+    function cancelVirtualizedMaintenanceThrough(cutoff, reason) {
+      cancelVirtualizedMaintenanceRequests(
+        (request) => request.requestId.requestSerial <= cutoff,
+        reason
+      );
+    }
+    function scheduleVirtualizedMaintenanceRetry2(request) {
+      if (request.retryFrame !== null || !isActiveVirtualizedMaintenanceRequest(request) || request.phase === "terminal") {
+        return;
+      }
+      request.phase = "retry-pending";
+      request.retryFrame = deps.requestFrame(() => {
+        request.retryFrame = null;
+        if (!isActiveVirtualizedMaintenanceRequest(request)) {
+          return;
+        }
+        if (deps.getPlane()?.isCurrentDocumentEpoch(request.documentEpoch) !== true) {
+          finishVirtualizedMaintenance(request, "canceled", "stale-document");
+          return;
+        }
+        request.phase = "pending";
+        attemptVirtualizedMaintenance(request);
+      });
+      postVirtualizedMaintenanceEvent("mm-virt-maintenance-retry", request, {
+        reason: request.retryReason()
+      });
+    }
+    function deliverVirtualizedMaintenance(request, operation) {
+      const binding = request.binding;
+      if (!isActiveVirtualizedMaintenanceRequest(request) || request.phase !== "frame-scheduled" || binding === null || binding.operation !== operation) {
+        return;
+      }
+      if (!operation.isCurrent() || operation.documentEpoch !== request.documentEpoch) {
+        finishVirtualizedMaintenance(request, "canceled", "stale-operation");
+        return;
+      }
+      if (request.executionCount !== 0) {
+        finishVirtualizedMaintenance(request, "failed", "execution-count-invariant");
+        return;
+      }
+      request.phase = "executing";
+      request.executionCount = 1;
+      const work = request.work;
+      try {
+        work(operation);
+      } catch (error) {
+        finishVirtualizedMaintenance(request, "failed", "frame-work-failed");
+        throw error;
+      }
+      finishVirtualizedMaintenance(request, "completed", "delivered");
+    }
+    function attemptVirtualizedMaintenance(request) {
+      const plane = deps.getPlane();
+      if (plane === null || !isActiveVirtualizedMaintenanceRequest(request) || !plane.isCurrentDocumentEpoch(request.documentEpoch)) {
+        if (isLiveVirtualizedMaintenanceRequest(request)) {
+          finishVirtualizedMaintenance(request, "canceled", "stale-document");
+        }
+        return;
+      }
+      const joined = plane.joinMaintenance(request.owner);
+      if (joined === null) {
+        finishVirtualizedMaintenance(request, "canceled", "lease-unavailable");
+        return;
+      }
+      const operation = createVirtualizedScrollOperation(joined.lease);
+      if (operation === null) {
+        finishVirtualizedMaintenance(request, "canceled", "operation-unavailable");
+        return;
+      }
+      const scheduled = operation.scheduleFrameTransaction(() => {
+        deliverVirtualizedMaintenance(request, operation);
+      });
+      if (!scheduled) {
+        if (joined.ownsLease && operation.isCurrent()) {
+          releaseVirtualizedScrollOperation2(operation);
+        }
+        scheduleVirtualizedMaintenanceRetry2(request);
+        return;
+      }
+      const binding = Object.freeze({
+        operation,
+        operationEpoch: operation.operationEpoch,
+        ownsLease: joined.ownsLease
+      });
+      request.binding = binding;
+      request.phase = "frame-scheduled";
+      if (!binding.ownsLease) {
+        registerVirtualizedMaintenanceReleaseHold(request, binding);
+      }
+      postVirtualizedMaintenanceEvent("mm-virt-maintenance-bound", request, {
+        operationEpoch: binding.operationEpoch,
+        ownsLease: binding.ownsLease
+      });
+    }
+    function scheduleVirtualizedMaintenance2(owner, work, onTerminal = null, retryReason = defaultVirtualizedMaintenanceRetryReason) {
+      const plane = deps.getPlane();
+      if (plane === null) {
+        return false;
+      }
+      const documentEpoch = plane.captureDocumentEpoch();
+      const staleSlot = virtualizedMaintenanceByOwner.get(owner);
+      if (staleSlot !== void 0 && [staleSlot.active, staleSlot.successor].some((request2) => request2 !== null && request2.documentEpoch !== documentEpoch)) {
+        cancelVirtualizedMaintenanceRequests(
+          (request2) => request2.owner === owner && request2.documentEpoch !== documentEpoch,
+          "stale-document"
+        );
+      }
+      let slot = virtualizedMaintenanceByOwner.get(owner);
+      if (slot?.active !== null && slot?.active !== void 0) {
+        if (slot.active.phase === "executing") {
+          if (slot.successor !== null) {
+            coalesceVirtualizedMaintenanceRequest(slot.successor, work, onTerminal, retryReason);
+            return true;
+          }
+          const successor = createVirtualizedMaintenanceRequest(
+            owner,
+            documentEpoch,
+            work,
+            onTerminal,
+            retryReason
+          );
+          slot.successor = successor;
+          postVirtualizedMaintenanceRequested(successor);
+          return true;
+        }
+        coalesceVirtualizedMaintenanceRequest(slot.active, work, onTerminal, retryReason);
+        return true;
+      }
+      const request = createVirtualizedMaintenanceRequest(
+        owner,
+        documentEpoch,
+        work,
+        onTerminal,
+        retryReason
+      );
+      if (slot === void 0) {
+        slot = { active: request, successor: null };
+        virtualizedMaintenanceByOwner.set(owner, slot);
+      } else {
+        slot.active = request;
+      }
+      postVirtualizedMaintenanceRequested(request);
+      attemptVirtualizedMaintenance(request);
+      return true;
+    }
+    return {
+      acquireOperation: acquireVirtualizedScrollOperation2,
+      releaseOperation: releaseVirtualizedScrollOperation2,
+      releaseOperationAfterWrite: releaseVirtualizedScrollOperationAfterWrite2,
+      getWriteReceipt: (operation) => virtualizedWriteReceipts.get(operation.operationEpoch),
+      getWriteReceiptByEpoch: (operationEpoch) => virtualizedWriteReceipts.get(operationEpoch),
+      setPendingInitialWindowWork: (work) => {
+        pendingInitialVirtualizedWindowWork = work;
+      },
+      consumePendingInitialWindow: consumePendingInitialVirtualizedWindow2,
+      clearPendingInitialWindow: () => {
+        pendingInitialVirtualizedWindowWork = null;
+      },
+      clearWriteReceipts: () => {
+        virtualizedWriteReceipts.clear();
+      },
+      scheduleStandaloneOperation: scheduleVirtualizedStandaloneOperation2,
+      scheduleExistingOperation: scheduleExistingVirtualizedOperation2,
+      scheduleElementLanding: scheduleVirtualizedElementLanding2,
+      scheduleMaintenance: scheduleVirtualizedMaintenance2,
+      cancelPendingMaintenance: cancelPendingVirtualizedMaintenance2
+    };
+  }
+
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -6160,7 +6651,6 @@
   var virtualizedProgrammaticNavigationOperation = null;
   var virtualizedScrollControlFrameTimestamp = null;
   var minimapScrollOperation = null;
-  var virtualizedWriteReceipts = /* @__PURE__ */ new Map();
   var cachedScrollRestoreCompletion = null;
   var finishCachedScrollRestore = null;
   var virtualizedWindowMathController = null;
@@ -6196,6 +6686,13 @@
     clientHeight: 0,
     topBlockIndex: null
   };
+  var virtualizedScrollCoordinator = createVirtualizedScrollCoordinator({
+    cancelFrame: (handle) => window.cancelAnimationFrame(handle),
+    getPlane: () => scrollOwnershipControlPlane,
+    readElementDocumentTop,
+    requestFrame: (callback) => window.requestAnimationFrame(callback),
+    trace: (name, detail) => postPerfMark(name, detail)
+  });
   function hashDocumentHtml(html) {
     let hash = 2166136261;
     for (let index = 0; index < html.length; index++) {
@@ -7505,12 +8002,6 @@
   function getDocumentScrollRoot() {
     return document.scrollingElement ?? document.documentElement;
   }
-  var virtualizedMaintenanceByOwner = /* @__PURE__ */ new Map();
-  var virtualizedMaintenanceReleaseHolds = /* @__PURE__ */ new Map();
-  var virtualizedMaintenanceDeferredPromotionOwners = /* @__PURE__ */ new Set();
-  var virtualizedMaintenanceCancellationBatchDepth = 0;
-  var virtualizedMaintenanceRequestSerial = 0;
-  var pendingInitialVirtualizedWindowWork = null;
   function beginVirtualizedGeometryWork(source, mountGeneration = virtualizedWindowMountGeneration) {
     const plane = scrollOwnershipControlPlane;
     if (plane === null) {
@@ -7548,447 +8039,44 @@
     return { settlement: confirmation, status: "changed" };
   }
   function consumePendingInitialVirtualizedWindow(operation) {
-    const work = pendingInitialVirtualizedWindowWork;
-    pendingInitialVirtualizedWindowWork = null;
-    if (work === null || !operation.isCurrent()) {
-      return false;
-    }
-    work(operation);
-    return true;
-  }
-  function createVirtualizedScrollOperation(lease) {
-    const plane = scrollOwnershipControlPlane;
-    if (plane === null) {
-      return null;
-    }
-    return {
-      documentEpoch: lease.documentEpoch,
-      operationEpoch: lease.operationEpoch,
-      lease,
-      isCurrent: () => plane.isCurrentDocumentEpoch(lease.documentEpoch) && plane.holds(lease),
-      requestScrollTop: (target, writer) => {
-        if (!plane.isCurrentDocumentEpoch(lease.documentEpoch) || !plane.holds(lease)) {
-          return;
-        }
-        const receipt = plane.write(lease, { target, writer });
-        virtualizedWriteReceipts.set(lease.operationEpoch, receipt);
-        void receipt.result.then(() => {
-          if (virtualizedWriteReceipts.get(lease.operationEpoch) === receipt) {
-            virtualizedWriteReceipts.delete(lease.operationEpoch);
-          }
-        });
-      },
-      scheduleFrameTransaction: (work) => plane.scheduleFrameTransaction(lease, work)
-    };
+    return virtualizedScrollCoordinator.consumePendingInitialWindow(operation);
   }
   function acquireVirtualizedScrollOperation(owner, policy) {
-    const maintenanceCutoff = virtualizedMaintenanceRequestSerial;
-    const acquired = scrollOwnershipControlPlane?.acquire(owner, policy);
-    if (acquired?.status !== "acquired") {
-      return null;
-    }
-    const operation = createVirtualizedScrollOperation(acquired.lease);
-    if (operation !== null && policy !== "defer") {
-      cancelVirtualizedMaintenanceThrough(
-        maintenanceCutoff,
-        policy === "supersede-as-user" ? "user-supersession" : "programmatic-supersession"
-      );
-    }
-    return operation;
+    return virtualizedScrollCoordinator.acquireOperation(owner, policy);
   }
   function releaseVirtualizedScrollOperationAfterWrite(operation) {
-    const plane = scrollOwnershipControlPlane;
-    if (plane === null) {
-      return;
-    }
-    const receipt = virtualizedWriteReceipts.get(operation.operationEpoch);
-    if (receipt === void 0) {
-      if (operation.isCurrent()) {
-        releaseVirtualizedScrollOperation(operation);
-      }
-      return;
-    }
-    void receipt.result.then(() => {
-      if (operation.isCurrent()) {
-        releaseVirtualizedScrollOperation(operation);
-      }
-    });
+    virtualizedScrollCoordinator.releaseOperationAfterWrite(operation);
   }
   function releaseVirtualizedScrollOperation(operation) {
-    const plane = scrollOwnershipControlPlane;
-    const hold = virtualizedMaintenanceReleaseHolds.get(operation.operationEpoch);
-    if (hold !== void 0 && hold.requestSerials.size > 0) {
-      hold.releaseRequested = true;
-      return true;
-    }
-    if (plane === null || !plane.release(operation.lease)) {
-      return false;
-    }
-    return true;
+    return virtualizedScrollCoordinator.releaseOperation(operation);
   }
   function scheduleVirtualizedStandaloneOperation(owner, policy, work) {
-    const operation = acquireVirtualizedScrollOperation(owner, policy);
-    if (operation === null) {
-      return null;
-    }
-    const scheduled = operation.scheduleFrameTransaction(() => {
-      if (!operation.isCurrent()) {
-        return;
-      }
-      work(operation);
-      releaseVirtualizedScrollOperationAfterWrite(operation);
-    });
-    if (!scheduled) {
-      releaseVirtualizedScrollOperation(operation);
-      return null;
-    }
-    return operation;
+    return virtualizedScrollCoordinator.scheduleStandaloneOperation(owner, policy, work);
   }
   function scheduleExistingVirtualizedOperation(operation, work, releaseAfterWrite = false) {
-    const scheduled = operation.scheduleFrameTransaction(() => {
-      if (!operation.isCurrent()) {
-        return;
-      }
-      work();
-      if (releaseAfterWrite) {
-        releaseVirtualizedScrollOperationAfterWrite(operation);
-      }
-    });
-    if (!scheduled && releaseAfterWrite && operation.isCurrent()) {
-      releaseVirtualizedScrollOperation(operation);
-    }
-    return scheduled;
+    return virtualizedScrollCoordinator.scheduleExistingOperation(operation, work, releaseAfterWrite);
   }
   function scheduleVirtualizedElementLanding(operation, element, writer, viewportOffsetY = 0) {
-    if (element === null) {
-      if (operation.isCurrent()) {
-        releaseVirtualizedScrollOperation(operation);
-      }
-      return false;
-    }
-    return scheduleExistingVirtualizedOperation(operation, () => {
-      const target = readElementDocumentTop(element) - Math.max(0, viewportOffsetY);
-      operation.requestScrollTop(target, writer);
-    }, true);
-  }
-  function virtualizedMaintenanceDetail(request) {
-    return {
-      documentEpoch: request.documentEpoch,
-      owner: request.owner,
-      requestId: request.requestId,
-      requestSerial: request.requestId.requestSerial,
-      workRevision: request.workRevision
-    };
-  }
-  function postVirtualizedMaintenanceEvent(name, request, detail = {}) {
-    postPerfMark(name, {
-      ...virtualizedMaintenanceDetail(request),
-      ...detail
-    });
-  }
-  function isLiveVirtualizedMaintenanceRequest(request) {
-    if (request.terminal !== null || request.phase === "terminal") {
-      return false;
-    }
-    const slot = virtualizedMaintenanceByOwner.get(request.owner);
-    return slot?.active === request || slot?.successor === request;
-  }
-  function isActiveVirtualizedMaintenanceRequest(request) {
-    return isLiveVirtualizedMaintenanceRequest(request) && virtualizedMaintenanceByOwner.get(request.owner)?.active === request;
-  }
-  function createVirtualizedMaintenanceRequest(owner, documentEpoch, work, onTerminal) {
-    const requestSerial = ++virtualizedMaintenanceRequestSerial;
-    return {
-      binding: null,
-      documentEpoch,
-      executionCount: 0,
-      owner,
-      onTerminal,
-      phase: "pending",
-      requestId: Object.freeze({ documentEpoch, requestSerial }),
-      retryFrame: null,
-      terminal: null,
-      work,
-      workRevision: 1
-    };
-  }
-  function postVirtualizedMaintenanceRequested(request) {
-    postVirtualizedMaintenanceEvent("mm-virt-maintenance-requested", request);
-  }
-  function coalesceVirtualizedMaintenanceRequest(request, work, onTerminal) {
-    if (!isLiveVirtualizedMaintenanceRequest(request)) {
-      return;
-    }
-    const replacedTerminal = request.onTerminal;
-    request.onTerminal = onTerminal;
-    request.work = work;
-    request.workRevision++;
-    replacedTerminal?.({ reason: "coalesced", status: "canceled" });
-    postVirtualizedMaintenanceEvent("mm-virt-maintenance-coalesced", request);
-  }
-  function registerVirtualizedMaintenanceReleaseHold(request, binding) {
-    let hold = virtualizedMaintenanceReleaseHolds.get(binding.operationEpoch);
-    if (hold === void 0) {
-      hold = {
-        operation: binding.operation,
-        releaseRequested: false,
-        requestSerials: /* @__PURE__ */ new Set()
-      };
-      virtualizedMaintenanceReleaseHolds.set(binding.operationEpoch, hold);
-    }
-    hold.requestSerials.add(request.requestId.requestSerial);
-  }
-  function detachVirtualizedMaintenanceBinding(request, terminal) {
-    const binding = request.binding;
-    if (binding === null) {
-      return null;
-    }
-    if (binding.ownsLease) {
-      if (terminal.status === "completed") {
-        return { afterWrite: true, operation: binding.operation };
-      }
-      if (terminal.status === "canceled" && binding.operation.isCurrent()) {
-        return { afterWrite: false, operation: binding.operation };
-      }
-      return null;
-    }
-    const hold = virtualizedMaintenanceReleaseHolds.get(binding.operationEpoch);
-    if (hold === void 0) {
-      return null;
-    }
-    hold.requestSerials.delete(request.requestId.requestSerial);
-    if (hold.requestSerials.size > 0) {
-      return null;
-    }
-    virtualizedMaintenanceReleaseHolds.delete(binding.operationEpoch);
-    return hold.releaseRequested && hold.operation.isCurrent() ? { afterWrite: true, operation: hold.operation } : null;
-  }
-  function promoteVirtualizedMaintenanceSuccessor(owner) {
-    const slot = virtualizedMaintenanceByOwner.get(owner);
-    if (slot === void 0 || slot.active !== null) {
-      return;
-    }
-    const successor = slot.successor;
-    slot.successor = null;
-    if (successor === null) {
-      virtualizedMaintenanceByOwner.delete(owner);
-      return;
-    }
-    slot.active = successor;
-    attemptVirtualizedMaintenance(successor);
-  }
-  function flushVirtualizedMaintenancePromotions() {
-    if (virtualizedMaintenanceCancellationBatchDepth !== 0) {
-      return;
-    }
-    const owners = [...virtualizedMaintenanceDeferredPromotionOwners];
-    virtualizedMaintenanceDeferredPromotionOwners.clear();
-    for (const owner of owners) {
-      promoteVirtualizedMaintenanceSuccessor(owner);
-    }
-  }
-  function finishVirtualizedMaintenance(request, status, reason) {
-    if (request.terminal !== null || request.phase === "terminal") {
-      return false;
-    }
-    const terminal = Object.freeze({ reason, status });
-    request.terminal = terminal;
-    request.phase = "terminal";
-    const onTerminal = request.onTerminal;
-    request.onTerminal = null;
-    if (request.retryFrame !== null) {
-      window.cancelAnimationFrame(request.retryFrame);
-      request.retryFrame = null;
-    }
-    const releaseAction = detachVirtualizedMaintenanceBinding(request, terminal);
-    const slot = virtualizedMaintenanceByOwner.get(request.owner);
-    if (slot?.active === request) {
-      slot.active = null;
-    } else if (slot?.successor === request) {
-      slot.successor = null;
-    }
-    if (slot !== void 0 && slot.active === null && slot.successor === null) {
-      virtualizedMaintenanceByOwner.delete(request.owner);
-    }
-    postPerfMark("mm-virt-maintenance-terminal", {
-      ...virtualizedMaintenanceDetail(request),
-      executionCount: request.executionCount,
-      reason,
-      status
-    });
-    onTerminal?.(terminal);
-    if (releaseAction !== null) {
-      if (releaseAction.afterWrite) {
-        releaseVirtualizedScrollOperationAfterWrite(releaseAction.operation);
-      } else {
-        releaseVirtualizedScrollOperation(releaseAction.operation);
-      }
-    }
-    if (slot?.active === null && slot.successor !== null) {
-      if (status === "failed") {
-        finishVirtualizedMaintenance(slot.successor, "canceled", reason);
-      } else if (virtualizedMaintenanceCancellationBatchDepth === 0) {
-        promoteVirtualizedMaintenanceSuccessor(request.owner);
-      } else {
-        virtualizedMaintenanceDeferredPromotionOwners.add(request.owner);
-      }
-    }
-    return true;
-  }
-  function cancelVirtualizedMaintenanceRequests(predicate, reason) {
-    const selected = [];
-    for (const slot of virtualizedMaintenanceByOwner.values()) {
-      for (const request of [slot.active, slot.successor]) {
-        if (request !== null && isLiveVirtualizedMaintenanceRequest(request) && predicate(request)) {
-          selected.push(request);
-        }
-      }
-    }
-    virtualizedMaintenanceCancellationBatchDepth++;
-    try {
-      for (const request of selected) {
-        finishVirtualizedMaintenance(request, "canceled", reason);
-      }
-    } finally {
-      virtualizedMaintenanceCancellationBatchDepth--;
-      flushVirtualizedMaintenancePromotions();
-    }
-  }
-  function cancelPendingVirtualizedMaintenance(reason) {
-    cancelVirtualizedMaintenanceRequests(() => true, reason);
-  }
-  function cancelVirtualizedMaintenanceThrough(cutoff, reason) {
-    cancelVirtualizedMaintenanceRequests(
-      (request) => request.requestId.requestSerial <= cutoff,
-      reason
+    return virtualizedScrollCoordinator.scheduleElementLanding(
+      operation,
+      element,
+      writer,
+      viewportOffsetY
     );
   }
-  function scheduleVirtualizedMaintenanceRetry(request) {
-    if (request.retryFrame !== null || !isActiveVirtualizedMaintenanceRequest(request) || request.phase === "terminal") {
-      return;
-    }
-    request.phase = "retry-pending";
-    request.retryFrame = window.requestAnimationFrame(() => {
-      request.retryFrame = null;
-      if (!isActiveVirtualizedMaintenanceRequest(request)) {
-        return;
-      }
-      if (scrollOwnershipControlPlane?.isCurrentDocumentEpoch(request.documentEpoch) !== true) {
-        finishVirtualizedMaintenance(request, "canceled", "stale-document");
-        return;
-      }
-      request.phase = "pending";
-      attemptVirtualizedMaintenance(request);
-    });
-    postVirtualizedMaintenanceEvent("mm-virt-maintenance-retry", request, {
-      reason: "frame-transaction-occupied"
-    });
-  }
-  function deliverVirtualizedMaintenance(request, operation) {
-    const binding = request.binding;
-    if (!isActiveVirtualizedMaintenanceRequest(request) || request.phase !== "frame-scheduled" || binding === null || binding.operation !== operation) {
-      return;
-    }
-    if (!operation.isCurrent() || operation.documentEpoch !== request.documentEpoch) {
-      finishVirtualizedMaintenance(request, "canceled", "stale-operation");
-      return;
-    }
-    if (request.executionCount !== 0) {
-      finishVirtualizedMaintenance(request, "failed", "execution-count-invariant");
-      return;
-    }
-    request.phase = "executing";
-    request.executionCount = 1;
-    const work = request.work;
-    try {
-      work(operation);
-    } catch (error) {
-      finishVirtualizedMaintenance(request, "failed", "frame-work-failed");
-      throw error;
-    }
-    finishVirtualizedMaintenance(request, "completed", "delivered");
-  }
-  function attemptVirtualizedMaintenance(request) {
-    const plane = scrollOwnershipControlPlane;
-    if (plane === null || !isActiveVirtualizedMaintenanceRequest(request) || !plane.isCurrentDocumentEpoch(request.documentEpoch)) {
-      if (isLiveVirtualizedMaintenanceRequest(request)) {
-        finishVirtualizedMaintenance(request, "canceled", "stale-document");
-      }
-      return;
-    }
-    const joined = plane.joinMaintenance(request.owner);
-    if (joined === null) {
-      finishVirtualizedMaintenance(request, "canceled", "lease-unavailable");
-      return;
-    }
-    const operation = createVirtualizedScrollOperation(joined.lease);
-    if (operation === null) {
-      finishVirtualizedMaintenance(request, "canceled", "operation-unavailable");
-      return;
-    }
-    const scheduled = operation.scheduleFrameTransaction(() => {
-      deliverVirtualizedMaintenance(request, operation);
-    });
-    if (!scheduled) {
-      if (joined.ownsLease && operation.isCurrent()) {
-        releaseVirtualizedScrollOperation(operation);
-      }
-      scheduleVirtualizedMaintenanceRetry(request);
-      return;
-    }
-    const binding = Object.freeze({
-      operation,
-      operationEpoch: operation.operationEpoch,
-      ownsLease: joined.ownsLease
-    });
-    request.binding = binding;
-    request.phase = "frame-scheduled";
-    if (!binding.ownsLease) {
-      registerVirtualizedMaintenanceReleaseHold(request, binding);
-    }
-    postVirtualizedMaintenanceEvent("mm-virt-maintenance-bound", request, {
-      operationEpoch: binding.operationEpoch,
-      ownsLease: binding.ownsLease
-    });
-  }
   function scheduleVirtualizedMaintenance(owner, work, onTerminal = null) {
-    const plane = scrollOwnershipControlPlane;
-    if (plane === null) {
-      return false;
-    }
-    const documentEpoch = plane.captureDocumentEpoch();
-    const staleSlot = virtualizedMaintenanceByOwner.get(owner);
-    if (staleSlot !== void 0 && [staleSlot.active, staleSlot.successor].some((request2) => request2 !== null && request2.documentEpoch !== documentEpoch)) {
-      cancelVirtualizedMaintenanceRequests(
-        (request2) => request2.owner === owner && request2.documentEpoch !== documentEpoch,
-        "stale-document"
-      );
-    }
-    let slot = virtualizedMaintenanceByOwner.get(owner);
-    if (slot?.active !== null && slot?.active !== void 0) {
-      if (slot.active.phase === "executing") {
-        if (slot.successor !== null) {
-          coalesceVirtualizedMaintenanceRequest(slot.successor, work, onTerminal);
-          return true;
-        }
-        const successor = createVirtualizedMaintenanceRequest(owner, documentEpoch, work, onTerminal);
-        slot.successor = successor;
-        postVirtualizedMaintenanceRequested(successor);
-        return true;
-      }
-      coalesceVirtualizedMaintenanceRequest(slot.active, work, onTerminal);
-      return true;
-    }
-    const request = createVirtualizedMaintenanceRequest(owner, documentEpoch, work, onTerminal);
-    if (slot === void 0) {
-      slot = { active: request, successor: null };
-      virtualizedMaintenanceByOwner.set(owner, slot);
-    } else {
-      slot.active = request;
-    }
-    postVirtualizedMaintenanceRequested(request);
-    attemptVirtualizedMaintenance(request);
-    return true;
+    return virtualizedScrollCoordinator.scheduleMaintenance(
+      owner,
+      work,
+      onTerminal,
+      scheduleVirtualizedMaintenanceRetry
+    );
+  }
+  function scheduleVirtualizedMaintenanceRetry() {
+    return "frame-transaction-occupied";
+  }
+  function cancelPendingVirtualizedMaintenance(reason) {
+    virtualizedScrollCoordinator.cancelPendingMaintenance(reason);
   }
   function captureCurrentVirtualizedReadingAnchor() {
     const main = document.querySelector("main.mm-document");
@@ -8313,7 +8401,7 @@
             root.scrollTop + residual,
             "navigation-residual"
           );
-          const receipt = virtualizedWriteReceipts.get(operation.operationEpoch);
+          const receipt = virtualizedScrollCoordinator.getWriteReceiptByEpoch(operation.operationEpoch);
           if (receipt === void 0) {
             resolve({ kind: "canceled" });
             return;
@@ -8718,6 +8806,7 @@
     const initialOperation = acquireVirtualizedScrollOperation("initial-window", "supersede-programmatic");
     if (initialOperation !== null) {
       const controller = virtualizedDocumentWindowController;
+      let pendingInitialVirtualizedWindowWork;
       pendingInitialVirtualizedWindowWork = (operation) => {
         if (!operation.isCurrent() || controller !== virtualizedDocumentWindowController) {
           return;
@@ -8727,6 +8816,7 @@
         invalidateTopVisibleBlockIndexCache();
         scheduleVirtualizedMeasuredHeightAdoption();
       };
+      virtualizedScrollCoordinator.setPendingInitialWindowWork(pendingInitialVirtualizedWindowWork);
       if (!initialOperation.scheduleFrameTransaction(() => {
         consumePendingInitialVirtualizedWindow(initialOperation);
         releaseVirtualizedScrollOperationAfterWrite(initialOperation);
@@ -9320,7 +9410,7 @@
               completedWrite(null);
               return;
             }
-            completedWrite(virtualizedWriteReceipts.get(operation.operationEpoch) ?? null);
+            completedWrite(virtualizedScrollCoordinator.getWriteReceipt(operation) ?? null);
           });
           if (!scheduled) {
             window.requestAnimationFrame(attempt);
@@ -10762,7 +10852,7 @@
         if (!requestMinimapScrollTarget(refinedTarget, "minimap-refine")) {
           return;
         }
-        const receipt = virtualizedWriteReceipts.get(operation.operationEpoch);
+        const receipt = virtualizedScrollCoordinator.getWriteReceipt(operation);
         if (receipt === void 0 || (await receipt.result).status !== "committed") {
           return;
         }
@@ -11599,8 +11689,8 @@
     cancelPendingVirtualizedMaintenance("stale-document");
     cancelModelRenderedContentCoordinator("stale-document");
     scrollOwnershipControlPlane?.invalidateDocument();
-    virtualizedWriteReceipts.clear();
-    pendingInitialVirtualizedWindowWork = null;
+    virtualizedScrollCoordinator.clearWriteReceipts();
+    virtualizedScrollCoordinator.clearPendingInitialWindow();
     cachedScrollRestoreCompletion = null;
     minimapScrollOperation = null;
     ++initialRenderPipelineGeneration;
