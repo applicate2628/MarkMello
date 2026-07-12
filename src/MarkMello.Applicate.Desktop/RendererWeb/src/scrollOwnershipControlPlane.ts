@@ -265,6 +265,8 @@ export function createScrollOwnershipControlPlane(
   let settleEmission = 0;
   let settleRevision = 0;
   let watchdogDeliveredFrames = 0;
+  let watchdogDocumentEpoch = documentEpoch;
+  let watchdogOperationEpoch = operationEpoch;
   const geometryTickets = new Map<number, GeometryWorkTicket>();
   const waiters = new Set<GeometryWaiter>();
 
@@ -496,7 +498,6 @@ export function createScrollOwnershipControlPlane(
 
   const createLease = (owner: string, supersessionSource: string | null = null): ScrollLease => {
     operationEpoch++;
-    watchdogDeliveredFrames = 0;
     const lease: ScrollLease = Object.freeze({
       [LEASE_BRAND]: true as const,
       documentEpoch,
@@ -581,7 +582,6 @@ export function createScrollOwnershipControlPlane(
     lastEmittedPayload = payload;
     lastEmittedRevision = settleRevision;
     quietCandidate = null;
-    watchdogDeliveredFrames = 0;
     for (const waiter of [...waiters]) {
       if (waiter.documentEpoch !== documentEpoch || settleEmission <= waiter.afterEmission) {
         continue;
@@ -616,6 +616,20 @@ export function createScrollOwnershipControlPlane(
     quietCandidate = null;
     lastEmittedRevision = settleRevision;
     watchdogDeliveredFrames = 0;
+  };
+
+  const consumeDeliveredFrameBudget = (): number => {
+    const currentOperationEpoch = activeLease?.operationEpoch ?? operationEpoch;
+    if (
+      watchdogDocumentEpoch !== documentEpoch
+      || watchdogOperationEpoch !== currentOperationEpoch
+    ) {
+      watchdogDocumentEpoch = documentEpoch;
+      watchdogOperationEpoch = currentOperationEpoch;
+      watchdogDeliveredFrames = 0;
+    }
+    watchdogDeliveredFrames++;
+    return watchdogDeliveredFrames;
   };
 
   const commitPendingWrite = (lease: ScrollLease): void => {
@@ -739,8 +753,7 @@ export function createScrollOwnershipControlPlane(
 
     const emitted = emitSettled();
     if (!emitted && needsSettlementProgress()) {
-      watchdogDeliveredFrames++;
-      if (watchdogDeliveredFrames >= deliveredFrameBudget) {
+      if (consumeDeliveredFrameBudget() >= deliveredFrameBudget) {
         failNonConvergence();
       }
     }
@@ -934,6 +947,8 @@ export function createScrollOwnershipControlPlane(
     cancelWaiters("user-supersession");
     operationEpoch++;
     watchdogDeliveredFrames = 0;
+    watchdogDocumentEpoch = documentEpoch;
+    watchdogOperationEpoch = operationEpoch;
     invalidateSettleCandidate();
   };
 
@@ -1169,6 +1184,8 @@ export function createScrollOwnershipControlPlane(
     lastEmittedRevision = settleRevision;
     lastEmittedPayload = null;
     watchdogDeliveredFrames = 0;
+    watchdogDocumentEpoch = documentEpoch;
+    watchdogOperationEpoch = operationEpoch;
   };
 
   const dispose = (): void => {

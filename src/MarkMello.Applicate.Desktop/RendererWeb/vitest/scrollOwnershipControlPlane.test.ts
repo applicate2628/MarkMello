@@ -782,6 +782,28 @@ describe("scroll ownership control plane", () => {
     expect(traces.some(trace => trace.id === SCROLL_OWNERSHIP_TRACE_IDS.settleTimeout)).toBe(false);
   });
 
+  it("preserves one operation's delivered-frame budget across settlement and joined maintenance", async () => {
+    const { events, frames, plane } = createHarness(3);
+    const lease = acquired(plane.acquire("cache-restore", "defer"));
+    const initial = plane.waitForGeometrySettled(lease.documentEpoch);
+
+    frames.deliverFrame();
+    frames.deliverFrame();
+    expect(await initial).toMatchObject({ status: "settled" });
+    expect(events).toHaveLength(1);
+    expect(plane.joinMaintenance("height-adoption")).toEqual({ lease, ownsLease: false });
+
+    plane.beginGeometryWork("joined-height-adoption", lease.documentEpoch);
+    const terminal = plane.waitForGeometrySettled(lease.documentEpoch, 1);
+    frames.deliverFrame();
+    expect(plane.holds(lease)).toBe(true);
+    frames.deliverFrame();
+
+    expect(plane.holds(lease)).toBe(false);
+    expect(await terminal).toMatchObject({ status: "canceled", reason: "non-converged" });
+    expect(events).toHaveLength(1);
+  });
+
   it("fails non-convergence only after delivered frames", async () => {
     const { events, frames, plane, traces } = createHarness(3);
     const lease = acquired(plane.acquire("cache-restore", "defer"));
