@@ -4648,4 +4648,69 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(root.scrollTop).toBeGreaterThanOrEqual(clickedScrollTop);
     expect(highestRenderedHeadingIndex()).toBeGreaterThanOrEqual(clickedHighest);
   });
+
+  it.each(["tap", "drag"] as const)(
+    "minimap %s clears stale targets and preserves preview source-line reverse sync",
+    async gesture => {
+      const sectionCount = 120;
+      const harness = await loadRendererHarness({ sectionCount, virtualization: true });
+      document.documentElement.style.setProperty("--mm-minimap-width", "136px");
+      setMinimapViewportHeight(592);
+      harness.load({ type: "reading-preferences", ...makeReadingPreferences("on") });
+      loadMinimapPolicy(harness.load);
+      harness.load({
+        type: "load-document",
+        html: buildSourceLineDocument(sectionCount),
+        hasMermaid: false,
+        hasHljs: false,
+      });
+      await harness.flushQueuedRafs();
+      harness.load({ type: "scroll-to-source-line", sourceLine: 900 });
+      await harness.flushQueuedRafs();
+      expect(perfDetails(harness.messages, "mm-virt-navigation-settled")).toHaveLength(1);
+
+      const minimap = document.querySelector<HTMLElement>(".mm-minimap")!;
+      Object.defineProperty(minimap, "setPointerCapture", { configurable: true, value: vi.fn() });
+      Object.defineProperty(minimap, "releasePointerCapture", { configurable: true, value: vi.fn() });
+      vi.spyOn(minimap, "getBoundingClientRect").mockReturnValue({
+        bottom: 592,
+        height: 592,
+        left: 0,
+        right: 136,
+        top: 0,
+        width: 136,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect);
+      harness.messages.length = 0;
+
+      const startY = gesture === "tap" ? 300 : 12;
+      minimap.dispatchEvent(pointerEvent("pointerdown", startY));
+      if (gesture === "drag") {
+        minimap.dispatchEvent(pointerEvent("pointermove", 588));
+      }
+      minimap.dispatchEvent(pointerEvent("pointerup", gesture === "tap" ? startY : 588));
+      await harness.flushQueuedRafs();
+
+      expect(harness.messages).toContainEqual(expect.objectContaining({
+        type: "preview-source-line",
+      }));
+      expect(perfDetails<{ owner?: string }>(harness.messages, "mm-virt-scroll-lease-acquired")
+        .filter(detail => detail.owner === "source-line-navigation")).toEqual([]);
+      expect(perfDetails<{ owner?: string; supersessionSource?: string }>(
+        harness.messages,
+        "mm-virt-scroll-lease-superseded"
+      ).filter(detail =>
+        detail.owner === "minimap-gesture"
+        && detail.supersessionSource === "source-line-navigation")).toEqual([]);
+
+      harness.messages.length = 0;
+      harness.setRenderedSectionHeight(SECTION_HEIGHT + 80);
+      harness.triggerResize();
+      await harness.flushQueuedRafs();
+      expect(perfDetails<{ writer?: string }>(harness.messages, "mm-virt-scroll-write-committed")
+        .filter(detail => detail.writer === "navigation-residual")).toEqual([]);
+    }
+  );
 });

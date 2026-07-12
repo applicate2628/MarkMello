@@ -6147,6 +6147,7 @@ function requestMinimapScrollTarget(target: number, writer: string): boolean {
     operation,
     policy: "empty-commit-retain-operation",
   });
+  queuePreviewSourceLinePost();
   return true;
 }
 
@@ -6219,6 +6220,8 @@ function finishMinimapScrollOperation(operation = minimapScrollOperation): void 
 //   paper map under a fixed crosshair. Opposite direction from a scrollbar.
 function handleMinimapPointerDown(event: PointerEvent): void {
   if (virtualizationEnabled) {
+    clearVirtualizedProgrammaticNavigationPostSettleTarget();
+    pendingSourceLineTarget = null;
     minimapScrollOperation = acquireVirtualizedScrollOperation("minimap-gesture", "supersede-as-user");
   }
   minimapDragging = true;
