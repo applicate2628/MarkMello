@@ -1746,9 +1746,10 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(headings.at(-1)).toMatchObject({ id: "heading-1004" });
   });
 
-  it("re-arms the active-heading observer with live headings after virtual window replacement", async () => {
+  it("posts the model active heading for a deep virtual scroll without an active-heading observer", async () => {
     const sectionCount = 120;
     const harness = await loadRendererHarness({
+      renderedSectionHeight: SECTION_PITCH,
       sectionCount,
       virtualization: true,
     });
@@ -1756,54 +1757,31 @@ describe("renderer scroll-family virtualization integration", () => {
     harness.load({ type: "load-document", html: buildHeadingDocument(sectionCount), hasMermaid: false, hasHljs: false });
     await harness.flushQueuedRafs();
 
-    const initialObserver = activeHeadingObserverRecords(harness).at(-1);
-    expect(initialObserver).toBeDefined();
+    expect(activeHeadingObserverRecords(harness)).toEqual([]);
+    harness.messages.length = 0;
 
     harness.root.scrollTop = 90 * SECTION_PITCH;
     document.dispatchEvent(new Event("scroll"));
-    await harness.flushRafsUntil(() => document.getElementById("heading-90") !== null);
     await harness.flushQueuedRafs();
 
-    const liveHeadings = Array.from(
-      document.querySelectorAll<HTMLHeadingElement>("body > main.mm-document [id^='heading-']")
-    );
-    const latestObserver = activeHeadingObserverRecords(harness).at(-1);
-    expect(liveHeadings.length).toBeGreaterThan(0);
-    expect(latestObserver).toBeDefined();
-    expect(latestObserver).not.toBe(initialObserver);
-    expect(initialObserver!.disconnected).toBe(true);
-    expect(latestObserver!.observed).toEqual(liveHeadings);
-    expect(latestObserver!.observed.every(node => node.isConnected)).toBe(true);
+    expect(activeHeadingChangedIds(harness.messages).at(-1)).toBe("heading-90");
+    expect(activeHeadingObserverRecords(harness)).toEqual([]);
   });
 
-  it("does not post an active heading from a superseded virtual window", async () => {
-    let controller: import("../src/virtualizedDocumentWindow").VirtualizedDocumentWindowController | null = null;
+  it("keeps the legacy active-heading observer when virtualization is disabled", async () => {
     const harness = await loadRendererHarness({
-      controllerFaults: {
-        onCreated: created => { controller = created; },
-      },
-      sectionCount: 120,
-      virtualization: true,
+      sectionCount: 12,
+      virtualization: false,
     });
 
-    harness.load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
-    expect(controller).not.toBeNull();
-    controller!.ensureSectionRendered(90, { force: true, preserveAnchor: false });
-    controller!.ensureSectionRendered(0, { force: true, preserveAnchor: false });
-
-    const liveHeadingIds = new Set(
-      Array.from(document.querySelectorAll<HTMLHeadingElement>("body > main.mm-document [id^='heading-']"))
-        .map(node => node.id)
-    );
-    expect(liveHeadingIds.has("heading-0")).toBe(true);
-    expect(liveHeadingIds.has("heading-90")).toBe(false);
-    harness.messages.length = 0;
-
+    harness.load({ type: "load-document", html: buildHeadingDocument(12), hasMermaid: false, hasHljs: false });
     await harness.flushQueuedRafs();
 
-    const postedIds = activeHeadingChangedIds(harness.messages);
-    expect(postedIds.length).toBeGreaterThan(0);
-    expect(postedIds.every(id => liveHeadingIds.has(id))).toBe(true);
+    const observer = activeHeadingObserverRecords(harness).at(-1);
+    expect(observer).toBeDefined();
+    expect(observer!.observed).toEqual(Array.from(
+      document.querySelectorAll<HTMLHeadingElement>("body > main.mm-document [id^='heading-']")
+    ));
   });
 
   it("keeps a non-smooth off-window anchor landing instant", async () => {

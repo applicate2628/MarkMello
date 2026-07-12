@@ -64,6 +64,7 @@ import {
   type ModelRenderedContentPreparationStatus,
   type PrepareDocumentWindowModelRenderedContentDeps,
 } from "./modelRenderedContent";
+import { ModelActiveHeadingPublisher } from "./modelActiveHeading";
 import {
   createSectionIntrinsicCalibrator,
   readIntrinsicSizeMetrics,
@@ -2807,6 +2808,7 @@ function applyVirtualizedRenderedHeightAdoptionEffects(
     reassertPendingTarget: options.reassertPendingTarget !== false,
   });
   refreshVirtualizedFindHighlights();
+  updateModelBasedActiveHeading();
   if (getModelMinimapSource() !== null && minimapSourceReady) {
     syncModelMinimapCloneMetadata();
     updateMinimapViewport({ skipVisibilityUpdate: true });
@@ -3893,6 +3895,7 @@ function runVirtualizedCalibration(documentEpoch: number, ticket: GeometryWorkTi
       return;
     }
     mutateVirtualizedGeometry(ticket);
+    updateModelBasedActiveHeading();
     const target = navigationRegistration !== null
       ? preMutationScrollTop + (result.anchorShift ?? 0)
       : correctionTarget.kind === "active"
@@ -3944,6 +3947,7 @@ function postScroll(): void {
     ...scrollState,
     topBlockIndex
   });
+  updateModelBasedActiveHeading();
   scheduleVirtualizationShadowValidation();
 }
 
@@ -5587,6 +5591,17 @@ function restoreCachedMinimapContent(): boolean {
 // requirement to span the full content-area height with its own scroll.
 let activeHeadingObserver: IntersectionObserver | null = null;
 let lastPostedActiveHeadingId: string | null = null;
+const modelActiveHeadingPublisher = new ModelActiveHeadingPublisher(id => {
+  postHostMessage({ type: "active-heading-changed", id });
+});
+
+function updateModelBasedActiveHeading(): void {
+  if (!virtualizationEnabled) {
+    return;
+  }
+
+  modelActiveHeadingPublisher.update(virtualizedDocumentWindowModel, window.scrollY);
+}
 
 function addHeadingSegment(
   segments: HeadingSegmentPayload[],
@@ -5669,6 +5684,11 @@ function readLiveHeadingNodes(main: HTMLElement): HTMLHeadingElement[] {
 }
 
 function rebuildActiveHeadingObserverFromLiveDocument(): void {
+  if (virtualizationEnabled) {
+    updateModelBasedActiveHeading();
+    return;
+  }
+
   const main = document.querySelector<HTMLElement>("main.mm-document");
   const nodes = main === null ? [] : readLiveHeadingNodes(main).filter((node) => !!node.id);
   rebuildActiveHeadingObserver(nodes);
@@ -5727,6 +5747,9 @@ function extractAndPostHeadings(): void {
     postHostMessage({ type: "headings-updated", headings: [] });
     lastExtractedHeadings = [];
     lastPostedActiveHeadingId = null;
+    if (virtualizationEnabled) {
+      modelActiveHeadingPublisher.update(null, window.scrollY);
+    }
     return;
   }
 
@@ -5737,7 +5760,11 @@ function extractAndPostHeadings(): void {
 
   lastExtractedHeadings = headings.map(cloneHeadingPayload);
   postHostMessage({ type: "headings-updated", headings });
-  rebuildActiveHeadingObserver(live.nodes.filter((n) => !!n.id));
+  if (virtualizationEnabled) {
+    updateModelBasedActiveHeading();
+  } else {
+    rebuildActiveHeadingObserver(live.nodes.filter((n) => !!n.id));
+  }
 }
 
 function postCachedHeadings(): void {
@@ -5752,6 +5779,10 @@ function postCachedHeadings(): void {
   const headings = cachedHeadings.map(cloneHeadingPayload);
   lastExtractedHeadings = headings.map(cloneHeadingPayload);
   postHostMessage({ type: "headings-updated", headings });
+  if (virtualizationEnabled) {
+    updateModelBasedActiveHeading();
+    return;
+  }
   if (activeHeadingObserver) {
     activeHeadingObserver.disconnect();
     activeHeadingObserver = null;
