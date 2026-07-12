@@ -194,6 +194,7 @@ export class DocumentWindowModel {
   private readonly sectionIndexByBlockIndex = new Map<number, number>();
   private readonly containingSectionIndexByBlockIndex = new Map<number, number>();
   private readonly sectionIndexByHeadingAnchor = new Map<string, number>();
+  private readonly headingAnchorPositions: Array<{ anchor: string; sectionIndex: number }> = [];
   private readonly sourceLineSpans: Array<SourceLineModelSpan & { sectionIndex: number }> = [];
   private readonly renderedContentStatsBySection: RenderedContentMathStats[] = [];
   private readonly renderedContentSummary: RenderedContentMathStats = createEmptyRenderedContentMathStats();
@@ -222,6 +223,7 @@ export class DocumentWindowModel {
         }
       }
       for (const anchor of entry.headingAnchors) {
+        this.headingAnchorPositions.push({ anchor, sectionIndex: index });
         if (!this.sectionIndexByHeadingAnchor.has(anchor)) {
           this.sectionIndexByHeadingAnchor.set(anchor, index);
         }
@@ -328,6 +330,31 @@ export class DocumentWindowModel {
 
     const sectionIndex = this.sectionIndexByHeadingAnchor.get(normalized);
     return sectionIndex === undefined ? undefined : this.sections[sectionIndex];
+  }
+
+  headingAnchorAtOrBeforeSectionIndex(sectionIndex: number): string | null {
+    if (this.headingAnchorPositions.length === 0 || !Number.isFinite(sectionIndex)) {
+      return null;
+    }
+
+    const normalizedSectionIndex = Math.max(
+      0,
+      Math.min(Math.floor(sectionIndex), Math.max(0, this.sections.length - 1))
+    );
+    let low = 0;
+    let high = this.headingAnchorPositions.length - 1;
+    let selectedIndex = -1;
+    while (low <= high) {
+      const mid = low + Math.floor((high - low) / 2);
+      if (this.headingAnchorPositions[mid]!.sectionIndex <= normalizedSectionIndex) {
+        selectedIndex = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    return this.headingAnchorPositions[selectedIndex >= 0 ? selectedIndex : 0]!.anchor;
   }
 
   getEntryBySourceLine(sourceLine: number): SectionModelEntry | undefined {
