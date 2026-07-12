@@ -464,11 +464,12 @@ describe("virtualized document window", () => {
       entry(2, 42, 100),
       entry(3, 43, 100),
     ]);
+    const measuredUpdates = [{ blockIndex: 41, measuredHeight: 150 }];
     const controller = createVirtualizedDocumentWindowController({
       main: document.querySelector<HTMLElement>("main.mm-document")!,
       model,
       ownerWindow: window,
-      readMeasuredHeights: () => [{ blockIndex: 41, measuredHeight: 150 }],
+      readMeasuredHeights: () => measuredUpdates,
       renderAhead: {
         aboveViewports: 1,
         belowViewports: 0,
@@ -479,14 +480,78 @@ describe("virtualized document window", () => {
     });
 
     controller.updateWindowForScroll();
-    const adopted = controller.adoptRenderedHeights({
-      operation: { requestScrollTop: target => { root.scrollTop = target; } },
-    });
+    const requestScrollTop = vi.fn((target: number) => { root.scrollTop = target; });
+    const adopted = controller.adoptRenderedHeights({ operation: { requestScrollTop } });
 
     expect(adopted.updatedCount).toBe(1);
+    expect(adopted.anchorShift).toBe(50);
     expect(getScrollTop()).toBe(300);
     expect(model.sectionTop(2)).toBe(250);
     expect(document.querySelector<HTMLElement>("[data-mm-virtual-spacer='top']")?.style.height).toBe("100px");
+
+    const fixedPoint = controller.adoptRenderedHeights({ operation: { requestScrollTop } });
+    expect(fixedPoint).toEqual({
+      anchorShift: 0,
+      maxAbsDelta: 0,
+      totalDelta: 0,
+      updatedCount: 0,
+    });
+    expect(requestScrollTop).toHaveBeenCalledOnce();
+  });
+
+  it("reports zero viewport-anchor shift for below-viewport adoption", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { getScrollTop, root } = setScrollRoot(150, 500, 100);
+    const model = new DocumentWindowModel([
+      entry(0, 44, 100),
+      entry(1, 45, 100),
+      entry(2, 46, 100),
+      entry(3, 47, 100),
+    ]);
+    const controller = createVirtualizedDocumentWindowController({
+      main: document.querySelector<HTMLElement>("main.mm-document")!,
+      model,
+      ownerWindow: window,
+      readMeasuredHeights: () => [{ blockIndex: 47, measuredHeight: 160 }],
+      renderAhead: {
+        aboveViewports: 0,
+        belowViewports: 3,
+        minAbovePx: 0,
+        minBelowPx: 0,
+      },
+      root,
+    });
+    const requestScrollTop = vi.fn((target: number) => { root.scrollTop = target; });
+
+    controller.updateWindowForScroll();
+    const adopted = controller.adoptRenderedHeights({ operation: { requestScrollTop } });
+
+    expect(adopted.anchorShift).toBe(0);
+    expect(getScrollTop()).toBe(150);
+  });
+
+  it("realizes the complete target viewport range without a scroll update", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(0, 3000, 200);
+    const model = new DocumentWindowModel(
+      Array.from({ length: 30 }, (_value, index) => entry(index, 500 + index, 100))
+    );
+    const controller = createVirtualizedDocumentWindowController({
+      main: document.querySelector<HTMLElement>("main.mm-document")!,
+      model,
+      ownerWindow: window,
+      root,
+    });
+    const target = 1400;
+    const range = model.computeWindowRange(target, root.clientHeight);
+
+    expect(controller.ensureSectionRangeRendered(range.start, range.end, {
+      force: true,
+      preserveAnchor: false,
+    })).toBe(true);
+    expect(controller.getCurrentRange()).toEqual(range);
+    expect(controller.isSectionRendered(model.sectionIndexAtDocumentY(target + root.clientHeight))).toBe(true);
+    expect(document.querySelector(`[data-mm-block-index="${500 + range.end}"]`)).not.toBeNull();
   });
 
   it("preserves the first visible rendered block offset when measured heights change", () => {
@@ -507,7 +572,7 @@ describe("virtualized document window", () => {
         if (blockIndex === 80) {
           top = -120;
         } else if (blockIndex === 81) {
-          top = 10;
+          top = 5;
         }
       }
       const height = entry === undefined ? 0 : model.sectionEffectiveHeight(entry.sectionIndex);
@@ -552,9 +617,10 @@ describe("virtualized document window", () => {
       const anchorAfter = document.querySelector<HTMLElement>('[data-mm-block-index="81"]')!;
 
       expect(adopted.updatedCount).toBe(2);
-      expect(anchorTopBefore).toBe(10);
-      expect(anchorAfter.getBoundingClientRect().top).toBeCloseTo(0);
-      expect(getScrollTop()).toBe(150);
+      expect(adopted.anchorShift).toBe(50);
+      expect(anchorTopBefore).toBe(5);
+      expect(anchorAfter.getBoundingClientRect().top).toBeCloseTo(5);
+      expect(getScrollTop()).toBe(145);
     } finally {
       rectSpy.mockRestore();
     }

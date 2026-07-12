@@ -237,18 +237,37 @@ export function createVirtualizedDocumentWindowController(
       const preserveSectionIndex = normalizeSectionIndex(options.preserveSectionIndex, deps.model.getSectionCount());
       const reanchor = options.reanchor !== false;
       const preMutationScrollTop = deps.root.scrollTop;
-      const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(deps.root.scrollTop) : null;
+      const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(preMutationScrollTop) : null;
       const blocks = collectLiveDocumentSectionElements(deps.main);
       const liveAnchor = preserveSectionIndex === null ? captureReadingAnchor(blocks) : null;
+      const liveAnchorEntry = liveAnchor === null
+        ? undefined
+        : deps.model.getEntryByBlockIndex(liveAnchor.blockIndex);
+      const viewportAnchor = preserveSectionIndex === null && options.modelAnchor === undefined
+        ? deps.model.captureAnchor(preMutationScrollTop)
+        : null;
+      const modelAnchor = options.modelAnchor ?? (
+        liveAnchorEntry !== undefined && liveAnchor !== null
+          ? {
+              sectionIndex: liveAnchorEntry.sectionIndex,
+              targetLocalOffset: liveAnchor.intraOffsetPx,
+            }
+          : viewportAnchor !== null && viewportAnchor.sectionIndex >= 0
+          ? {
+              sectionIndex: viewportAnchor.sectionIndex,
+              targetLocalOffset: viewportAnchor.intraOffset,
+            }
+          : undefined
+      );
       const updates = deps.readMeasuredHeights
         ? deps.readMeasuredHeights(blocks)
         : readLiveBlockOffsetMeasuredHeights(blocks);
       const result = deps.model.updateMeasuredHeightsByBlockIndex(
         realizationTracker?.filterRealizedUpdates(blocks, updates) ?? updates,
-        options.modelAnchor
+        modelAnchor
       );
       if (result.updatedCount === 0) {
-        return options.modelAnchor === undefined
+        return modelAnchor === undefined
           ? EMPTY_HEIGHT_UPDATE
           : { ...EMPTY_HEIGHT_UPDATE, anchorShift: 0 };
       }
@@ -256,7 +275,7 @@ export function createVirtualizedDocumentWindowController(
         return result;
       }
 
-      const desiredScrollTop = options.modelAnchor !== undefined
+      const desiredScrollTop = modelAnchor !== undefined
         ? preMutationScrollTop + (result.anchorShift ?? 0)
         : preserveSectionIndex !== null
         ? deps.model.sectionTop(preserveSectionIndex)

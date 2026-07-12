@@ -229,6 +229,33 @@ describe("document window model", () => {
     expect(update.anchorShift).toBe(0);
   });
 
+  it("reaches a fixed point after identical measured geometry is adopted", () => {
+    const model = new DocumentWindowModel([
+      entry(0, 23, 100),
+      entry(1, 24, 100),
+    ]);
+    const update = {
+      blockIndex: 23,
+      geometryOwner: "source" as const,
+      measuredHeight: 140,
+      occupiedNonContentHeight: 12,
+    };
+
+    expect(model.updateMeasuredHeightsByBlockIndex([update], {
+      sectionIndex: 1,
+      targetLocalOffset: 20,
+    })).toMatchObject({ anchorShift: 40, updatedCount: 1 });
+    expect(model.updateMeasuredHeightsByBlockIndex([update], {
+      sectionIndex: 1,
+      targetLocalOffset: 20,
+    })).toEqual({
+      anchorShift: 0,
+      maxAbsDelta: 0,
+      totalDelta: 0,
+      updatedCount: 0,
+    });
+  });
+
   it("computes windows, anchors, and spacer math from the same height model", () => {
     const model = new DocumentWindowModel([
       entry(0, 20, 100),
@@ -588,6 +615,32 @@ describe("document window model", () => {
       blockIndex: 72,
       measuredHeight: 160,
     });
+  });
+
+  it("keeps a stored measured anchor pixel-exact across repeated restores", () => {
+    setDocumentScrollRoot(0, 80);
+    const blocks = [
+      block(170, 0, 100, "Before"),
+      block(171, 100, 300, "Tall target"),
+      block(172, 400, 100, "After"),
+    ];
+    for (const [index, blockElement] of blocks.entries()) {
+      blockElement.style.setProperty("content-visibility", "auto");
+      blockElement.style.setProperty("contain-intrinsic-size", `auto ${[100, 300, 100][index]}px`);
+    }
+    const models = buildDocumentWindowModelsFromLiveBlocks(blocks, metrics, 500, {
+      acceptRememberedIntrinsicSizeMeasurements: true,
+    });
+    const storedAnchor = { blockIndex: 171, intraOffset: 250, sectionIndex: 1 };
+    const originalScrollTop = 350;
+
+    const restoredEntry = models.measuredModel.getEntryByBlockIndex(171);
+    expect(restoredEntry).toMatchObject({ measuredHeight: 300 });
+    expect(restoredEntry).not.toHaveProperty("measuredHeightPlaceholder");
+    expect(models.estimateOnlyModel.scrollTopForAnchor(storedAnchor)).not.toBe(originalScrollTop);
+    for (let restore = 0; restore < 5; restore++) {
+      expect(models.measuredModel.scrollTopForAnchor(storedAnchor) - originalScrollTop).toBe(0);
+    }
   });
 
   it("flags content-visibility placeholder measurements and excludes them from estimate-error stats", () => {

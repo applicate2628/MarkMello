@@ -114,6 +114,7 @@ export type LiveDocumentWindowModels = {
 };
 
 export type BuildDocumentWindowModelOptions = {
+  acceptRememberedIntrinsicSizeMeasurements?: boolean;
   intrinsicSizeCalibrator?: SectionIntrinsicCalibrator;
 };
 
@@ -427,9 +428,6 @@ export class DocumentWindowModel {
 
       const entry = this.sections[index]!;
       const occupiedNonContentHeight = update.occupiedNonContentHeight;
-      if (typeof occupiedNonContentHeight === "number" && Number.isFinite(occupiedNonContentHeight)) {
-        entry.occupiedNonContentHeight = occupiedNonContentHeight;
-      }
       if (update.measuredHeightPlaceholder === true) {
         continue;
       }
@@ -438,6 +436,23 @@ export class DocumentWindowModel {
       }
 
       const previous = effectiveHeight(entry);
+      const nextOccupiedNonContentHeight = typeof occupiedNonContentHeight === "number"
+        && Number.isFinite(occupiedNonContentHeight)
+        ? occupiedNonContentHeight
+        : entry.occupiedNonContentHeight;
+      const changed = !Object.is(entry.measuredHeight, update.measuredHeight)
+        || !Object.is(entry.occupiedNonContentHeight, nextOccupiedNonContentHeight)
+        || entry.geometryOwner !== update.geometryOwner
+        || entry.measuredHeightPlaceholder === true;
+      if (!changed) {
+        continue;
+      }
+
+      if (nextOccupiedNonContentHeight === undefined) {
+        delete entry.occupiedNonContentHeight;
+      } else {
+        entry.occupiedNonContentHeight = nextOccupiedNonContentHeight;
+      }
       entry.measuredHeight = update.measuredHeight;
       if (update.geometryOwner === undefined) {
         delete entry.geometryOwner;
@@ -1031,7 +1046,9 @@ function readLiveSectionModelEntries(
     if (measurement.occupiedNonContentHeight !== undefined) {
       entry.occupiedNonContentHeight = measurement.occupiedNonContentHeight;
     }
-    if (measured && measurement.measuredHeightPlaceholder) {
+    const acceptsRememberedIntrinsicSizeMeasurement = options.acceptRememberedIntrinsicSizeMeasurements === true
+      && semanticElement.style.containIntrinsicSize.trim().length > 0;
+    if (measured && measurement.measuredHeightPlaceholder && !acceptsRememberedIntrinsicSizeMeasurement) {
       entry.measuredHeight = undefined;
       entry.measuredHeightPlaceholder = true;
     }
