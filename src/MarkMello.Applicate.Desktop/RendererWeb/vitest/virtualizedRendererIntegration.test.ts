@@ -121,7 +121,7 @@ describe("renderer virtualization wiring", () => {
     const comparisons = readProductionTypeScript("RendererWeb/src").flatMap(file =>
       Array.from(file.source.matchAll(detector), match => ({ path: file.path, text: match[0] }))
     );
-    expect(comparisons).toHaveLength(2);
+    expect(comparisons).toHaveLength(1);
     expect(comparisons.every(candidate => candidate.path.endsWith("virtualizedDocumentWindow.ts"))).toBe(true);
     expect("offsetHeight > intrinsicSize".match(detector)).not.toBeNull();
     expect(windowSource).toContain("const filterRealizedUpdates = (");
@@ -202,9 +202,10 @@ describe("renderer virtualization wiring", () => {
       '}, { passive: true });'
     );
     const currentOffBranch = sliceBetween(currentListener, "  } else {", "    return;\n  }");
+    const baselineObservableBranch = baselineListener.slice(baselineListener.indexOf("  queuePostScroll();"));
 
     expect(source).toContain("if (!virtualizationEnabled) {\n    scrollToSourceLineInCurrentWindow(sourceLine);");
-    expect(normalizeStatements(currentOffBranch)).toBe(normalizeStatements(baselineListener));
+    expect(normalizeStatements(currentOffBranch)).toBe(normalizeStatements(baselineObservableBranch));
     expect(currentListener.indexOf("classifyNativeScroll")).toBeLessThan(currentListener.indexOf("queuePostScroll();"));
   });
 
@@ -387,9 +388,9 @@ describe("renderer virtualization wiring", () => {
     expect(scrollWindow).toContain("isVirtualizedHeldRestoreInProgress()");
     expect(sourceLine).toContain("isVirtualizedHeldRestoreInProgress()");
     expect(source.match(
-      /reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null/g
-    )).toHaveLength(4);
-    expect(source.match(/reassertPendingTarget: postSettleTarget === null/g)).toHaveLength(1);
+      /reassertPendingTarget: !hasVirtualizedNavigationRegistration\(\)/g
+    )).toHaveLength(5);
+    expect(source).not.toContain("virtualizedProgrammaticNavigationPostSettleTarget");
   });
 
   it("navigation cache and minimap consume same-epoch confirmation settlement", () => {

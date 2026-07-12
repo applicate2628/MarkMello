@@ -108,9 +108,11 @@ describe("renderer virtualization flags", () => {
 
     expect(composition).toContain("const userInputWitness = virtualizationEnabled");
     expect(composition).toContain("? createUserInputWitness");
-    expect(composition).toContain("const disposeUserInputWitness = userInputWitness === null");
+    expect(composition).toContain("const disposeUserInputWitnessListeners = userInputWitness === null");
     expect(composition).toContain("? null\n  : installUserInputWitnessListeners");
-    expect(composition).toContain("disposeUserInputWitness?.();");
+    expect(composition).toContain("const disposeNavigationWitness = userInputWitness?.subscribeEvidence");
+    expect(composition).toContain("disposeNavigationWitness?.();");
+    expect(composition).toContain("disposeUserInputWitnessListeners?.();");
   });
 
   it("flags unset install no control plane tickets listeners watches reservations font tickets or H3 observer", () => {
@@ -178,15 +180,21 @@ describe("renderer virtualization flags", () => {
       /scheduleVirtualizedMeasuredHeightAdoption\(\);/,
     ] as const;
 
+    const normalizeNavigationHoldPredicate = (statements: readonly string[]) => statements.map(statement =>
+      statement.replace(
+        "virtualizedProgrammaticNavigationPostSettleTarget === null",
+        "!hasVirtualizedNavigationRegistration()"
+      )
+    );
     expect(normalizedMatches(currentResizeOwner, resizeStatements))
-      .toEqual(normalizedMatches(baselineShared, resizeStatements));
+      .toEqual(normalizeNavigationHoldPredicate(normalizedMatches(baselineShared, resizeStatements)));
     expect(normalizedMatches(currentFontsOwner, fontStatements))
-      .toEqual(normalizedMatches(baselineShared, fontStatements));
+      .toEqual(normalizeNavigationHoldPredicate(normalizedMatches(baselineShared, fontStatements)));
     expect(currentResizeOwner).toContain(
-      "reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null"
+      "reassertPendingTarget: !hasVirtualizedNavigationRegistration()"
     );
     expect(currentFontsOwner).toContain(
-      "reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null"
+      "reassertPendingTarget: !hasVirtualizedNavigationRegistration()"
     );
     expect(currentShared).toContain("if (!virtualizationEnabled) {\n        runLegacyResizeObserverWork(documentEpoch);");
     expect(currentShared).toContain("if (!virtualizationEnabled) {\n      runLegacyDocumentFontsReadyWork(fontsDocumentEpoch);");
