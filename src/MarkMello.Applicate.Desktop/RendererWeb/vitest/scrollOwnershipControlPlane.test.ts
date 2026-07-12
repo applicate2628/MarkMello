@@ -76,7 +76,11 @@ type Harness = {
 
 function createHarness(
   deliveredFrameBudget = 120,
-  hasRecentUserInput: (withinMs: number) => boolean = () => true
+  hasRecentUserInput: (withinMs: number) => boolean = () => true,
+  heldOperation: Pick<
+    Parameters<typeof createScrollOwnershipControlPlane>[0],
+    "readHeldGestureEvidence" | "readHeldOperationMode"
+  > = {}
 ): Harness {
   const events: GeometrySettledPayload[] = [];
   const frames = new FakeFrameQueue();
@@ -87,6 +91,7 @@ function createHarness(
     deliveredFrameBudget,
     emitGeometrySettled: payload => events.push(payload),
     hasRecentUserInput,
+    ...heldOperation,
     requestFrame: frames.request,
     root,
     trace: event => traces.push(event),
@@ -308,6 +313,46 @@ describe("scroll ownership control plane", () => {
     expect(plane.holds(lease)).toBe(true);
     expect(plane.classifyNativeScroll(260).kind).toBe("user-supersession");
     expect(plane.holds(lease)).toBe(false);
+  });
+
+  it("attributes unmatched native movement to a declared held gesture until later foreign evidence", () => {
+    let gestureLease: ScrollLease | null = null;
+    let evidence: { kind: "wheel"; sequence: number } | null = null;
+    const { plane } = createHarness(120, () => true, {
+      readHeldGestureEvidence: lease => lease === gestureLease ? evidence : null,
+      readHeldOperationMode: lease => lease === gestureLease ? "gesture" : null,
+    });
+    gestureLease = acquired(plane.acquire("minimap-gesture", "supersede-as-user"));
+
+    expect(plane.classifyNativeScroll(333)).toEqual({
+      kind: "gesture-owned",
+      operationEpoch: gestureLease.operationEpoch,
+      value: 333,
+    });
+    expect(plane.holds(gestureLease)).toBe(true);
+
+    evidence = { kind: "wheel", sequence: 12 };
+    expect(plane.classifyNativeScroll(444)).toEqual({
+      evidence,
+      kind: "user-supersession",
+      value: 444,
+    });
+    expect(plane.holds(gestureLease)).toBe(false);
+  });
+
+  it("keeps an unregistered supersede-as-user host operation on value matching", async () => {
+    const { frames, plane } = createHarness(120, () => true, {
+      readHeldGestureEvidence: () => null,
+      readHeldOperationMode: () => null,
+    });
+    const host = acquired(plane.acquire("host-progress", "supersede-as-user"));
+    const receipt = plane.write(host, { target: 200, writer: "host-progress" });
+    plane.scheduleFrameTransaction(host, () => undefined);
+    frames.deliverFrame();
+    await receipt.result;
+
+    expect(plane.classifyNativeScroll(350).kind).toBe("unattributed-failure");
+    expect(plane.holds(host)).toBe(false);
   });
 
   it("traces finite no-echo movement without a recent user-input witness", () => {

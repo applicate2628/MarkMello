@@ -446,6 +446,8 @@ const scrollOwnershipControlPlane: ScrollOwnershipControlPlane | null = virtuali
     hasRecentUserInput: withinMs => userInputWitness!.hasRecentUserInput(withinMs),
     prepareGeometrySettleCandidate: () =>
       virtualizedDocumentWindowController?.recensusRealizationWatches() ?? true,
+    readHeldGestureEvidence: lease => readVirtualizedHeldGestureEvidence(lease),
+    readHeldOperationMode: lease => readVirtualizedHeldOperationMode(lease),
     requestFrame: callback => window.requestAnimationFrame(timestamp => {
       virtualizedScrollControlFrameTimestamp = timestamp;
       callback(timestamp);
@@ -532,6 +534,7 @@ const virtualizedHeldOperationScrollPolicy = virtualizationEnabled
   : null;
 let virtualizedScrollControlFrameTimestamp: number | null = null;
 let minimapScrollOperation: VirtualizedScrollOperation | null = null;
+let minimapOwnedPointerId: number | null = null;
 let cachedScrollRestoreCompletion: Promise<void> | null = null;
 let finishCachedScrollRestore: ((status: "canceled" | "committed" | "failed", reason: string) => void) | null = null;
 let virtualizedWindowMathController: MathReadinessController | null = null;
@@ -3175,6 +3178,34 @@ function resolveVirtualizedCorrectionTarget(
     operation,
     virtualizedProgrammaticNavigationPostSettleTarget
   );
+}
+
+function readVirtualizedHeldOperationRegistration(
+  operation: Pick<VirtualizedScrollOperation, "documentEpoch" | "operationEpoch">
+) {
+  const registration = virtualizedHeldOperationScrollPolicy?.read(operation) ?? null;
+  return registration !== null && "operation" in registration.target
+    ? registration
+    : null;
+}
+
+function readVirtualizedHeldOperationMode(
+  operation: Pick<VirtualizedScrollOperation, "documentEpoch" | "operationEpoch">
+) {
+  return readVirtualizedHeldOperationRegistration(operation)?.mode ?? null;
+}
+
+function readVirtualizedHeldGestureEvidence(
+  operation: Pick<VirtualizedScrollOperation, "documentEpoch" | "operationEpoch">
+) {
+  const registration = readVirtualizedHeldOperationRegistration(operation);
+  const target = registration?.target;
+  return registration?.mode === "gesture"
+    && target !== undefined
+    && "kind" in target
+    && target.kind === "gesture"
+    ? userInputWitness?.readEvidenceAfter(target.witnessSequence) ?? null
+    : null;
 }
 
 function readVirtualizedCorrectionTargetSectionIndex(
@@ -6141,6 +6172,17 @@ function requestMinimapScrollTarget(target: number, writer: string): boolean {
   if (operation === null || !operation.isCurrent()) {
     return false;
   }
+  const registration = readVirtualizedHeldOperationRegistration(operation);
+  if (
+    registration?.mode === "gesture"
+    && "kind" in registration.target
+    && registration.target.kind === "gesture"
+  ) {
+    virtualizedHeldOperationScrollPolicy?.update(operation, Object.freeze({
+      ...registration.target,
+      latestTarget: target,
+    }));
+  }
   operation.requestScrollTop(target, writer);
   virtualizedScrollCoordinator.runFrameTransaction({
     kind: "empty-commit",
@@ -6206,7 +6248,12 @@ function finishMinimapScrollOperation(operation = minimapScrollOperation): void 
     minimapScrollOperation = null;
   }
   if (operation !== null) {
+    virtualizedHeldOperationScrollPolicy?.clear(operation);
     releaseVirtualizedScrollOperationAfterWrite(operation);
+  }
+  if (minimapOwnedPointerId !== null) {
+    userInputWitness?.endOwnedPointer(minimapOwnedPointerId);
+    minimapOwnedPointerId = null;
   }
 }
 
@@ -6219,14 +6266,30 @@ function finishMinimapScrollOperation(operation = minimapScrollOperation): void 
 //   point under the cursor stays anchored. Pan/grab UX, like dragging a
 //   paper map under a fixed crosshair. Opposite direction from a scrollbar.
 function handleMinimapPointerDown(event: PointerEvent): void {
+  const root = document.scrollingElement ?? document.documentElement;
   if (virtualizationEnabled) {
+    if (minimapOwnedPointerId !== null) {
+      userInputWitness?.endOwnedPointer(minimapOwnedPointerId);
+      minimapOwnedPointerId = null;
+    }
     clearVirtualizedProgrammaticNavigationPostSettleTarget();
     pendingSourceLineTarget = null;
     minimapScrollOperation = acquireVirtualizedScrollOperation("minimap-gesture", "supersede-as-user");
+    const operation = minimapScrollOperation;
+    if (operation !== null) {
+      const witnessSequence = userInputWitness!.captureSequence();
+      minimapOwnedPointerId = event.pointerId;
+      userInputWitness!.beginOwnedPointer(event.pointerId);
+      virtualizedHeldOperationScrollPolicy?.register(operation, "gesture", Object.freeze({
+        kind: "gesture",
+        latestTarget: root.scrollTop,
+        operation,
+        witnessSequence,
+      }));
+    }
   }
   minimapDragging = true;
   minimapDragStartClientY = event.clientY;
-  const root = document.scrollingElement ?? document.documentElement;
   minimapDragStartScrollTop = root.scrollTop;
   minimapDragMode = "tentative";
   // Record where inside the viewport indicator the user grabbed (minimap-local Y)
@@ -6309,6 +6372,10 @@ function handleMinimapPointerUp(event: PointerEvent): void {
   minimapDragging = false;
   minimapDragStartClientY = null;
   minimapDragMode = "tentative";
+  if (minimapOwnedPointerId !== null) {
+    userInputWitness?.endOwnedPointer(minimapOwnedPointerId);
+    minimapOwnedPointerId = null;
+  }
   try {
     minimapRoot?.releasePointerCapture(event.pointerId);
   } catch {

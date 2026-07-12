@@ -1,6 +1,18 @@
+export type UserInputEvidenceKind = "scroll-key" | "scrollbar-gutter" | "touch" | "wheel";
+
+export type UserInputEvidence = Readonly<{
+  kind: UserInputEvidenceKind;
+  sequence: number;
+}>;
+
 export type UserInputWitness = {
+  beginOwnedPointer: (pointerId: number) => void;
+  captureSequence: () => number;
+  endOwnedPointer: (pointerId: number) => void;
   hasRecentUserInput: (withinMs: number) => boolean;
-  recordUserInput: () => void;
+  hasOwnedPointer: () => boolean;
+  readEvidenceAfter: (sequence: number) => UserInputEvidence | null;
+  recordUserInput: (kind: UserInputEvidenceKind) => UserInputEvidence;
 };
 
 export type UserInputWitnessListenerDeps = {
@@ -21,9 +33,19 @@ const SCROLL_KEYS = new Set([
 ]);
 
 export function createUserInputWitness(deps: { now: () => number }): UserInputWitness {
+  let evidence: UserInputEvidence | null = null;
   let recordedAt: number | null = null;
+  let sequence = 0;
+  const ownedPointers = new Set<number>();
 
   return {
+    beginOwnedPointer: pointerId => {
+      if (Number.isFinite(pointerId)) {
+        ownedPointers.add(pointerId);
+      }
+    },
+    captureSequence: () => sequence,
+    endOwnedPointer: pointerId => { ownedPointers.delete(pointerId); },
     hasRecentUserInput: withinMs => {
       if (!Number.isFinite(withinMs) || withinMs < 0 || recordedAt === null) {
         return false;
@@ -32,8 +54,18 @@ export function createUserInputWitness(deps: { now: () => number }): UserInputWi
       return Number.isFinite(recordedAt) && Number.isFinite(elapsed)
         && elapsed >= 0 && elapsed <= withinMs;
     },
-    recordUserInput: () => {
+    hasOwnedPointer: () => ownedPointers.size > 0,
+    readEvidenceAfter: capturedSequence =>
+      Number.isSafeInteger(capturedSequence)
+      && capturedSequence >= 0
+      && evidence !== null
+      && evidence.sequence > capturedSequence
+        ? evidence
+        : null,
+    recordUserInput: kind => {
       recordedAt = deps.now();
+      evidence = Object.freeze({ kind, sequence: ++sequence });
+      return evidence;
     },
   };
 }
@@ -63,7 +95,12 @@ function isEditableTarget(target: EventTarget | null): boolean {
 export function installUserInputWitnessListeners(
   deps: UserInputWitnessListenerDeps
 ): () => void {
-  const record = (): void => deps.witness.recordUserInput();
+  const onWheel = (): void => { deps.witness.recordUserInput("wheel"); };
+  const onTouch = (): void => {
+    if (!deps.witness.hasOwnedPointer()) {
+      deps.witness.recordUserInput("touch");
+    }
+  };
   const onKeyDown = (event: KeyboardEvent): void => {
     if (
       event.ctrlKey
@@ -74,7 +111,7 @@ export function installUserInputWitnessListeners(
     ) {
       return;
     }
-    record();
+    deps.witness.recordUserInput("scroll-key");
   };
   const onPointerDown = (event: PointerEvent): void => {
     if (
@@ -84,13 +121,13 @@ export function installUserInputWitnessListeners(
       && event.clientY >= 0
       && event.clientY < deps.ownerWindow.innerHeight
     ) {
-      record();
+      deps.witness.recordUserInput("scrollbar-gutter");
     }
   };
   const options = { capture: true, passive: true } as const;
-  deps.document.addEventListener("wheel", record, options);
-  deps.document.addEventListener("touchstart", record, options);
-  deps.document.addEventListener("touchmove", record, options);
+  deps.document.addEventListener("wheel", onWheel, options);
+  deps.document.addEventListener("touchstart", onTouch, options);
+  deps.document.addEventListener("touchmove", onTouch, options);
   deps.document.addEventListener("keydown", onKeyDown, options);
   deps.document.addEventListener("pointerdown", onPointerDown, options);
 
@@ -101,9 +138,9 @@ export function installUserInputWitnessListeners(
     }
     disposed = true;
     const removeOptions = { capture: true } as const;
-    deps.document.removeEventListener("wheel", record, removeOptions);
-    deps.document.removeEventListener("touchstart", record, removeOptions);
-    deps.document.removeEventListener("touchmove", record, removeOptions);
+    deps.document.removeEventListener("wheel", onWheel, removeOptions);
+    deps.document.removeEventListener("touchstart", onTouch, removeOptions);
+    deps.document.removeEventListener("touchmove", onTouch, removeOptions);
     deps.document.removeEventListener("keydown", onKeyDown, removeOptions);
     deps.document.removeEventListener("pointerdown", onPointerDown, removeOptions);
   };

@@ -1,3 +1,5 @@
+import type { ActiveHeldOperationMode } from "./heldOperationScrollPolicy";
+
 export const GEOMETRY_SETTLED_EVENT = "mm-virt-geometry-settled" as const;
 
 export const SCROLL_OWNERSHIP_TRACE_IDS = {
@@ -91,8 +93,14 @@ export type GeometrySettledWaitOutcome =
 export type NativeScrollClassification =
   | { kind: "self-echo"; expected: number; value: number }
   | { kind: "stale-self-echo"; expected: number; value: number }
-  | { kind: "user-supersession"; value: number }
+  | { kind: "gesture-owned"; operationEpoch: number; value: number }
+  | { evidence?: HeldGestureEvidence; kind: "user-supersession"; value: number }
   | { kind: "unattributed-failure"; expected: number | null; value: number };
+
+export type HeldGestureEvidence = Readonly<{
+  kind: string;
+  sequence: number;
+}>;
 
 export type ScrollOwnershipTraceEvent = {
   documentEpoch: number;
@@ -115,6 +123,8 @@ export type ScrollOwnershipControlPlaneDeps = {
   emitGeometrySettled: (payload: GeometrySettledPayload) => void;
   hasRecentUserInput: (withinMs: number) => boolean;
   prepareGeometrySettleCandidate?: () => boolean;
+  readHeldGestureEvidence?: (lease: ScrollLease) => HeldGestureEvidence | null;
+  readHeldOperationMode?: (lease: ScrollLease) => ActiveHeldOperationMode | null;
   requestFrame: (callback: FrameRequestCallback) => number;
   root: ScrollRootPort;
   trace?: (event: ScrollOwnershipTraceEvent) => void;
@@ -874,6 +884,25 @@ export function createScrollOwnershipControlPlane(
       previousFiniteNativeScrollValue = value;
     }
     const expected = expectedEcho;
+    const heldMode = activeLease === null
+      ? null
+      : deps.readHeldOperationMode?.(activeLease) ?? null;
+    if (activeLease !== null && heldMode === "gesture" && finite) {
+      const evidence = deps.readHeldGestureEvidence?.(activeLease) ?? null;
+      if (evidence !== null) {
+        supersedeByUser(`user-input:${evidence.kind}`);
+        return { evidence, kind: "user-supersession", value };
+      }
+      if (expectedEcho?.lease === activeLease) {
+        expectedEcho = null;
+      }
+      ensureFrame();
+      return {
+        kind: "gesture-owned",
+        operationEpoch: activeLease.operationEpoch,
+        value,
+      };
+    }
     if (
       expected !== null
       && finite

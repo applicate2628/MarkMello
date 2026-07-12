@@ -15,7 +15,7 @@ describe("user input witness", () => {
     const witness = createUserInputWitness({ now: () => now });
 
     expect(witness.hasRecentUserInput(250)).toBe(false);
-    witness.recordUserInput();
+    witness.recordUserInput("wheel");
     expect(witness.hasRecentUserInput(250)).toBe(true);
 
     now = 1250;
@@ -24,6 +24,38 @@ describe("user input witness", () => {
     expect(witness.hasRecentUserInput(250)).toBe(false);
     expect(witness.hasRecentUserInput(-1)).toBe(false);
     expect(witness.hasRecentUserInput(Number.NaN)).toBe(false);
+  });
+
+  it("returns only typed evidence recorded after a captured sequence", () => {
+    const witness = createUserInputWitness({ now: () => 0 });
+    witness.recordUserInput("wheel");
+    const acquisitionSequence = witness.captureSequence();
+
+    expect(witness.readEvidenceAfter(acquisitionSequence)).toBeNull();
+    witness.recordUserInput("scroll-key");
+    expect(witness.readEvidenceAfter(acquisitionSequence)).toEqual({
+      kind: "scroll-key",
+      sequence: acquisitionSequence + 1,
+    });
+  });
+
+  it("suppresses compatibility touch evidence while an owned pointer is active", () => {
+    const witness = createUserInputWitness({ now: () => 0 });
+    const dispose = installUserInputWitnessListeners({ document, ownerWindow: window, witness });
+    const acquisitionSequence = witness.captureSequence();
+
+    witness.beginOwnedPointer(7);
+    document.dispatchEvent(new TouchEvent("touchstart"));
+    document.dispatchEvent(new TouchEvent("touchmove"));
+    expect(witness.readEvidenceAfter(acquisitionSequence)).toBeNull();
+
+    witness.endOwnedPointer(7);
+    document.dispatchEvent(new TouchEvent("touchstart"));
+    expect(witness.readEvidenceAfter(acquisitionSequence)).toEqual({
+      kind: "touch",
+      sequence: acquisitionSequence + 1,
+    });
+    dispose();
   });
 
   it("records wheel, touch, approved keys, and primary gutter pointer input", () => {

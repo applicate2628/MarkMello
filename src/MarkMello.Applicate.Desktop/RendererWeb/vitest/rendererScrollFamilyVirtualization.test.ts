@@ -953,12 +953,13 @@ function activeHeadingChangedIds(messages: readonly unknown[]): string[] {
     .map(message => message.id);
 }
 
-function pointerEvent(type: string, clientY: number): PointerEvent {
+function pointerEvent(type: string, clientY: number, pointerType = "mouse"): PointerEvent {
   return new PointerEvent(type, {
     bubbles: true,
     cancelable: true,
     clientY,
     pointerId: 1,
+    pointerType,
   });
 }
 
@@ -4042,6 +4043,7 @@ describe("renderer scroll-family virtualization integration", () => {
     async state => {
       const harness = await loadMaintenanceLifecycleHarness();
       const request = await startMeasuredMaintenanceInState(harness, state);
+      document.dispatchEvent(new WheelEvent("wheel"));
       harness.root.scrollTop += 17;
       document.dispatchEvent(new Event("scroll"));
       await harness.flushQueuedRafs();
@@ -4557,6 +4559,7 @@ describe("renderer scroll-family virtualization integration", () => {
           : "teardown";
 
       if (cancellation === "user") {
+        document.dispatchEvent(new WheelEvent("wheel"));
         harness.root.scrollTop += 17;
         document.dispatchEvent(new Event("scroll"));
       } else if (cancellation === "document") {
@@ -4713,4 +4716,82 @@ describe("renderer scroll-family virtualization integration", () => {
         .filter(detail => detail.writer === "navigation-residual")).toEqual([]);
     }
   );
+
+  it.each(["wheel", "scroll-key", "scrollbar-gutter"] as const)(
+    "revokes a held minimap gesture on later %s evidence",
+    async evidenceKind => {
+      const harness = await loadMaintenanceLifecycleHarness();
+      const minimap = beginMinimapMaintenanceLease(harness);
+      harness.messages.length = 0;
+
+      if (evidenceKind === "wheel") {
+        document.dispatchEvent(new WheelEvent("wheel"));
+      } else if (evidenceKind === "scroll-key") {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "PageDown" }));
+      } else {
+        document.dispatchEvent(new PointerEvent("pointerdown", {
+          bubbles: true,
+          button: 0,
+          clientX: document.documentElement.clientWidth,
+          clientY: 10,
+          pointerId: 9,
+        }));
+      }
+      harness.root.scrollTop += 17;
+      document.dispatchEvent(new Event("scroll"));
+      await Promise.resolve();
+
+      expect(perfDetails<{ owner?: string; supersessionSource?: string }>(
+        harness.messages,
+        "mm-virt-scroll-lease-superseded"
+      )).toContainEqual(expect.objectContaining({
+        owner: "minimap-gesture",
+        supersessionSource: `user-input:${evidenceKind}`,
+      }));
+      minimap.dispatchEvent(pointerEvent("pointerup", 12));
+      await harness.flushQueuedRafs();
+    }
+  );
+
+  it("does not revoke a new gesture for stale pre-acquisition input", async () => {
+    const harness = await loadMaintenanceLifecycleHarness();
+    document.dispatchEvent(new WheelEvent("wheel"));
+    const minimap = beginMinimapMaintenanceLease(harness);
+    harness.messages.length = 0;
+
+    harness.root.scrollTop += 17;
+    document.dispatchEvent(new Event("scroll"));
+    minimap.dispatchEvent(pointerEvent("pointermove", 588));
+    await harness.flushQueuedRafs();
+
+    expect(perfDetails<{ owner?: string }>(harness.messages, "mm-virt-scroll-lease-superseded")
+      .filter(detail => detail.owner === "minimap-gesture")).toEqual([]);
+    expect(perfDetails<{ writer?: string }>(harness.messages, "mm-virt-scroll-write-committed")
+      .some(detail => detail.writer?.startsWith("minimap-") === true)).toBe(true);
+    minimap.dispatchEvent(pointerEvent("pointerup", 588));
+    await harness.flushQueuedRafs();
+  });
+
+  it("does not revoke a touch minimap drag for its compatibility touch stream", async () => {
+    const harness = await loadMaintenanceLifecycleHarness();
+    const minimap = document.querySelector<HTMLElement>(".mm-minimap")!;
+    Object.defineProperty(minimap, "setPointerCapture", { configurable: true, value: vi.fn() });
+    Object.defineProperty(minimap, "releasePointerCapture", { configurable: true, value: vi.fn() });
+    minimap.dispatchEvent(pointerEvent("pointerdown", 12, "touch"));
+    harness.messages.length = 0;
+
+    document.dispatchEvent(new TouchEvent("touchstart"));
+    document.dispatchEvent(new TouchEvent("touchmove"));
+    harness.root.scrollTop += 17;
+    document.dispatchEvent(new Event("scroll"));
+    minimap.dispatchEvent(pointerEvent("pointermove", 588, "touch"));
+    await harness.flushQueuedRafs();
+
+    expect(perfDetails<{ owner?: string }>(harness.messages, "mm-virt-scroll-lease-superseded")
+      .filter(detail => detail.owner === "minimap-gesture")).toEqual([]);
+    expect(perfDetails<{ writer?: string }>(harness.messages, "mm-virt-scroll-write-committed")
+      .some(detail => detail.writer?.startsWith("minimap-") === true)).toBe(true);
+    minimap.dispatchEvent(pointerEvent("pointerup", 588, "touch"));
+    await harness.flushQueuedRafs();
+  });
 });
