@@ -391,7 +391,7 @@ describe("virtualized document window", () => {
     expect(isCompatible(invalid)).toBe(false);
   });
 
-  it("keeps the same offset anchor when a scroll changes the live window", () => {
+  it("does not re-anchor when a scroll changes only the realized window", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { getScrollTop, root, setScrollTop } = setScrollRoot(150, 450, 100);
     const model = new DocumentWindowModel([
@@ -401,15 +401,58 @@ describe("virtualized document window", () => {
       entry(3, 33, 150),
     ]);
     const controller = makeController({ model, root });
+    const requestScrollTop = vi.fn();
 
     controller.updateWindowForScroll();
     setScrollTop(320);
-    controller.updateWindowForScroll();
+    controller.updateWindowForScroll({ operation: { requestScrollTop } });
 
     const main = document.querySelector<HTMLElement>("main.mm-document")!;
     expect(Array.from(main.querySelectorAll<HTMLElement>("[data-mm-block-index]")).map(node =>
       Number(node.dataset.mmBlockIndex))).toEqual([33]);
     expect(getScrollTop()).toBe(320);
+    expect(requestScrollTop).not.toHaveBeenCalled();
+  });
+
+  it("re-anchors the current scroll by the model shift after a window update", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root, setScrollTop } = setScrollRoot(150, 450, 100);
+    const model = new DocumentWindowModel([
+      entry(0, 34, 100),
+      entry(1, 35, 100),
+      entry(2, 36, 100),
+      entry(3, 37, 100),
+    ]);
+    let mutateGeometry = false;
+    const controller = createVirtualizedDocumentWindowController({
+      main: document.querySelector<HTMLElement>("main.mm-document")!,
+      model,
+      onWindowMounted: () => {
+        if (!mutateGeometry) {
+          return;
+        }
+        model.updateMeasuredHeightsByBlockIndex([{ blockIndex: 34, measuredHeight: 130 }]);
+        setScrollTop(335);
+      },
+      ownerWindow: window,
+      renderAhead: {
+        aboveViewports: 0,
+        belowViewports: 0,
+        minAbovePx: 0,
+        minBelowPx: 0,
+      },
+      root,
+    });
+    const requestScrollTop = vi.fn();
+
+    controller.updateWindowForScroll();
+    setScrollTop(320);
+    mutateGeometry = true;
+    controller.updateWindowForScroll({ operation: { requestScrollTop } });
+
+    expect(model.sectionTop(3)).toBe(330);
+    expect(requestScrollTop).toHaveBeenCalledOnce();
+    expect(requestScrollTop).toHaveBeenCalledWith(365, "scroll-window-reanchor");
   });
 
   it("re-anchors after adopting a measured height above the viewport", () => {

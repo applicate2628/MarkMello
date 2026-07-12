@@ -285,11 +285,15 @@ export function createVirtualizedDocumentWindowController(
       }
 
       const anchor = deps.model.captureAnchor(options.desiredScrollTop ?? deps.root.scrollTop);
+      const preRenderAnchorTop = deps.model.scrollTopForAnchor(anchor);
       renderRange(nextRange);
-      options.operation?.requestScrollTop(
-        deps.model.scrollTopForAnchor(anchor),
-        "scroll-window-reanchor"
-      );
+      const anchorShift = deps.model.scrollTopForAnchor(anchor) - preRenderAnchorTop;
+      if (Math.abs(anchorShift) > Number.EPSILON) {
+        options.operation?.requestScrollTop(
+          deps.root.scrollTop + anchorShift,
+          "scroll-window-reanchor"
+        );
+      }
       return true;
     },
   };
