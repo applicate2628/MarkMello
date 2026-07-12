@@ -1467,6 +1467,36 @@ describe("virtualized document window", () => {
     expect(getScrollTop()).toBe(120);
   });
 
+  it("returns the navigation model-anchor shift without issuing a re-anchor write", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const { root } = setScrollRoot(120, 400, 50);
+    const model = new DocumentWindowModel([
+      entry(0, 120, 100),
+      entry(1, 121, 100),
+      entry(2, 122, 100),
+    ]);
+    const controller = makeController({
+      measure: () => [
+        { blockIndex: 120, measuredHeight: 160 },
+        { blockIndex: 122, measuredHeight: 180 },
+      ],
+      model,
+      root,
+    });
+    const requestScrollTop = vi.fn();
+    controller.updateWindowForScroll({ operation: { requestScrollTop } });
+    requestScrollTop.mockClear();
+
+    const result = controller.adoptRenderedHeights({
+      modelAnchor: { sectionIndex: 2, targetLocalOffset: 17 },
+      operation: { requestScrollTop },
+      reanchor: false,
+    });
+
+    expect(result.anchorShift).toBe(60);
+    expect(requestScrollTop).not.toHaveBeenCalled();
+  });
+
   it("recensuses realization watches before a geometry quiet candidate", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { root } = setScrollRoot(0, 400, 50);

@@ -144,10 +144,16 @@ export type MeasuredHeightUpdate = {
 };
 
 export type MeasuredHeightUpdateResult = {
+  anchorShift?: number | null;
   updatedCount: number;
   maxAbsDelta: number;
   totalDelta: number;
 };
+
+export type ModelGeometryAnchor = Readonly<{
+  sectionIndex: number;
+  targetLocalOffset: number;
+}>;
 
 export type SpacerHeights = {
   topSpacer: number;
@@ -378,7 +384,11 @@ export class DocumentWindowModel {
     this.totalHeight = cumulative;
   }
 
-  updateMeasuredHeightsByBlockIndex(updates: Iterable<MeasuredHeightUpdate>): MeasuredHeightUpdateResult {
+  updateMeasuredHeightsByBlockIndex(
+    updates: Iterable<MeasuredHeightUpdate>,
+    modelAnchor?: ModelGeometryAnchor
+  ): MeasuredHeightUpdateResult {
+    const previousAnchorY = this.readModelAnchorDocumentY(modelAnchor);
     let updatedCount = 0;
     let maxAbsDelta = 0;
     let totalDelta = 0;
@@ -416,7 +426,13 @@ export class DocumentWindowModel {
     if (updatedCount > 0) {
       this.refreshHeightModel();
     }
-    return { maxAbsDelta, totalDelta, updatedCount };
+    const result = { maxAbsDelta, totalDelta, updatedCount };
+    return modelAnchor === undefined
+      ? result
+      : {
+          ...result,
+          anchorShift: this.computeModelAnchorShift(previousAnchorY, modelAnchor),
+        };
   }
 
   recordIntrinsicSizeCalibrationSamples(calibrator: SectionIntrinsicCalibrator): number {
@@ -444,7 +460,11 @@ export class DocumentWindowModel {
     return recordedCount;
   }
 
-  updateEstimatedHeightsFromCalibration(calibrator: SectionIntrinsicCalibrator): MeasuredHeightUpdateResult {
+  updateEstimatedHeightsFromCalibration(
+    calibrator: SectionIntrinsicCalibrator,
+    modelAnchor?: ModelGeometryAnchor
+  ): MeasuredHeightUpdateResult {
+    const previousAnchorY = this.readModelAnchorDocumentY(modelAnchor);
     let updatedCount = 0;
     let maxAbsDelta = 0;
     let totalDelta = 0;
@@ -472,7 +492,36 @@ export class DocumentWindowModel {
     if (updatedCount > 0) {
       this.refreshHeightModel();
     }
-    return { maxAbsDelta, totalDelta, updatedCount };
+    const result = { maxAbsDelta, totalDelta, updatedCount };
+    return modelAnchor === undefined
+      ? result
+      : {
+          ...result,
+          anchorShift: this.computeModelAnchorShift(previousAnchorY, modelAnchor),
+        };
+  }
+
+  private readModelAnchorDocumentY(modelAnchor?: ModelGeometryAnchor): number | null {
+    if (
+      modelAnchor === undefined
+      || !Number.isInteger(modelAnchor.sectionIndex)
+      || modelAnchor.sectionIndex < 0
+      || modelAnchor.sectionIndex >= this.sections.length
+      || !Number.isFinite(modelAnchor.targetLocalOffset)
+    ) {
+      return null;
+    }
+    return this.sectionTop(modelAnchor.sectionIndex) + modelAnchor.targetLocalOffset;
+  }
+
+  private computeModelAnchorShift(
+    previousAnchorY: number | null,
+    modelAnchor: ModelGeometryAnchor
+  ): number | null {
+    const nextAnchorY = this.readModelAnchorDocumentY(modelAnchor);
+    return previousAnchorY === null || nextAnchorY === null
+      ? null
+      : nextAnchorY - previousAnchorY;
   }
 
   sectionIndexAtDocumentY(y: number): number {

@@ -55,6 +55,7 @@ import {
   readLiveBlockOffsetMeasuredHeights,
   type DocumentWindowModel,
   type MeasuredHeightUpdateResult,
+  type ModelGeometryAnchor,
   type RenderedContentState,
 } from "./documentWindow";
 import {
@@ -2793,34 +2794,6 @@ function readVirtualizedProgrammaticNavigationResidual(
   return sectionRectTop + targetLocalOffset - normalizedViewportOffset;
 }
 
-function correctVirtualizedProgrammaticNavigationResidual(input: {
-  descriptor: WindowTargetDescriptor;
-  operation: VirtualizedScrollOperation;
-  viewportOffsetY: number;
-}): boolean {
-  const context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
-  if (context === null) {
-    return false;
-  }
-
-  const residual = readVirtualizedProgrammaticNavigationResidual(
-    context,
-    input.descriptor,
-    input.viewportOffsetY
-  );
-  if (residual === null) {
-    return false;
-  }
-
-  if (Math.abs(residual) > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
-    const root = getDocumentScrollRoot();
-    const nextScrollTop = Math.max(0, root.scrollTop + residual);
-    writeVirtualizedProgrammaticNavigationScrollTop(input.operation, nextScrollTop, "navigation-residual");
-  }
-
-  return true;
-}
-
 function applyVirtualizedRenderedHeightAdoptionEffects(
   result: MeasuredHeightUpdateResult,
   options: { reassertPendingTarget?: boolean; scheduleCalibration?: boolean } = {}
@@ -2853,6 +2826,92 @@ function hasMeasuredHeightGeometryDelta(result: MeasuredHeightUpdateResult): boo
   return result.maxAbsDelta > Number.EPSILON || Math.abs(result.totalDelta) > Number.EPSILON;
 }
 
+function readVirtualizedNavigationModelGeometryAnchor(
+  registration: VirtualizedNavigationRegistration
+): ModelGeometryAnchor {
+  return {
+    sectionIndex: registration.modelAnchor.sectionIndex,
+    targetLocalOffset: registration.modelAnchor.targetLocalOffset,
+  };
+}
+
+function updateVirtualizedNavigationRegistration(
+  registration: VirtualizedNavigationRegistration,
+  update: Partial<Pick<
+    VirtualizedNavigationRegistration,
+    "externalShiftCount" | "geometryRevision" | "phase"
+  >>
+): boolean {
+  return virtualizedHeldOperationScrollPolicy?.update(registration, Object.freeze({
+    externalShiftCount: update.externalShiftCount ?? registration.externalShiftCount,
+    geometryRevision: update.geometryRevision ?? registration.geometryRevision,
+    mode: "navigation",
+    modelAnchor: registration.modelAnchor,
+    operation: registration.operation,
+    phase: update.phase ?? registration.phase,
+    semanticTarget: registration.semanticTarget,
+    witnessSequence: registration.witnessSequence,
+  })) ?? false;
+}
+
+function preserveVirtualizedNavigationGeometry(
+  registration: VirtualizedNavigationRegistration,
+  operation: VirtualizedScrollOperation,
+  result: MeasuredHeightUpdateResult,
+  preMutationScrollTop: number
+): void {
+  const current = readCurrentVirtualizedNavigationRegistration(operation);
+  const plane = scrollOwnershipControlPlane;
+  if (
+    current === null
+    || current.documentEpoch !== registration.documentEpoch
+    || current.operationEpoch !== registration.operationEpoch
+    || plane === null
+  ) {
+    return;
+  }
+  const geometryRevision = plane.captureGeometryEpoch();
+  if (result.anchorShift === null || result.anchorShift === undefined) {
+    postPerfMark("mm-virt-navigation-failed", {
+      geometryEpoch: geometryRevision,
+      reason: "model-anchor-missing",
+    });
+    releaseVirtualizedProgrammaticNavigationOperation(operation);
+    return;
+  }
+  if (Math.abs(result.anchorShift) <= Number.EPSILON) {
+    updateVirtualizedNavigationRegistration(current, {
+      geometryRevision,
+      phase: "post-settle-hold",
+    });
+    return;
+  }
+  if (!updateVirtualizedNavigationRegistration(current, {
+    geometryRevision,
+    phase: "preserving-geometry",
+  })) {
+    return;
+  }
+  operation.requestScrollTop(
+    preMutationScrollTop + result.anchorShift,
+    "navigation-geometry-preserve"
+  );
+  const receipt = virtualizedScrollCoordinator.getWriteReceiptByEpoch(operation.operationEpoch);
+  void receipt?.result.then(outcome => {
+    if (outcome.status !== "committed") {
+      return;
+    }
+    const committed = readCurrentVirtualizedNavigationRegistration(operation);
+    if (committed !== null) {
+      updateVirtualizedNavigationRegistration(committed, {
+        geometryRevision: scrollOwnershipControlPlane?.captureGeometryEpoch()
+          ?? committed.geometryRevision,
+        phase: "post-settle-hold",
+      });
+    }
+  });
+}
+
 function adoptVirtualizedProgrammaticNavigationRenderedHeights(
   context: WindowTargetContext,
   operation: VirtualizedScrollOperation
@@ -2864,7 +2923,11 @@ function adoptVirtualizedProgrammaticNavigationRenderedHeights(
 
   const ticket = beginVirtualizedGeometryWork("measured-height-adoption");
   try {
+    const registration = readCurrentVirtualizedNavigationRegistration(operation);
     const result = controller.adoptRenderedHeights({
+      ...(registration === null
+        ? {}
+        : { modelAnchor: readVirtualizedNavigationModelGeometryAnchor(registration) }),
       operation,
       preserveSectionIndex: context.sectionIndex,
       reanchor: false,
@@ -2905,16 +2968,11 @@ function finishVirtualizedProgrammaticNavigationCorrection(
   if (registration === null) {
     return;
   }
-  virtualizedHeldOperationScrollPolicy?.update(operation, Object.freeze({
-    externalShiftCount: registration.externalShiftCount,
-    geometryRevision: registration.geometryRevision,
-    mode: "navigation",
-    modelAnchor: registration.modelAnchor,
-    operation,
+  updateVirtualizedNavigationRegistration(registration, {
+    geometryRevision: scrollOwnershipControlPlane?.captureGeometryEpoch()
+      ?? registration.geometryRevision,
     phase: "post-settle-hold",
-    semanticTarget: registration.semanticTarget,
-    witnessSequence: registration.witnessSequence,
-  }));
+  });
 
   postPerfMark("mm-virt-navigation-settled", {
     descriptorKind: input.descriptor.kind,
@@ -3000,7 +3058,7 @@ function scheduleVirtualizedProgrammaticNavigationFrame(
         writeVirtualizedProgrammaticNavigationScrollTop(
           operation,
           root.scrollTop + residual,
-          "navigation-residual"
+          "navigation-settle-correction"
         );
         const receipt = virtualizedScrollCoordinator.getWriteReceiptByEpoch(operation.operationEpoch);
         if (receipt === undefined) {
@@ -3699,17 +3757,37 @@ function adoptVirtualizedRenderedHeights(ticket: GeometryWorkTicket | null): voi
       return;
     }
     const correctionTarget = resolveVirtualizedCorrectionTarget(operation);
+    const navigationRegistration = correctionTarget.kind === "active"
+      && correctionTarget.registration.mode === "navigation"
+      && correctionTarget.registration.phase !== "settling"
+      ? correctionTarget.registration
+      : null;
+    const preMutationScrollTop = getDocumentScrollRoot().scrollTop;
     const preserveSectionIndex = readVirtualizedCorrectionTargetSectionIndex(correctionTarget);
     const preservesCorrectionTarget = correctionTarget.kind !== "generic";
     const result = controller.adoptRenderedHeights(
       preserveSectionIndex === null
         ? {
             operation,
+            ...(navigationRegistration === null
+              ? {}
+              : {
+                  modelAnchor: readVirtualizedNavigationModelGeometryAnchor(
+                    navigationRegistration
+                  ),
+                }),
             ...(preservesCorrectionTarget ? { reanchor: false } : {}),
           }
         : {
           operation,
           preserveSectionIndex,
+          ...(navigationRegistration === null
+            ? {}
+            : {
+                modelAnchor: readVirtualizedNavigationModelGeometryAnchor(
+                  navigationRegistration
+                ),
+              }),
           ...(preservesCorrectionTarget ? { reanchor: false } : {}),
         }
     );
@@ -3723,11 +3801,13 @@ function adoptVirtualizedRenderedHeights(ticket: GeometryWorkTicket | null): voi
       const registration = correctionTarget.registration;
       if (registration.mode === "restore") {
         correctVirtualizedHeldRestoreTarget(registration, operation);
-      } else if (registration.mode === "navigation") {
-        correctVirtualizedProgrammaticNavigationResidual({
-          ...registration.semanticTarget,
+      } else if (navigationRegistration !== null) {
+        preserveVirtualizedNavigationGeometry(
+          navigationRegistration,
           operation,
-        });
+          result,
+          preMutationScrollTop
+        );
       }
     }
   }, closeTicket);
@@ -3783,6 +3863,12 @@ function runVirtualizedCalibration(documentEpoch: number, ticket: GeometryWorkTi
       return;
     }
     const correctionTarget = resolveVirtualizedCorrectionTarget(operation);
+    const navigationRegistration = correctionTarget.kind === "active"
+      && correctionTarget.registration.mode === "navigation"
+      && correctionTarget.registration.phase !== "settling"
+      ? correctionTarget.registration
+      : null;
+    const preMutationScrollTop = getDocumentScrollRoot().scrollTop;
     const preserveSectionIndex = readVirtualizedCorrectionTargetSectionIndex(correctionTarget);
     const anchor = correctionTarget.kind === "generic"
       ? captureCurrentVirtualizedReadingAnchor()
@@ -3791,12 +3877,19 @@ function runVirtualizedCalibration(documentEpoch: number, ticket: GeometryWorkTi
     if (recordedCount === 0) {
       return;
     }
-    const result = model.updateEstimatedHeightsFromCalibration(virtualizedIntrinsicCalibrator);
+    const result = model.updateEstimatedHeightsFromCalibration(
+      virtualizedIntrinsicCalibrator,
+      navigationRegistration === null
+        ? undefined
+        : readVirtualizedNavigationModelGeometryAnchor(navigationRegistration)
+    );
     if (!hasMeasuredHeightGeometryDelta(result)) {
       return;
     }
     mutateVirtualizedGeometry(ticket);
-    const target = correctionTarget.kind === "active"
+    const target = navigationRegistration !== null
+      ? preMutationScrollTop + (result.anchorShift ?? 0)
+      : correctionTarget.kind === "active"
       && correctionTarget.registration.mode === "restore"
       ? correctionTarget.registration.anchor === null
         ? 0
@@ -3810,11 +3903,13 @@ function runVirtualizedCalibration(documentEpoch: number, ticket: GeometryWorkTi
     controller.updateWindowForScroll({ desiredScrollTop: target, force: true });
     if (correctionTarget.kind === "generic") {
       operation.requestScrollTop(target, "calibration");
-    } else if (correctionTarget.registration.mode === "navigation") {
-      correctVirtualizedProgrammaticNavigationResidual({
-        ...correctionTarget.registration.semanticTarget,
+    } else if (navigationRegistration !== null) {
+      preserveVirtualizedNavigationGeometry(
+        navigationRegistration,
         operation,
-      });
+        result,
+        preMutationScrollTop
+      );
     } else if (
       correctionTarget.registration.mode === "restore"
     ) {
@@ -8231,16 +8326,9 @@ document.addEventListener("scroll", () => {
     } else if (classification.kind === "unattributed-failure") {
       cancelPendingVirtualizedMaintenance("unattributed-failure");
       if (navigationRegistration !== null) {
-        virtualizedHeldOperationScrollPolicy?.update(navigationRegistration, Object.freeze({
+        updateVirtualizedNavigationRegistration(navigationRegistration, {
           externalShiftCount: navigationRegistration.externalShiftCount + 1,
-          geometryRevision: navigationRegistration.geometryRevision,
-          mode: "navigation",
-          modelAnchor: navigationRegistration.modelAnchor,
-          operation: navigationRegistration.operation,
-          phase: navigationRegistration.phase,
-          semanticTarget: navigationRegistration.semanticTarget,
-          witnessSequence: navigationRegistration.witnessSequence,
-        }));
+        });
       }
       clearVirtualizedNavigationRegistration();
     }

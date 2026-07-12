@@ -1536,6 +1536,14 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(smoothTransition).not.toContain("clearVirtualizedNavigationSession(input.operation)");
   });
 
+  it("uses model-shift preservation without a navigation-residual writer", () => {
+    const rendererSource = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+
+    expect(rendererSource).toContain('"navigation-geometry-preserve"');
+    expect(rendererSource).not.toContain('"navigation-residual"');
+    expect(rendererSource).not.toContain("alignVirtualizedProgrammaticNavigationPostSettleTarget");
+  });
+
   it("emits geometry settled after a non-convergent realization watch is quarantined", async () => {
     const sectionCount = 120;
     const harness = await loadRendererHarness({
@@ -1873,7 +1881,7 @@ describe("renderer scroll-family virtualization integration", () => {
   });
 
   it("smoothly lands an off-window TOC target through owned intermediate frames", async () => {
-    const { flushNextRaf, flushQueuedRafs, load, messages, root, scrollCalls, scrollWrites } = await loadRendererHarness({
+    const { flushNextRaf, flushQueuedRafs, load, messages, root, scrollCalls } = await loadRendererHarness({
       sectionCount: 120,
       virtualization: true,
     });
@@ -1889,11 +1897,13 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(scrollCalls).toEqual([]);
     await flushQueuedRafs();
 
-    const positiveWrites = scrollWrites.filter(value => value > 0);
-    expect(positiveWrites.length).toBeGreaterThan(2);
-    expect(positiveWrites.slice(1).every((value, index) => value > positiveWrites[index]!)).toBe(true);
-    expect(positiveWrites.slice(0, -1).every(value => value < root.scrollTop)).toBe(true);
-    expect(root.scrollTop).toBeCloseTo(positiveWrites.at(-1)!, 5);
+    const smoothWrites = perfDetails<{ after: number; writer?: string }>(
+      messages,
+      "mm-virt-scroll-write-committed"
+    ).filter(detail => detail.writer === "navigation-smooth").map(detail => detail.after);
+    expect(smoothWrites.length).toBeGreaterThan(2);
+    expect(smoothWrites.slice(1).every((value, index) => value > smoothWrites[index]!)).toBe(true);
+    expect(root.scrollTop).toBeGreaterThanOrEqual(smoothWrites.at(-1)!);
     expect(document.getElementById("heading-95")!.getBoundingClientRect().top).toBeCloseTo(0, 0);
     expectCommittedWriterOwned(messages, "navigation-smooth", "heading-navigation");
     expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(1);
@@ -2226,7 +2236,7 @@ describe("renderer scroll-family virtualization integration", () => {
       .not.toBeCloseTo(0, 0);
   });
 
-  it("completes post-settle residual correction on the navigation session lease", async () => {
+  it("completes settling correction on the navigation registration lease", async () => {
     const { flushQueuedRafs, load, messages, triggerResize } = await loadRendererHarness({
       rectTopShiftByBlockIndex: { 90: -64 },
       renderedSectionHeight: SECTION_PITCH,
@@ -2249,14 +2259,16 @@ describe("renderer scroll-family virtualization integration", () => {
     const navigationWrites = perfDetails<{ operationEpoch: number; writer?: string }>(
       messages,
       "mm-virt-scroll-write-committed"
-    ).filter(detail => detail.writer === "navigation-initial" || detail.writer === "navigation-residual");
+    ).filter(detail =>
+      detail.writer === "navigation-initial"
+      || detail.writer === "navigation-settle-correction");
     expect(navigationWrites.map(detail => detail.writer))
-      .toEqual(expect.arrayContaining(["navigation-initial", "navigation-residual"]));
+      .toEqual(expect.arrayContaining(["navigation-initial", "navigation-settle-correction"]));
     expect(navigationWrites.every(detail => detail.operationEpoch === blockOperation!.operationEpoch)).toBe(true);
     expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(1);
   });
 
-  it("re-pins a settled block through adoption and calibration with maintenance epochs", async () => {
+  it("preserves a settled block through adoption and calibration with model-anchor shifts", async () => {
     const harness = await loadRendererHarness({
       renderedSectionHeight: SECTION_HEIGHT,
       sectionCount: 120,
@@ -2287,19 +2299,67 @@ describe("renderer scroll-family virtualization integration", () => {
       "mm-virt-maintenance-bound"
     ).filter(detail => detail.owner === "measured-height-adoption" || detail.owner === "calibration");
     const maintenanceEpochs = new Set(maintenanceOperations.map(detail => detail.operationEpoch));
-    const residualWrites = perfDetails<{ operationEpoch: number; writer?: string }>(
+    const preservationWrites = perfDetails<{ operationEpoch: number; writer?: string }>(
       harness.messages,
       "mm-virt-scroll-write-committed"
-    ).filter(detail => detail.writer === "navigation-residual");
+    ).filter(detail => detail.writer === "navigation-geometry-preserve");
 
     expect(maintenanceOperations.map(detail => detail.owner))
       .toEqual(expect.arrayContaining(["measured-height-adoption", "calibration"]));
-    expect(residualWrites.length).toBeGreaterThan(0);
-    expect(residualWrites.every(detail => maintenanceEpochs.has(detail.operationEpoch))).toBe(true);
+    expect(preservationWrites.length).toBeGreaterThan(0);
+    const geometryMutationBatches =
+      perfDetails(harness.messages, "mm-virt-window-height-adopted").length
+      + perfDetails(harness.messages, "mm-virt-window-calibrated").length;
+    expect(preservationWrites.length).toBeLessThanOrEqual(geometryMutationBatches);
+    expect(preservationWrites.every(detail => maintenanceEpochs.has(detail.operationEpoch))).toBe(true);
     expect(perfDetails<{ writer?: string }>(harness.messages, "mm-virt-scroll-write-committed")
       .filter(detail => detail.writer === "calibration")).toEqual([]);
     expect(document.querySelector<HTMLElement>('[data-mm-block-index="90"]')!
       .getBoundingClientRect().top).toBeCloseTo(0, 0);
+  });
+
+  it("cancels queued navigation geometry preservation on the first foreign witness", async () => {
+    const harness = await loadRendererHarness({
+      renderedSectionHeight: SECTION_HEIGHT,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    harness.load({
+      type: "load-document",
+      html: buildSourceLineDocument(120),
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await harness.flushQueuedRafs();
+    harness.load({ type: "scroll-to-block", blockIndex: 90 });
+    await harness.flushQueuedRafs();
+    harness.messages.length = 0;
+
+    harness.setRenderedSectionHeight(SECTION_HEIGHT + 80);
+    harness.triggerResize();
+    await harness.flushRafsUntil(() => maintenanceRequestsForOwner(
+      harness.messages,
+      "measured-height-adoption"
+    ).length === 1, 20);
+    expect(maintenanceRequestsForOwner(
+      harness.messages,
+      "measured-height-adoption"
+    )).toHaveLength(1);
+    document.dispatchEvent(new WheelEvent("wheel"));
+    await harness.flushQueuedRafs();
+
+    expect(perfDetails<{ writer?: string }>(
+      harness.messages,
+      "mm-virt-scroll-write-committed"
+    ).filter(detail => detail.writer === "navigation-geometry-preserve")).toEqual([]);
+    expect(maintenanceTerminalDetails(harness.messages)).toContainEqual(
+      expect.objectContaining({
+        owner: "measured-height-adoption",
+        reason: "user-supersession",
+        status: "canceled",
+      })
+    );
   });
 
   it.each(["user-scroll", "document-reset"] as const)(
@@ -2335,7 +2395,7 @@ describe("renderer scroll-family virtualization integration", () => {
 
       const writes = perfDetails<{ writer?: string }>(harness.messages, "mm-virt-scroll-write-committed");
       expect(perfDetails(harness.messages, "mm-virt-window-height-adopted").length).toBeGreaterThan(0);
-      expect(writes.some(detail => detail.writer === "navigation-residual")).toBe(false);
+      expect(writes.some(detail => detail.writer === "navigation-geometry-preserve")).toBe(false);
     }
   );
 
@@ -2420,7 +2480,7 @@ describe("renderer scroll-family virtualization integration", () => {
       messages,
       "mm-virt-scroll-write-committed"
     ).filter(detail => detail.operationEpoch === blockOperation!.operationEpoch).map(detail => detail.writer))
-      .toEqual(expect.arrayContaining(["navigation-initial", "navigation-residual"]));
+      .toEqual(expect.arrayContaining(["navigation-initial", "navigation-settle-correction"]));
     const committedFrames = perfDetails<{ frame: number }>(messages, "mm-virt-scroll-write-committed")
       .map(detail => detail.frame);
     expect(new Set(committedFrames).size).toBe(committedFrames.length);
@@ -4853,7 +4913,7 @@ describe("renderer scroll-family virtualization integration", () => {
       harness.triggerResize();
       await harness.flushQueuedRafs();
       expect(perfDetails<{ writer?: string }>(harness.messages, "mm-virt-scroll-write-committed")
-        .filter(detail => detail.writer === "navigation-residual")).toEqual([]);
+        .filter(detail => detail.writer === "navigation-geometry-preserve")).toEqual([]);
 
       harness.messages.length = 0;
       harness.load({ type: "scroll-to-source-line", sourceLine: 200 });
@@ -4895,7 +4955,7 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(committedWriters.some(writer => writer?.startsWith("minimap-") === true)).toBe(true);
     expect(committedWriters).not.toContain("measured-height-adoption");
     expect(committedWriters).not.toContain("calibration");
-    expect(committedWriters).not.toContain("navigation-residual");
+    expect(committedWriters).not.toContain("navigation-geometry-preserve");
 
     minimap.dispatchEvent(pointerEvent("pointerup", 588));
     await harness.flushQueuedRafs();

@@ -190,6 +190,45 @@ describe("document window model", () => {
     expect(model.sectionTop(2)).toBe(250);
   });
 
+  it("reports one exact model-anchor shift for a measured-height batch", () => {
+    const model = new DocumentWindowModel([
+      entry(0, 10, 100),
+      entry(1, 11, 120),
+      entry(2, 12, 80),
+      entry(3, 13, 90),
+    ]);
+
+    const update = model.updateMeasuredHeightsByBlockIndex([
+      { blockIndex: 10, measuredHeight: 130 },
+      { blockIndex: 11, measuredHeight: 100 },
+      { blockIndex: 12, measuredHeight: 140 },
+      { blockIndex: 13, measuredHeight: 150 },
+    ], {
+      sectionIndex: 2,
+      targetLocalOffset: 17,
+    });
+
+    expect(update.anchorShift).toBe(10);
+    expect(model.sectionTop(2) + 17).toBe(247);
+  });
+
+  it("reports zero model-anchor shift for below-anchor measured-height changes", () => {
+    const model = new DocumentWindowModel([
+      entry(0, 20, 100),
+      entry(1, 21, 120),
+      entry(2, 22, 80),
+    ]);
+
+    const update = model.updateMeasuredHeightsByBlockIndex([
+      { blockIndex: 22, measuredHeight: 180 },
+    ], {
+      sectionIndex: 1,
+      targetLocalOffset: 23,
+    });
+
+    expect(update.anchorShift).toBe(0);
+  });
+
   it("computes windows, anchors, and spacer math from the same height model", () => {
     const model = new DocumentWindowModel([
       entry(0, 20, 100),

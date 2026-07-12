@@ -6,6 +6,7 @@ import {
   type DocumentWindowModel,
   type MeasuredHeightUpdate,
   type MeasuredHeightUpdateResult,
+  type ModelGeometryAnchor,
   type RenderAheadConfig,
   type SectionModelEntry,
   type WindowRange,
@@ -84,6 +85,7 @@ export type EnsureSectionRenderedOptions = {
 };
 
 export type AdoptRenderedHeightsOptions = {
+  modelAnchor?: ModelGeometryAnchor;
   operation?: VirtualizedWindowOperation;
   preserveSectionIndex?: number;
   reanchor?: boolean;
@@ -236,6 +238,7 @@ export function createVirtualizedDocumentWindowController(
     adoptRenderedHeights: (options = {}) => {
       const preserveSectionIndex = normalizeSectionIndex(options.preserveSectionIndex, deps.model.getSectionCount());
       const reanchor = options.reanchor !== false;
+      const preMutationScrollTop = deps.root.scrollTop;
       const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(deps.root.scrollTop) : null;
       const blocks = collectLiveDocumentSectionElements(deps.main);
       const liveAnchor = preserveSectionIndex === null ? captureReadingAnchor(blocks) : null;
@@ -243,16 +246,21 @@ export function createVirtualizedDocumentWindowController(
         ? deps.readMeasuredHeights(blocks)
         : readLiveBlockOffsetMeasuredHeights(blocks);
       const result = deps.model.updateMeasuredHeightsByBlockIndex(
-        realizationTracker?.filterRealizedUpdates(blocks, updates) ?? updates
+        realizationTracker?.filterRealizedUpdates(blocks, updates) ?? updates,
+        options.modelAnchor
       );
       if (result.updatedCount === 0) {
-        return EMPTY_HEIGHT_UPDATE;
+        return options.modelAnchor === undefined
+          ? EMPTY_HEIGHT_UPDATE
+          : { ...EMPTY_HEIGHT_UPDATE, anchorShift: 0 };
       }
       if (result.maxAbsDelta <= Number.EPSILON && Math.abs(result.totalDelta) <= Number.EPSILON) {
         return result;
       }
 
-      const desiredScrollTop = preserveSectionIndex !== null
+      const desiredScrollTop = options.modelAnchor !== undefined
+        ? preMutationScrollTop + (result.anchorShift ?? 0)
+        : preserveSectionIndex !== null
         ? deps.model.sectionTop(preserveSectionIndex)
         : scrollTopForReadingAnchor(deps.model, liveAnchor)
           ?? deps.model.scrollTopForAnchor(anchor!);
