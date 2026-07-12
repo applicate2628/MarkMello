@@ -5986,7 +5986,8 @@
   }
 
   // RendererWeb/src/virtualizedScrollCoordination.ts
-  var defaultVirtualizedMaintenanceRetryReason = () => "frame-transaction-occupied";
+  var VIRTUALIZED_MAINTENANCE_RETRY_POLICY = "maintenance-retry-on-occupied";
+  var VIRTUALIZED_MAINTENANCE_RETRY_REASON = "frame-transaction-occupied";
   function createVirtualizedScrollCoordinator(deps) {
     const virtualizedMaintenanceByOwner = /* @__PURE__ */ new Map();
     const virtualizedMaintenanceReleaseHolds = /* @__PURE__ */ new Map();
@@ -6074,50 +6075,72 @@
       }
       return true;
     }
-    function scheduleVirtualizedStandaloneOperation2(owner, policy, work) {
-      const operation = acquireVirtualizedScrollOperation2(owner, policy);
+    function runStandaloneReleaseAfterWrite(request) {
+      const operation = acquireVirtualizedScrollOperation2(request.owner, request.acquirePolicy);
       if (operation === null) {
-        return null;
+        return { operation: null, scheduled: false };
       }
       const scheduled = operation.scheduleFrameTransaction(() => {
         if (!operation.isCurrent()) {
           return;
         }
-        work(operation);
+        request.work(operation);
         releaseVirtualizedScrollOperationAfterWrite2(operation);
       });
       if (!scheduled) {
         releaseVirtualizedScrollOperation2(operation);
-        return null;
+        return { operation: null, scheduled: false };
       }
-      return operation;
+      return { operation, scheduled: true };
     }
-    function scheduleExistingVirtualizedOperation2(operation, work, releaseAfterWrite = false) {
+    function runExistingReleaseAfterWrite(request) {
+      const operation = request.operation;
       const scheduled = operation.scheduleFrameTransaction(() => {
         if (!operation.isCurrent()) {
           return;
         }
-        work();
-        if (releaseAfterWrite) {
-          releaseVirtualizedScrollOperationAfterWrite2(operation);
-        }
+        request.work();
+        releaseVirtualizedScrollOperationAfterWrite2(operation);
       });
-      if (!scheduled && releaseAfterWrite && operation.isCurrent()) {
+      if (!scheduled && operation.isCurrent()) {
         releaseVirtualizedScrollOperation2(operation);
       }
-      return scheduled;
+      return { operation, scheduled };
     }
-    function scheduleVirtualizedElementLanding2(operation, element, writer, viewportOffsetY = 0) {
+    function runElementLandingReleaseAfterWrite(request) {
+      const operation = request.operation;
+      const element = request.element;
       if (element === null) {
-        if (operation.isCurrent()) {
-          releaseVirtualizedScrollOperation2(operation);
+        if (request.operation.isCurrent()) {
+          releaseVirtualizedScrollOperation2(request.operation);
         }
-        return false;
+        return { operation, scheduled: false };
       }
-      return scheduleExistingVirtualizedOperation2(operation, () => {
-        const target = deps.readElementDocumentTop(element) - Math.max(0, viewportOffsetY);
-        operation.requestScrollTop(target, writer);
-      }, true);
+      return runExistingReleaseAfterWrite({
+        kind: "existing",
+        operation,
+        policy: "existing-release-after-write",
+        work: () => {
+          const target = deps.readElementDocumentTop(element) - Math.max(0, request.viewportOffsetY ?? 0);
+          operation.requestScrollTop(target, request.writer);
+        }
+      });
+    }
+    function runEmptyCommitRetainOperation(request) {
+      const scheduled = request.operation.scheduleFrameTransaction(() => void 0);
+      return { operation: request.operation, scheduled };
+    }
+    function runFrameTransaction(request) {
+      switch (request.kind) {
+        case "acquire":
+          return runStandaloneReleaseAfterWrite(request);
+        case "existing":
+          return runExistingReleaseAfterWrite(request);
+        case "element-landing":
+          return runElementLandingReleaseAfterWrite(request);
+        case "empty-commit":
+          return runEmptyCommitRetainOperation(request);
+      }
     }
     function virtualizedMaintenanceDetail(request) {
       return {
@@ -6144,7 +6167,7 @@
     function isActiveVirtualizedMaintenanceRequest(request) {
       return isLiveVirtualizedMaintenanceRequest(request) && virtualizedMaintenanceByOwner.get(request.owner)?.active === request;
     }
-    function createVirtualizedMaintenanceRequest(owner, documentEpoch, work, onTerminal, retryReason) {
+    function createVirtualizedMaintenanceRequest(owner, documentEpoch, work, onTerminal) {
       const requestSerial = ++virtualizedMaintenanceRequestSerial;
       return {
         binding: null,
@@ -6155,7 +6178,6 @@
         phase: "pending",
         requestId: Object.freeze({ documentEpoch, requestSerial }),
         retryFrame: null,
-        retryReason,
         terminal: null,
         work,
         workRevision: 1
@@ -6164,13 +6186,12 @@
     function postVirtualizedMaintenanceRequested(request) {
       postVirtualizedMaintenanceEvent("mm-virt-maintenance-requested", request);
     }
-    function coalesceVirtualizedMaintenanceRequest(request, work, onTerminal, retryReason) {
+    function coalesceVirtualizedMaintenanceRequest(request, work, onTerminal) {
       if (!isLiveVirtualizedMaintenanceRequest(request)) {
         return;
       }
       const replacedTerminal = request.onTerminal;
       request.onTerminal = onTerminal;
-      request.retryReason = retryReason;
       request.work = work;
       request.workRevision++;
       replacedTerminal?.({ reason: "coalesced", status: "canceled" });
@@ -6313,7 +6334,7 @@
         reason
       );
     }
-    function scheduleVirtualizedMaintenanceRetry2(request) {
+    function scheduleVirtualizedMaintenanceRetry(request) {
       if (request.retryFrame !== null || !isActiveVirtualizedMaintenanceRequest(request) || request.phase === "terminal") {
         return;
       }
@@ -6331,7 +6352,8 @@
         attemptVirtualizedMaintenance(request);
       });
       postVirtualizedMaintenanceEvent("mm-virt-maintenance-retry", request, {
-        reason: request.retryReason()
+        policy: VIRTUALIZED_MAINTENANCE_RETRY_POLICY,
+        reason: VIRTUALIZED_MAINTENANCE_RETRY_REASON
       });
     }
     function deliverVirtualizedMaintenance(request, operation) {
@@ -6383,7 +6405,7 @@
         if (joined.ownsLease && operation.isCurrent()) {
           releaseVirtualizedScrollOperation2(operation);
         }
-        scheduleVirtualizedMaintenanceRetry2(request);
+        scheduleVirtualizedMaintenanceRetry(request);
         return;
       }
       const binding = Object.freeze({
@@ -6401,7 +6423,7 @@
         ownsLease: binding.ownsLease
       });
     }
-    function scheduleVirtualizedMaintenance2(owner, work, onTerminal = null, retryReason = defaultVirtualizedMaintenanceRetryReason) {
+    function scheduleVirtualizedMaintenance2(owner, work, onTerminal = null) {
       const plane = deps.getPlane();
       if (plane === null) {
         return false;
@@ -6418,29 +6440,27 @@
       if (slot?.active !== null && slot?.active !== void 0) {
         if (slot.active.phase === "executing") {
           if (slot.successor !== null) {
-            coalesceVirtualizedMaintenanceRequest(slot.successor, work, onTerminal, retryReason);
+            coalesceVirtualizedMaintenanceRequest(slot.successor, work, onTerminal);
             return true;
           }
           const successor = createVirtualizedMaintenanceRequest(
             owner,
             documentEpoch,
             work,
-            onTerminal,
-            retryReason
+            onTerminal
           );
           slot.successor = successor;
           postVirtualizedMaintenanceRequested(successor);
           return true;
         }
-        coalesceVirtualizedMaintenanceRequest(slot.active, work, onTerminal, retryReason);
+        coalesceVirtualizedMaintenanceRequest(slot.active, work, onTerminal);
         return true;
       }
       const request = createVirtualizedMaintenanceRequest(
         owner,
         documentEpoch,
         work,
-        onTerminal,
-        retryReason
+        onTerminal
       );
       if (slot === void 0) {
         slot = { active: request, successor: null };
@@ -6468,9 +6488,7 @@
       clearWriteReceipts: () => {
         virtualizedWriteReceipts.clear();
       },
-      scheduleStandaloneOperation: scheduleVirtualizedStandaloneOperation2,
-      scheduleExistingOperation: scheduleExistingVirtualizedOperation2,
-      scheduleElementLanding: scheduleVirtualizedElementLanding2,
+      runFrameTransaction,
       scheduleMaintenance: scheduleVirtualizedMaintenance2,
       cancelPendingMaintenance: cancelPendingVirtualizedMaintenance2
     };
@@ -6975,8 +6993,14 @@
     document.documentElement.dataset.mmDocumentScroll = documentScrollEnabled ? "on" : "off";
     if (!documentScrollEnabled) {
       if (virtualizationEnabled) {
-        scheduleVirtualizedStandaloneOperation("scroll-disabled-reset", "supersede-as-user", (operation) => {
-          operation.requestScrollTop(0, "scroll-disabled-reset");
+        virtualizedScrollCoordinator.runFrameTransaction({
+          acquirePolicy: "supersede-as-user",
+          kind: "acquire",
+          owner: "scroll-disabled-reset",
+          policy: "standalone-release-after-write",
+          work: (operation) => {
+            operation.requestScrollTop(0, "scroll-disabled-reset");
+          }
         });
       } else {
         legacyScrollWriter.legacyScrollTo(0, { left: 0, behavior: "instant" });
@@ -8050,30 +8074,12 @@
   function releaseVirtualizedScrollOperation(operation) {
     return virtualizedScrollCoordinator.releaseOperation(operation);
   }
-  function scheduleVirtualizedStandaloneOperation(owner, policy, work) {
-    return virtualizedScrollCoordinator.scheduleStandaloneOperation(owner, policy, work);
-  }
-  function scheduleExistingVirtualizedOperation(operation, work, releaseAfterWrite = false) {
-    return virtualizedScrollCoordinator.scheduleExistingOperation(operation, work, releaseAfterWrite);
-  }
-  function scheduleVirtualizedElementLanding(operation, element, writer, viewportOffsetY = 0) {
-    return virtualizedScrollCoordinator.scheduleElementLanding(
-      operation,
-      element,
-      writer,
-      viewportOffsetY
-    );
-  }
   function scheduleVirtualizedMaintenance(owner, work, onTerminal = null) {
     return virtualizedScrollCoordinator.scheduleMaintenance(
       owner,
       work,
-      onTerminal,
-      scheduleVirtualizedMaintenanceRetry
+      onTerminal
     );
-  }
-  function scheduleVirtualizedMaintenanceRetry() {
-    return "frame-transaction-occupied";
   }
   function cancelPendingVirtualizedMaintenance(reason) {
     virtualizedScrollCoordinator.cancelPendingMaintenance(reason);
@@ -9064,12 +9070,17 @@
     }
     pendingSourceLineTarget = sourceLine;
     suppressPreviewSourceLinePost();
-    return scheduleExistingVirtualizedOperation(operation, () => {
-      operation.requestScrollTop(
-        Math.max(0, scrollTop - getViewportAnchorY()),
-        "source-line-live-fallback"
-      );
-    }, true);
+    return virtualizedScrollCoordinator.runFrameTransaction({
+      kind: "existing",
+      operation,
+      policy: "existing-release-after-write",
+      work: () => {
+        operation.requestScrollTop(
+          Math.max(0, scrollTop - getViewportAnchorY()),
+          "source-line-live-fallback"
+        );
+      }
+    }).scheduled;
   }
   function scrollToSourceLine(sourceLine) {
     if (!Number.isFinite(sourceLine) || sourceLine < 0) {
@@ -10820,8 +10831,14 @@
     const maximum = Math.max(0, root.scrollHeight - root.clientHeight);
     const progress = Number.isFinite(progressPercent) ? Math.max(0, Math.min(100, progressPercent)) : 0;
     if (virtualizationEnabled) {
-      scheduleVirtualizedStandaloneOperation("host-progress", "supersede-as-user", (operation) => {
-        operation.requestScrollTop(maximum * (progress / 100), "host-progress");
+      virtualizedScrollCoordinator.runFrameTransaction({
+        acquirePolicy: "supersede-as-user",
+        kind: "acquire",
+        owner: "host-progress",
+        policy: "standalone-release-after-write",
+        work: (operation) => {
+          operation.requestScrollTop(maximum * (progress / 100), "host-progress");
+        }
       });
     } else {
       legacyScrollWriter.legacyScrollTo(maximum * (progress / 100), { behavior: "instant" });
@@ -10833,7 +10850,11 @@
       return false;
     }
     operation.requestScrollTop(target, writer);
-    operation.scheduleFrameTransaction(() => void 0);
+    virtualizedScrollCoordinator.runFrameTransaction({
+      kind: "empty-commit",
+      operation,
+      policy: "empty-commit-retain-operation"
+    });
     return true;
   }
   async function settleMinimapScrollOperation(operation, readRefinedTarget) {
@@ -11258,11 +11279,13 @@
     }
     const main = getLiveDocumentRoot();
     if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-      scheduleVirtualizedElementLanding(
+      virtualizedScrollCoordinator.runFrameTransaction({
+        element: findLiveDocumentElementById(anchor),
+        kind: "element-landing",
         operation,
-        findLiveDocumentElementById(anchor),
-        "heading-live-fallback"
-      );
+        policy: "element-landing-release-after-write",
+        writer: "heading-live-fallback"
+      });
       return;
     }
     const descriptor = { anchor, kind: "heading-anchor" };
@@ -11280,11 +11303,13 @@
       actionKind: "navigate",
       controller: virtualizedDocumentWindowController,
       descriptor,
-      legacyAction: () => scheduleVirtualizedElementLanding(
+      legacyAction: () => virtualizedScrollCoordinator.runFrameTransaction({
+        element: findLiveDocumentElementById(anchor),
+        kind: "element-landing",
         operation,
-        findLiveDocumentElementById(anchor),
-        "heading-resolver-fallback"
-      ),
+        policy: "element-landing-release-after-write",
+        writer: "heading-resolver-fallback"
+      }).scheduled,
       main,
       model: virtualizedDocumentWindowModel,
       operation,
@@ -11377,8 +11402,14 @@
     if (message.type === "scroll-by") {
       if (virtualizationEnabled) {
         const root = getDocumentScrollRoot();
-        scheduleVirtualizedStandaloneOperation("host-scroll-by", "supersede-as-user", (operation) => {
-          operation.requestScrollTop(root.scrollTop + message.deltaY, "host-scroll-by");
+        virtualizedScrollCoordinator.runFrameTransaction({
+          acquirePolicy: "supersede-as-user",
+          kind: "acquire",
+          owner: "host-scroll-by",
+          policy: "standalone-release-after-write",
+          work: (operation) => {
+            operation.requestScrollTop(root.scrollTop + message.deltaY, "host-scroll-by");
+          }
         });
       } else {
         legacyScrollWriter.legacyScrollBy(message.deltaY);
@@ -11401,11 +11432,13 @@
       }
       const main = document.querySelector("main.mm-document");
       if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-        scheduleVirtualizedElementLanding(
+        virtualizedScrollCoordinator.runFrameTransaction({
+          element: findLiveDocumentBlockElement(message.blockIndex),
+          kind: "element-landing",
           operation,
-          findLiveDocumentBlockElement(message.blockIndex),
-          "block-live-fallback"
-        );
+          policy: "element-landing-release-after-write",
+          writer: "block-live-fallback"
+        });
         return;
       }
       const descriptor = { blockIndex: message.blockIndex, kind: "block" };
@@ -11422,11 +11455,13 @@
         actionKind: "navigate",
         controller: virtualizedDocumentWindowController,
         descriptor,
-        legacyAction: () => scheduleVirtualizedElementLanding(
+        legacyAction: () => virtualizedScrollCoordinator.runFrameTransaction({
+          element: findLiveDocumentBlockElement(message.blockIndex),
+          kind: "element-landing",
           operation,
-          findLiveDocumentBlockElement(message.blockIndex),
-          "block-resolver-fallback"
-        ),
+          policy: "element-landing-release-after-write",
+          writer: "block-resolver-fallback"
+        }).scheduled,
         main,
         model: virtualizedDocumentWindowModel,
         operation,
@@ -11831,9 +11866,15 @@
       scrollWindowToTop: () => {
         suppressPreviewSourceLinePost();
         if (virtualizationEnabled) {
-          scheduleVirtualizedStandaloneOperation("cold-load-reset", "supersede-programmatic", (operation) => {
-            consumePendingInitialVirtualizedWindow(operation);
-            operation.requestScrollTop(0, "cold-load-reset");
+          virtualizedScrollCoordinator.runFrameTransaction({
+            acquirePolicy: "supersede-programmatic",
+            kind: "acquire",
+            owner: "cold-load-reset",
+            policy: "standalone-release-after-write",
+            work: (operation) => {
+              consumePendingInitialVirtualizedWindow(operation);
+              operation.requestScrollTop(0, "cold-load-reset");
+            }
           });
         } else {
           legacyScrollWriter.legacyScrollTo(0, { left: 0, behavior: "instant" });

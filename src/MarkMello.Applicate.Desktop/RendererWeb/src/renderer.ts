@@ -114,7 +114,6 @@ import {
 import {
   createVirtualizedScrollCoordinator,
   type VirtualizedMaintenanceTerminal,
-  type VirtualizedMaintenanceRetryReason,
   type VirtualizedScrollOperation,
 } from "./virtualizedScrollCoordination";
 
@@ -994,8 +993,14 @@ function applyDocumentScrollState(): void {
     // Avalonia ScrollViewer), force the document to position 0 so the host
     // and renderer agree on the starting offset.
     if (virtualizationEnabled) {
-      scheduleVirtualizedStandaloneOperation("scroll-disabled-reset", "supersede-as-user", operation => {
-        operation.requestScrollTop(0, "scroll-disabled-reset");
+      virtualizedScrollCoordinator.runFrameTransaction({
+        acquirePolicy: "supersede-as-user",
+        kind: "acquire",
+        owner: "scroll-disabled-reset",
+        policy: "standalone-release-after-write",
+        work: operation => {
+          operation.requestScrollTop(0, "scroll-disabled-reset");
+        },
       });
     } else {
       legacyScrollWriter.legacyScrollTo(0, { left: 0, behavior: "instant" as ScrollBehavior });
@@ -2423,36 +2428,6 @@ function releaseVirtualizedScrollOperation(operation: VirtualizedScrollOperation
   return virtualizedScrollCoordinator.releaseOperation(operation);
 }
 
-function scheduleVirtualizedStandaloneOperation(
-  owner: string,
-  policy: ScrollAcquirePolicy,
-  work: (operation: VirtualizedScrollOperation) => void
-): VirtualizedScrollOperation | null {
-  return virtualizedScrollCoordinator.scheduleStandaloneOperation(owner, policy, work);
-}
-
-function scheduleExistingVirtualizedOperation(
-  operation: VirtualizedScrollOperation,
-  work: () => void,
-  releaseAfterWrite = false
-): boolean {
-  return virtualizedScrollCoordinator.scheduleExistingOperation(operation, work, releaseAfterWrite);
-}
-
-function scheduleVirtualizedElementLanding(
-  operation: VirtualizedScrollOperation,
-  element: HTMLElement | null,
-  writer: string,
-  viewportOffsetY = 0
-): boolean {
-  return virtualizedScrollCoordinator.scheduleElementLanding(
-    operation,
-    element,
-    writer,
-    viewportOffsetY
-  );
-}
-
 function scheduleVirtualizedMaintenance(
   owner: string,
   work: (operation: VirtualizedScrollOperation) => void,
@@ -2461,13 +2436,8 @@ function scheduleVirtualizedMaintenance(
   return virtualizedScrollCoordinator.scheduleMaintenance(
     owner,
     work,
-    onTerminal,
-    scheduleVirtualizedMaintenanceRetry
+    onTerminal
   );
-}
-
-function scheduleVirtualizedMaintenanceRetry(): VirtualizedMaintenanceRetryReason {
-  return "frame-transaction-occupied";
 }
 
 function cancelPendingVirtualizedMaintenance(reason: string): void {
@@ -3728,12 +3698,17 @@ function scheduleVirtualizedSourceLineLanding(
   }
   pendingSourceLineTarget = sourceLine;
   suppressPreviewSourceLinePost();
-  return scheduleExistingVirtualizedOperation(operation, () => {
-    operation.requestScrollTop(
-      Math.max(0, scrollTop - getViewportAnchorY()),
-      "source-line-live-fallback"
-    );
-  }, true);
+  return virtualizedScrollCoordinator.runFrameTransaction({
+    kind: "existing",
+    operation,
+    policy: "existing-release-after-write",
+    work: () => {
+      operation.requestScrollTop(
+        Math.max(0, scrollTop - getViewportAnchorY()),
+        "source-line-live-fallback"
+      );
+    },
+  }).scheduled;
 }
 
 function scrollToSourceLine(sourceLine: number): void {
@@ -6015,8 +5990,14 @@ function scrollToProgress(progressPercent: number): void {
   const maximum = Math.max(0, root.scrollHeight - root.clientHeight);
   const progress = Number.isFinite(progressPercent) ? Math.max(0, Math.min(100, progressPercent)) : 0;
   if (virtualizationEnabled) {
-    scheduleVirtualizedStandaloneOperation("host-progress", "supersede-as-user", operation => {
-      operation.requestScrollTop(maximum * (progress / 100), "host-progress");
+    virtualizedScrollCoordinator.runFrameTransaction({
+      acquirePolicy: "supersede-as-user",
+      kind: "acquire",
+      owner: "host-progress",
+      policy: "standalone-release-after-write",
+      work: operation => {
+        operation.requestScrollTop(maximum * (progress / 100), "host-progress");
+      },
     });
   } else {
     legacyScrollWriter.legacyScrollTo(maximum * (progress / 100), { behavior: "instant" as ScrollBehavior });
@@ -6029,7 +6010,11 @@ function requestMinimapScrollTarget(target: number, writer: string): boolean {
     return false;
   }
   operation.requestScrollTop(target, writer);
-  operation.scheduleFrameTransaction(() => undefined);
+  virtualizedScrollCoordinator.runFrameTransaction({
+    kind: "empty-commit",
+    operation,
+    policy: "empty-commit-retain-operation",
+  });
   return true;
 }
 
@@ -6637,11 +6622,13 @@ function scrollToHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): 
 
   const main = getLiveDocumentRoot();
   if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-    scheduleVirtualizedElementLanding(
+    virtualizedScrollCoordinator.runFrameTransaction({
+      element: findLiveDocumentElementById(anchor),
+      kind: "element-landing",
       operation,
-      findLiveDocumentElementById(anchor),
-      "heading-live-fallback"
-    );
+      policy: "element-landing-release-after-write",
+      writer: "heading-live-fallback",
+    });
     return;
   }
 
@@ -6660,11 +6647,13 @@ function scrollToHeadingAnchor(anchor: string, options: ScrollIntoViewOptions): 
     actionKind: "navigate",
     controller: virtualizedDocumentWindowController,
     descriptor,
-    legacyAction: () => scheduleVirtualizedElementLanding(
+    legacyAction: () => virtualizedScrollCoordinator.runFrameTransaction({
+      element: findLiveDocumentElementById(anchor),
+      kind: "element-landing",
       operation,
-      findLiveDocumentElementById(anchor),
-      "heading-resolver-fallback"
-    ),
+      policy: "element-landing-release-after-write",
+      writer: "heading-resolver-fallback",
+    }).scheduled,
     main,
     model: virtualizedDocumentWindowModel,
     operation,
@@ -6786,8 +6775,14 @@ function handleHostMessage(raw: unknown): void {
   if (message.type === "scroll-by") {
     if (virtualizationEnabled) {
       const root = getDocumentScrollRoot();
-      scheduleVirtualizedStandaloneOperation("host-scroll-by", "supersede-as-user", operation => {
-        operation.requestScrollTop(root.scrollTop + message.deltaY, "host-scroll-by");
+      virtualizedScrollCoordinator.runFrameTransaction({
+        acquirePolicy: "supersede-as-user",
+        kind: "acquire",
+        owner: "host-scroll-by",
+        policy: "standalone-release-after-write",
+        work: operation => {
+          operation.requestScrollTop(root.scrollTop + message.deltaY, "host-scroll-by");
+        },
       });
     } else {
       legacyScrollWriter.legacyScrollBy(message.deltaY);
@@ -6812,11 +6807,13 @@ function handleHostMessage(raw: unknown): void {
 
     const main = document.querySelector<HTMLElement>("main.mm-document");
     if (main === null || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
-      scheduleVirtualizedElementLanding(
+      virtualizedScrollCoordinator.runFrameTransaction({
+        element: findLiveDocumentBlockElement(message.blockIndex),
+        kind: "element-landing",
         operation,
-        findLiveDocumentBlockElement(message.blockIndex),
-        "block-live-fallback"
-      );
+        policy: "element-landing-release-after-write",
+        writer: "block-live-fallback",
+      });
       return;
     }
 
@@ -6834,11 +6831,13 @@ function handleHostMessage(raw: unknown): void {
       actionKind: "navigate",
       controller: virtualizedDocumentWindowController,
       descriptor,
-      legacyAction: () => scheduleVirtualizedElementLanding(
+      legacyAction: () => virtualizedScrollCoordinator.runFrameTransaction({
+        element: findLiveDocumentBlockElement(message.blockIndex),
+        kind: "element-landing",
         operation,
-        findLiveDocumentBlockElement(message.blockIndex),
-        "block-resolver-fallback"
-      ),
+        policy: "element-landing-release-after-write",
+        writer: "block-resolver-fallback",
+      }).scheduled,
       main,
       model: virtualizedDocumentWindowModel,
       operation,
@@ -7361,9 +7360,15 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
       // re-suppress right before the write.
       suppressPreviewSourceLinePost();
       if (virtualizationEnabled) {
-        scheduleVirtualizedStandaloneOperation("cold-load-reset", "supersede-programmatic", operation => {
-          consumePendingInitialVirtualizedWindow(operation);
-          operation.requestScrollTop(0, "cold-load-reset");
+        virtualizedScrollCoordinator.runFrameTransaction({
+          acquirePolicy: "supersede-programmatic",
+          kind: "acquire",
+          owner: "cold-load-reset",
+          policy: "standalone-release-after-write",
+          work: operation => {
+            consumePendingInitialVirtualizedWindow(operation);
+            operation.requestScrollTop(0, "cold-load-reset");
+          },
         });
       } else {
         legacyScrollWriter.legacyScrollTo(0, { left: 0, behavior: "instant" as ScrollBehavior });

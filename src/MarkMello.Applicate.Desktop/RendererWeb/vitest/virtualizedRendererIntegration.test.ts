@@ -267,18 +267,43 @@ describe("renderer virtualization wiring", () => {
 
   it("terminates cache restoration and retries occupied maintenance through explicit owners", () => {
     const source = readRendererSource();
+    const coordinator = readSource("virtualizedScrollCoordination.ts");
     const cacheRestore = sliceBetween(source, "function restoreCachedScrollPosition", "function scheduleLayoutReady");
-    const maintenance = sliceBetween(
-      source,
-      "function scheduleVirtualizedMaintenance",
-      "function captureCurrentVirtualizedReadingAnchor"
-    );
 
     expect(cacheRestore).toContain("finishCachedScrollRestore");
     expect(cacheRestore).toContain("catch");
     expect(cacheRestore).toContain("mm-virt-cache-restore-terminal");
-    expect(maintenance).toContain("scheduleVirtualizedMaintenanceRetry");
-    expect(maintenance).toContain("frame-transaction-occupied");
+    expect(coordinator).toContain("maintenance-retry-on-occupied");
+    expect(coordinator).toContain("frame-transaction-occupied");
+    expect(source).not.toContain("scheduleVirtualizedMaintenanceRetry");
+    expect(source).not.toContain("VirtualizedMaintenanceRetryReasonProvider");
+  });
+
+  it("centralizes renderer-owned frame transaction policies in the coordinator", () => {
+    const source = readRendererSource();
+    const coordinator = readSource("virtualizedScrollCoordination.ts");
+
+    for (const forbidden of [
+      "scheduleVirtualizedStandaloneOperation",
+      "scheduleExistingVirtualizedOperation",
+      "scheduleVirtualizedElementLanding",
+      "scheduleFrameTransaction(() => undefined",
+      "scheduleVirtualizedMaintenanceRetry",
+      "VirtualizedMaintenanceRetryReasonProvider",
+    ]) {
+      expect(source).not.toContain(forbidden);
+    }
+
+    expect(coordinator).toContain("runFrameTransaction");
+    for (const policy of [
+      "standalone-release-after-write",
+      "existing-release-after-write",
+      "element-landing-release-after-write",
+      "empty-commit-retain-operation",
+      "maintenance-retry-on-occupied",
+    ]) {
+      expect(coordinator).toContain(policy);
+    }
   });
 
   it("consumes initial-window reconciliation only inside an owning frame transaction", () => {

@@ -78,6 +78,43 @@ type Harness = {
   root: FakeScrollRoot;
 };
 
+type RunFrameTransactionRequest =
+  | Readonly<{
+      acquirePolicy: "supersede-as-user" | "supersede-programmatic";
+      kind: "acquire";
+      owner: string;
+      policy: "standalone-release-after-write";
+      work: (operation: VirtualizedScrollOperation) => void;
+    }>
+  | Readonly<{
+      kind: "existing";
+      operation: VirtualizedScrollOperation;
+      policy: "existing-release-after-write";
+      work: () => void;
+    }>
+  | Readonly<{
+      element: HTMLElement | null;
+      kind: "element-landing";
+      operation: VirtualizedScrollOperation;
+      policy: "element-landing-release-after-write";
+      viewportOffsetY?: number;
+      writer: string;
+    }>
+  | Readonly<{
+      kind: "empty-commit";
+      operation: VirtualizedScrollOperation;
+      policy: "empty-commit-retain-operation";
+    }>;
+
+type RunFrameTransactionResult = Readonly<{
+  operation: VirtualizedScrollOperation | null;
+  scheduled: boolean;
+}>;
+
+type RunFrameTransactionCoordinator = VirtualizedScrollCoordinator & {
+  runFrameTransaction: (request: RunFrameTransactionRequest) => RunFrameTransactionResult;
+};
+
 function createHarness(): Harness {
   const events: GeometrySettledPayload[] = [];
   const frames = new FakeFrameQueue();
@@ -100,6 +137,54 @@ function createHarness(): Harness {
     trace: (name, detail) => coordinatorTraces.push({ detail, name }),
   });
   return { coordinator, coordinatorTraces, frames, plane, planeTraces, root };
+}
+
+function runFrameCoordinator(
+  coordinator: VirtualizedScrollCoordinator
+): RunFrameTransactionCoordinator {
+  return coordinator as RunFrameTransactionCoordinator;
+}
+
+function createScheduleRejectingPlane(): {
+  plane: ScrollOwnershipControlPlane;
+  releaseCalls: () => number;
+  scheduleCalls: () => number;
+} {
+  const lease = {
+    documentEpoch: 1,
+    geometryEpoch: 0,
+    operationEpoch: 1,
+    owner: "standalone-reject",
+  } as ScrollLease;
+  let released = false;
+  let releaseCount = 0;
+  let scheduleCount = 0;
+  const plane = {
+    acquire: () => ({ lease, status: "acquired" }),
+    captureDocumentEpoch: () => 1,
+    holds: (candidate: ScrollLease) => candidate === lease && !released,
+    isCurrentDocumentEpoch: (epoch: number) => epoch === 1,
+    release: (candidate: ScrollLease) => {
+      if (candidate !== lease || released) {
+        return false;
+      }
+      released = true;
+      releaseCount++;
+      return true;
+    },
+    scheduleFrameTransaction: (candidate: ScrollLease) => {
+      scheduleCount++;
+      return candidate === lease ? false : false;
+    },
+    write: () => {
+      throw new Error("The standalone rejection test must not write");
+    },
+  } as unknown as ScrollOwnershipControlPlane;
+  return {
+    plane,
+    releaseCalls: () => releaseCount,
+    scheduleCalls: () => scheduleCount,
+  };
 }
 
 function acquired(result: LeaseAcquisition): ScrollLease {
@@ -270,7 +355,7 @@ describe("virtualized scroll coordinator", () => {
     const blocker = acquireOperation(coordinator, "blocker");
     const calls: number[] = [];
 
-    expect(coordinator.scheduleExistingOperation(blocker, () => {
+    expect(blocker.scheduleFrameTransaction(() => {
       expect(coordinator.releaseOperation(blocker)).toBe(true);
     })).toBe(true);
     expect(coordinator.scheduleMaintenance("maintenance", operation => {
@@ -297,7 +382,7 @@ describe("virtualized scroll coordinator", () => {
     const blocker = acquireOperation(coordinator, "blocker");
     const calls: number[] = [];
 
-    expect(coordinator.scheduleExistingOperation(blocker, () => undefined)).toBe(true);
+    expect(blocker.scheduleFrameTransaction(() => undefined)).toBe(true);
     expect(coordinator.scheduleMaintenance("joined-maintenance", operation => {
       calls.push(operation.operationEpoch);
     })).toBe(true);
@@ -417,7 +502,7 @@ describe("virtualized scroll coordinator", () => {
     const calls: string[] = [];
     const terminals: string[] = [];
 
-    expect(coordinator.scheduleExistingOperation(blocker, () => undefined)).toBe(true);
+    expect(blocker.scheduleFrameTransaction(() => undefined)).toBe(true);
     expect(coordinator.scheduleMaintenance(
       "retrying-maintenance",
       () => calls.push("retrying"),
@@ -456,7 +541,7 @@ describe("virtualized scroll coordinator", () => {
     const operation = acquireOperation(coordinator, "receipt-owner");
     let receipt: ScrollWriteReceipt | undefined;
 
-    expect(coordinator.scheduleExistingOperation(operation, () => {
+    expect(operation.scheduleFrameTransaction(() => {
       operation.requestScrollTop(360, "receipt-owner");
       receipt = coordinator.getWriteReceipt(operation);
       expect(receipt).toBeDefined();
@@ -472,6 +557,220 @@ describe("virtualized scroll coordinator", () => {
 
     expect(coordinator.getWriteReceipt(operation)).toBeUndefined();
     expect(coordinator.getWriteReceiptByEpoch(operation.operationEpoch)).toBeUndefined();
+    expect(coordinator.releaseOperation(operation)).toBe(true);
+  });
+
+  it("runs the standalone release-after-write policy and releases after the write commits", async () => {
+    const { coordinator, frames, plane, root } = createHarness();
+    let receipt: ScrollWriteReceipt | undefined;
+
+    const result = runFrameCoordinator(coordinator).runFrameTransaction({
+      acquirePolicy: "supersede-as-user",
+      kind: "acquire",
+      owner: "host-progress",
+      policy: "standalone-release-after-write",
+      work: operation => {
+        operation.requestScrollTop(300, "host-progress");
+        receipt = coordinator.getWriteReceipt(operation);
+      },
+    });
+
+    expect(result.scheduled).toBe(true);
+    expect(result.operation).not.toBeNull();
+    expect(result.operation).not.toBeUndefined();
+    expect(plane.holds(result.operation!.lease)).toBe(true);
+
+    expect(frames.deliverFrame()).toBe(true);
+
+    expect(root.writes).toEqual([300]);
+    expect(receipt).toBeDefined();
+    expect(await receipt!.result).toEqual({ status: "committed", value: 300 });
+    await flushMicrotasks();
+    expect(plane.holds(result.operation!.lease)).toBe(false);
+  });
+
+  it("returns an unscheduled null operation when standalone acquisition is unavailable", () => {
+    const frames = new FakeFrameQueue();
+    const coordinator = createVirtualizedScrollCoordinator({
+      cancelFrame: frames.cancel,
+      getPlane: () => null,
+      readElementDocumentTop: element => Number(element.dataset["top"] ?? 0),
+      requestFrame: frames.request,
+      trace: () => undefined,
+    });
+
+    const result = runFrameCoordinator(coordinator).runFrameTransaction({
+      acquirePolicy: "supersede-as-user",
+      kind: "acquire",
+      owner: "scroll-disabled-reset",
+      policy: "standalone-release-after-write",
+      work: () => {
+        throw new Error("Unavailable acquisition must not run work");
+      },
+    });
+
+    expect(result).toEqual({ operation: null, scheduled: false });
+    expect(frames.pending()).toBe(0);
+  });
+
+  it("releases a standalone operation when its frame transaction is rejected", () => {
+    const frames = new FakeFrameQueue();
+    const rejecting = createScheduleRejectingPlane();
+    const coordinator = createVirtualizedScrollCoordinator({
+      cancelFrame: frames.cancel,
+      getPlane: () => rejecting.plane,
+      readElementDocumentTop: element => Number(element.dataset["top"] ?? 0),
+      requestFrame: frames.request,
+      trace: () => undefined,
+    });
+
+    const result = runFrameCoordinator(coordinator).runFrameTransaction({
+      acquirePolicy: "supersede-as-user",
+      kind: "acquire",
+      owner: "scroll-disabled-reset",
+      policy: "standalone-release-after-write",
+      work: () => {
+        throw new Error("Rejected standalone frame must not run work");
+      },
+    });
+
+    expect(result).toEqual({ operation: null, scheduled: false });
+    expect(rejecting.scheduleCalls()).toBe(1);
+    expect(rejecting.releaseCalls()).toBe(1);
+  });
+
+  it("runs an existing operation policy and releases after its write commits", async () => {
+    const { coordinator, frames, plane, root } = createHarness();
+    const operation = acquireOperation(coordinator, "source-line-navigation");
+    let receipt: ScrollWriteReceipt | undefined;
+
+    const result = runFrameCoordinator(coordinator).runFrameTransaction({
+      kind: "existing",
+      operation,
+      policy: "existing-release-after-write",
+      work: () => {
+        operation.requestScrollTop(180, "source-line-live-fallback");
+        receipt = coordinator.getWriteReceipt(operation);
+      },
+    });
+
+    expect(result.scheduled).toBe(true);
+    expect(result.operation).toBe(operation);
+
+    expect(frames.deliverFrame()).toBe(true);
+
+    expect(root.writes).toEqual([180]);
+    expect(receipt).toBeDefined();
+    expect(await receipt!.result).toEqual({ status: "committed", value: 180 });
+    await flushMicrotasks();
+    expect(plane.holds(operation.lease)).toBe(false);
+  });
+
+  it("releases an existing current operation when the frame slot is occupied", () => {
+    const { coordinator, frames, plane } = createHarness();
+    const operation = acquireOperation(coordinator, "source-line-navigation");
+    const calls: string[] = [];
+
+    expect(operation.scheduleFrameTransaction(() => calls.push("blocker"))).toBe(true);
+
+    const result = runFrameCoordinator(coordinator).runFrameTransaction({
+      kind: "existing",
+      operation,
+      policy: "existing-release-after-write",
+      work: () => calls.push("rejected"),
+    });
+
+    expect(result).toEqual({ operation, scheduled: false });
+    expect(plane.holds(operation.lease)).toBe(false);
+    expect(frames.deliverFrame()).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it("releases only a current operation when element landing receives a null element", () => {
+    const { coordinator, plane } = createHarness();
+    const operation = acquireOperation(coordinator, "heading-navigation");
+
+    const result = runFrameCoordinator(coordinator).runFrameTransaction({
+      element: null,
+      kind: "element-landing",
+      operation,
+      policy: "element-landing-release-after-write",
+      writer: "heading-live-fallback",
+    });
+
+    expect(result).toEqual({ operation, scheduled: false });
+    expect(plane.holds(operation.lease)).toBe(false);
+  });
+
+  it("computes element landing inside the delivered frame before releasing after write", async () => {
+    const { coordinator, frames, plane, root } = createHarness();
+    const operation = acquireOperation(coordinator, "heading-navigation");
+    const element = document.createElement("div");
+    element.dataset["top"] = "420";
+    let receipt: ScrollWriteReceipt | undefined;
+
+    const result = runFrameCoordinator(coordinator).runFrameTransaction({
+      element,
+      kind: "element-landing",
+      operation,
+      policy: "element-landing-release-after-write",
+      viewportOffsetY: 35,
+      writer: "heading-live-fallback",
+    });
+    element.dataset["top"] = "510";
+
+    expect(result.scheduled).toBe(true);
+    expect(result.operation).toBe(operation);
+    expect(frames.deliverFrame()).toBe(true);
+
+    expect(root.writes).toEqual([475]);
+    receipt = coordinator.getWriteReceipt(operation);
+    expect(receipt).toBeDefined();
+    expect(await receipt!.result).toEqual({ status: "committed", value: 475 });
+    await flushMicrotasks();
+    expect(plane.holds(operation.lease)).toBe(false);
+  });
+
+  it("commits an empty minimap frame without releasing the operation", async () => {
+    const { coordinator, frames, plane, root } = createHarness();
+    const operation = acquireOperation(coordinator, "minimap");
+    operation.requestScrollTop(240, "minimap-click-fallback");
+    const receipt = coordinator.getWriteReceipt(operation);
+
+    const result = runFrameCoordinator(coordinator).runFrameTransaction({
+      kind: "empty-commit",
+      operation,
+      policy: "empty-commit-retain-operation",
+    });
+
+    expect(result).toEqual({ operation, scheduled: true });
+    expect(frames.deliverFrame()).toBe(true);
+
+    expect(root.writes).toEqual([240]);
+    expect(receipt).toBeDefined();
+    expect(await receipt!.result).toEqual({ status: "committed", value: 240 });
+    await flushMicrotasks();
+    expect(plane.holds(operation.lease)).toBe(true);
+    expect(coordinator.releaseOperation(operation)).toBe(true);
+  });
+
+  it("retains a minimap operation when the empty commit frame is rejected", () => {
+    const { coordinator, frames, plane } = createHarness();
+    const operation = acquireOperation(coordinator, "minimap");
+    const calls: string[] = [];
+
+    expect(operation.scheduleFrameTransaction(() => calls.push("blocker"))).toBe(true);
+
+    const result = runFrameCoordinator(coordinator).runFrameTransaction({
+      kind: "empty-commit",
+      operation,
+      policy: "empty-commit-retain-operation",
+    });
+
+    expect(result).toEqual({ operation, scheduled: false });
+    expect(plane.holds(operation.lease)).toBe(true);
+    expect(frames.deliverFrame()).toBe(true);
+    expect(calls).toEqual(["blocker"]);
     expect(coordinator.releaseOperation(operation)).toBe(true);
   });
 });

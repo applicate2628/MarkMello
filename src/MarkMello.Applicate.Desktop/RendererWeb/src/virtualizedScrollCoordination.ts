@@ -21,11 +21,6 @@ export type VirtualizedMaintenanceTerminalHandler =
 export type PendingInitialVirtualizedWindowWork =
   (operation: VirtualizedScrollOperation) => void;
 
-export type VirtualizedMaintenanceRetryReason = "frame-transaction-occupied";
-
-export type VirtualizedMaintenanceRetryReasonProvider =
-  () => VirtualizedMaintenanceRetryReason;
-
 export type VirtualizedScrollCoordinatorDeps = Readonly<{
   cancelFrame: (handle: number) => void;
   getPlane: () => ScrollOwnershipControlPlane | null;
@@ -47,29 +42,54 @@ export type VirtualizedScrollCoordinator = Readonly<{
   consumePendingInitialWindow: (operation: VirtualizedScrollOperation) => boolean;
   clearPendingInitialWindow: () => void;
   clearWriteReceipts: () => void;
-  scheduleStandaloneOperation: (
-    owner: string,
-    policy: ScrollAcquirePolicy,
-    work: (operation: VirtualizedScrollOperation) => void
-  ) => VirtualizedScrollOperation | null;
-  scheduleExistingOperation: (
-    operation: VirtualizedScrollOperation,
-    work: () => void,
-    releaseAfterWrite?: boolean
-  ) => boolean;
-  scheduleElementLanding: (
-    operation: VirtualizedScrollOperation,
-    element: HTMLElement | null,
-    writer: string,
-    viewportOffsetY?: number
-  ) => boolean;
+  runFrameTransaction: (
+    request: VirtualizedFrameTransactionRequest
+  ) => VirtualizedFrameTransactionResult;
   scheduleMaintenance: (
     owner: string,
     work: (operation: VirtualizedScrollOperation) => void,
-    onTerminal?: VirtualizedMaintenanceTerminalHandler | null,
-    retryReason?: VirtualizedMaintenanceRetryReasonProvider
+    onTerminal?: VirtualizedMaintenanceTerminalHandler | null
   ) => boolean;
   cancelPendingMaintenance: (reason: string) => void;
+}>;
+
+export type VirtualizedFrameTransactionPolicy =
+  | "standalone-release-after-write"
+  | "existing-release-after-write"
+  | "element-landing-release-after-write"
+  | "empty-commit-retain-operation";
+
+export type VirtualizedFrameTransactionRequest =
+  | Readonly<{
+      acquirePolicy: ScrollAcquirePolicy;
+      kind: "acquire";
+      owner: string;
+      policy: "standalone-release-after-write";
+      work: (operation: VirtualizedScrollOperation) => void;
+    }>
+  | Readonly<{
+      kind: "existing";
+      operation: VirtualizedScrollOperation;
+      policy: "existing-release-after-write";
+      work: () => void;
+    }>
+  | Readonly<{
+      element: HTMLElement | null;
+      kind: "element-landing";
+      operation: VirtualizedScrollOperation;
+      policy: "element-landing-release-after-write";
+      viewportOffsetY?: number;
+      writer: string;
+    }>
+  | Readonly<{
+      kind: "empty-commit";
+      operation: VirtualizedScrollOperation;
+      policy: "empty-commit-retain-operation";
+    }>;
+
+export type VirtualizedFrameTransactionResult = Readonly<{
+  operation: VirtualizedScrollOperation | null;
+  scheduled: boolean;
 }>;
 
 type VirtualizedMaintenancePhase = "executing" | "frame-scheduled" | "pending" | "retry-pending" | "terminal";
@@ -94,7 +114,6 @@ type VirtualizedMaintenanceRequest = {
   phase: VirtualizedMaintenancePhase;
   requestId: VirtualizedMaintenanceRequestId;
   retryFrame: number | null;
-  retryReason: VirtualizedMaintenanceRetryReasonProvider;
   terminal: VirtualizedMaintenanceTerminal | null;
   work: (operation: VirtualizedScrollOperation) => void;
   workRevision: number;
@@ -116,8 +135,8 @@ type VirtualizedMaintenanceReleaseAction = {
   operation: VirtualizedScrollOperation;
 };
 
-const defaultVirtualizedMaintenanceRetryReason: VirtualizedMaintenanceRetryReasonProvider =
-  () => "frame-transaction-occupied";
+const VIRTUALIZED_MAINTENANCE_RETRY_POLICY = "maintenance-retry-on-occupied" as const;
+const VIRTUALIZED_MAINTENANCE_RETRY_REASON = "frame-transaction-occupied" as const;
 
 export function createVirtualizedScrollCoordinator(
   deps: VirtualizedScrollCoordinatorDeps
@@ -217,65 +236,86 @@ export function createVirtualizedScrollCoordinator(
     return true;
   }
 
-  function scheduleVirtualizedStandaloneOperation(
-    owner: string,
-    policy: ScrollAcquirePolicy,
-    work: (operation: VirtualizedScrollOperation) => void
-  ): VirtualizedScrollOperation | null {
-    const operation = acquireVirtualizedScrollOperation(owner, policy);
+  function runStandaloneReleaseAfterWrite(
+    request: Extract<VirtualizedFrameTransactionRequest, { kind: "acquire" }>
+  ): VirtualizedFrameTransactionResult {
+    const operation = acquireVirtualizedScrollOperation(request.owner, request.acquirePolicy);
     if (operation === null) {
-      return null;
+      return { operation: null, scheduled: false };
     }
     const scheduled = operation.scheduleFrameTransaction(() => {
       if (!operation.isCurrent()) {
         return;
       }
-      work(operation);
+      request.work(operation);
       releaseVirtualizedScrollOperationAfterWrite(operation);
     });
     if (!scheduled) {
       releaseVirtualizedScrollOperation(operation);
-      return null;
+      return { operation: null, scheduled: false };
     }
-    return operation;
+    return { operation, scheduled: true };
   }
 
-  function scheduleExistingVirtualizedOperation(
-    operation: VirtualizedScrollOperation,
-    work: () => void,
-    releaseAfterWrite = false
-  ): boolean {
+  function runExistingReleaseAfterWrite(
+    request: Extract<VirtualizedFrameTransactionRequest, { kind: "existing" }>
+  ): VirtualizedFrameTransactionResult {
+    const operation = request.operation;
     const scheduled = operation.scheduleFrameTransaction(() => {
       if (!operation.isCurrent()) {
         return;
       }
-      work();
-      if (releaseAfterWrite) {
-        releaseVirtualizedScrollOperationAfterWrite(operation);
-      }
+      request.work();
+      releaseVirtualizedScrollOperationAfterWrite(operation);
     });
-    if (!scheduled && releaseAfterWrite && operation.isCurrent()) {
+    if (!scheduled && operation.isCurrent()) {
       releaseVirtualizedScrollOperation(operation);
     }
-    return scheduled;
+    return { operation, scheduled };
   }
 
-  function scheduleVirtualizedElementLanding(
-    operation: VirtualizedScrollOperation,
-    element: HTMLElement | null,
-    writer: string,
-    viewportOffsetY = 0
-  ): boolean {
+  function runElementLandingReleaseAfterWrite(
+    request: Extract<VirtualizedFrameTransactionRequest, { kind: "element-landing" }>
+  ): VirtualizedFrameTransactionResult {
+    const operation = request.operation;
+    const element = request.element;
     if (element === null) {
-      if (operation.isCurrent()) {
-        releaseVirtualizedScrollOperation(operation);
+      if (request.operation.isCurrent()) {
+        releaseVirtualizedScrollOperation(request.operation);
       }
-      return false;
+      return { operation, scheduled: false };
     }
-    return scheduleExistingVirtualizedOperation(operation, () => {
-      const target = deps.readElementDocumentTop(element) - Math.max(0, viewportOffsetY);
-      operation.requestScrollTop(target, writer);
-    }, true);
+    return runExistingReleaseAfterWrite({
+      kind: "existing",
+      operation,
+      policy: "existing-release-after-write",
+      work: () => {
+        const target = deps.readElementDocumentTop(element) - Math.max(0, request.viewportOffsetY ?? 0);
+        operation.requestScrollTop(target, request.writer);
+      },
+    });
+  }
+
+  function runEmptyCommitRetainOperation(
+    request: Extract<VirtualizedFrameTransactionRequest, { kind: "empty-commit" }>
+  ): VirtualizedFrameTransactionResult {
+    const scheduled = request.operation.scheduleFrameTransaction(() => undefined);
+    return { operation: request.operation, scheduled };
+  }
+
+  function runFrameTransaction(
+    request: VirtualizedFrameTransactionRequest
+  ): VirtualizedFrameTransactionResult {
+    switch (request.kind) {
+      case "acquire":
+        return runStandaloneReleaseAfterWrite(request);
+      case "existing":
+        return runExistingReleaseAfterWrite(request);
+      case "element-landing":
+        return runElementLandingReleaseAfterWrite(request);
+      case "empty-commit":
+        return runEmptyCommitRetainOperation(request);
+    }
   }
 
   function virtualizedMaintenanceDetail(request: VirtualizedMaintenanceRequest): Record<string, unknown> {
@@ -319,8 +359,7 @@ export function createVirtualizedScrollCoordinator(
     owner: string,
     documentEpoch: number,
     work: (operation: VirtualizedScrollOperation) => void,
-    onTerminal: VirtualizedMaintenanceTerminalHandler | null,
-    retryReason: VirtualizedMaintenanceRetryReasonProvider
+    onTerminal: VirtualizedMaintenanceTerminalHandler | null
   ): VirtualizedMaintenanceRequest {
     const requestSerial = ++virtualizedMaintenanceRequestSerial;
     return {
@@ -332,7 +371,6 @@ export function createVirtualizedScrollCoordinator(
       phase: "pending",
       requestId: Object.freeze({ documentEpoch, requestSerial }),
       retryFrame: null,
-      retryReason,
       terminal: null,
       work,
       workRevision: 1,
@@ -346,15 +384,13 @@ export function createVirtualizedScrollCoordinator(
   function coalesceVirtualizedMaintenanceRequest(
     request: VirtualizedMaintenanceRequest,
     work: (operation: VirtualizedScrollOperation) => void,
-    onTerminal: VirtualizedMaintenanceTerminalHandler | null,
-    retryReason: VirtualizedMaintenanceRetryReasonProvider
+    onTerminal: VirtualizedMaintenanceTerminalHandler | null
   ): void {
     if (!isLiveVirtualizedMaintenanceRequest(request)) {
       return;
     }
     const replacedTerminal = request.onTerminal;
     request.onTerminal = onTerminal;
-    request.retryReason = retryReason;
     request.work = work;
     request.workRevision++;
     replacedTerminal?.({ reason: "coalesced", status: "canceled" });
@@ -547,7 +583,8 @@ export function createVirtualizedScrollCoordinator(
       attemptVirtualizedMaintenance(request);
     });
     postVirtualizedMaintenanceEvent("mm-virt-maintenance-retry", request, {
-      reason: request.retryReason(),
+      policy: VIRTUALIZED_MAINTENANCE_RETRY_POLICY,
+      reason: VIRTUALIZED_MAINTENANCE_RETRY_REASON,
     });
   }
 
@@ -636,8 +673,7 @@ export function createVirtualizedScrollCoordinator(
   function scheduleVirtualizedMaintenance(
     owner: string,
     work: (operation: VirtualizedScrollOperation) => void,
-    onTerminal: VirtualizedMaintenanceTerminalHandler | null = null,
-    retryReason: VirtualizedMaintenanceRetryReasonProvider = defaultVirtualizedMaintenanceRetryReason
+    onTerminal: VirtualizedMaintenanceTerminalHandler | null = null
   ): boolean {
     const plane = deps.getPlane();
     if (plane === null) {
@@ -660,21 +696,20 @@ export function createVirtualizedScrollCoordinator(
     if (slot?.active !== null && slot?.active !== undefined) {
       if (slot.active.phase === "executing") {
         if (slot.successor !== null) {
-          coalesceVirtualizedMaintenanceRequest(slot.successor, work, onTerminal, retryReason);
+          coalesceVirtualizedMaintenanceRequest(slot.successor, work, onTerminal);
           return true;
         }
         const successor = createVirtualizedMaintenanceRequest(
           owner,
           documentEpoch,
           work,
-          onTerminal,
-          retryReason
+          onTerminal
         );
         slot.successor = successor;
         postVirtualizedMaintenanceRequested(successor);
         return true;
       }
-      coalesceVirtualizedMaintenanceRequest(slot.active, work, onTerminal, retryReason);
+      coalesceVirtualizedMaintenanceRequest(slot.active, work, onTerminal);
       return true;
     }
 
@@ -682,8 +717,7 @@ export function createVirtualizedScrollCoordinator(
       owner,
       documentEpoch,
       work,
-      onTerminal,
-      retryReason
+      onTerminal
     );
     if (slot === undefined) {
       slot = { active: request, successor: null };
@@ -706,9 +740,7 @@ export function createVirtualizedScrollCoordinator(
     consumePendingInitialWindow: consumePendingInitialVirtualizedWindow,
     clearPendingInitialWindow: () => { pendingInitialVirtualizedWindowWork = null; },
     clearWriteReceipts: () => { virtualizedWriteReceipts.clear(); },
-    scheduleStandaloneOperation: scheduleVirtualizedStandaloneOperation,
-    scheduleExistingOperation: scheduleExistingVirtualizedOperation,
-    scheduleElementLanding: scheduleVirtualizedElementLanding,
+    runFrameTransaction,
     scheduleMaintenance: scheduleVirtualizedMaintenance,
     cancelPendingMaintenance: cancelPendingVirtualizedMaintenance,
   };
