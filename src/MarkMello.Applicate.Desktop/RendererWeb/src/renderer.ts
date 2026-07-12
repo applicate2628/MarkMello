@@ -3575,7 +3575,7 @@ function scheduleVirtualizedWindowFontReadiness(mountGeneration: number): void {
   void ready.then(finish, finish);
 }
 
-function initializeVirtualizedDocumentWindow(): void {
+function initializeVirtualizedDocumentWindow(useCachedDocumentState = false): void {
   if (!virtualizationEnabled) {
     return;
   }
@@ -3597,8 +3597,11 @@ function initializeVirtualizedDocumentWindow(): void {
     blocks,
     readIntrinsicSizeMetrics(main),
     root.scrollHeight,
-    { intrinsicSizeCalibrator: virtualizedIntrinsicCalibrator });
-  virtualizedDocumentWindowModel = models.estimateOnlyModel;
+    {
+      acceptRememberedIntrinsicSizeMeasurements: useCachedDocumentState,
+      intrinsicSizeCalibrator: virtualizedIntrinsicCalibrator,
+    });
+  virtualizedDocumentWindowModel = useCachedDocumentState ? models.measuredModel : models.estimateOnlyModel;
   virtualizedDocumentWindowModelGeneration++;
   const documentEpoch = scrollOwnershipControlPlane!.captureDocumentEpoch();
   startRenderedFindProjectionForCurrentModel();
@@ -4467,8 +4470,9 @@ function restoreCachedScrollPosition(): void {
         : null;
       const prepared = await scheduleFrameWork(() => {
         consumePendingInitialVirtualizedWindow(operation);
-        if (target !== null && entry !== undefined) {
-          controller?.ensureSectionRendered(entry.sectionIndex, {
+        if (target !== null && entry !== undefined && model !== null) {
+          const restoreRange = model.computeWindowRange(target, getDocumentScrollRoot().clientHeight);
+          controller?.ensureSectionRangeRendered(restoreRange.start, restoreRange.end, {
             force: true,
             operation,
             preserveAnchor: false,
@@ -7668,7 +7672,7 @@ function ensureChromeNodes(useCachedDocumentState = false, options: EnsureChrome
   if (options.allowVirtualization === false) {
     resetVirtualizedDocumentWindow(false);
   } else {
-    initializeVirtualizedDocumentWindow();
+    initializeVirtualizedDocumentWindow(useCachedDocumentState);
   }
   refreshTopVisibleBlockIndexCache();
   // Width-handle X depends on the new .mm-document bounding rect after innerHTML

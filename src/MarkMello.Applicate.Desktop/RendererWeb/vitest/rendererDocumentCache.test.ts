@@ -240,7 +240,20 @@ describe("renderer document cache", () => {
     const ensureChromeNodes = source.slice(start, end);
     expect(ensureChromeNodes).toContain("if (useCachedDocumentState && virtualizationEnabled)");
     expect(ensureChromeNodes.indexOf("reclaimClonedMermaidProxyLifecycles(main)"))
-      .toBeLessThan(ensureChromeNodes.indexOf("initializeVirtualizedDocumentWindow()"));
+      .toBeLessThan(ensureChromeNodes.indexOf("initializeVirtualizedDocumentWindow(useCachedDocumentState)"));
+  });
+
+  it("uses measured cache geometry while cold initialization remains estimate-only", () => {
+    const source = readRendererSource();
+    const initializeStart = source.indexOf("function initializeVirtualizedDocumentWindow(");
+    const initializeEnd = source.indexOf("function updateVirtualizedWindowForScroll", initializeStart);
+    const initialize = source.slice(initializeStart, initializeEnd);
+
+    expect(initialize).toContain("useCachedDocumentState = false");
+    expect(initialize).toContain(
+      "useCachedDocumentState ? models.measuredModel : models.estimateOnlyModel"
+    );
+    expect(initialize).not.toContain("virtualizedDocumentWindowModel = models.estimateOnlyModel;");
   });
 
   it("captures live block plus intra-offset synchronously before reset", () => {
@@ -271,6 +284,17 @@ describe("renderer document cache", () => {
     expect(settleIndex).toBeGreaterThan(prepareIndex);
     expect(writeIndex).toBeGreaterThan(settleIndex);
     expect(restore.slice(prepareIndex, settleIndex)).not.toContain("operation.requestScrollTop");
+  });
+
+  it("flag-on restore realizes the target viewport range before settlement", () => {
+    const restore = readCacheRestoreSource();
+    const prepareStart = restore.indexOf("const prepared = await scheduleFrameWork");
+    const prepareEnd = restore.indexOf("if (!prepared || completed)", prepareStart);
+    const prepare = restore.slice(prepareStart, prepareEnd);
+
+    expect(prepare).toContain("model.computeWindowRange(target, getDocumentScrollRoot().clientHeight)");
+    expect(prepare).toContain("controller?.ensureSectionRangeRendered(");
+    expect(prepare).not.toContain("controller?.ensureSectionRendered(");
   });
 
   it("cache restore has no 180ms correctness retry", () => {
