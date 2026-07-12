@@ -5986,7 +5986,6 @@
   }
 
   // RendererWeb/src/virtualizedScrollCoordination.ts
-  var VIRTUALIZED_MAINTENANCE_RETRY_POLICY = "maintenance-retry-on-occupied";
   var VIRTUALIZED_MAINTENANCE_RETRY_REASON = "frame-transaction-occupied";
   function createVirtualizedScrollCoordinator(deps) {
     const virtualizedMaintenanceByOwner = /* @__PURE__ */ new Map();
@@ -6352,7 +6351,6 @@
         attemptVirtualizedMaintenance(request);
       });
       postVirtualizedMaintenanceEvent("mm-virt-maintenance-retry", request, {
-        policy: VIRTUALIZED_MAINTENANCE_RETRY_POLICY,
         reason: VIRTUALIZED_MAINTENANCE_RETRY_REASON
       });
     }
@@ -6663,6 +6661,7 @@
   var virtualizedWindowMountGeneration = 0;
   var virtualizedWindowFontGeometryTicket = null;
   var navigationSessionRef = null;
+  var virtualizedProgrammaticNavigationPostSettleTarget = null;
   var virtualizedScrollControlFrameTimestamp = null;
   var minimapScrollOperation = null;
   var cachedScrollRestoreCompletion = null;
@@ -8124,7 +8123,6 @@
     let startTimestamp = null;
     const advance = () => input.operation.scheduleFrameTransaction(() => {
       if (!input.operation.isCurrent()) {
-        clearVirtualizedNavigationSession(input.operation);
         return;
       }
       const timestamp = virtualizedScrollControlFrameTimestamp;
@@ -8326,12 +8324,11 @@
       endVirtualizedGeometryWork(ticket);
     }
   }
-  function releaseVirtualizedProgrammaticNavigationOperation(operation) {
-    if (!operation.isCurrent()) {
-      clearVirtualizedNavigationSession(operation);
-      return;
+  function releaseVirtualizedProgrammaticNavigationOperation(operation, clearPostSettleTarget = false) {
+    clearVirtualizedNavigationSession(operation);
+    if (clearPostSettleTarget) {
+      clearVirtualizedProgrammaticNavigationPostSettleTarget();
     }
-    clearVirtualizedNavigationSession();
     releaseVirtualizedScrollOperation(operation);
   }
   function finishVirtualizedProgrammaticNavigationCorrection(operation, input) {
@@ -8435,7 +8432,6 @@
       if (settlement === null) {
         const outcome = await waitForCurrentVirtualizedGeometry(operation, afterEmission);
         if (outcome.status === "canceled") {
-          clearVirtualizedNavigationSession(operation);
           return;
         }
         settlement = outcome;
@@ -8448,11 +8444,10 @@
         previousResidualAbs
       );
       if (frame.kind === "canceled") {
-        clearVirtualizedNavigationSession(operation);
         return;
       }
       if (frame.kind === "missing-target") {
-        releaseVirtualizedProgrammaticNavigationOperation(operation);
+        releaseVirtualizedProgrammaticNavigationOperation(operation, true);
         return;
       }
       if (frame.kind === "geometry-changed") {
@@ -8468,13 +8463,12 @@
           reason: "residual-non-converged",
           residual: frame.residual
         });
-        releaseVirtualizedProgrammaticNavigationOperation(operation);
+        releaseVirtualizedProgrammaticNavigationOperation(operation, true);
         return;
       }
       if (frame.kind === "written") {
         const write = await frame.receipt.result;
         if (write.status !== "committed") {
-          clearVirtualizedNavigationSession(operation);
           return;
         }
         previousResidualAbs = Math.abs(frame.residual);
@@ -8485,7 +8479,6 @@
       }
       const confirmation = await awaitConfirmedVirtualizedGeometry(operation, settlement);
       if (confirmation.status === "canceled") {
-        clearVirtualizedNavigationSession(operation);
         return;
       }
       if (confirmation.status === "changed") {
@@ -8508,7 +8501,6 @@
       });
       return;
     }
-    clearVirtualizedNavigationSession(operation);
   }
   function landVirtualizedProgrammaticNavigation(input) {
     startVirtualizedProgrammaticNavigationSettle({
@@ -8568,29 +8560,23 @@
     const session = navigationSessionRef;
     return session?.operation.isCurrent() === true ? session : null;
   }
-  function readCurrentVirtualizedNavigationPostSettleTarget() {
-    return readCurrentVirtualizedNavigationSession()?.postSettleTarget ?? null;
-  }
-  function hasCurrentVirtualizedNavigationPostSettleTarget() {
-    return readCurrentVirtualizedNavigationPostSettleTarget() !== null;
-  }
   function clearVirtualizedNavigationSession(operation) {
     if (operation === void 0 || navigationSessionRef?.operation === operation) {
       navigationSessionRef = null;
     }
   }
   function clearVirtualizedProgrammaticNavigationPostSettleTarget() {
-    clearVirtualizedNavigationSession();
+    virtualizedProgrammaticNavigationPostSettleTarget = null;
   }
   function alignVirtualizedProgrammaticNavigationPostSettleTarget() {
     const session = readCurrentVirtualizedNavigationSession();
-    const target = session?.postSettleTarget ?? null;
+    const target = virtualizedProgrammaticNavigationPostSettleTarget;
     if (session !== null && target !== null) {
       correctVirtualizedProgrammaticNavigationResidual({ ...target, operation: session.operation });
     }
   }
   function getVirtualizedProgrammaticNavigationPostSettleSectionIndex() {
-    const target = readCurrentVirtualizedNavigationPostSettleTarget();
+    const target = virtualizedProgrammaticNavigationPostSettleTarget;
     return target === null ? null : resolveVirtualizedNavigationTargetSectionIndex(target.descriptor);
   }
   function startVirtualizedProgrammaticNavigationSettle(input) {
@@ -8604,9 +8590,9 @@
     navigationSessionRef = {
       anchor,
       externalShiftCount: 0,
-      operation: input.operation,
-      postSettleTarget: anchor
+      operation: input.operation
     };
+    virtualizedProgrammaticNavigationPostSettleTarget = anchor;
     cancelVirtualizedCalibration();
     if (input.behavior === "smooth" && input.initialContext !== void 0) {
       const destinationScrollTop = computeVirtualizedProgrammaticNavigationScrollTop(
@@ -8672,6 +8658,7 @@
     virtualizedWindowMountGeneration++;
     virtualizedMeasureFrameRequested = false;
     clearVirtualizedNavigationSession();
+    clearVirtualizedProgrammaticNavigationPostSettleTarget();
     if (resetCalibrator) {
       virtualizedIntrinsicCalibrator.reset();
     }
@@ -8696,7 +8683,7 @@
         return;
       }
       invalidateSourceLineAnchors({
-        reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget()
+        reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
       });
       refreshVirtualizedFindHighlights();
       scheduleVirtualizedMeasuredHeightAdoption();
@@ -8866,7 +8853,7 @@
       if (controller.updateWindowForScroll({ ...options, operation })) {
         invalidateTopVisibleBlockIndexCache();
         invalidateSourceLineAnchors({
-          reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget()
+          reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
         });
         refreshVirtualizedFindHighlights();
         scheduleVirtualizedMeasuredHeightAdoption();
@@ -8932,8 +8919,7 @@
       if (controller !== virtualizedDocumentWindowController) {
         return;
       }
-      const navigationSession = readCurrentVirtualizedNavigationSession();
-      const postSettleTarget = navigationSession?.postSettleTarget ?? null;
+      const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
       const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
       const result = controller.adoptRenderedHeights(
         preserveSectionIndex === null ? { operation } : {
@@ -8948,10 +8934,10 @@
       applyVirtualizedRenderedHeightAdoptionEffects(result, {
         alignPostSettleTarget: postSettleTarget === null
       });
-      if (postSettleTarget !== null && navigationSession !== null) {
+      if (postSettleTarget !== null && operation.isCurrent()) {
         correctVirtualizedProgrammaticNavigationResidual({
           ...postSettleTarget,
-          operation: navigationSession.operation
+          operation
         });
       }
     }, closeTicket);
@@ -8996,9 +8982,8 @@
       if (!operation.isCurrent() || operation.documentEpoch !== documentEpoch || model !== virtualizedDocumentWindowModel || controller !== virtualizedDocumentWindowController) {
         return;
       }
-      const navigationSession = readCurrentVirtualizedNavigationSession();
       const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
-      const postSettleTarget = navigationSession?.postSettleTarget ?? null;
+      const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
       const anchor = preserveSectionIndex === null ? captureCurrentVirtualizedReadingAnchor() : null;
       const recordedCount = model.recordIntrinsicSizeCalibrationSamples(virtualizedIntrinsicCalibrator);
       if (recordedCount === 0) {
@@ -9013,10 +8998,10 @@
       controller.updateWindowForScroll({ desiredScrollTop: target, force: true });
       if (postSettleTarget === null) {
         operation.requestScrollTop(target, "calibration");
-      } else if (navigationSession !== null) {
+      } else {
         correctVirtualizedProgrammaticNavigationResidual({
           ...postSettleTarget,
-          operation: navigationSession.operation
+          operation
         });
       }
       invalidateTopVisibleBlockIndexCache();
@@ -12232,7 +12217,7 @@
     queueMinimapRefreshAfterLayoutSettles();
     scheduleResizeReactions(documentEpoch);
     invalidateSourceLineAnchors({
-      reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget()
+      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
     });
     scheduleVirtualizedMeasuredHeightAdoption();
     window.requestAnimationFrame(() => {
@@ -12247,7 +12232,7 @@
     }
     queueMinimapRefreshAfterLayoutSettles();
     invalidateSourceLineAnchors({
-      reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget()
+      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
     });
     scheduleVirtualizedMeasuredHeightAdoption();
   }
@@ -12334,6 +12319,7 @@
       if (classification.kind === "user-supersession") {
         cancelPendingVirtualizedMaintenance("user-supersession");
         clearVirtualizedNavigationSession();
+        clearVirtualizedProgrammaticNavigationPostSettleTarget();
         queuePreviewSourceLinePost();
       } else if (classification.kind === "unattributed-failure") {
         cancelPendingVirtualizedMaintenance("unattributed-failure");
@@ -12341,6 +12327,7 @@
           navigationSession.externalShiftCount++;
         }
         clearVirtualizedNavigationSession();
+        clearVirtualizedProgrammaticNavigationPostSettleTarget();
       }
     } else {
       const programmaticNavigationScroll = isVirtualizedProgrammaticNavigationInProgress();
