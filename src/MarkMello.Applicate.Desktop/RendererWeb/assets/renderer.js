@@ -1108,13 +1108,34 @@
       s.bar.classList.remove("mm-find-no-match");
       return;
     }
-    if (status.totalCount === 0) {
-      s.count.textContent = "0 of 0";
+    const shownCount = normalizeProviderCount(status.shownCount);
+    if (shownCount === 0) {
+      s.count.textContent = formatProviderCountText(status, shownCount);
       s.bar.classList.add("mm-find-no-match");
       return;
     }
     s.bar.classList.remove("mm-find-no-match");
-    s.count.textContent = `${status.currentIndex >= 0 ? status.currentIndex + 1 : 0} of ${status.totalCount}`;
+    s.count.textContent = formatProviderCountText(status, shownCount);
+  }
+  function normalizeProviderCount(value) {
+    return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  }
+  function formatProviderCountText(status, shownCount) {
+    const currentPosition = status.currentIndex >= 0 && shownCount > 0 ? Math.min(status.currentIndex + 1, shownCount) : 0;
+    const base = `${currentPosition} of ${shownCount}`;
+    const totalCount = normalizeProviderCount(status.totalCount);
+    const skippedCount = normalizeProviderCount(status.skippedCount);
+    const details = [];
+    if (status.truncated || skippedCount > 0 || totalCount !== shownCount) {
+      details.push(`${totalCount} total`);
+    }
+    if (skippedCount > 0) {
+      details.push(`${skippedCount} skipped`);
+    }
+    if (status.truncated) {
+      details.push("truncated");
+    }
+    return details.length === 0 ? base : `${base} shown (${details.join(", ")})`;
   }
   function runSearch(s, query) {
     s.lastSearched = query;
@@ -2234,15 +2255,18 @@
       this.containingSectionIndexByBlockIndex = /* @__PURE__ */ new Map();
       this.sectionIndexByHeadingAnchor = /* @__PURE__ */ new Map();
       this.sourceLineSpans = [];
+      this.renderedContentStatsBySection = [];
+      this.renderedContentSummary = createEmptyRenderedContentMathStats();
       this.totalHeight = 0;
       this.leadingOffset = options.leadingOffset ?? 0;
       this.sections = entries.slice().sort((a, b) => a.sectionIndex - b.sectionIndex).map((entry) => ({ ...entry }));
       for (let index = 0; index < this.sections.length; index++) {
         const entry = this.sections[index];
-        const metadata = readSectionModelEntryMetadata(entry);
-        entry.containedBlockIndexes = metadata.containedBlockIndexes;
-        entry.headingAnchors = metadata.headingAnchors;
-        entry.sourceLineSpans = metadata.sourceLineSpans;
+        const analysis = readSectionModelEntryAnalysis(entry);
+        entry.containedBlockIndexes = analysis.metadata.containedBlockIndexes;
+        entry.headingAnchors = analysis.metadata.headingAnchors;
+        entry.sourceLineSpans = analysis.metadata.sourceLineSpans;
+        this.replaceRenderedContentStats(index, analysis.renderedContentStats);
         if (!this.sectionIndexByBlockIndex.has(entry.blockIndex)) {
           this.sectionIndexByBlockIndex.set(entry.blockIndex, index);
         }
@@ -2269,34 +2293,22 @@
     getPendingRenderedContentEntryIndexes() {
       const pendingIndexes = [];
       for (let index = 0; index < this.sections.length; index++) {
-        const entry = this.sections[index];
-        if (readRenderedContentHtmlStats(entry.html).pendingMathCount > 0) {
+        if ((this.renderedContentStatsBySection[index]?.pendingMathCount ?? 0) > 0) {
           pendingIndexes.push(index);
         }
       }
       return pendingIndexes;
     }
-    adoptRenderedSectionHtml(updates) {
-      let updatedCount = 0;
-      for (const update of updates) {
-        const entry = this.sections[update.sectionIndex];
-        if (entry === void 0 || typeof update.html !== "string") {
-          continue;
-        }
-        if (entry.html === update.html) {
-          continue;
-        }
-        entry.html = update.html;
-        updatedCount++;
-      }
-      return {
-        pendingMathCount: this.countPendingRenderedContentMath(),
-        updatedCount
-      };
-    }
     commitRenderedFormulaFragment(sectionIndex, renderedHtml, result) {
       const entry = this.sections[sectionIndex];
-      if (entry === void 0 || typeof renderedHtml !== "string" || !isRenderedFormulaFragmentResultConsistent(renderedHtml, result)) {
+      if (entry === void 0 || typeof renderedHtml !== "string") {
+        return {
+          changed: false,
+          pendingMathCount: this.countPendingRenderedContentMath()
+        };
+      }
+      const nextStats = result.mathStats ?? readRenderedContentHtmlStats(renderedHtml);
+      if (!isRenderedFormulaFragmentResultConsistent(nextStats, result)) {
         return {
           changed: false,
           pendingMathCount: this.countPendingRenderedContentMath()
@@ -2304,7 +2316,7 @@
       }
       const changed = entry.html !== renderedHtml;
       if (changed) {
-        entry.html = renderedHtml;
+        this.replaceRenderedContentHtml(sectionIndex, renderedHtml, nextStats);
       }
       return {
         changed,
@@ -2312,7 +2324,7 @@
       };
     }
     getRenderedContentState() {
-      const summary = this.readRenderedContentSummary();
+      const summary = this.renderedContentSummary;
       if (summary.totalMathCount === 0) {
         return "not-needed";
       }
@@ -2326,6 +2338,9 @@
     }
     getTotalHeight() {
       return this.totalHeight;
+    }
+    getPendingRenderedContentMathCount() {
+      return this.countPendingRenderedContentMath();
     }
     sectionTop(sectionIndex) {
       return this.sections[sectionIndex]?.cumulativeTop ?? this.leadingOffset;
@@ -2576,21 +2591,22 @@
       };
     }
     countPendingRenderedContentMath() {
-      return this.readRenderedContentSummary().pendingMathCount;
+      return this.renderedContentSummary.pendingMathCount;
     }
-    readRenderedContentSummary() {
-      const summary = {
-        failedMathCount: 0,
-        pendingMathCount: 0,
-        totalMathCount: 0
-      };
-      for (const entry of this.sections) {
-        const stats = readRenderedContentHtmlStats(entry.html);
-        summary.failedMathCount += stats.failedMathCount;
-        summary.pendingMathCount += stats.pendingMathCount;
-        summary.totalMathCount += stats.totalMathCount;
+    replaceRenderedContentHtml(sectionIndex, html, stats) {
+      const entry = this.sections[sectionIndex];
+      if (entry === void 0) {
+        return;
       }
-      return summary;
+      entry.html = html;
+      this.replaceRenderedContentStats(sectionIndex, stats);
+    }
+    replaceRenderedContentStats(sectionIndex, stats) {
+      const previous = this.renderedContentStatsBySection[sectionIndex] ?? EMPTY_RENDERED_CONTENT_HTML_STATS;
+      addRenderedContentMathStats(this.renderedContentSummary, previous, -1);
+      const next = cloneRenderedContentMathStats(stats);
+      this.renderedContentStatsBySection[sectionIndex] = next;
+      addRenderedContentMathStats(this.renderedContentSummary, next, 1);
     }
   };
   function buildDocumentWindowModelsFromLiveBlocks(blocks, metrics, documentScrollHeight, options = {}) {
@@ -2646,6 +2662,9 @@
     const template = document.createElement("template");
     template.innerHTML = html;
     const mathNodes = Array.from(template.content.querySelectorAll("[data-tex]"));
+    return readRenderedContentMathNodeStats(mathNodes);
+  }
+  function readRenderedContentMathNodeStats(mathNodes) {
     let failedMathCount = 0;
     let pendingMathCount = 0;
     for (const node of mathNodes) {
@@ -2667,8 +2686,26 @@
     pendingMathCount: 0,
     totalMathCount: 0
   };
-  function isRenderedFormulaFragmentResultConsistent(renderedHtml, result) {
-    const stats = readRenderedContentHtmlStats(renderedHtml);
+  function createEmptyRenderedContentMathStats() {
+    return {
+      failedMathCount: 0,
+      pendingMathCount: 0,
+      totalMathCount: 0
+    };
+  }
+  function cloneRenderedContentMathStats(stats) {
+    return {
+      failedMathCount: stats.failedMathCount,
+      pendingMathCount: stats.pendingMathCount,
+      totalMathCount: stats.totalMathCount
+    };
+  }
+  function addRenderedContentMathStats(target, stats, direction) {
+    target.failedMathCount += stats.failedMathCount * direction;
+    target.pendingMathCount += stats.pendingMathCount * direction;
+    target.totalMathCount += stats.totalMathCount * direction;
+  }
+  function isRenderedFormulaFragmentResultConsistent(stats, result) {
     if (stats.pendingMathCount > 0) {
       return false;
     }
@@ -2974,22 +3011,25 @@
     const tag = element.tagName.toUpperCase();
     return /^H[1-6]$/.test(tag) ? Number.parseInt(tag.slice(1), 10) : 0;
   }
-  function readSectionModelEntryMetadata(entry) {
-    const parsed = entry.html ? readSectionHtmlMetadata(entry.html) : EMPTY_SECTION_METADATA;
+  function readSectionModelEntryAnalysis(entry) {
+    const parsed = entry.html ? readSectionHtmlAnalysis(entry.html) : EMPTY_SECTION_ANALYSIS;
     return {
-      containedBlockIndexes: uniqueNumbers([
-        entry.blockIndex,
-        ...entry.containedBlockIndexes ?? [],
-        ...parsed.containedBlockIndexes
-      ]),
-      headingAnchors: uniqueStrings([
-        ...entry.headingAnchors ?? [],
-        ...parsed.headingAnchors
-      ]),
-      sourceLineSpans: uniqueSourceLineSpans([
-        ...entry.sourceLineSpans ?? [],
-        ...parsed.sourceLineSpans
-      ])
+      metadata: {
+        containedBlockIndexes: uniqueNumbers([
+          entry.blockIndex,
+          ...entry.containedBlockIndexes ?? [],
+          ...parsed.metadata.containedBlockIndexes
+        ]),
+        headingAnchors: uniqueStrings([
+          ...entry.headingAnchors ?? [],
+          ...parsed.metadata.headingAnchors
+        ]),
+        sourceLineSpans: uniqueSourceLineSpans([
+          ...entry.sourceLineSpans ?? [],
+          ...parsed.metadata.sourceLineSpans
+        ])
+      },
+      renderedContentStats: parsed.renderedContentStats
     };
   }
   var EMPTY_SECTION_METADATA = {
@@ -2997,14 +3037,24 @@
     headingAnchors: [],
     sourceLineSpans: []
   };
-  function readSectionHtmlMetadata(html) {
+  var EMPTY_SECTION_ANALYSIS = {
+    metadata: EMPTY_SECTION_METADATA,
+    renderedContentStats: EMPTY_RENDERED_CONTENT_HTML_STATS
+  };
+  function readSectionHtmlAnalysis(html) {
     if (typeof document === "undefined") {
-      return EMPTY_SECTION_METADATA;
+      return {
+        metadata: EMPTY_SECTION_METADATA,
+        renderedContentStats: readRenderedContentHtmlStats(html)
+      };
     }
     const template = document.createElement("template");
     template.innerHTML = html;
     const elements = Array.from(template.content.querySelectorAll("*"));
-    return readSectionElementMetadata(elements);
+    return {
+      metadata: readSectionElementMetadata(elements),
+      renderedContentStats: readRenderedContentMathNodeStats(elements.filter((element) => element.hasAttribute("data-tex")))
+    };
   }
   function readSectionElementMetadata(elements) {
     const containedBlockIndexes = [];
@@ -3953,13 +4003,19 @@
     let currentQuery = "";
     let matches = [];
     let totalCount = 0;
+    let shownCount = 0;
+    let skippedCount = 0;
+    let truncated = false;
     let currentIndex = -1;
     let navigationSequence = 0;
     const updateStatus = () => {
       const status = {
         currentIndex,
         query: currentQuery,
-        totalCount
+        shownCount,
+        skippedCount,
+        totalCount,
+        truncated
       };
       view?.updateStatus(status);
     };
@@ -3967,6 +4023,9 @@
       currentQuery = query;
       matches = [];
       totalCount = 0;
+      shownCount = 0;
+      skippedCount = 0;
+      truncated = false;
       currentIndex = -1;
       clearFindHighlights();
       updateStatus();
@@ -3993,6 +4052,9 @@
       navigationSequence++;
       currentIndex = -1;
       totalCount = 0;
+      shownCount = 0;
+      skippedCount = 0;
+      truncated = false;
       matches = [];
       clearFindHighlights();
       updateStatus();
@@ -4024,8 +4086,12 @@
         resetResults(currentQuery);
         return;
       }
-      matches = message.matches.filter(isUsableDescriptor).filter(hasUsableRenderedOffsetWhenLive).slice().sort((left, right) => left.ordinal - right.ordinal);
+      const usableMatches = message.matches.filter(isUsableDescriptor).filter(hasUsableRenderedOffsetWhenLive).slice().sort((left, right) => left.ordinal - right.ordinal);
+      matches = usableMatches;
       totalCount = Math.max(0, Math.floor(message.totalCount));
+      shownCount = matches.length;
+      skippedCount = Math.max(0, message.matches.length - shownCount);
+      truncated = message.truncated === true;
       currentIndex = matches.length === 0 ? -1 : 0;
       paintVisibleHighlights();
       if (currentIndex >= 0) {
@@ -4616,13 +4682,16 @@
           type: "cancelled"
         });
       }
-      const sectionFailedCount = section.allMathNodes.filter((node) => node.dataset["mmMathRendered"] === "failed").length;
+      const sectionStats = readRenderedContentMathNodeStats(section.allMathNodes);
       const renderedHtml = serializeRenderedSection(section.template);
-      const status = sectionFailedCount > 0 ? "ready-with-failures" : "ready";
-      const commit = model.commitRenderedFormulaFragment(sectionIndex, renderedHtml, { status });
+      const status = sectionStats.failedMathCount > 0 ? "ready-with-failures" : "ready";
+      const commit = model.commitRenderedFormulaFragment(sectionIndex, renderedHtml, {
+        mathStats: sectionStats,
+        status
+      });
       if (commit.changed) {
         committedSectionCount++;
-        failedMathCount += sectionFailedCount;
+        failedMathCount += sectionStats.failedMathCount;
       }
       deps.onProgress?.({
         committed: commit.changed,
@@ -4655,7 +4724,11 @@
     template.innerHTML = entry.html;
     const allMathNodes = Array.from(template.content.querySelectorAll("[data-tex]"));
     const pendingMathNodes = allMathNodes.filter((node) => !isTerminalMathState(node.dataset["mmMathRendered"]));
-    return { allMathNodes, pendingMathNodes, template };
+    return {
+      allMathNodes,
+      pendingMathNodes,
+      template
+    };
   }
   function readMathRenderTask(node) {
     return {
@@ -4669,7 +4742,7 @@
     return firstElement instanceof HTMLElement ? firstElement.outerHTML : template.innerHTML;
   }
   function finish(args) {
-    const pendingMathCount = countPendingMath(args.model, args.deps.ownerDocument);
+    const pendingMathCount = args.model.getPendingRenderedContentMathCount();
     const completed = args.status === "not-needed" || args.status === "ready" || args.status === "ready-with-failures";
     args.deps.onProgress?.({
       failedMathCount: args.failedMathCount,
@@ -4689,14 +4762,6 @@
       skippedNoKatex: args.skippedNoKatex,
       status: args.status
     };
-  }
-  function countPendingMath(model, ownerDocument) {
-    let pendingMathCount = 0;
-    for (const entry of model.sections) {
-      const section = readPendingRenderedSection(entry, ownerDocument);
-      pendingMathCount += section?.pendingMathNodes.length ?? 0;
-    }
-    return pendingMathCount;
   }
   function readNow() {
     return typeof performance === "undefined" ? Date.now() : performance.now();
