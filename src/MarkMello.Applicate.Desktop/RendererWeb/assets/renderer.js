@@ -2419,7 +2419,8 @@
       }
       this.totalHeight = cumulative;
     }
-    updateMeasuredHeightsByBlockIndex(updates) {
+    updateMeasuredHeightsByBlockIndex(updates, modelAnchor) {
+      const previousAnchorY = this.readModelAnchorDocumentY(modelAnchor);
       let updatedCount = 0;
       let maxAbsDelta = 0;
       let totalDelta = 0;
@@ -2455,7 +2456,11 @@
       if (updatedCount > 0) {
         this.refreshHeightModel();
       }
-      return { maxAbsDelta, totalDelta, updatedCount };
+      const result = { maxAbsDelta, totalDelta, updatedCount };
+      return modelAnchor === void 0 ? result : {
+        ...result,
+        anchorShift: this.computeModelAnchorShift(previousAnchorY, modelAnchor)
+      };
     }
     recordIntrinsicSizeCalibrationSamples(calibrator) {
       let recordedCount = 0;
@@ -2480,7 +2485,8 @@
       }
       return recordedCount;
     }
-    updateEstimatedHeightsFromCalibration(calibrator) {
+    updateEstimatedHeightsFromCalibration(calibrator, modelAnchor) {
+      const previousAnchorY = this.readModelAnchorDocumentY(modelAnchor);
       let updatedCount = 0;
       let maxAbsDelta = 0;
       let totalDelta = 0;
@@ -2505,7 +2511,21 @@
       if (updatedCount > 0) {
         this.refreshHeightModel();
       }
-      return { maxAbsDelta, totalDelta, updatedCount };
+      const result = { maxAbsDelta, totalDelta, updatedCount };
+      return modelAnchor === void 0 ? result : {
+        ...result,
+        anchorShift: this.computeModelAnchorShift(previousAnchorY, modelAnchor)
+      };
+    }
+    readModelAnchorDocumentY(modelAnchor) {
+      if (modelAnchor === void 0 || !Number.isInteger(modelAnchor.sectionIndex) || modelAnchor.sectionIndex < 0 || modelAnchor.sectionIndex >= this.sections.length || !Number.isFinite(modelAnchor.targetLocalOffset)) {
+        return null;
+      }
+      return this.sectionTop(modelAnchor.sectionIndex) + modelAnchor.targetLocalOffset;
+    }
+    computeModelAnchorShift(previousAnchorY, modelAnchor) {
+      const nextAnchorY = this.readModelAnchorDocumentY(modelAnchor);
+      return previousAnchorY === null || nextAnchorY === null ? null : nextAnchorY - previousAnchorY;
     }
     sectionIndexAtDocumentY(y) {
       const count = this.sections.length;
@@ -3239,20 +3259,22 @@
       adoptRenderedHeights: (options = {}) => {
         const preserveSectionIndex = normalizeSectionIndex(options.preserveSectionIndex, deps.model.getSectionCount());
         const reanchor = options.reanchor !== false;
+        const preMutationScrollTop = deps.root.scrollTop;
         const anchor = preserveSectionIndex === null ? deps.model.captureAnchor(deps.root.scrollTop) : null;
         const blocks = collectLiveDocumentSectionElements(deps.main);
         const liveAnchor = preserveSectionIndex === null ? captureReadingAnchor(blocks) : null;
         const updates = deps.readMeasuredHeights ? deps.readMeasuredHeights(blocks) : readLiveBlockOffsetMeasuredHeights(blocks);
         const result = deps.model.updateMeasuredHeightsByBlockIndex(
-          realizationTracker?.filterRealizedUpdates(blocks, updates) ?? updates
+          realizationTracker?.filterRealizedUpdates(blocks, updates) ?? updates,
+          options.modelAnchor
         );
         if (result.updatedCount === 0) {
-          return EMPTY_HEIGHT_UPDATE;
+          return options.modelAnchor === void 0 ? EMPTY_HEIGHT_UPDATE : { ...EMPTY_HEIGHT_UPDATE, anchorShift: 0 };
         }
         if (result.maxAbsDelta <= Number.EPSILON && Math.abs(result.totalDelta) <= Number.EPSILON) {
           return result;
         }
-        const desiredScrollTop = preserveSectionIndex !== null ? deps.model.sectionTop(preserveSectionIndex) : scrollTopForReadingAnchor(deps.model, liveAnchor) ?? deps.model.scrollTopForAnchor(anchor);
+        const desiredScrollTop = options.modelAnchor !== void 0 ? preMutationScrollTop + (result.anchorShift ?? 0) : preserveSectionIndex !== null ? deps.model.sectionTop(preserveSectionIndex) : scrollTopForReadingAnchor(deps.model, liveAnchor) ?? deps.model.scrollTopForAnchor(anchor);
         renderRange(computeRange(desiredScrollTop));
         if (reanchor) {
           options.operation?.requestScrollTop(desiredScrollTop, "measured-height-adoption");
@@ -3449,17 +3471,11 @@
       if (stateEvent.skipped === true) {
         watch.skipped = true;
         watch.readyMeasuredHeight = null;
-        watch.stableFrameCount = 0;
-        watch.lastOffsetHeight = null;
-        watch.lastOccupiedHeight = null;
         watch.state = watch.state === "real-ready" ? "realized-then-skipped" : "placeholder-not-intersecting";
         return;
       }
       watch.skipped = false;
       watch.frameBudget = REALIZATION_FRAME_BUDGET;
-      watch.stableFrameCount = 0;
-      watch.lastOffsetHeight = null;
-      watch.lastOccupiedHeight = null;
       watch.readyMeasuredHeight = null;
       watch.state = "event-observed-settling";
       scheduleSample(watch);
@@ -3505,13 +3521,10 @@
           element: block,
           frameBudget: REALIZATION_FRAME_BUDGET,
           frameRequested: false,
-          lastOccupiedHeight: null,
-          lastOffsetHeight: null,
           mountGeneration: currentMountGeneration,
           nonconvergentCycles: 0,
           readyMeasuredHeight: null,
           skipped: true,
-          stableFrameCount: 0,
           state: isStrictlyViewportIntersecting(block) ? "intersecting-await-event" : "placeholder-not-intersecting"
         });
       }
@@ -3579,28 +3592,17 @@
         expireOrContinue(watch);
         return;
       }
-      const offsetStable = watch.lastOffsetHeight === null || Math.abs(sample.offsetHeight - watch.lastOffsetHeight) <= 1;
-      const occupiedStable = watch.lastOccupiedHeight === null || Math.abs(sample.occupiedHeight - watch.lastOccupiedHeight) <= 1;
-      watch.stableFrameCount = offsetStable && occupiedStable ? watch.stableFrameCount + 1 : 1;
-      watch.lastOffsetHeight = sample.offsetHeight;
-      watch.lastOccupiedHeight = sample.occupiedHeight;
-      if (watch.stableFrameCount >= 2) {
-        if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) <= 1) {
-          watch.nonconvergentCycles = 0;
-          watch.state = "event-equal-fallback-noop";
-          watch.readyMeasuredHeight = null;
-          deps.onRealizationReady?.(watch.mountGeneration);
-          return;
-        }
-        if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) > 1) {
-          watch.nonconvergentCycles = 0;
-          watch.state = "real-ready";
-          watch.readyMeasuredHeight = Math.max(0, sample.occupiedHeight);
-          deps.onRealizationReady?.(watch.mountGeneration);
-          return;
-        }
+      if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) <= 1) {
+        watch.nonconvergentCycles = 0;
+        watch.state = "event-equal-fallback-noop";
+        watch.readyMeasuredHeight = null;
+        deps.onRealizationReady?.(watch.mountGeneration);
+        return;
       }
-      expireOrContinue(watch);
+      watch.nonconvergentCycles = 0;
+      watch.state = "real-ready";
+      watch.readyMeasuredHeight = Math.max(0, sample.occupiedHeight);
+      deps.onRealizationReady?.(watch.mountGeneration);
     }
     function expireOrContinue(watch) {
       watch.frameBudget--;
@@ -3615,6 +3617,7 @@
             cycles: watch.nonconvergentCycles
           }
         });
+        deps.onRealizationStateChanged?.(watch.mountGeneration);
         return;
       }
       scheduleSample(watch);
@@ -3630,9 +3633,6 @@
         if (intersecting && watch.state === "expired-nonconvergent") {
           if (watch.nonconvergentCycles < REALIZATION_QUARANTINE_CYCLES) {
             watch.frameBudget = REALIZATION_FRAME_BUDGET;
-            watch.stableFrameCount = 0;
-            watch.lastOffsetHeight = null;
-            watch.lastOccupiedHeight = null;
             watch.readyMeasuredHeight = null;
             watch.state = "event-observed-settling";
             scheduleSample(watch);
@@ -4829,6 +4829,7 @@
     let recordedAt = null;
     let sequence = 0;
     const ownedPointers = /* @__PURE__ */ new Set();
+    const evidenceListeners = /* @__PURE__ */ new Set();
     return {
       beginOwnedPointer: (pointerId) => {
         if (Number.isFinite(pointerId)) {
@@ -4851,7 +4852,16 @@
       recordUserInput: (kind) => {
         recordedAt = deps.now();
         evidence = Object.freeze({ kind, sequence: ++sequence });
+        for (const listener of evidenceListeners) {
+          listener(evidence);
+        }
         return evidence;
+      },
+      subscribeEvidence: (listener) => {
+        evidenceListeners.add(listener);
+        return () => {
+          evidenceListeners.delete(listener);
+        };
       }
     };
   }
@@ -4927,26 +4937,29 @@
       },
       read: (identity) => matches(identity) ? active : null,
       readActive: () => active,
-      register: (identity, mode, target) => {
+      register: (identity, state2) => {
         active = Object.freeze({
           documentEpoch: identity.documentEpoch,
-          mode,
           operationEpoch: identity.operationEpoch,
-          target
+          ...state2
         });
         return active;
       },
-      resolve: (identity, retainedNavigationTarget) => {
+      resolve: (identity) => {
         if (matches(identity) && active !== null) {
           return { kind: "active", registration: active };
         }
-        return retainedNavigationTarget === null ? { kind: "generic" } : { kind: "retained-navigation", target: retainedNavigationTarget };
+        return { kind: "generic" };
       },
-      update: (identity, target) => {
+      update: (identity, state2) => {
         if (!matches(identity) || active === null) {
           return false;
         }
-        active = Object.freeze({ ...active, target });
+        active = Object.freeze({
+          documentEpoch: active.documentEpoch,
+          operationEpoch: active.operationEpoch,
+          ...state2
+        });
         return true;
       }
     };
@@ -5261,7 +5274,6 @@
     let pendingWrite = null;
     let pendingTraceFailures = 0;
     let previousFiniteNativeScrollValue = null;
-    let quietCandidate = null;
     let retiredEchoes = [];
     let scheduledFrame = null;
     let settleEmission = 0;
@@ -5315,7 +5327,6 @@
     };
     const invalidateSettleCandidate = () => {
       settleRevision++;
-      quietCandidate = null;
     };
     const pruneRetiredEchoes = () => {
       retiredEchoes = retiredEchoes.filter((echo) => echo.documentEpoch === documentEpoch && echo.expiresAfterFrame >= frameSerial);
@@ -5506,25 +5517,14 @@
       trace(SCROLL_OWNERSHIP_TRACE_IDS.watchdogPaused, { reason: "awaiting-delivered-frame" });
       scheduledFrame = deps.requestFrame(deliverFrame);
     };
-    const emitSettled = () => {
-      if (hasSettlementBlocker()) {
-        quietCandidate = null;
-        return false;
-      }
-      const candidateMatches = quietCandidate !== null && quietCandidate.documentEpoch === documentEpoch && quietCandidate.geometryEpoch === geometryEpoch && quietCandidate.revision === settleRevision;
-      if (candidateMatches && quietCandidate !== null) {
-        quietCandidate = { ...quietCandidate, stableFrames: quietCandidate.stableFrames + 1 };
-      } else {
-        quietCandidate = { documentEpoch, geometryEpoch, revision: settleRevision, stableFrames: 1 };
-      }
-      if (quietCandidate.stableFrames < 2) {
+    const tryEmitSettled = () => {
+      if (hasSettlementBlocker() || settleRevision <= lastEmittedRevision) {
         return false;
       }
       const payload = { documentEpoch, geometryEpoch };
       settleEmission++;
       lastEmittedPayload = payload;
       lastEmittedRevision = settleRevision;
-      quietCandidate = null;
       for (const waiter of [...waiters]) {
         if (waiter.documentEpoch !== documentEpoch || settleEmission <= waiter.afterEmission) {
           continue;
@@ -5555,7 +5555,6 @@
       frameTransaction = null;
       expectedEcho = null;
       rejectPendingWrite("non-converged");
-      quietCandidate = null;
       lastEmittedRevision = settleRevision;
       watchdogDeliveredFrames = 0;
     };
@@ -5648,6 +5647,7 @@
         actual,
         pending.supersessionSource
       );
+      tryEmitSettled();
     };
     function deliverFrame(_timestamp) {
       scheduledFrame = null;
@@ -5682,8 +5682,8 @@
           commitPendingWrite(transaction.lease);
         }
       }
-      const emitted = emitSettled();
-      if (!emitted && needsSettlementProgress()) {
+      const emitted = tryEmitSettled();
+      if (!emitted && hasSettlementBlocker()) {
         if (consumeDeliveredFrameBudget() >= deliveredFrameBudget) {
           failNonConvergence();
         }
@@ -5749,6 +5749,7 @@
         expectedEcho = null;
       }
       trace(SCROLL_OWNERSHIP_TRACE_IDS.leaseReleased, { owner: lease.owner });
+      tryEmitSettled();
       drainDeferredAcquisition();
       return true;
     };
@@ -5892,6 +5893,7 @@
         }
         if (expectedEcho?.lease === activeLease) {
           expectedEcho = null;
+          tryEmitSettled();
         }
         ensureFrame();
         return {
@@ -5902,6 +5904,7 @@
       }
       if (expected !== null && finite && Math.abs(value - expected.value) <= SELF_ECHO_TOLERANCE_PX) {
         expectedEcho = null;
+        tryEmitSettled();
         ensureFrame();
         return { expected: expected.value, kind: "self-echo", value };
       }
@@ -5913,6 +5916,14 @@
           value
         });
         return { expected: retired.value, kind: "stale-self-echo", value };
+      }
+      if (activeLease !== null && heldMode === "navigation" && finite) {
+        ensureFrame();
+        return {
+          kind: "navigation-owned",
+          operationEpoch: activeLease.operationEpoch,
+          value
+        };
       }
       if (expected !== null) {
         trace(SCROLL_OWNERSHIP_TRACE_IDS.unattributedMovement, {
@@ -6011,6 +6022,7 @@
         source: current.source,
         ticket: current.id
       });
+      tryEmitSettled();
       ensureFrame();
       return true;
     };
@@ -6050,6 +6062,7 @@
         operationEpoch: capturedOperationEpoch,
         resolve
       });
+      tryEmitSettled();
       ensureFrame();
       return result;
     };
@@ -6076,7 +6089,6 @@
       retiredEchoes = [];
       documentEpoch++;
       geometryEpoch = 0;
-      quietCandidate = null;
       settleRevision++;
       lastEmittedRevision = settleRevision;
       lastEmittedPayload = null;
@@ -6102,7 +6114,6 @@
       expectedEcho = null;
       previousFiniteNativeScrollValue = null;
       retiredEchoes = [];
-      quietCandidate = null;
       disposed = true;
     };
     const isCurrentDocumentEpoch = (epoch) => !disposed && Number.isSafeInteger(epoch) && epoch === documentEpoch;
@@ -6122,6 +6133,7 @@
       release,
       scheduleFrameTransaction,
       supersedeByUser,
+      tryEmitSettled,
       waitForGeometrySettled,
       write
     };
@@ -6755,7 +6767,7 @@
   var liveDocumentBlockElementsStale = true;
   var virtualizationEnabled = readVirtualizationFlag(window, document);
   var userInputWitness = virtualizationEnabled ? createUserInputWitness({ now: () => performance.now() }) : null;
-  var disposeUserInputWitness = userInputWitness === null ? null : installUserInputWitnessListeners({ document, ownerWindow: window, witness: userInputWitness });
+  var disposeUserInputWitnessListeners = userInputWitness === null ? null : installUserInputWitnessListeners({ document, ownerWindow: window, witness: userInputWitness });
   var legacyScrollWriter = createLegacyScrollWriter({
     developmentDiagnosticsEnabled: true,
     ownerWindow: window,
@@ -6784,6 +6796,13 @@
       operationEpoch: event.operationEpoch
     })
   }) : null;
+  var disposeNavigationWitness = userInputWitness?.subscribeEvidence(
+    (evidence) => handleVirtualizedNavigationUserInputEvidence(evidence)
+  ) ?? null;
+  var disposeUserInputWitness = () => {
+    disposeNavigationWitness?.();
+    disposeUserInputWitnessListeners?.();
+  };
   if (scrollOwnershipControlPlane !== null) {
     const virtualizationRoot = getDocumentScrollRoot();
     if (virtualizationRoot instanceof HTMLElement) {
@@ -6806,7 +6825,7 @@
       }
       cancelModelRenderedContentCoordinator("teardown");
       resetVirtualizedDocumentWindow(false);
-      disposeUserInputWitness?.();
+      disposeUserInputWitness();
       scrollOwnershipControlPlane.dispose();
       getDocumentScrollRoot().removeAttribute("data-mm-virtualization-active");
     }, { once: true });
@@ -6826,8 +6845,7 @@
   var virtualizedCalibrationGeometryTicket = null;
   var virtualizedWindowMountGeneration = 0;
   var virtualizedWindowFontGeometryTicket = null;
-  var navigationSessionRef = null;
-  var virtualizedProgrammaticNavigationPostSettleTarget = null;
+  var pendingNavigationWitnessReverseSync = false;
   var virtualizedHeldOperationScrollPolicy = virtualizationEnabled ? createHeldOperationScrollPolicy() : null;
   var virtualizedScrollControlFrameTimestamp = null;
   var minimapScrollOperation = null;
@@ -8237,11 +8255,8 @@
   function acquireVirtualizedScrollOperation(owner, policy) {
     const operation = virtualizedScrollCoordinator.acquireOperation(owner, policy);
     const activeHeldTarget = virtualizedHeldOperationScrollPolicy?.readActive() ?? null;
-    if (activeHeldTarget !== null && (!("operation" in activeHeldTarget.target) || activeHeldTarget.target.operation.isCurrent() !== true)) {
+    if (activeHeldTarget !== null && activeHeldTarget.operation.isCurrent() !== true) {
       virtualizedHeldOperationScrollPolicy?.clear(activeHeldTarget);
-    }
-    if (navigationSessionRef !== null && !navigationSessionRef.operation.isCurrent()) {
-      clearVirtualizedNavigationSession();
     }
     return operation;
   }
@@ -8288,7 +8303,8 @@
     };
   }
   function isVirtualizedProgrammaticNavigationInProgress() {
-    return navigationSessionRef?.operation.isCurrent() === true;
+    const registration = readCurrentVirtualizedNavigationRegistration();
+    return registration?.phase === "settling";
   }
   function isVirtualizedHeldRestoreInProgress() {
     return virtualizedHeldOperationScrollPolicy?.readActive()?.mode === "restore";
@@ -8339,33 +8355,6 @@
     });
     return advance();
   }
-  function resolveVirtualizedNavigationTargetSectionIndex(descriptor) {
-    const model = virtualizedDocumentWindowModel;
-    if (model === null) {
-      return null;
-    }
-    const entry = (() => {
-      switch (descriptor.kind) {
-        case "block":
-          return model.getEntryContainingBlockIndex(descriptor.blockIndex);
-        case "heading-anchor":
-          return model.getEntryByHeadingAnchor(descriptor.anchor);
-        case "source-line":
-          return model.getEntryBySourceLine(descriptor.sourceLine);
-        case "document-y":
-          return model.sections[model.sectionIndexAtDocumentY(descriptor.documentY)];
-        case "section":
-          return model.sections[descriptor.sectionIndex];
-        case "find-match":
-          return descriptor.blockIndex === void 0 ? void 0 : model.getEntryContainingBlockIndex(descriptor.blockIndex);
-      }
-    })();
-    if (entry === void 0) {
-      return null;
-    }
-    const sectionIndex = model.sections.findIndex((candidate) => candidate.blockIndex === entry.blockIndex);
-    return sectionIndex < 0 ? null : sectionIndex;
-  }
   function readVirtualizedProgrammaticNavigationTargetContext(descriptor) {
     const model = virtualizedDocumentWindowModel;
     const controller = virtualizedDocumentWindowController;
@@ -8410,6 +8399,14 @@
     const normalizedViewportOffset = Number.isFinite(viewportOffsetY) ? Math.max(0, viewportOffsetY) : 0;
     return Math.max(0, context.sectionTop + targetLocalOffset - normalizedViewportOffset);
   }
+  function createVirtualizedNavigationModelAnchor(context, descriptor, viewportOffsetY) {
+    return Object.freeze({
+      blockIndex: context.entry.blockIndex,
+      sectionIndex: context.sectionIndex,
+      targetLocalOffset: readVirtualizedTargetLocalOffset(context, descriptor),
+      viewportOffset: Number.isFinite(viewportOffsetY) ? Math.max(0, viewportOffsetY) : 0
+    });
+  }
   function applyVirtualizedProgrammaticNavigationContext(context, descriptor, viewportOffsetY, operation) {
     if (descriptor.kind === "source-line") {
       pendingSourceLineTarget = descriptor.sourceLine;
@@ -8436,41 +8433,18 @@
     const normalizedViewportOffset = Number.isFinite(viewportOffsetY) ? Math.max(0, viewportOffsetY) : 0;
     return sectionRectTop + targetLocalOffset - normalizedViewportOffset;
   }
-  function correctVirtualizedProgrammaticNavigationResidual(input) {
-    const context = readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
-    if (context === null) {
-      return false;
-    }
-    const residual = readVirtualizedProgrammaticNavigationResidual(
-      context,
-      input.descriptor,
-      input.viewportOffsetY
-    );
-    if (residual === null) {
-      return false;
-    }
-    if (Math.abs(residual) > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
-      const root = getDocumentScrollRoot();
-      const nextScrollTop = Math.max(0, root.scrollTop + residual);
-      writeVirtualizedProgrammaticNavigationScrollTop(input.operation, nextScrollTop, "navigation-residual");
-    }
-    return true;
-  }
   function applyVirtualizedRenderedHeightAdoptionEffects(result, options = {}) {
     if (!hasMeasuredHeightGeometryDelta(result)) {
       return;
     }
     invalidateTopVisibleBlockIndexCache();
     invalidateSourceLineAnchors({
-      reassertPendingTarget: options.alignPostSettleTarget !== false
+      reassertPendingTarget: options.reassertPendingTarget !== false
     });
     refreshVirtualizedFindHighlights();
     if (getModelMinimapSource() !== null && minimapSourceReady) {
       syncModelMinimapCloneMetadata();
       updateMinimapViewport({ skipVisibilityUpdate: true });
-    }
-    if (options.alignPostSettleTarget !== false) {
-      alignVirtualizedProgrammaticNavigationPostSettleTarget();
     }
     if (options.scheduleCalibration !== false) {
       scheduleVirtualizedCalibration();
@@ -8485,6 +8459,70 @@
   function hasMeasuredHeightGeometryDelta(result) {
     return result.maxAbsDelta > Number.EPSILON || Math.abs(result.totalDelta) > Number.EPSILON;
   }
+  function readVirtualizedNavigationModelGeometryAnchor(registration) {
+    return {
+      sectionIndex: registration.modelAnchor.sectionIndex,
+      targetLocalOffset: registration.modelAnchor.targetLocalOffset
+    };
+  }
+  function updateVirtualizedNavigationRegistration(registration, update) {
+    return virtualizedHeldOperationScrollPolicy?.update(registration, Object.freeze({
+      externalShiftCount: update.externalShiftCount ?? registration.externalShiftCount,
+      geometryRevision: update.geometryRevision ?? registration.geometryRevision,
+      mode: "navigation",
+      modelAnchor: registration.modelAnchor,
+      operation: registration.operation,
+      phase: update.phase ?? registration.phase,
+      semanticTarget: registration.semanticTarget,
+      witnessSequence: registration.witnessSequence
+    })) ?? false;
+  }
+  function preserveVirtualizedNavigationGeometry(registration, operation, result, preMutationScrollTop) {
+    const current = readCurrentVirtualizedNavigationRegistration(operation);
+    const plane = scrollOwnershipControlPlane;
+    if (current === null || current.documentEpoch !== registration.documentEpoch || current.operationEpoch !== registration.operationEpoch || plane === null) {
+      return;
+    }
+    const geometryRevision = plane.captureGeometryEpoch();
+    if (result.anchorShift === null || result.anchorShift === void 0) {
+      postPerfMark("mm-virt-navigation-failed", {
+        geometryEpoch: geometryRevision,
+        reason: "model-anchor-missing"
+      });
+      releaseVirtualizedProgrammaticNavigationOperation(operation);
+      return;
+    }
+    if (Math.abs(result.anchorShift) <= Number.EPSILON) {
+      updateVirtualizedNavigationRegistration(current, {
+        geometryRevision,
+        phase: "post-settle-hold"
+      });
+      return;
+    }
+    if (!updateVirtualizedNavigationRegistration(current, {
+      geometryRevision,
+      phase: "preserving-geometry"
+    })) {
+      return;
+    }
+    operation.requestScrollTop(
+      preMutationScrollTop + result.anchorShift,
+      "navigation-geometry-preserve"
+    );
+    const receipt = virtualizedScrollCoordinator.getWriteReceiptByEpoch(operation.operationEpoch);
+    void receipt?.result.then((outcome) => {
+      if (outcome.status !== "committed") {
+        return;
+      }
+      const committed = readCurrentVirtualizedNavigationRegistration(operation);
+      if (committed !== null) {
+        updateVirtualizedNavigationRegistration(committed, {
+          geometryRevision: scrollOwnershipControlPlane?.captureGeometryEpoch() ?? committed.geometryRevision,
+          phase: "post-settle-hold"
+        });
+      }
+    });
+  }
   function adoptVirtualizedProgrammaticNavigationRenderedHeights(context, operation) {
     const controller = virtualizedDocumentWindowController;
     if (!virtualizationEnabled || controller === null) {
@@ -8492,7 +8530,9 @@
     }
     const ticket = beginVirtualizedGeometryWork("measured-height-adoption");
     try {
+      const registration = readCurrentVirtualizedNavigationRegistration(operation);
       const result = controller.adoptRenderedHeights({
+        ...registration === null ? {} : { modelAnchor: readVirtualizedNavigationModelGeometryAnchor(registration) },
         operation,
         preserveSectionIndex: context.sectionIndex,
         reanchor: false
@@ -8501,7 +8541,7 @@
         mutateVirtualizedGeometry(ticket);
       }
       applyVirtualizedRenderedHeightAdoptionEffects(result, {
-        alignPostSettleTarget: false,
+        reassertPendingTarget: false,
         scheduleCalibration: false
       });
       return hasMeasuredHeightGeometryDelta(result);
@@ -8509,31 +8549,31 @@
       endVirtualizedGeometryWork(ticket);
     }
   }
-  function releaseVirtualizedProgrammaticNavigationOperation(operation, clearPostSettleTarget = false) {
-    clearVirtualizedNavigationSession(operation);
-    if (clearPostSettleTarget) {
-      clearVirtualizedProgrammaticNavigationPostSettleTarget();
-    }
+  function releaseVirtualizedProgrammaticNavigationOperation(operation) {
+    virtualizedHeldOperationScrollPolicy?.clear(operation);
     releaseVirtualizedScrollOperation(operation);
   }
   function finishVirtualizedProgrammaticNavigationCorrection(operation, input) {
     if (!operation.isCurrent()) {
-      clearVirtualizedNavigationSession(operation);
+      virtualizedHeldOperationScrollPolicy?.clear(operation);
       return;
     }
-    const session = navigationSessionRef;
-    if (session === null) {
+    const registration = readCurrentVirtualizedNavigationRegistration(operation);
+    if (registration === null) {
       return;
     }
+    updateVirtualizedNavigationRegistration(registration, {
+      geometryRevision: scrollOwnershipControlPlane?.captureGeometryEpoch() ?? registration.geometryRevision,
+      phase: "post-settle-hold"
+    });
     postPerfMark("mm-virt-navigation-settled", {
       descriptorKind: input.descriptor.kind,
-      externalShiftCount: session.externalShiftCount,
+      externalShiftCount: registration.externalShiftCount,
       passCount: input.passCount,
       residual: input.residual
     });
     updateMinimapViewport({ skipVisibilityUpdate: true });
     postScroll();
-    releaseVirtualizedProgrammaticNavigationOperation(operation);
   }
   function scheduleVirtualizedProgrammaticNavigationFrame(input, operation, settlement, pass, previousResidualAbs = Number.POSITIVE_INFINITY) {
     return new Promise((resolve) => {
@@ -8592,7 +8632,7 @@
           writeVirtualizedProgrammaticNavigationScrollTop(
             operation,
             root.scrollTop + residual,
-            "navigation-residual"
+            "navigation-settle-correction"
           );
           const receipt = virtualizedScrollCoordinator.getWriteReceiptByEpoch(operation.operationEpoch);
           if (receipt === void 0) {
@@ -8632,7 +8672,7 @@
         return;
       }
       if (frame.kind === "missing-target") {
-        releaseVirtualizedProgrammaticNavigationOperation(operation, true);
+        releaseVirtualizedProgrammaticNavigationOperation(operation);
         return;
       }
       if (frame.kind === "geometry-changed") {
@@ -8648,7 +8688,7 @@
           reason: "residual-non-converged",
           residual: frame.residual
         });
-        releaseVirtualizedProgrammaticNavigationOperation(operation, true);
+        releaseVirtualizedProgrammaticNavigationOperation(operation);
         return;
       }
       if (frame.kind === "written") {
@@ -8741,62 +8781,59 @@
     });
     return true;
   }
-  function readCurrentVirtualizedNavigationSession() {
-    const session = navigationSessionRef;
-    return session?.operation.isCurrent() === true ? session : null;
+  function readCurrentVirtualizedNavigationRegistration(operation) {
+    const registration = operation === void 0 ? virtualizedHeldOperationScrollPolicy?.readActive() ?? null : virtualizedHeldOperationScrollPolicy?.read(operation) ?? null;
+    return registration?.mode === "navigation" && registration.operation.isCurrent() ? registration : null;
   }
-  function clearVirtualizedNavigationSession(operation) {
-    if (operation === void 0 || navigationSessionRef?.operation === operation) {
-      navigationSessionRef = null;
+  function clearVirtualizedNavigationRegistration(operation) {
+    const registration = operation === void 0 ? readCurrentVirtualizedNavigationRegistration() : readCurrentVirtualizedNavigationRegistration(operation);
+    return registration === null ? false : virtualizedHeldOperationScrollPolicy?.clear(registration) ?? false;
+  }
+  function hasVirtualizedNavigationRegistration() {
+    return readCurrentVirtualizedNavigationRegistration() !== null;
+  }
+  function handleVirtualizedNavigationUserInputEvidence(evidence) {
+    const registration = readCurrentVirtualizedNavigationRegistration();
+    if (registration === null || evidence.sequence <= registration.witnessSequence) {
+      return;
     }
-  }
-  function clearVirtualizedProgrammaticNavigationPostSettleTarget() {
-    virtualizedProgrammaticNavigationPostSettleTarget = null;
-  }
-  function alignVirtualizedProgrammaticNavigationPostSettleTarget() {
-    const session = readCurrentVirtualizedNavigationSession();
-    const target = virtualizedProgrammaticNavigationPostSettleTarget;
-    if (session !== null && target !== null) {
-      correctVirtualizedProgrammaticNavigationResidual({ ...target, operation: session.operation });
+    if (virtualizedHeldOperationScrollPolicy?.clear(registration) !== true) {
+      return;
     }
+    pendingNavigationWitnessReverseSync = true;
+    cancelPendingVirtualizedMaintenance("user-supersession");
+    scrollOwnershipControlPlane?.supersedeByUser("native-scroll");
   }
   function resolveVirtualizedCorrectionTarget(operation) {
     if (virtualizedHeldOperationScrollPolicy === null) {
-      return virtualizedProgrammaticNavigationPostSettleTarget === null ? { kind: "generic" } : {
-        kind: "retained-navigation",
-        target: virtualizedProgrammaticNavigationPostSettleTarget
-      };
+      return { kind: "generic" };
     }
-    return virtualizedHeldOperationScrollPolicy.resolve(
-      operation,
-      virtualizedProgrammaticNavigationPostSettleTarget
-    );
+    return virtualizedHeldOperationScrollPolicy.resolve(operation);
   }
   function readVirtualizedHeldOperationRegistration(operation) {
     const registration = virtualizedHeldOperationScrollPolicy?.read(operation) ?? null;
-    return registration !== null && "operation" in registration.target ? registration : null;
+    return registration?.operation.isCurrent() === true ? registration : null;
   }
   function readVirtualizedHeldOperationMode(operation) {
     return readVirtualizedHeldOperationRegistration(operation)?.mode ?? null;
   }
   function readVirtualizedHeldGestureEvidence(operation) {
     const registration = readVirtualizedHeldOperationRegistration(operation);
-    const target = registration?.target;
-    return registration?.mode === "gesture" && target !== void 0 && "kind" in target && target.kind === "gesture" ? userInputWitness?.readEvidenceAfter(target.witnessSequence) ?? null : null;
+    return registration?.mode === "gesture" ? userInputWitness?.readEvidenceAfter(registration.witnessSequence) ?? null : null;
   }
   function readVirtualizedCorrectionTargetSectionIndex(resolution) {
     if (resolution.kind === "generic") {
       return null;
     }
-    const target = resolution.kind === "active" ? resolution.registration.target : resolution.target;
-    if ("kind" in target && target.kind === "restore") {
-      const blockIndex = target.anchor?.blockIndex;
+    const registration = resolution.registration;
+    if (registration.mode === "restore") {
+      const blockIndex = registration.anchor?.blockIndex;
       return blockIndex === void 0 ? null : virtualizedDocumentWindowModel?.getEntryByBlockIndex(blockIndex)?.sectionIndex ?? null;
     }
-    if ("kind" in target && target.kind === "gesture") {
+    if (registration.mode === "gesture") {
       return null;
     }
-    return resolveVirtualizedNavigationTargetSectionIndex(target.descriptor);
+    return registration.modelAnchor.sectionIndex;
   }
   function correctVirtualizedHeldRestoreTarget(target, operation) {
     const model = virtualizedDocumentWindowModel;
@@ -8812,16 +8849,29 @@
     if (!virtualizationEnabled || !input.operation.isCurrent() || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
       return;
     }
-    const anchor = {
+    const targetContext = input.initialContext ?? readVirtualizedProgrammaticNavigationTargetContext(input.descriptor);
+    if (targetContext === null || scrollOwnershipControlPlane === null || userInputWitness === null) {
+      releaseVirtualizedProgrammaticNavigationOperation(input.operation);
+      return;
+    }
+    const semanticTarget = Object.freeze({
       descriptor: input.descriptor,
       viewportOffsetY: input.viewportOffsetY
-    };
-    navigationSessionRef = {
-      anchor,
+    });
+    virtualizedHeldOperationScrollPolicy?.register(input.operation, Object.freeze({
       externalShiftCount: 0,
-      operation: input.operation
-    };
-    virtualizedProgrammaticNavigationPostSettleTarget = anchor;
+      geometryRevision: scrollOwnershipControlPlane.captureGeometryEpoch(),
+      mode: "navigation",
+      modelAnchor: createVirtualizedNavigationModelAnchor(
+        targetContext,
+        input.descriptor,
+        input.viewportOffsetY
+      ),
+      operation: input.operation,
+      phase: "settling",
+      semanticTarget,
+      witnessSequence: userInputWitness.captureSequence()
+    }));
     cancelVirtualizedCalibration();
     if (input.behavior === "smooth" && input.initialContext !== void 0) {
       const destinationScrollTop = computeVirtualizedProgrammaticNavigationScrollTop(
@@ -8886,8 +8936,8 @@
     virtualizedWindowFontGeometryTicket = null;
     virtualizedWindowMountGeneration++;
     virtualizedMeasureFrameRequested = false;
-    clearVirtualizedNavigationSession();
-    clearVirtualizedProgrammaticNavigationPostSettleTarget();
+    clearVirtualizedNavigationRegistration();
+    pendingNavigationWitnessReverseSync = false;
     if (resetCalibrator) {
       virtualizedIntrinsicCalibrator.reset();
     }
@@ -8912,7 +8962,7 @@
         return;
       }
       invalidateSourceLineAnchors({
-        reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
+        reassertPendingTarget: !hasVirtualizedNavigationRegistration()
       });
       refreshVirtualizedFindHighlights();
       scheduleVirtualizedMeasuredHeightAdoption();
@@ -9025,6 +9075,12 @@
       onRealizationReady: (mountGeneration) => {
         if (mountGeneration === virtualizedWindowMountGeneration) {
           scheduleVirtualizedMeasuredHeightAdoption();
+          scrollOwnershipControlPlane?.tryEmitSettled();
+        }
+      },
+      onRealizationStateChanged: (mountGeneration) => {
+        if (mountGeneration === virtualizedWindowMountGeneration) {
+          scrollOwnershipControlPlane?.tryEmitSettled();
         }
       },
       onWindowMounted: (mountGeneration) => {
@@ -9082,7 +9138,7 @@
       if (controller.updateWindowForScroll({ ...options, operation })) {
         invalidateTopVisibleBlockIndexCache();
         invalidateSourceLineAnchors({
-          reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
+          reassertPendingTarget: !hasVirtualizedNavigationRegistration()
         });
         refreshVirtualizedFindHighlights();
         scheduleVirtualizedMeasuredHeightAdoption();
@@ -9149,16 +9205,27 @@
         return;
       }
       const correctionTarget = resolveVirtualizedCorrectionTarget(operation);
-      const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
+      const navigationRegistration = correctionTarget.kind === "active" && correctionTarget.registration.mode === "navigation" && correctionTarget.registration.phase !== "settling" ? correctionTarget.registration : null;
+      const preMutationScrollTop = getDocumentScrollRoot().scrollTop;
       const preserveSectionIndex = readVirtualizedCorrectionTargetSectionIndex(correctionTarget);
       const preservesCorrectionTarget = correctionTarget.kind !== "generic";
       const result = controller.adoptRenderedHeights(
         preserveSectionIndex === null ? {
           operation,
+          ...navigationRegistration === null ? {} : {
+            modelAnchor: readVirtualizedNavigationModelGeometryAnchor(
+              navigationRegistration
+            )
+          },
           ...preservesCorrectionTarget ? { reanchor: false } : {}
         } : {
           operation,
           preserveSectionIndex,
+          ...navigationRegistration === null ? {} : {
+            modelAnchor: readVirtualizedNavigationModelGeometryAnchor(
+              navigationRegistration
+            )
+          },
           ...preservesCorrectionTarget ? { reanchor: false } : {}
         }
       );
@@ -9166,20 +9233,19 @@
         mutateVirtualizedGeometry(ticket);
       }
       applyVirtualizedRenderedHeightAdoptionEffects(result, {
-        alignPostSettleTarget: correctionTarget.kind === "generic"
+        reassertPendingTarget: correctionTarget.kind === "generic"
       });
       if (correctionTarget.kind === "active") {
-        const target = correctionTarget.registration.target;
-        if ("kind" in target && target.kind === "restore") {
-          correctVirtualizedHeldRestoreTarget(target, operation);
-        }
-      } else if (correctionTarget.kind === "retained-navigation" && operation.isCurrent()) {
-        const target = correctionTarget.target;
-        if (!("kind" in target)) {
-          correctVirtualizedProgrammaticNavigationResidual({
-            ...target,
-            operation
-          });
+        const registration = correctionTarget.registration;
+        if (registration.mode === "restore") {
+          correctVirtualizedHeldRestoreTarget(registration, operation);
+        } else if (navigationRegistration !== null) {
+          preserveVirtualizedNavigationGeometry(
+            navigationRegistration,
+            operation,
+            result,
+            preMutationScrollTop
+          );
         }
       }
     }, closeTicket);
@@ -9225,32 +9291,38 @@
         return;
       }
       const correctionTarget = resolveVirtualizedCorrectionTarget(operation);
+      const navigationRegistration = correctionTarget.kind === "active" && correctionTarget.registration.mode === "navigation" && correctionTarget.registration.phase !== "settling" ? correctionTarget.registration : null;
+      const preMutationScrollTop = getDocumentScrollRoot().scrollTop;
       const preserveSectionIndex = readVirtualizedCorrectionTargetSectionIndex(correctionTarget);
-      const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
       const anchor = correctionTarget.kind === "generic" ? captureCurrentVirtualizedReadingAnchor() : null;
       const recordedCount = model.recordIntrinsicSizeCalibrationSamples(virtualizedIntrinsicCalibrator);
       if (recordedCount === 0) {
         return;
       }
-      const result = model.updateEstimatedHeightsFromCalibration(virtualizedIntrinsicCalibrator);
+      const result = model.updateEstimatedHeightsFromCalibration(
+        virtualizedIntrinsicCalibrator,
+        navigationRegistration === null ? void 0 : readVirtualizedNavigationModelGeometryAnchor(navigationRegistration)
+      );
       if (!hasMeasuredHeightGeometryDelta(result)) {
         return;
       }
       mutateVirtualizedGeometry(ticket);
-      const target = correctionTarget.kind === "active" && "kind" in correctionTarget.registration.target && correctionTarget.registration.target.kind === "restore" ? correctionTarget.registration.target.anchor === null ? 0 : scrollTopForReadingAnchor(model, correctionTarget.registration.target.anchor) ?? 0 : correctionTarget.kind === "active" && "kind" in correctionTarget.registration.target && correctionTarget.registration.target.kind === "gesture" ? correctionTarget.registration.target.latestTarget : preserveSectionIndex !== null ? model.sectionTop(preserveSectionIndex) : scrollTopForReadingAnchor(model, anchor) ?? 0;
+      const target = navigationRegistration !== null ? preMutationScrollTop + (result.anchorShift ?? 0) : correctionTarget.kind === "active" && correctionTarget.registration.mode === "restore" ? correctionTarget.registration.anchor === null ? 0 : scrollTopForReadingAnchor(model, correctionTarget.registration.anchor) ?? 0 : correctionTarget.kind === "active" && correctionTarget.registration.mode === "gesture" ? correctionTarget.registration.latestTarget : preserveSectionIndex !== null ? model.sectionTop(preserveSectionIndex) : scrollTopForReadingAnchor(model, anchor) ?? 0;
       controller.updateWindowForScroll({ desiredScrollTop: target, force: true });
       if (correctionTarget.kind === "generic") {
         operation.requestScrollTop(target, "calibration");
-      } else if (correctionTarget.kind === "retained-navigation" && !("kind" in correctionTarget.target)) {
-        correctVirtualizedProgrammaticNavigationResidual({
-          ...correctionTarget.target,
-          operation
-        });
-      } else if (correctionTarget.kind === "active" && "kind" in correctionTarget.registration.target && correctionTarget.registration.target.kind === "restore") {
-        correctVirtualizedHeldRestoreTarget(correctionTarget.registration.target, operation);
+      } else if (navigationRegistration !== null) {
+        preserveVirtualizedNavigationGeometry(
+          navigationRegistration,
+          operation,
+          result,
+          preMutationScrollTop
+        );
+      } else if (correctionTarget.registration.mode === "restore") {
+        correctVirtualizedHeldRestoreTarget(correctionTarget.registration, operation);
       }
       invalidateTopVisibleBlockIndexCache();
-      invalidateSourceLineAnchors({ reassertPendingTarget: postSettleTarget === null });
+      invalidateSourceLineAnchors({ reassertPendingTarget: !hasVirtualizedNavigationRegistration() });
       postPerfMark("mm-virt-window-calibrated", {
         maxAbsDelta: result.maxAbsDelta,
         recordedCount,
@@ -9573,9 +9645,10 @@
     const restoreTarget = Object.freeze({
       anchor: layoutState.readingAnchor ?? null,
       kind: "restore",
+      mode: "restore",
       operation
     });
-    virtualizedHeldOperationScrollPolicy?.register(operation, "restore", restoreTarget);
+    virtualizedHeldOperationScrollPolicy?.register(operation, restoreTarget);
     const documentEpoch = operation.documentEpoch;
     cachedScrollRestoreCompletion = new Promise((resolve) => {
       let completed = false;
@@ -11113,10 +11186,13 @@
       return false;
     }
     const registration = readVirtualizedHeldOperationRegistration(operation);
-    if (registration?.mode === "gesture" && "kind" in registration.target && registration.target.kind === "gesture") {
+    if (registration?.mode === "gesture") {
       virtualizedHeldOperationScrollPolicy?.update(operation, Object.freeze({
-        ...registration.target,
-        latestTarget: target
+        kind: "gesture",
+        latestTarget: target,
+        mode: "gesture",
+        operation,
+        witnessSequence: registration.witnessSequence
       }));
     }
     operation.requestHeldOperationTarget(target, writer);
@@ -11185,7 +11261,7 @@
         userInputWitness?.endOwnedPointer(minimapOwnedPointerId);
         minimapOwnedPointerId = null;
       }
-      clearVirtualizedProgrammaticNavigationPostSettleTarget();
+      clearVirtualizedNavigationRegistration();
       pendingSourceLineTarget = null;
       minimapScrollOperation = acquireVirtualizedScrollOperation("minimap-gesture", "supersede-as-user");
       const operation = minimapScrollOperation;
@@ -11193,9 +11269,10 @@
         const witnessSequence = userInputWitness.captureSequence();
         minimapOwnedPointerId = event.pointerId;
         userInputWitness.beginOwnedPointer(event.pointerId);
-        virtualizedHeldOperationScrollPolicy?.register(operation, "gesture", Object.freeze({
+        virtualizedHeldOperationScrollPolicy?.register(operation, Object.freeze({
           kind: "gesture",
           latestTarget: root.scrollTop,
+          mode: "gesture",
           operation,
           witnessSequence
         }));
@@ -12508,7 +12585,7 @@
     queueMinimapRefreshAfterLayoutSettles();
     scheduleResizeReactions(documentEpoch);
     invalidateSourceLineAnchors({
-      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
+      reassertPendingTarget: !hasVirtualizedNavigationRegistration()
     });
     scheduleVirtualizedMeasuredHeightAdoption();
     window.requestAnimationFrame(() => {
@@ -12523,7 +12600,7 @@
     }
     queueMinimapRefreshAfterLayoutSettles();
     invalidateSourceLineAnchors({
-      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
+      reassertPendingTarget: !hasVirtualizedNavigationRegistration()
     });
     scheduleVirtualizedMeasuredHeightAdoption();
   }
@@ -12601,33 +12678,34 @@
     }
   });
   document.addEventListener("scroll", () => {
+    const postNavigationWitnessSourceLine = pendingNavigationWitnessReverseSync;
     if (scrollOwnershipControlPlane !== null) {
-      const navigationSession = readCurrentVirtualizedNavigationSession();
+      const navigationRegistration = readCurrentVirtualizedNavigationRegistration();
       const classification = scrollOwnershipControlPlane.classifyNativeScroll(
         getDocumentScrollRoot().scrollTop,
         "native-scroll"
       );
       if (classification.kind === "user-supersession") {
         cancelPendingVirtualizedMaintenance("user-supersession");
-        clearVirtualizedNavigationSession();
-        clearVirtualizedProgrammaticNavigationPostSettleTarget();
+        clearVirtualizedNavigationRegistration();
         queuePreviewSourceLinePost();
       } else if (classification.kind === "unattributed-failure") {
         cancelPendingVirtualizedMaintenance("unattributed-failure");
-        if (navigationSession !== null) {
-          navigationSession.externalShiftCount++;
+        if (navigationRegistration !== null) {
+          updateVirtualizedNavigationRegistration(navigationRegistration, {
+            externalShiftCount: navigationRegistration.externalShiftCount + 1
+          });
         }
-        clearVirtualizedNavigationSession();
-        clearVirtualizedProgrammaticNavigationPostSettleTarget();
+        clearVirtualizedNavigationRegistration();
       }
     } else {
-      const programmaticNavigationScroll = isVirtualizedProgrammaticNavigationInProgress();
-      if (!programmaticNavigationScroll) {
-        clearVirtualizedProgrammaticNavigationPostSettleTarget();
-      }
       queuePostScroll();
       queuePreviewSourceLinePost();
       return;
+    }
+    if (postNavigationWitnessSourceLine) {
+      pendingNavigationWitnessReverseSync = false;
+      queuePreviewSourceLinePost();
     }
     queuePostScroll();
   }, { passive: true });
