@@ -42,6 +42,9 @@ public sealed class ApplicateRenderedFindDomainState
     }
 
     public ApplicateRenderedFindResultEnvelope QueryRendered(int renderId, long requestId, string query)
+        => BeginRenderedQuery(renderId, requestId, query).CreateEnvelope();
+
+    internal ApplicateRenderedFindQueryWork BeginRenderedQuery(int renderId, long requestId, string query)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(renderId);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(requestId);
@@ -49,12 +52,11 @@ public sealed class ApplicateRenderedFindDomainState
 
         if (_currentRenderId is int currentRenderId && renderId < currentRenderId)
         {
-            return CreateEnvelope(
-                renderId,
-                requestId,
-                query,
+            return new ApplicateRenderedFindQueryWork(
+                new ApplicateRenderedFindQuery(renderId, requestId, query, RenderedTextDomain),
                 ApplicateRenderedFindResultStatus.Unavailable,
-                ApplicateRenderedFindTextSearchResult.Empty);
+                null,
+                UpdatesLatest: false);
         }
 
         if (_currentRenderId != renderId)
@@ -71,32 +73,49 @@ public sealed class ApplicateRenderedFindDomainState
             Status = ApplicateRenderedFindDomainStatus.RenderedPending;
         }
 
-        LatestQuery = new ApplicateRenderedFindQuery(renderId, requestId, query);
-        return BuildLatestQueryResult();
+        LatestQuery = new ApplicateRenderedFindQuery(renderId, requestId, query, RenderedTextDomain);
+        return BuildLatestQueryWork();
     }
 
     public ApplicateRenderedFindDomainApplyResult ApplyProtocolMessage(string body)
+        => ApplyProtocolMessage(body, buildLatestQueryResult: true);
+
+    internal ApplicateRenderedFindDomainApplyResult ApplyProtocolMessageForHost(string body)
+        => ApplyProtocolMessage(body, buildLatestQueryResult: false);
+
+    private ApplicateRenderedFindDomainApplyResult ApplyProtocolMessage(string body, bool buildLatestQueryResult)
     {
         ArgumentNullException.ThrowIfNull(body);
 
         var bounds = ApplicateRenderedFindTextProtocol.ValidateRawMessageBounds(body);
         if (!bounds.Accepted)
         {
-            return RejectWithoutTransfer(bounds.Rejection?.FailureId ?? "mm-find-transfer-budget-rejected");
+            return RejectWithoutTransfer(
+                bounds.Rejection?.FailureId ?? "mm-find-transfer-budget-rejected",
+                buildLatestQueryResult);
         }
 
         try
         {
             using var document = JsonDocument.Parse(body, StrictDocumentOptions);
-            return ApplyProtocolMessage(document, bounds.WireUtf8Bytes);
+            return ApplyProtocolMessage(document, bounds.WireUtf8Bytes, buildLatestQueryResult);
         }
         catch (JsonException)
         {
-            return RejectWithoutTransfer("mm-find-transfer-invalid");
+            return RejectWithoutTransfer("mm-find-transfer-invalid", buildLatestQueryResult);
         }
     }
 
     public ApplicateRenderedFindDomainApplyResult ApplyProtocolMessage(JsonDocument document, int wireUtf8Bytes)
+        => ApplyProtocolMessage(document, wireUtf8Bytes, buildLatestQueryResult: true);
+
+    internal ApplicateRenderedFindDomainApplyResult ApplyProtocolMessageForHost(JsonDocument document, int wireUtf8Bytes)
+        => ApplyProtocolMessage(document, wireUtf8Bytes, buildLatestQueryResult: false);
+
+    private ApplicateRenderedFindDomainApplyResult ApplyProtocolMessage(
+        JsonDocument document,
+        int wireUtf8Bytes,
+        bool buildLatestQueryResult)
     {
         ArgumentNullException.ThrowIfNull(document);
 
@@ -104,7 +123,7 @@ public sealed class ApplicateRenderedFindDomainState
         var initialRenderId = 0;
         if (_currentRenderId is null && !TryReadRenderId(root, out initialRenderId))
         {
-            return RejectWithoutTransfer("mm-find-transfer-invalid");
+            return RejectWithoutTransfer("mm-find-transfer-invalid", buildLatestQueryResult);
         }
 
         var renderId = _currentRenderId ?? initialRenderId;
@@ -123,7 +142,9 @@ public sealed class ApplicateRenderedFindDomainState
                     validation.Rejection);
             }
 
-            return RejectWithoutTransfer(validation.Rejection?.FailureId ?? "mm-find-transfer-invalid");
+            return RejectWithoutTransfer(
+                validation.Rejection?.FailureId ?? "mm-find-transfer-invalid",
+                buildLatestQueryResult);
         }
 
         if (validation.Message is ApplicateRenderedFindDomainBeginMessage begin)
@@ -139,7 +160,7 @@ public sealed class ApplicateRenderedFindDomainState
             return new ApplicateRenderedFindDomainApplyResult(
                 ApplicateRenderedFindProtocolApplyStatus.Accepted,
                 Status,
-                BuildLatestQueryResultOrNull(),
+                BuildLatestQueryResultOrNull(buildLatestQueryResult),
                 null);
         }
 
@@ -151,7 +172,7 @@ public sealed class ApplicateRenderedFindDomainState
             return new ApplicateRenderedFindDomainApplyResult(
                 ApplicateRenderedFindProtocolApplyStatus.Accepted,
                 Status,
-                BuildLatestQueryResultOrNull(),
+                BuildLatestQueryResultOrNull(buildLatestQueryResult),
                 null);
         }
 
@@ -167,7 +188,7 @@ public sealed class ApplicateRenderedFindDomainState
             return new ApplicateRenderedFindDomainApplyResult(
                 ApplicateRenderedFindProtocolApplyStatus.Stale,
                 Status,
-                BuildLatestQueryResultOrNull(),
+                BuildLatestQueryResultOrNull(buildLatestQueryResult),
                 new ApplicateRenderedFindProtocolRejection(
                     "mm-find-transfer-stale",
                     _transfer.MinimumProjectionRevision,
@@ -197,7 +218,7 @@ public sealed class ApplicateRenderedFindDomainState
         return new ApplicateRenderedFindDomainApplyResult(
             protocolResult.Status,
             Status,
-            BuildLatestQueryResultOrNull(),
+            BuildLatestQueryResultOrNull(buildLatestQueryResult),
             protocolResult.Rejection);
     }
 
@@ -206,6 +227,14 @@ public sealed class ApplicateRenderedFindDomainState
     // Legacy-plaintext domains have no rendered-find state to reject (matching
     // RejectInvalidRenderedFindMessageIfCurrent's guard), so they return null.
     public ApplicateRenderedFindDomainApplyResult? RejectCurrentTransfer(string failureId)
+        => RejectCurrentTransfer(failureId, buildLatestQueryResult: true);
+
+    internal ApplicateRenderedFindDomainApplyResult? RejectCurrentTransferForHost(string failureId)
+        => RejectCurrentTransfer(failureId, buildLatestQueryResult: false);
+
+    private ApplicateRenderedFindDomainApplyResult? RejectCurrentTransfer(
+        string failureId,
+        bool buildLatestQueryResult)
     {
         ArgumentException.ThrowIfNullOrEmpty(failureId);
         if (Status == ApplicateRenderedFindDomainStatus.LegacyPlaintext)
@@ -213,10 +242,12 @@ public sealed class ApplicateRenderedFindDomainState
             return null;
         }
 
-        return RejectWithoutTransfer(failureId);
+        return RejectWithoutTransfer(failureId, buildLatestQueryResult);
     }
 
-    private ApplicateRenderedFindDomainApplyResult RejectWithoutTransfer(string failureId)
+    private ApplicateRenderedFindDomainApplyResult RejectWithoutTransfer(
+        string failureId,
+        bool buildLatestQueryResult = true)
     {
         if (_currentRenderId is int currentRenderId)
         {
@@ -230,39 +261,32 @@ public sealed class ApplicateRenderedFindDomainState
         return new ApplicateRenderedFindDomainApplyResult(
             ApplicateRenderedFindProtocolApplyStatus.Rejected,
             Status,
-            BuildLatestQueryResultOrNull(),
+            BuildLatestQueryResultOrNull(buildLatestQueryResult),
             rejection);
     }
 
     private ApplicateRenderedFindResultEnvelope BuildLatestQueryResult()
+        => BuildLatestQueryWork().CreateEnvelope();
+
+    internal ApplicateRenderedFindQueryWork? CreateLatestQueryWorkOrNull()
+        => LatestQuery is null ? null : BuildLatestQueryWork();
+
+    private ApplicateRenderedFindQueryWork BuildLatestQueryWork()
     {
         var query = LatestQuery ?? throw new InvalidOperationException("No rendered-find query is current.");
         if (_committedIndex is not null)
         {
-            return CreateEnvelope(
-                query.RenderId,
-                query.RequestId,
-                query.Query,
+            return new ApplicateRenderedFindQueryWork(
+                query,
                 ApplicateRenderedFindResultStatus.Ready,
-                _committedIndex.Search(query.Query));
+                _committedIndex,
+                UpdatesLatest: true);
         }
 
-        return Status switch
-        {
-            ApplicateRenderedFindDomainStatus.RenderedUnavailable =>
-                CreateEnvelope(
-                    query.RenderId,
-                    query.RequestId,
-                    query.Query,
-                    ApplicateRenderedFindResultStatus.Unavailable,
-                    ApplicateRenderedFindTextSearchResult.Empty),
-            _ => CreateEnvelope(
-                query.RenderId,
-                query.RequestId,
-                query.Query,
-                ApplicateRenderedFindResultStatus.Pending,
-                ApplicateRenderedFindTextSearchResult.Empty),
-        };
+        var status = Status == ApplicateRenderedFindDomainStatus.RenderedUnavailable
+            ? ApplicateRenderedFindResultStatus.Unavailable
+            : ApplicateRenderedFindResultStatus.Pending;
+        return new ApplicateRenderedFindQueryWork(query, status, null, UpdatesLatest: true);
     }
 
     private ApplicateRenderedFindDomainStatus ResolveStatusWithoutTransfer()
@@ -280,6 +304,9 @@ public sealed class ApplicateRenderedFindDomainState
     private ApplicateRenderedFindResultEnvelope? BuildLatestQueryResultOrNull()
         => LatestQuery is null ? null : BuildLatestQueryResult();
 
+    private ApplicateRenderedFindResultEnvelope? BuildLatestQueryResultOrNull(bool buildLatestQueryResult)
+        => buildLatestQueryResult ? BuildLatestQueryResultOrNull() : null;
+
     private static ApplicateRenderedFindResultEnvelope CreateEnvelope(
         int renderId,
         long requestId,
@@ -293,6 +320,7 @@ public sealed class ApplicateRenderedFindDomainState
             RenderedTextDomain,
             status,
             result.TotalCount,
+            result.Truncated,
             result.Matches);
 
     private static bool TryReadRenderId(JsonElement root, out int renderId)
@@ -324,7 +352,61 @@ public enum ApplicateRenderedFindResultStatus
     Unavailable,
 }
 
-public sealed record ApplicateRenderedFindQuery(int RenderId, long RequestId, string Query);
+public sealed record ApplicateRenderedFindQuery(
+    int RenderId,
+    long RequestId,
+    string Query,
+    string TextDomain);
+
+public readonly record struct ApplicateRenderedFindQueryIdentity(
+    int RenderId,
+    long RequestId,
+    string Query,
+    string TextDomain);
+
+public sealed record ApplicateRenderedFindQueryWork(
+    ApplicateRenderedFindQuery Query,
+    ApplicateRenderedFindResultStatus Status,
+    ApplicateRenderedFindTextIndex? CommittedIndex,
+    bool UpdatesLatest)
+{
+    public ApplicateRenderedFindQueryIdentity Identity { get; } =
+        new(Query.RenderId, Query.RequestId, Query.Query, Query.TextDomain);
+
+    public bool RequiresSearch => Status == ApplicateRenderedFindResultStatus.Ready && CommittedIndex is not null;
+
+    public ApplicateRenderedFindResultEnvelope CreateEnvelope()
+        => RequiresSearch
+            ? CreateReadyEnvelope(CommittedIndex!.Search(Query.Query))
+            : new ApplicateRenderedFindResultEnvelope(
+                Query.RenderId,
+                Query.RequestId,
+                Query.Query,
+                Query.TextDomain,
+                Status,
+                0,
+                false,
+                []);
+
+    public ApplicateRenderedFindResultEnvelope CreateReadyEnvelope(ApplicateRenderedFindTextSearchResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        if (Status != ApplicateRenderedFindResultStatus.Ready)
+        {
+            throw new InvalidOperationException("Only ready rendered-find query work can create a ready envelope.");
+        }
+
+        return new ApplicateRenderedFindResultEnvelope(
+            Query.RenderId,
+            Query.RequestId,
+            Query.Query,
+            Query.TextDomain,
+            ApplicateRenderedFindResultStatus.Ready,
+            result.TotalCount,
+            result.Truncated,
+            result.Matches);
+    }
+}
 
 public sealed record ApplicateRenderedFindResultEnvelope(
     int RenderId,
@@ -333,6 +415,7 @@ public sealed record ApplicateRenderedFindResultEnvelope(
     string TextDomain,
     ApplicateRenderedFindResultStatus Status,
     int TotalCount,
+    bool Truncated,
     IReadOnlyList<ApplicateRenderedFindTextMatch> Matches);
 
 public sealed record ApplicateRenderedFindDomainApplyResult(

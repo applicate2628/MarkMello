@@ -1,4 +1,5 @@
 using System.IO;
+using System.Threading;
 using MarkMello.Applicate.Desktop.Rendering;
 using Xunit;
 
@@ -48,7 +49,7 @@ public sealed class ApplicateRenderedFindTextIndexTests
     }
 
     [Fact]
-    public void SearchReportsBlockLocalOffsetsAndSkipsLengthChangingNormalization()
+    public void SearchReportsBlockLocalOffsetsAndPreservesLengthDuringNormalization()
     {
         var index = ApplicateRenderedFindTextIndex.Create(
             renderId: 22,
@@ -74,7 +75,9 @@ public sealed class ApplicateRenderedFindTextIndexTests
 
         var expanded = index.Search("b");
 
-        Assert.DoesNotContain(expanded.Matches, match => match.BlockIndex == 7);
+        var expandedMatch = Assert.Single(expanded.Matches);
+        Assert.Equal(2, expandedMatch.BlockLocalOffset);
+        Assert.Equal("b", expandedMatch.NormalizedText);
     }
 
     [Fact]
@@ -94,6 +97,104 @@ public sealed class ApplicateRenderedFindTextIndexTests
         var match = Assert.Single(result.Matches);
         Assert.Equal(4, match.BlockLocalOffset);
         Assert.Equal("r31-p2-b5-s0-o4-l4-n1", match.MatchId);
+    }
+
+    [Fact]
+    public void SearchCapsMaterializedDescriptorsButContinuesExactCounting()
+    {
+        var index = ApplicateRenderedFindTextIndex.Create(
+            renderId: 41,
+            projectionRevision: 9,
+            [
+                new ApplicateRenderedFindTextSegment(
+                    SegmentOrdinal: 0,
+                    BlockIndex: 1,
+                    BlockLocalStart: 0,
+                    Text: new string('a', 5_017)),
+            ]);
+
+        var result = index.Search("a");
+
+        Assert.Equal(5_017, result.TotalCount);
+        Assert.True(result.Truncated);
+        Assert.Equal(5_000, result.Matches.Count);
+        Assert.Equal(5_000, result.Matches[^1].Ordinal);
+        Assert.Equal("r41-p9-b1-s0-o4999-l1-n5000", result.Matches[^1].MatchId);
+    }
+
+    [Fact]
+    public void SearchDoesNotInvokeDescriptorFactoryAfterMaterializedCap()
+    {
+        var index = ApplicateRenderedFindTextIndex.Create(
+            renderId: 42,
+            projectionRevision: 10,
+            [
+                new ApplicateRenderedFindTextSegment(
+                    SegmentOrdinal: 0,
+                    BlockIndex: 2,
+                    BlockLocalStart: 0,
+                    Text: new string('x', 5_025)),
+            ]);
+        var factoryState = new DescriptorFactoryState();
+
+        var result = index.Search(
+            "x",
+            static (descriptor, state) =>
+            {
+                state.FactoryCalls++;
+                return ApplicateRenderedFindTextIndex.CreateMatch(descriptor);
+            },
+            factoryState,
+            CancellationToken.None);
+
+        Assert.Equal(5_025, result.TotalCount);
+        Assert.True(result.Truncated);
+        Assert.Equal(5_000, result.Matches.Count);
+        Assert.Equal(5_000, factoryState.FactoryCalls);
+    }
+
+    [Fact]
+    public void SearchCountsOccurrencesOnlyAfterTheCap()
+    {
+        var index = ApplicateRenderedFindTextIndex.Create(
+            renderId: 43,
+            projectionRevision: 11,
+            [
+                new ApplicateRenderedFindTextSegment(0, 3, 0, new string('b', 5_000)),
+                new ApplicateRenderedFindTextSegment(1, 4, 12, "bbb"),
+            ]);
+
+        var result = index.Search("b");
+
+        Assert.Equal(5_003, result.TotalCount);
+        Assert.True(result.Truncated);
+        Assert.Equal(5_000, result.Matches.Count);
+        Assert.DoesNotContain(result.Matches, match => match.BlockIndex == 4);
+    }
+
+    [Fact]
+    public void SearchPreservesOriginalOffsetsWhenQueryOrContentContainsTurkishCapitalIWithDot()
+    {
+        var index = ApplicateRenderedFindTextIndex.Create(
+            renderId: 44,
+            projectionRevision: 12,
+            [
+                new ApplicateRenderedFindTextSegment(0, 8, 30, "a\u0130b i"),
+            ]);
+
+        var dottedQuery = index.Search("\u0130b");
+        var asciiQuery = index.Search("i");
+
+        var dottedMatch = Assert.Single(dottedQuery.Matches);
+        Assert.Equal(31, dottedMatch.BlockLocalOffset);
+        Assert.Equal(2, dottedMatch.Length);
+        Assert.Equal("ib", dottedMatch.NormalizedText);
+
+        Assert.Equal(2, asciiQuery.TotalCount);
+        Assert.Collection(
+            asciiQuery.Matches,
+            match => Assert.Equal(31, match.BlockLocalOffset),
+            match => Assert.Equal(34, match.BlockLocalOffset));
     }
 
     [Fact]
@@ -124,5 +225,10 @@ public sealed class ApplicateRenderedFindTextIndexTests
         }
 
         throw new InvalidOperationException("Could not find MarkMello.sln from the test working directory.");
+    }
+
+    private sealed class DescriptorFactoryState
+    {
+        public int FactoryCalls { get; set; }
     }
 }

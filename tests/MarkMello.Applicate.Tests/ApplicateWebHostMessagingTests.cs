@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views;
 using Xunit;
@@ -408,15 +411,197 @@ public sealed class ApplicateWebHostMessagingTests
     {
         var source = File.ReadAllText(WebDocumentViewSourcePath);
         var queryHandler = ExtractMethodBody(source, "private void HandleFindQueryMessage(");
-        var renderedResults = ExtractMethodBody(source, "private void PostRenderedFindResults(");
+        var renderedResults = ExtractMethodBody(source, "private static object BuildRenderedFindResultsMessage(");
 
         Assert.Contains("ApplicateRenderedFindDomainState.RenderedTextDomain", queryHandler, StringComparison.Ordinal);
-        Assert.Contains("_renderedFindDomain.QueryRendered", queryHandler, StringComparison.Ordinal);
-        Assert.Contains("PostRenderedFindResults", queryHandler, StringComparison.Ordinal);
+        Assert.Contains("_renderedFindDomain.BeginRenderedQuery", queryHandler, StringComparison.Ordinal);
+        Assert.Contains("PostLatestRenderedFindResultAsync", queryHandler, StringComparison.Ordinal);
         Assert.Contains("_currentFindTextIndex.Search(query)", queryHandler, StringComparison.Ordinal);
         Assert.Contains("textDomain = envelope.TextDomain", renderedResults, StringComparison.Ordinal);
         Assert.Contains("status = ToWireStatus(envelope.Status)", renderedResults, StringComparison.Ordinal);
         Assert.Contains("envelope.Status == ApplicateRenderedFindResultStatus.Ready", renderedResults, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RenderedFindReadyPayloadCarriesTruncationExactTotalAndCappedMatches()
+    {
+        var envelope = CreateRenderedEnvelope(
+            requestId: 21,
+            query: "needle",
+            ApplicateRenderedFindResultStatus.Ready,
+            totalCount: 5_006,
+            truncated: true,
+            matches: CreateRenderedMatches(count: 5_000, normalizedText: "needle"));
+
+        var payload = ApplicateWebMarkdownDocumentView.BuildRenderedFindResultsPayload(envelope);
+
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+        Assert.Equal("find-results", root.GetProperty("type").GetString());
+        Assert.Equal(21, root.GetProperty("requestId").GetInt64());
+        Assert.Equal("needle", root.GetProperty("query").GetString());
+        Assert.Equal("rendered-dom-v1", root.GetProperty("textDomain").GetString());
+        Assert.Equal("ready", root.GetProperty("status").GetString());
+        Assert.Equal(5_006, root.GetProperty("totalCount").GetInt32());
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.Equal(5_000, root.GetProperty("matches").GetArrayLength());
+    }
+
+    [Fact]
+    public void RenderedFindReadyPayloadUsesDocumentedSenderOwnedCeiling()
+    {
+        var source = File.ReadAllText(WebDocumentViewSourcePath);
+
+        Assert.Contains("sender-owned find-results safety ceiling", source, StringComparison.Ordinal);
+        Assert.Contains("not the inbound rendered-find transfer contract", source, StringComparison.Ordinal);
+        Assert.Contains("MaxRenderedFindResultsUtf8Bytes", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RenderedFindReadyPayloadStaysReadyBelowSenderOwnedUtf8Ceiling()
+    {
+        var envelope = CreateRenderedEnvelope(
+            requestId: 22,
+            query: "needle",
+            ApplicateRenderedFindResultStatus.Ready,
+            totalCount: 5_000,
+            truncated: false,
+            matches: CreateRenderedMatches(
+                count: 5_000,
+                normalizedText: new string('a', 128)));
+
+        var payload = ApplicateWebMarkdownDocumentView.BuildRenderedFindResultsPayload(envelope);
+        var wireBytes = Encoding.UTF8.GetByteCount(payload);
+
+        Assert.InRange(wireBytes, 1, ApplicateWebMarkdownDocumentView.MaxRenderedFindResultsUtf8Bytes);
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+        Assert.Equal("find-results", root.GetProperty("type").GetString());
+        Assert.Equal("ready", root.GetProperty("status").GetString());
+        Assert.Equal(5_000, root.GetProperty("totalCount").GetInt32());
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+        Assert.Equal(5_000, root.GetProperty("matches").GetArrayLength());
+    }
+
+    [Fact]
+    public void RenderedFindReadyPayloadFallsBackUnavailableAboveSenderOwnedUtf8Ceiling()
+    {
+        var envelope = CreateRenderedEnvelope(
+            requestId: 23,
+            query: "needle",
+            ApplicateRenderedFindResultStatus.Ready,
+            totalCount: 5_000,
+            truncated: false,
+            matches: CreateRenderedMatches(
+                count: 5_000,
+                normalizedText: new string('\u044f', 512)));
+
+        var payload = ApplicateWebMarkdownDocumentView.BuildRenderedFindResultsPayload(envelope);
+        var wireBytes = Encoding.UTF8.GetByteCount(payload);
+
+        Assert.InRange(wireBytes, 1, ApplicateWebMarkdownDocumentView.MaxRenderedFindResultsUtf8Bytes);
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+        Assert.Equal("find-results", root.GetProperty("type").GetString());
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        Assert.Equal(0, root.GetProperty("totalCount").GetInt32());
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+        Assert.Empty(root.GetProperty("matches").EnumerateArray());
+    }
+
+    [Fact]
+    public void RenderedFindBoundaryMeasurementsCoverHandlerAndPostContinuation()
+    {
+        var source = File.ReadAllText(WebDocumentViewSourcePath);
+        var queryHandler = ExtractMethodBody(source, "private void HandleFindQueryMessage(");
+        var postIfCurrent = ExtractMethodBody(source, "private async Task<double> PostIfCurrentAsync(");
+
+        var enqueueStart = queryHandler.IndexOf("var enqueueStart = Stopwatch.GetTimestamp();", StringComparison.Ordinal);
+        var requestIdValidation = queryHandler.IndexOf("root.TryGetProperty(\"requestId\"", StringComparison.Ordinal);
+        var queryWork = queryHandler.IndexOf("_renderedFindDomain.BeginRenderedQuery", StringComparison.Ordinal);
+        var submit = queryHandler.IndexOf("PostLatestRenderedFindResultAsync(work, enqueueStart)", StringComparison.Ordinal);
+
+        Assert.True(enqueueStart >= 0, "find-query handler should start enqueue timing at handler entry.");
+        Assert.True(enqueueStart < requestIdValidation, "enqueue timing should include request validation.");
+        Assert.True(requestIdValidation < queryWork, "validation should happen before query-work creation.");
+        Assert.True(queryWork < submit, "query work should be created before worker scheduling.");
+
+        var uiContinuation = postIfCurrent.IndexOf("await _postOnUiAsync(() =>", StringComparison.Ordinal);
+        var postStart = postIfCurrent.IndexOf("var postStart = Stopwatch.GetTimestamp();", StringComparison.Ordinal);
+        var latestCheck = postIfCurrent.IndexOf("if (work.UpdatesLatest && !IsCurrent", StringComparison.Ordinal);
+        var postCall = postIfCurrent.IndexOf("postAsync(envelope).GetAwaiter().GetResult();", StringComparison.Ordinal);
+        var elapsed = postIfCurrent.IndexOf("postMs = Stopwatch.GetElapsedTime(postStart).TotalMilliseconds;", StringComparison.Ordinal);
+
+        Assert.True(uiContinuation >= 0, "post timing should run inside the UI continuation.");
+        Assert.True(uiContinuation < postStart, "post timing should start at UI continuation entry.");
+        Assert.True(postStart < latestCheck, "post timing should include the latest-query recheck.");
+        Assert.True(latestCheck < postCall, "latest-query recheck should happen before renderer post.");
+        Assert.True(postCall < elapsed, "post timing should include renderer post return.");
+    }
+
+    [Fact]
+    public async Task RenderedFindAsyncSearchDoesNotPostSupersededQuery()
+    {
+        var firstSearchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstSearch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var posts = new List<ApplicateRenderedFindResultEnvelope>();
+        var coordinator = new ApplicateRenderedFindQueryCoordinator(
+            buildReadyEnvelope: (work, cancellationToken) =>
+            {
+                if (work.Identity.RequestId == 31)
+                {
+                    firstSearchStarted.SetResult();
+                    releaseFirstSearch.Task.GetAwaiter().GetResult();
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                return work.CreateReadyEnvelope(new ApplicateRenderedFindTextSearchResult(
+                    1,
+                    false,
+                    [CreateRenderedMatch(work.Identity.RequestId, ordinal: 1, normalizedText: work.Query.Query)]));
+            },
+            runReadySearchAsync: static (build, cancellationToken) => Task.Run(() => build(cancellationToken), cancellationToken),
+            postOnUiAsync: action =>
+            {
+                action();
+                return Task.CompletedTask;
+            });
+
+        var first = coordinator.SubmitAsync(CreateReadyWork(requestId: 31, query: "first"), PostAsync);
+        await firstSearchStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await coordinator.SubmitAsync(CreateReadyWork(requestId: 32, query: "second"), PostAsync);
+        releaseFirstSearch.SetResult();
+        await first.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.DoesNotContain(posts, post => post.RequestId == 31);
+        var post = Assert.Single(posts);
+        Assert.Equal(32, post.RequestId);
+        Assert.Equal("second", post.Query);
+
+        Task PostAsync(ApplicateRenderedFindResultEnvelope envelope)
+        {
+            posts.Add(envelope);
+            return Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public void RenderedFindProtocolReturnPathsUseHostLatestBoundary()
+    {
+        var source = File.ReadAllText(WebDocumentViewSourcePath);
+        var messageHandler = ExtractMethodBody(source, "private void OnWebMessageReceived(");
+        var latestPoster = ExtractMethodBody(source, "private System.Threading.Tasks.Task PostLatestRenderedFindResultAsync(");
+
+        Assert.Contains(
+            "deferRenderedFindLatestResult: true",
+            messageHandler,
+            StringComparison.Ordinal);
+        Assert.Contains("_renderedFindQueryCoordinator.SubmitAsync", latestPoster, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "PostLatestRenderedFindResult(ingress.RenderedFindResult?.LatestQueryResult)",
+            messageHandler,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -934,6 +1119,65 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Equal(ApplicateRenderedFindResultStatus.Ready, state.QueryRendered(11, 1, "x").Status);
         return state;
     }
+
+    private static ApplicateRenderedFindResultEnvelope CreateRenderedEnvelope(
+        long requestId,
+        string query,
+        ApplicateRenderedFindResultStatus status,
+        int totalCount,
+        bool truncated,
+        IReadOnlyList<ApplicateRenderedFindTextMatch> matches)
+        => new(
+            RenderId: 11,
+            RequestId: requestId,
+            Query: query,
+            TextDomain: ApplicateRenderedFindDomainState.RenderedTextDomain,
+            Status: status,
+            TotalCount: totalCount,
+            Truncated: truncated,
+            Matches: matches);
+
+    private static ApplicateRenderedFindTextMatch[] CreateRenderedMatches(
+        int count,
+        string normalizedText)
+    {
+        var matches = new ApplicateRenderedFindTextMatch[count];
+        for (var index = 0; index < count; index++)
+        {
+            matches[index] = CreateRenderedMatch(seed: index + 1, ordinal: index + 1, normalizedText);
+        }
+
+        return matches;
+    }
+
+    private static ApplicateRenderedFindTextMatch CreateRenderedMatch(
+        long seed,
+        int ordinal,
+        string normalizedText)
+        => new(
+            MatchId: $"r11-p1-b{seed}-s{seed}-o{seed}-l{normalizedText.Length}-n{ordinal}",
+            RenderId: 11,
+            ProjectionRevision: 1,
+            BlockIndex: checked((int)seed),
+            SegmentOrdinal: checked((int)seed),
+            BlockLocalOffset: checked((int)seed),
+            Length: normalizedText.Length,
+            NormalizedText: normalizedText,
+            Ordinal: ordinal);
+
+    private static ApplicateRenderedFindQueryWork CreateReadyWork(long requestId, string query)
+        => new(
+            new ApplicateRenderedFindQuery(
+                RenderId: 11,
+                RequestId: requestId,
+                Query: query,
+                TextDomain: ApplicateRenderedFindDomainState.RenderedTextDomain),
+            ApplicateRenderedFindResultStatus.Ready,
+            ApplicateRenderedFindTextIndex.Create(
+                renderId: 11,
+                projectionRevision: 1,
+                [new ApplicateRenderedFindTextSegment(0, 0, 0, query)]),
+            UpdatesLatest: true);
 
     private static string ExtractFromMarker(string source, string marker)
     {

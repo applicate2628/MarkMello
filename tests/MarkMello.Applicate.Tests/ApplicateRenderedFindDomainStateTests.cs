@@ -1,3 +1,6 @@
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
 using MarkMello.Applicate.Desktop.Rendering;
 using Xunit;
 
@@ -92,6 +95,85 @@ public sealed class ApplicateRenderedFindDomainStateTests
         Assert.Equal(11, committed.LatestQueryResult?.RequestId);
         Assert.Equal("alpha", committed.LatestQueryResult?.Query);
         Assert.Equal(1, committed.LatestQueryResult?.TotalCount);
+    }
+
+    [Fact]
+    public void LatestQueryIdentityIncludesRenderedTextDomain()
+    {
+        var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+
+        state.QueryRendered(renderId: 26, requestId: 13, query: "alpha");
+
+        Assert.NotNull(state.LatestQuery);
+        Assert.Equal(26, state.LatestQuery!.RenderId);
+        Assert.Equal(13, state.LatestQuery.RequestId);
+        Assert.Equal("alpha", state.LatestQuery.Query);
+        Assert.Equal(ApplicateRenderedFindDomainState.RenderedTextDomain, state.LatestQuery.TextDomain);
+    }
+
+    [Fact]
+    public void ReadyEnvelopeCarriesTruncatedExactTotalAndCappedMatches()
+    {
+        var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        state.BeginRenderedRender(renderId: 27);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReceiving, state.ApplyProtocolMessage(
+            StartJson(
+                renderId: 27,
+                projectionRevision: 1,
+                semanticSegmentCount: 1,
+                totalCodeUnits: 5_006,
+                chunkCount: 1,
+                partCount: 1)).StateStatus);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReceiving, state.ApplyProtocolMessage(
+            ChunkJson(
+                renderId: 27,
+                projectionRevision: 1,
+                chunkIndex: 0,
+                PartJson(0, 1, 0, 5_006, 0, new string('z', 5_006)))).StateStatus);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReady, state.ApplyProtocolMessage(
+            CompleteJson(
+                renderId: 27,
+                projectionRevision: 1,
+                semanticSegmentCount: 1,
+                totalCodeUnits: 5_006,
+                chunkCount: 1,
+                partCount: 1)).StateStatus);
+
+        var envelope = state.QueryRendered(renderId: 27, requestId: 14, query: "z");
+
+        Assert.Equal(ApplicateRenderedFindResultStatus.Ready, envelope.Status);
+        Assert.Equal(5_006, envelope.TotalCount);
+        Assert.True(envelope.Truncated);
+        Assert.Equal(5_000, envelope.Matches.Count);
+    }
+
+    [Fact]
+    public void ApplyProtocolMessageForHostDoesNotBuildLatestReadyResultWhenInitialRenderIdIsMissing()
+    {
+        var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        InstallReadyLatestQueryWithoutCurrentRenderForHostRejectionTest(state);
+        const string body = """{"type":"find-domain-begin","schemaVersion":1,"textDomain":"rendered-dom-v1"}""";
+
+        using var document = JsonDocument.Parse(body);
+        var result = state.ApplyProtocolMessageForHost(document, Encoding.UTF8.GetByteCount(body));
+
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, result.ProtocolStatus);
+        Assert.Null(result.LatestQueryResult);
+    }
+
+    [Fact]
+    public void ApplyProtocolMessageForHostDoesNotBuildLatestReadyResultWhenParsedValidationRejects()
+    {
+        var state = CreateReadyRenderedDomain();
+        var ready = state.QueryRendered(renderId: 11, requestId: 76, query: "x");
+        Assert.Equal(ApplicateRenderedFindResultStatus.Ready, ready.Status);
+        const string body = """{"type":"find-domain-begin","schemaVersion":2,"textDomain":"rendered-dom-v1","renderId":11}""";
+
+        using var document = JsonDocument.Parse(body);
+        var result = state.ApplyProtocolMessageForHost(document, Encoding.UTF8.GetByteCount(body));
+
+        Assert.Equal(ApplicateRenderedFindProtocolApplyStatus.Rejected, result.ProtocolStatus);
+        Assert.Null(result.LatestQueryResult);
     }
 
     [Fact]
@@ -292,5 +374,51 @@ public sealed class ApplicateRenderedFindDomainStateTests
 
     private static string PartJson(int segmentOrdinal, int blockIndex, int blockLocalStart, int segmentCodeUnitLength, int partOffset, string text)
         => $$"""{"segmentOrdinal":{{segmentOrdinal}},"blockIndex":{{blockIndex}},"blockLocalStart":{{blockLocalStart}},"segmentCodeUnitLength":{{segmentCodeUnitLength}},"partOffset":{{partOffset}},"text":"{{text}}"}""";
+
+    private static ApplicateRenderedFindDomainState CreateReadyRenderedDomain()
+    {
+        var state = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
+        state.BeginRenderedRender(renderId: 11);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReceiving, state.ApplyProtocolMessage(
+            StartJson(renderId: 11, projectionRevision: 1, semanticSegmentCount: 1, totalCodeUnits: 1, chunkCount: 1, partCount: 1)).StateStatus);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReceiving, state.ApplyProtocolMessage(
+            ChunkJson(renderId: 11, projectionRevision: 1, chunkIndex: 0, PartJson(0, 1, 0, 1, 0, "x"))).StateStatus);
+        Assert.Equal(ApplicateRenderedFindDomainStatus.RenderedReady, state.ApplyProtocolMessage(
+            CompleteJson(renderId: 11, projectionRevision: 1, semanticSegmentCount: 1, totalCodeUnits: 1, chunkCount: 1, partCount: 1)).StateStatus);
+        return state;
+    }
+
+    private static void InstallReadyLatestQueryWithoutCurrentRenderForHostRejectionTest(
+        ApplicateRenderedFindDomainState state)
+    {
+        var type = typeof(ApplicateRenderedFindDomainState);
+        SetPrivateField(
+            state,
+            "_committedIndex",
+            ApplicateRenderedFindTextIndex.Create(
+                renderId: 99,
+                projectionRevision: 1,
+                [new ApplicateRenderedFindTextSegment(0, 1, 0, "needle")]));
+        SetPrivateField(
+            state,
+            "<LatestQuery>k__BackingField",
+            new ApplicateRenderedFindQuery(
+                RenderId: 99,
+                RequestId: 88,
+                Query: "needle",
+                TextDomain: ApplicateRenderedFindDomainState.RenderedTextDomain));
+        SetPrivateField(
+            state,
+            "<Status>k__BackingField",
+            ApplicateRenderedFindDomainStatus.RenderedReady);
+        Assert.Null(type.GetField("_currentRenderId", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(state));
+    }
+
+    private static void SetPrivateField(object instance, string name, object? value)
+    {
+        var field = instance.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        field!.SetValue(instance, value);
+    }
 
 }

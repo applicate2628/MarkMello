@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -80,6 +81,235 @@ internal sealed class ApplicateWebMessageIngress : IDisposable
     public void Dispose() => GenericDocument?.Dispose();
 }
 
+internal sealed record ApplicateRenderedFindBoundaryMeasurement(
+    ApplicateRenderedFindQueryIdentity Identity,
+    double EnqueueMs,
+    double SearchMs,
+    double PostMs);
+
+internal sealed class ApplicateRenderedFindQueryCoordinator : IDisposable
+{
+    private readonly object _gate = new();
+    private readonly Func<ApplicateRenderedFindQueryWork, CancellationToken, ApplicateRenderedFindResultEnvelope> _buildReadyEnvelope;
+    private readonly Func<Func<CancellationToken, ApplicateRenderedFindResultEnvelope>, CancellationToken, Task<ApplicateRenderedFindResultEnvelope>> _runReadySearchAsync;
+    private readonly Func<Action, Task> _postOnUiAsync;
+    private readonly Action<ApplicateRenderedFindBoundaryMeasurement>? _measurements;
+    private ApplicateRenderedFindQueryIdentity? _latestIdentity;
+    private CancellationTokenSource? _latestCancellation;
+    private bool _disposed;
+
+    public ApplicateRenderedFindQueryCoordinator(
+        Func<ApplicateRenderedFindQueryWork, CancellationToken, ApplicateRenderedFindResultEnvelope>? buildReadyEnvelope = null,
+        Func<Func<CancellationToken, ApplicateRenderedFindResultEnvelope>, CancellationToken, Task<ApplicateRenderedFindResultEnvelope>>? runReadySearchAsync = null,
+        Func<Action, Task>? postOnUiAsync = null,
+        Action<ApplicateRenderedFindBoundaryMeasurement>? measurements = null)
+    {
+        _buildReadyEnvelope = buildReadyEnvelope ?? BuildReadyEnvelope;
+        _runReadySearchAsync = runReadySearchAsync ?? RunReadySearchAsync;
+        _postOnUiAsync = postOnUiAsync ?? PostOnUiThreadAsync;
+        _measurements = measurements;
+    }
+
+    public Task SubmitAsync(
+        ApplicateRenderedFindQueryWork? work,
+        Func<ApplicateRenderedFindResultEnvelope, Task> postAsync,
+        long enqueueStartTimestamp = 0)
+    {
+        ArgumentNullException.ThrowIfNull(postAsync);
+        if (work is null)
+        {
+            return Task.CompletedTask;
+        }
+
+        var enqueueStart = enqueueStartTimestamp == 0
+            ? Stopwatch.GetTimestamp()
+            : enqueueStartTimestamp;
+        CancellationTokenSource? cancellation = null;
+        if (work.UpdatesLatest)
+        {
+            cancellation = new CancellationTokenSource();
+            CancellationTokenSource? previous;
+            lock (_gate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                previous = _latestCancellation;
+                _latestIdentity = work.Identity;
+                _latestCancellation = cancellation;
+            }
+
+            previous?.Cancel();
+            previous?.Dispose();
+        }
+
+        return SubmitCoreAsync(work, postAsync, cancellation, enqueueStart);
+    }
+
+    public void CancelLatest()
+    {
+        CancellationTokenSource? previous;
+        lock (_gate)
+        {
+            previous = _latestCancellation;
+            _latestCancellation = null;
+            _latestIdentity = null;
+        }
+
+        previous?.Cancel();
+        previous?.Dispose();
+    }
+
+    private async Task SubmitCoreAsync(
+        ApplicateRenderedFindQueryWork work,
+        Func<ApplicateRenderedFindResultEnvelope, Task> postAsync,
+        CancellationTokenSource? cancellation,
+        long enqueueStart)
+    {
+        var searchMs = 0d;
+        var enqueueMs = 0d;
+        try
+        {
+            var token = cancellation?.Token ?? CancellationToken.None;
+            ApplicateRenderedFindResultEnvelope envelope;
+            if (work.RequiresSearch)
+            {
+                var searchStart = Stopwatch.GetTimestamp();
+                var readySearch = _runReadySearchAsync(
+                    searchToken => _buildReadyEnvelope(work, searchToken),
+                    token);
+                enqueueMs = Stopwatch.GetElapsedTime(enqueueStart).TotalMilliseconds;
+                envelope = await readySearch.ConfigureAwait(false);
+                searchMs = Stopwatch.GetElapsedTime(searchStart).TotalMilliseconds;
+            }
+            else
+            {
+                envelope = work.CreateEnvelope();
+                enqueueMs = Stopwatch.GetElapsedTime(enqueueStart).TotalMilliseconds;
+            }
+
+            if (work.UpdatesLatest && !IsCurrent(work.Identity, cancellation))
+            {
+                return;
+            }
+
+            var postMs = await PostIfCurrentAsync(work, envelope, postAsync, cancellation).ConfigureAwait(false);
+            if (postMs >= 0)
+            {
+                _measurements?.Invoke(new ApplicateRenderedFindBoundaryMeasurement(
+                    work.Identity,
+                    enqueueMs,
+                    searchMs,
+                    postMs));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"rendered-find query worker failed: {ex.GetType().Name}");
+        }
+        finally
+        {
+            if (cancellation is not null && !ReferenceEquals(GetLatestCancellation(), cancellation))
+            {
+                cancellation.Dispose();
+            }
+        }
+    }
+
+    private async Task<double> PostIfCurrentAsync(
+        ApplicateRenderedFindQueryWork work,
+        ApplicateRenderedFindResultEnvelope envelope,
+        Func<ApplicateRenderedFindResultEnvelope, Task> postAsync,
+        CancellationTokenSource? cancellation)
+    {
+        var posted = false;
+        var postMs = -1d;
+        await _postOnUiAsync(() =>
+        {
+            var postStart = Stopwatch.GetTimestamp();
+            if (work.UpdatesLatest && !IsCurrent(work.Identity, cancellation))
+            {
+                return;
+            }
+
+            postAsync(envelope).GetAwaiter().GetResult();
+            postMs = Stopwatch.GetElapsedTime(postStart).TotalMilliseconds;
+            posted = true;
+        }).ConfigureAwait(false);
+
+        return posted ? postMs : -1d;
+    }
+
+    private bool IsCurrent(ApplicateRenderedFindQueryIdentity identity, CancellationTokenSource? cancellation)
+    {
+        if (cancellation is not null && cancellation.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            return _latestIdentity == identity &&
+                   ReferenceEquals(_latestCancellation, cancellation);
+        }
+    }
+
+    private CancellationTokenSource? GetLatestCancellation()
+    {
+        lock (_gate)
+        {
+            return _latestCancellation;
+        }
+    }
+
+    private static ApplicateRenderedFindResultEnvelope BuildReadyEnvelope(
+        ApplicateRenderedFindQueryWork work,
+        CancellationToken cancellationToken)
+    {
+        var index = work.CommittedIndex ??
+                    throw new InvalidOperationException("Ready rendered-find work requires a committed index.");
+        var result = index.Search(work.Query.Query, cancellationToken);
+        return work.CreateReadyEnvelope(result);
+    }
+
+    private static Task<ApplicateRenderedFindResultEnvelope> RunReadySearchAsync(
+        Func<CancellationToken, ApplicateRenderedFindResultEnvelope> build,
+        CancellationToken cancellationToken)
+        => Task.Run(() => build(cancellationToken), cancellationToken);
+
+    private static async Task PostOnUiThreadAsync(Action action)
+        => await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(action);
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        CancellationTokenSource? cancellation;
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            cancellation = _latestCancellation;
+            _latestCancellation = null;
+            _latestIdentity = null;
+        }
+
+        cancellation?.Cancel();
+        cancellation?.Dispose();
+    }
+}
+
 public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 {
     private const double MaxRendererReportedMinimapReservedWidth = 2000;
@@ -89,6 +319,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private const int ProgressiveViewerInitialTopLevelBlockCount = 96;
     private const int ProgressiveViewerMinimumAppendHtmlLength = 128 * 1024;
     private const int ProgressiveAppendChunkTargetHtmlLength = 64 * 1024;
+    // This sender-owned find-results safety ceiling bounds host-to-renderer
+    // result payloads before WebView posting. It is not the inbound rendered-find transfer contract.
+    // The inbound contract remains `ApplicateRenderedFindTextProtocol.MaxMessageUtf8Bytes`.
+    internal const int MaxRenderedFindResultsUtf8Bytes = 4 * 1024 * 1024;
     private static readonly TimeSpan DuplicateThemePostWindow = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan ProgressiveAppendChunkDelay = TimeSpan.FromMilliseconds(16);
     private const string CoreWebView2InteropTypeName = "Avalonia.Controls.Win.WebView2.Interop.ICoreWebView2";
@@ -164,6 +398,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private Microsoft.Web.WebView2.Core.CoreWebView2? _nativeUiCore;
     private bool _isWebWidthDragging;
     private long _renderSequence;
+    private readonly ApplicateRenderedFindQueryCoordinator _renderedFindQueryCoordinator = new();
     private NativeWindowPlacement? _pendingNativeHiddenPaintPlacement;
     private readonly HashSet<string> _postedRendererDocumentCacheKeys = new(StringComparer.Ordinal);
     private readonly Dictionary<long, object> _pendingRendererCacheFallbackLoads = new();
@@ -1799,7 +2034,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             // reused by the dispatch below. Non-find traffic (drop-file, scroll,
             // minimap, ...) is never subjected to rendered-find byte ceilings, so a
             // 1 MiB drop-file reaches its handler in both flag states.
-            using var ingress = ClassifyWebMessageIngress(_renderedFindDomain, body);
+            using var ingress = ClassifyWebMessageIngress(
+                _renderedFindDomain,
+                body,
+                deferRenderedFindLatestResult: true);
             if (ingress.Kind == ApplicateWebMessageIngressKind.Ignore)
             {
                 return;
@@ -1808,7 +2046,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (ingress.Kind == ApplicateWebMessageIngressKind.RenderedFind)
             {
                 PostRenderedFindRejection(ingress.RenderedFindResult);
-                PostLatestRenderedFindResult(ingress.RenderedFindResult?.LatestQueryResult);
+                _ = PostLatestRenderedFindResultAsync(_renderedFindDomain.CreateLatestQueryWorkOrNull());
                 return;
             }
 
@@ -2441,6 +2679,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void ClearCurrentFindTextIndex()
     {
+        _renderedFindQueryCoordinator.CancelLatest();
         _currentFindTextIndex = null;
         _currentFindTextIndexRenderId = 0;
         _renderedFindDomain = ApplicateRenderedFindDomainState.CreateLegacyPlaintext();
@@ -2448,6 +2687,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void ResetCurrentFindDomainForRender(long renderId)
     {
+        _renderedFindQueryCoordinator.CancelLatest();
         _currentFindTextIndex = null;
         _currentFindTextIndexRenderId = 0;
         if (ApplicateVirtualizationMode.IsEnabled)
@@ -2471,13 +2711,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     internal static ApplicateWebMessageIngress ClassifyWebMessageIngress(
         ApplicateRenderedFindDomainState domain,
-        string body)
+        string body,
+        bool deferRenderedFindLatestResult = false)
         => ClassifyWebMessageIngress(
             domain,
             body,
             static (candidate, options) => JsonDocument.Parse(candidate, options),
             static candidate =>
-                ApplicateRenderedFindTextProtocol.TryGetTopLevelRenderedFindMessageType(candidate, out _));
+                ApplicateRenderedFindTextProtocol.TryGetTopLevelRenderedFindMessageType(candidate, out _),
+            deferRenderedFindLatestResult);
 
     // Single ownership point for inbound web-message classification. The top-level
     // rendered-find discriminator runs once (classifyRenderedFindType) and is threaded
@@ -2492,7 +2734,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ApplicateRenderedFindDomainState domain,
         string body,
         Func<string, JsonDocumentOptions, JsonDocument> parseJsonDocument,
-        Func<string, bool> classifyRenderedFindType)
+        Func<string, bool> classifyRenderedFindType,
+        bool deferRenderedFindLatestResult = false)
     {
         ArgumentNullException.ThrowIfNull(domain);
         ArgumentNullException.ThrowIfNull(body);
@@ -2517,6 +2760,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 domain,
                 body,
                 isRenderedFind,
+                deferRenderedFindLatestResult,
                 out var bounds,
                 out var rawRejection))
         {
@@ -2537,13 +2781,17 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 // The single ingress parse already proved the body malformed; reject
                 // the current transfer from that known failure without reparsing it.
                 return ApplicateWebMessageIngress.ForRenderedFind(
-                    domain.RejectCurrentTransfer("mm-find-transfer-invalid"));
+                    deferRenderedFindLatestResult
+                        ? domain.RejectCurrentTransferForHost("mm-find-transfer-invalid")
+                        : domain.RejectCurrentTransfer("mm-find-transfer-invalid"));
             }
 
             using (findDocument)
             {
                 return ApplicateWebMessageIngress.ForRenderedFind(
-                    domain.ApplyProtocolMessage(findDocument, bounds.WireUtf8Bytes));
+                    deferRenderedFindLatestResult
+                        ? domain.ApplyProtocolMessageForHost(findDocument, bounds.WireUtf8Bytes)
+                        : domain.ApplyProtocolMessage(findDocument, bounds.WireUtf8Bytes));
             }
         }
 
@@ -2567,6 +2815,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     internal static ApplicateRenderedFindDomainApplyResult? RejectInvalidRenderedFindMessageIfCurrent(
         ApplicateRenderedFindDomainState domain,
         string body)
+        => RejectInvalidRenderedFindMessageIfCurrent(
+            domain,
+            body,
+            deferRenderedFindLatestResult: false);
+
+    private static ApplicateRenderedFindDomainApplyResult? RejectInvalidRenderedFindMessageIfCurrent(
+        ApplicateRenderedFindDomainState domain,
+        string body,
+        bool deferRenderedFindLatestResult)
     {
         ArgumentNullException.ThrowIfNull(domain);
         ArgumentNullException.ThrowIfNull(body);
@@ -2575,7 +2832,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return null;
         }
 
-        return domain.ApplyProtocolMessage(body);
+        return deferRenderedFindLatestResult
+            ? domain.ApplyProtocolMessageForHost(body)
+            : domain.ApplyProtocolMessage(body);
     }
 
     internal static bool TryRejectInvalidRawRenderedFindMessage(
@@ -2586,6 +2845,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             domain,
             body,
             IsRecognizableRenderedFind(body),
+            deferRenderedFindLatestResult: false,
             out _,
             out result);
 
@@ -2595,6 +2855,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ApplicateRenderedFindDomainState domain,
         string body,
         bool isRenderedFind,
+        bool deferRenderedFindLatestResult,
         out ApplicateRenderedFindProtocolValidation? acceptedBounds,
         out ApplicateRenderedFindDomainApplyResult? result)
     {
@@ -2624,7 +2885,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return false;
         }
 
-        result = RejectInvalidRenderedFindMessageIfCurrent(domain, body);
+        result = RejectInvalidRenderedFindMessageIfCurrent(domain, body, deferRenderedFindLatestResult);
         return true;
     }
 
@@ -2633,6 +2894,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void HandleFindQueryMessage(JsonElement root)
     {
+        var enqueueStart = Stopwatch.GetTimestamp();
         if (!root.TryGetProperty("requestId", out var requestIdProperty)
             || requestIdProperty.ValueKind != JsonValueKind.Number
             || !requestIdProperty.TryGetInt64(out var requestId)
@@ -2666,11 +2928,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 return;
             }
 
-            var envelope = _renderedFindDomain.QueryRendered(
+            var work = _renderedFindDomain.BeginRenderedQuery(
                 checked((int)renderedRenderId),
                 requestId,
                 query);
-            PostRenderedFindResults(envelope);
+            _ = PostLatestRenderedFindResultAsync(work, enqueueStart);
             return;
         }
 
@@ -2720,6 +2982,20 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
     }
 
+    private System.Threading.Tasks.Task PostLatestRenderedFindResultAsync(
+        ApplicateRenderedFindQueryWork? work,
+        long enqueueStartTimestamp = 0)
+    {
+        return _renderedFindQueryCoordinator.SubmitAsync(
+            work,
+            envelope =>
+            {
+                PostRenderedFindResults(envelope);
+                return System.Threading.Tasks.Task.CompletedTask;
+            },
+            enqueueStartTimestamp);
+    }
+
     private void PostRenderedFindRejection(ApplicateRenderedFindDomainApplyResult? result)
     {
         if (result?.ProtocolStatus != ApplicateRenderedFindProtocolApplyStatus.Rejected ||
@@ -2740,6 +3016,34 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     }
 
     private void PostRenderedFindResults(ApplicateRenderedFindResultEnvelope envelope)
+        => PostRendererPayload(BuildRenderedFindResultsPayload(envelope));
+
+    internal static string BuildRenderedFindResultsPayload(ApplicateRenderedFindResultEnvelope envelope)
+    {
+        ArgumentNullException.ThrowIfNull(envelope);
+        var payload = JsonSerializer.Serialize(BuildRenderedFindResultsMessage(envelope));
+        if (Encoding.UTF8.GetByteCount(payload) <= MaxRenderedFindResultsUtf8Bytes)
+        {
+            return payload;
+        }
+
+        var fallback = envelope with
+        {
+            Status = ApplicateRenderedFindResultStatus.Unavailable,
+            TotalCount = 0,
+            Truncated = false,
+            Matches = [],
+        };
+        payload = JsonSerializer.Serialize(BuildRenderedFindResultsMessage(fallback));
+        if (Encoding.UTF8.GetByteCount(payload) > MaxRenderedFindResultsUtf8Bytes)
+        {
+            throw new InvalidOperationException("Rendered find result payload exceeds the UTF-8 envelope ceiling.");
+        }
+
+        return payload;
+    }
+
+    private static object BuildRenderedFindResultsMessage(ApplicateRenderedFindResultEnvelope envelope)
     {
         var matches = envelope.Status == ApplicateRenderedFindResultStatus.Ready
             ? envelope.Matches.Select(static match => new
@@ -2755,7 +3059,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 ordinal = match.Ordinal
             }).ToArray()
             : Array.Empty<object>();
-        PostRendererMessage(new
+        return new
         {
             type = "find-results",
             requestId = envelope.RequestId,
@@ -2766,8 +3070,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             totalCount = envelope.Status == ApplicateRenderedFindResultStatus.Ready
                 ? envelope.TotalCount
                 : 0,
+            truncated = envelope.Status == ApplicateRenderedFindResultStatus.Ready && envelope.Truncated,
             matches
-        });
+        };
     }
 
     private static string ToWireStatus(ApplicateRenderedFindResultStatus status)
@@ -3700,6 +4005,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private void PostRendererMessage(object message)
     {
         var payload = JsonSerializer.Serialize(message);
+        PostRendererPayload(payload);
+    }
+
+    private void PostRendererPayload(string payload)
+    {
         var isModeSettleProbe = payload.Contains("\"type\":\"mode-settle-probe\"", StringComparison.Ordinal);
         var postStart = isModeSettleProbe ? Stopwatch.GetTimestamp() : 0;
         if (TryPostRendererMessageNative(payload))
@@ -3953,6 +4263,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             _nativeUiCore = null;
         }
         CancelRender();
+        _renderedFindQueryCoordinator.Dispose();
         DeleteCurrentGeneratedDocument();
         _webView.EnvironmentRequested -= OnEnvironmentRequested;
         _webView.NavigationStarted -= OnNavigationStarted;
