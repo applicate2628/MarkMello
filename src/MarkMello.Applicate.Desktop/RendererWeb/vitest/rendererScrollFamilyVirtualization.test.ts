@@ -42,7 +42,7 @@ let clearPendingRendererRafs: (() => void) | null = null;
 
 type ControllerFaults = {
   adoptRenderedHeights?: boolean;
-  ensureSectionRendered?: boolean;
+  ensureSectionRangeRendered?: boolean;
   onAdoptRenderedHeights?: (
     options: Parameters<
       import("../src/virtualizedDocumentWindow").VirtualizedDocumentWindowController["adoptRenderedHeights"]
@@ -204,7 +204,7 @@ async function loadRendererHarness(options: {
           const controller = actual.createVirtualizedDocumentWindowController(deps);
           controllerFaults.onCreated?.(controller);
           const adoptRenderedHeights = controller.adoptRenderedHeights.bind(controller);
-          const ensureSectionRendered = controller.ensureSectionRendered.bind(controller);
+          const ensureSectionRangeRendered = controller.ensureSectionRangeRendered.bind(controller);
           controller.adoptRenderedHeights = adoptOptions => {
             if (controllerFaults.adoptRenderedHeights === true) {
               throw new Error("injected adoptRenderedHeights failure");
@@ -213,11 +213,11 @@ async function loadRendererHarness(options: {
             controllerFaults.onAdoptRenderedHeights?.(adoptOptions);
             return result;
           };
-          controller.ensureSectionRendered = (sectionIndex, ensureOptions) => {
-            if (controllerFaults.ensureSectionRendered === true) {
-              throw new Error("injected ensureSectionRendered failure");
+          controller.ensureSectionRangeRendered = (start, end, ensureOptions) => {
+            if (controllerFaults.ensureSectionRangeRendered === true) {
+              throw new Error("injected ensureSectionRangeRendered failure");
             }
-            return ensureSectionRendered(sectionIndex, ensureOptions);
+            return ensureSectionRangeRendered(start, end, ensureOptions);
           };
           return controller;
         },
@@ -1636,7 +1636,7 @@ describe("renderer scroll-family virtualization integration", () => {
     await settleFakeTimedRenderer(harness);
 
     harness.messages.length = 0;
-    controllerFaults.ensureSectionRendered = ensureThrows;
+    controllerFaults.ensureSectionRangeRendered = ensureThrows;
     harness.load({ type: "load-document", html: firstHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 3 });
     await settleFakeTimedRenderer(harness);
 

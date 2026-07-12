@@ -43,7 +43,7 @@ describe("renderer virtualization wiring", () => {
 
     expect(source).toContain("readVirtualizationFlag(window, document)");
     expect(source).toContain("createVirtualizedDocumentWindowController");
-    expect(source).toContain("initializeVirtualizedDocumentWindow();");
+    expect(source).toContain("initializeVirtualizedDocumentWindow(useCachedDocumentState);");
   });
 
   it("updates the virtualized window before scroll IPC reads the top visible block", () => {
@@ -83,7 +83,7 @@ describe("renderer virtualization wiring", () => {
 
   it("installs event-realization machinery only through the flag-on controller path", () => {
     const source = readRendererSource();
-    const initializeStart = source.indexOf("function initializeVirtualizedDocumentWindow()");
+    const initializeStart = source.indexOf("function initializeVirtualizedDocumentWindow(");
     const initializeEnd = source.indexOf("function updateVirtualizedWindowForScroll", initializeStart);
     const initializeBody = source.slice(initializeStart, initializeEnd);
     const resetStart = source.indexOf("function resetVirtualizedDocumentWindow");
@@ -320,7 +320,7 @@ describe("renderer virtualization wiring", () => {
     expect(initialize).toContain("initialOperation.scheduleFrameTransaction(() => {");
     expect(initialize).toContain("consumePendingInitialVirtualizedWindow(initialOperation);");
     expect(cacheRestore.indexOf("consumePendingInitialVirtualizedWindow(operation)"))
-      .toBeLessThan(cacheRestore.indexOf("controller?.ensureSectionRendered"));
+      .toBeLessThan(cacheRestore.indexOf("controller?.ensureSectionRangeRendered"));
     expect(coldLoad.indexOf("consumePendingInitialVirtualizedWindow(operation)"))
       .toBeLessThan(coldLoad.indexOf('operation.requestScrollTop(0, "cold-load-reset")'));
   });

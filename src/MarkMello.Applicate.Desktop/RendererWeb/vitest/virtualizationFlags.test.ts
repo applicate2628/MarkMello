@@ -119,7 +119,7 @@ describe("renderer virtualization flags", () => {
     const source = readRendererSource();
     const initialization = sliceBetween(
       source,
-      "function initializeVirtualizedDocumentWindow()",
+      "function initializeVirtualizedDocumentWindow(",
       "function updateVirtualizedWindowForScroll"
     );
 
