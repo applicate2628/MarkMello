@@ -89,6 +89,33 @@ function setComputedBoxStyle(
     target === element ? style : current.call(window, target)) as typeof window.getComputedStyle;
 }
 
+function installTemplateParseCounter(ownerDocument: Document = document): {
+  readonly count: number;
+  reset: () => void;
+  restore: () => void;
+} {
+  const createElement = ownerDocument.createElement.bind(ownerDocument);
+  let count = 0;
+  ownerDocument.createElement = ((tagName: string, options?: ElementCreationOptions) => {
+    if (tagName.toLowerCase() === "template") {
+      count++;
+    }
+    return createElement(tagName, options);
+  }) as typeof ownerDocument.createElement;
+
+  return {
+    get count() {
+      return count;
+    },
+    reset() {
+      count = 0;
+    },
+    restore() {
+      ownerDocument.createElement = createElement as typeof ownerDocument.createElement;
+    },
+  };
+}
+
 function mermaidBlock(index: number, top: number, height: number): HTMLElement {
   const element = block(index, top, height, "code", "pre");
   element.className = "mm-mermaid";
@@ -692,6 +719,27 @@ describe("document window model", () => {
       expect(model.getPendingRenderedContentEntryIndexes()).toEqual([0]);
     });
 
+    it("serves rendered content readiness from cached section stats after construction", () => {
+      const counter = installTemplateParseCounter();
+      try {
+        const model = new DocumentWindowModel([
+          { ...entry(0, 146, 100), html: pendingMathHtml, kind: "math" },
+          { ...entry(1, 147, 100), html: readyMathHtml, kind: "math" },
+          { ...entry(2, 148, 100), html: failedMathHtml, kind: "math" },
+        ]);
+        expect(counter.count).toBe(3);
+
+        counter.reset();
+        expect(model.getPendingRenderedContentEntryIndexes()).toEqual([0]);
+        expect(model.getRenderedContentState()).toBe("unprepared");
+        expect(model.getPendingRenderedContentEntryIndexes()).toEqual([0]);
+        expect(model.getRenderedContentState()).toBe("unprepared");
+        expect(counter.count).toBe(0);
+      } finally {
+        counter.restore();
+      }
+    });
+
     it("reports rendered content as not-needed without parsing no-formula entries", () => {
       const model = new DocumentWindowModel([
         { ...entry(0, 142, 100), html: "<p>No formula</p>" },
@@ -728,6 +776,32 @@ describe("document window model", () => {
 
       expect(model.getPendingRenderedContentEntryIndexes()).toEqual([]);
       expect(model.getRenderedContentState()).toBe("ready-with-failures");
+    });
+
+    it("commits one rendered section without reparsing unrelated sections", () => {
+      const counter = installTemplateParseCounter();
+      try {
+        const model = new DocumentWindowModel([
+          { ...entry(0, 149, 100), html: pendingMathHtml, kind: "math" },
+          { ...entry(1, 150, 100), html: pendingMathHtml.replace("x", "y"), kind: "math" },
+          { ...entry(2, 151, 100), html: readyMathHtml, kind: "math" },
+        ]);
+        expect(counter.count).toBe(3);
+
+        counter.reset();
+        const renderedHtml = "<p><span class='math-inline' data-tex='y' data-mm-math-rendered='true'><span class='katex'>y</span></span></p>";
+        expect(model.commitRenderedFormulaFragment(1, renderedHtml, { status: "ready" })).toEqual({
+          changed: true,
+          pendingMathCount: 1,
+        });
+        expect(counter.count).toBe(1);
+
+        expect(model.getPendingRenderedContentEntryIndexes()).toEqual([0]);
+        expect(model.getRenderedContentState()).toBe("unprepared");
+        expect(counter.count).toBe(1);
+      } finally {
+        counter.restore();
+      }
     });
 
     it("adopts and commits rendered content HTML without changing model geometry or lookup metadata", () => {

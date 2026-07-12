@@ -1,5 +1,6 @@
 import {
   DocumentWindowModel,
+  readRenderedContentMathNodeStats,
   type RenderedContentState,
   type SectionModelEntry,
 } from "./documentWindow";
@@ -167,13 +168,16 @@ export async function prepareDocumentWindowModelRenderedContent(
       });
     }
 
-    const sectionFailedCount = section.allMathNodes.filter(node => node.dataset["mmMathRendered"] === "failed").length;
+    const sectionStats = readRenderedContentMathNodeStats(section.allMathNodes);
     const renderedHtml = serializeRenderedSection(section.template);
-    const status = sectionFailedCount > 0 ? "ready-with-failures" : "ready";
-    const commit = model.commitRenderedFormulaFragment(sectionIndex, renderedHtml, { status });
+    const status = sectionStats.failedMathCount > 0 ? "ready-with-failures" : "ready";
+    const commit = model.commitRenderedFormulaFragment(sectionIndex, renderedHtml, {
+      mathStats: sectionStats,
+      status,
+    });
     if (commit.changed) {
       committedSectionCount++;
-      failedMathCount += sectionFailedCount;
+      failedMathCount += sectionStats.failedMathCount;
     }
     deps.onProgress?.({
       committed: commit.changed,
@@ -218,7 +222,11 @@ function readPendingRenderedSection(
   template.innerHTML = entry.html;
   const allMathNodes = Array.from(template.content.querySelectorAll<HTMLElement>("[data-tex]"));
   const pendingMathNodes = allMathNodes.filter(node => !isTerminalMathState(node.dataset["mmMathRendered"]));
-  return { allMathNodes, pendingMathNodes, template };
+  return {
+    allMathNodes,
+    pendingMathNodes,
+    template,
+  };
 }
 
 function readMathRenderTask(node: HTMLElement): MathRenderTask {
@@ -246,7 +254,7 @@ function finish(args: {
   renderedMathCount: number;
   failedMathCount: number;
 }): ModelRenderedContentPreparationResult {
-  const pendingMathCount = countPendingMath(args.model, args.deps.ownerDocument);
+  const pendingMathCount = args.model.getPendingRenderedContentMathCount();
   const completed = args.status === "not-needed"
     || args.status === "ready"
     || args.status === "ready-with-failures";
@@ -268,15 +276,6 @@ function finish(args: {
     skippedNoKatex: args.skippedNoKatex,
     status: args.status,
   };
-}
-
-function countPendingMath(model: DocumentWindowModel, ownerDocument: Document): number {
-  let pendingMathCount = 0;
-  for (const entry of model.sections) {
-    const section = readPendingRenderedSection(entry, ownerDocument);
-    pendingMathCount += section?.pendingMathNodes.length ?? 0;
-  }
-  return pendingMathCount;
 }
 
 function readNow(): number {

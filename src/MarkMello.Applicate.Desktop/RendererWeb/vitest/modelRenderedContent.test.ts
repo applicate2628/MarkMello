@@ -26,6 +26,95 @@ function makeKatex() {
   };
 }
 
+function installTemplateParseCounter(ownerDocument: Document = document): {
+  readonly count: number;
+  reset: () => void;
+  restore: () => void;
+} {
+  const createElement = ownerDocument.createElement.bind(ownerDocument);
+  let count = 0;
+  ownerDocument.createElement = ((tagName: string, options?: ElementCreationOptions) => {
+    if (tagName.toLowerCase() === "template") {
+      count++;
+    }
+    return createElement(tagName, options);
+  }) as typeof ownerDocument.createElement;
+
+  return {
+    get count() {
+      return count;
+    },
+    reset() {
+      count = 0;
+    },
+    restore() {
+      ownerDocument.createElement = createElement as typeof ownerDocument.createElement;
+    },
+  };
+}
+
+function allPendingEntries(sectionCount: number): SectionModelEntry[] {
+  return Array.from({ length: sectionCount }, (_value, index) =>
+    entry(index, `<p data-mm-block-index='${200 + index}'><span class='math-inline' data-tex='x_${index}'>x_${index}</span></p>`));
+}
+
+function readModelMathStats(model: DocumentWindowModel): {
+  failedMathCount: number;
+  pendingMathCount: number;
+  totalMathCount: number;
+} {
+  let failedMathCount = 0;
+  let pendingMathCount = 0;
+  let totalMathCount = 0;
+  for (const section of model.sections) {
+    const template = document.createElement("template");
+    template.innerHTML = section.html ?? "";
+    const mathNodes = Array.from(template.content.querySelectorAll<HTMLElement>("[data-tex]"));
+    totalMathCount += mathNodes.length;
+    for (const node of mathNodes) {
+      const state = node.dataset["mmMathRendered"];
+      if (state === "failed") {
+        failedMathCount++;
+      } else if (state !== "true") {
+        pendingMathCount++;
+      }
+    }
+  }
+  return { failedMathCount, pendingMathCount, totalMathCount };
+}
+
+async function measureAllPendingPreparation(sectionCount: number, measureConstruction: boolean): Promise<{
+  model: DocumentWindowModel;
+  parseCount: number;
+  progressEvents: unknown[];
+  result: Awaited<ReturnType<typeof prepareDocumentWindowModelRenderedContent>>;
+}> {
+  const counter = installTemplateParseCounter();
+  try {
+    const model = new DocumentWindowModel(allPendingEntries(sectionCount));
+    if (!measureConstruction) {
+      counter.reset();
+    }
+    const progress = vi.fn();
+    const result = await prepareDocumentWindowModelRenderedContent(model, {
+      katex: makeKatex(),
+      now: () => 0,
+      onProgress: progress,
+      ownerDocument: document,
+      yield: () => Promise.resolve(),
+    });
+    const parseCount = counter.count;
+    return {
+      model,
+      parseCount,
+      progressEvents: progress.mock.calls.map(call => call[0]),
+      result,
+    };
+  } finally {
+    counter.restore();
+  }
+}
+
 afterEach(() => {
   document.body.innerHTML = "";
   vi.restoreAllMocks();
@@ -96,6 +185,58 @@ describe("model rendered content preparation", () => {
       sectionIndex: 0,
       type: "progress",
     }));
+  });
+
+  it.each([12, 24])("parses each pending section once while publishing counter-backed progress for %i sections", async sectionCount => {
+    // Current parse-on-read baseline:
+    // construction+preparation = 2N^2 + 6N, preparation-only = 2N^2 + 5N.
+    const fullMeasurement = await measureAllPendingPreparation(sectionCount, true);
+    const preparationOnly = await measureAllPendingPreparation(sectionCount, false);
+    const fullCeiling = 2 * sectionCount;
+    const preparationCeiling = sectionCount;
+
+    expect(fullMeasurement.parseCount).toBeLessThanOrEqual(fullCeiling);
+    expect(preparationOnly.parseCount).toBeLessThanOrEqual(preparationCeiling);
+    expect(fullMeasurement.result).toMatchObject({
+      cancelled: false,
+      committedSectionCount: sectionCount,
+      completed: true,
+      failedMathCount: 0,
+      pendingMathCount: 0,
+      renderedMathCount: sectionCount,
+      status: "ready",
+    });
+    expect(preparationOnly.result).toMatchObject({
+      cancelled: false,
+      committedSectionCount: sectionCount,
+      completed: true,
+      failedMathCount: 0,
+      pendingMathCount: 0,
+      renderedMathCount: sectionCount,
+      status: "ready",
+    });
+    expect(fullMeasurement.progressEvents).toHaveLength(sectionCount + 1);
+    expect(fullMeasurement.progressEvents[0]).toMatchObject({
+      pendingMathCount: sectionCount - 1,
+      status: "unprepared",
+      type: "progress",
+    });
+    expect(fullMeasurement.progressEvents.at(-2)).toMatchObject({
+      pendingMathCount: 0,
+      status: "ready",
+      type: "progress",
+    });
+    expect(fullMeasurement.progressEvents.at(-1)).toMatchObject({
+      pendingMathCount: 0,
+      status: "ready",
+      type: "complete",
+    });
+
+    expect(readModelMathStats(fullMeasurement.model)).toEqual({
+      failedMathCount: 0,
+      pendingMathCount: 0,
+      totalMathCount: sectionCount,
+    });
   });
 
   it("cancels before commit and leaves the in-progress section unchanged", async () => {

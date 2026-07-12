@@ -51,8 +51,15 @@ export type RenderedSectionHtmlAdoptionResult = {
   pendingMathCount: number;
 };
 
+export type RenderedContentMathStats = {
+  failedMathCount: number;
+  pendingMathCount: number;
+  totalMathCount: number;
+};
+
 export type RenderedFormulaFragmentResult = {
   status: "ready" | "ready-with-failures";
+  mathStats?: RenderedContentMathStats;
 };
 
 export type RenderedFormulaFragmentCommitResult = {
@@ -192,6 +199,8 @@ export class DocumentWindowModel {
   private readonly containingSectionIndexByBlockIndex = new Map<number, number>();
   private readonly sectionIndexByHeadingAnchor = new Map<string, number>();
   private readonly sourceLineSpans: Array<SourceLineModelSpan & { sectionIndex: number }> = [];
+  private readonly renderedContentStatsBySection: RenderedContentMathStats[] = [];
+  private readonly renderedContentSummary: RenderedContentMathStats = createEmptyRenderedContentMathStats();
   private readonly leadingOffset: number;
   private totalHeight = 0;
 
@@ -203,10 +212,11 @@ export class DocumentWindowModel {
       .map(entry => ({ ...entry }));
     for (let index = 0; index < this.sections.length; index++) {
       const entry = this.sections[index]!;
-      const metadata = readSectionModelEntryMetadata(entry);
-      entry.containedBlockIndexes = metadata.containedBlockIndexes;
-      entry.headingAnchors = metadata.headingAnchors;
-      entry.sourceLineSpans = metadata.sourceLineSpans;
+      const analysis = readSectionModelEntryAnalysis(entry);
+      entry.containedBlockIndexes = analysis.metadata.containedBlockIndexes;
+      entry.headingAnchors = analysis.metadata.headingAnchors;
+      entry.sourceLineSpans = analysis.metadata.sourceLineSpans;
+      this.replaceRenderedContentStats(index, analysis.renderedContentStats);
       if (!this.sectionIndexByBlockIndex.has(entry.blockIndex)) {
         this.sectionIndexByBlockIndex.set(entry.blockIndex, index);
       }
@@ -234,8 +244,7 @@ export class DocumentWindowModel {
   getPendingRenderedContentEntryIndexes(): number[] {
     const pendingIndexes: number[] = [];
     for (let index = 0; index < this.sections.length; index++) {
-      const entry = this.sections[index]!;
-      if (readRenderedContentHtmlStats(entry.html).pendingMathCount > 0) {
+      if ((this.renderedContentStatsBySection[index]?.pendingMathCount ?? 0) > 0) {
         pendingIndexes.push(index);
       }
     }
@@ -253,7 +262,7 @@ export class DocumentWindowModel {
         continue;
       }
 
-      entry.html = update.html;
+      this.replaceRenderedContentHtml(update.sectionIndex, update.html, readRenderedContentHtmlStats(update.html));
       updatedCount++;
     }
 
@@ -269,7 +278,15 @@ export class DocumentWindowModel {
     result: RenderedFormulaFragmentResult
   ): RenderedFormulaFragmentCommitResult {
     const entry = this.sections[sectionIndex];
-    if (entry === undefined || typeof renderedHtml !== "string" || !isRenderedFormulaFragmentResultConsistent(renderedHtml, result)) {
+    if (entry === undefined || typeof renderedHtml !== "string") {
+      return {
+        changed: false,
+        pendingMathCount: this.countPendingRenderedContentMath(),
+      };
+    }
+
+    const nextStats = result.mathStats ?? readRenderedContentHtmlStats(renderedHtml);
+    if (!isRenderedFormulaFragmentResultConsistent(nextStats, result)) {
       return {
         changed: false,
         pendingMathCount: this.countPendingRenderedContentMath(),
@@ -278,7 +295,7 @@ export class DocumentWindowModel {
 
     const changed = entry.html !== renderedHtml;
     if (changed) {
-      entry.html = renderedHtml;
+      this.replaceRenderedContentHtml(sectionIndex, renderedHtml, nextStats);
     }
     return {
       changed,
@@ -287,7 +304,7 @@ export class DocumentWindowModel {
   }
 
   getRenderedContentState(): RenderedContentState {
-    const summary = this.readRenderedContentSummary();
+    const summary = this.renderedContentSummary;
     if (summary.totalMathCount === 0) {
       return "not-needed";
     }
@@ -303,6 +320,10 @@ export class DocumentWindowModel {
 
   getTotalHeight(): number {
     return this.totalHeight;
+  }
+
+  getPendingRenderedContentMathCount(): number {
+    return this.countPendingRenderedContentMath();
   }
 
   sectionTop(sectionIndex: number): number {
@@ -589,22 +610,29 @@ export class DocumentWindowModel {
   }
 
   private countPendingRenderedContentMath(): number {
-    return this.readRenderedContentSummary().pendingMathCount;
+    return this.renderedContentSummary.pendingMathCount;
   }
 
-  private readRenderedContentSummary(): RenderedContentHtmlStats {
-    const summary: RenderedContentHtmlStats = {
-      failedMathCount: 0,
-      pendingMathCount: 0,
-      totalMathCount: 0,
-    };
-    for (const entry of this.sections) {
-      const stats = readRenderedContentHtmlStats(entry.html);
-      summary.failedMathCount += stats.failedMathCount;
-      summary.pendingMathCount += stats.pendingMathCount;
-      summary.totalMathCount += stats.totalMathCount;
+  private replaceRenderedContentHtml(
+    sectionIndex: number,
+    html: string,
+    stats: RenderedContentMathStats
+  ): void {
+    const entry = this.sections[sectionIndex];
+    if (entry === undefined) {
+      return;
     }
-    return summary;
+
+    entry.html = html;
+    this.replaceRenderedContentStats(sectionIndex, stats);
+  }
+
+  private replaceRenderedContentStats(sectionIndex: number, stats: RenderedContentMathStats): void {
+    const previous = this.renderedContentStatsBySection[sectionIndex] ?? EMPTY_RENDERED_CONTENT_HTML_STATS;
+    addRenderedContentMathStats(this.renderedContentSummary, previous, -1);
+    const next = cloneRenderedContentMathStats(stats);
+    this.renderedContentStatsBySection[sectionIndex] = next;
+    addRenderedContentMathStats(this.renderedContentSummary, next, 1);
   }
 }
 
@@ -668,11 +696,7 @@ export function readLiveBlockMeasuredHeights(
   });
 }
 
-type RenderedContentHtmlStats = {
-  failedMathCount: number;
-  pendingMathCount: number;
-  totalMathCount: number;
-};
+type RenderedContentHtmlStats = RenderedContentMathStats;
 
 function readRenderedContentHtmlStats(html: string | undefined): RenderedContentHtmlStats {
   if (typeof html !== "string" || !html.includes("data-tex")) {
@@ -689,6 +713,10 @@ function readRenderedContentHtmlStats(html: string | undefined): RenderedContent
   const template = document.createElement("template");
   template.innerHTML = html;
   const mathNodes = Array.from(template.content.querySelectorAll<HTMLElement>("[data-tex]"));
+  return readRenderedContentMathNodeStats(mathNodes);
+}
+
+export function readRenderedContentMathNodeStats(mathNodes: readonly HTMLElement[]): RenderedContentMathStats {
   let failedMathCount = 0;
   let pendingMathCount = 0;
   for (const node of mathNodes) {
@@ -712,11 +740,36 @@ const EMPTY_RENDERED_CONTENT_HTML_STATS: RenderedContentHtmlStats = {
   totalMathCount: 0,
 };
 
+function createEmptyRenderedContentMathStats(): RenderedContentMathStats {
+  return {
+    failedMathCount: 0,
+    pendingMathCount: 0,
+    totalMathCount: 0,
+  };
+}
+
+function cloneRenderedContentMathStats(stats: RenderedContentMathStats): RenderedContentMathStats {
+  return {
+    failedMathCount: stats.failedMathCount,
+    pendingMathCount: stats.pendingMathCount,
+    totalMathCount: stats.totalMathCount,
+  };
+}
+
+function addRenderedContentMathStats(
+  target: RenderedContentMathStats,
+  stats: RenderedContentMathStats,
+  direction: 1 | -1
+): void {
+  target.failedMathCount += stats.failedMathCount * direction;
+  target.pendingMathCount += stats.pendingMathCount * direction;
+  target.totalMathCount += stats.totalMathCount * direction;
+}
+
 function isRenderedFormulaFragmentResultConsistent(
-  renderedHtml: string,
+  stats: RenderedContentMathStats,
   result: RenderedFormulaFragmentResult
 ): boolean {
-  const stats = readRenderedContentHtmlStats(renderedHtml);
   if (stats.pendingMathCount > 0) {
     return false;
   }
@@ -1113,22 +1166,30 @@ type SectionModelEntryMetadata = {
   sourceLineSpans: SourceLineModelSpan[];
 };
 
-function readSectionModelEntryMetadata(entry: SectionModelEntry): SectionModelEntryMetadata {
-  const parsed = entry.html ? readSectionHtmlMetadata(entry.html) : EMPTY_SECTION_METADATA;
+type SectionModelEntryAnalysis = {
+  metadata: SectionModelEntryMetadata;
+  renderedContentStats: RenderedContentMathStats;
+};
+
+function readSectionModelEntryAnalysis(entry: SectionModelEntry): SectionModelEntryAnalysis {
+  const parsed = entry.html ? readSectionHtmlAnalysis(entry.html) : EMPTY_SECTION_ANALYSIS;
   return {
-    containedBlockIndexes: uniqueNumbers([
-      entry.blockIndex,
-      ...(entry.containedBlockIndexes ?? []),
-      ...parsed.containedBlockIndexes,
-    ]),
-    headingAnchors: uniqueStrings([
-      ...(entry.headingAnchors ?? []),
-      ...parsed.headingAnchors,
-    ]),
-    sourceLineSpans: uniqueSourceLineSpans([
-      ...(entry.sourceLineSpans ?? []),
-      ...parsed.sourceLineSpans,
-    ]),
+    metadata: {
+      containedBlockIndexes: uniqueNumbers([
+        entry.blockIndex,
+        ...(entry.containedBlockIndexes ?? []),
+        ...parsed.metadata.containedBlockIndexes,
+      ]),
+      headingAnchors: uniqueStrings([
+        ...(entry.headingAnchors ?? []),
+        ...parsed.metadata.headingAnchors,
+      ]),
+      sourceLineSpans: uniqueSourceLineSpans([
+        ...(entry.sourceLineSpans ?? []),
+        ...parsed.metadata.sourceLineSpans,
+      ]),
+    },
+    renderedContentStats: parsed.renderedContentStats,
   };
 }
 
@@ -1138,15 +1199,26 @@ const EMPTY_SECTION_METADATA: SectionModelEntryMetadata = {
   sourceLineSpans: [],
 };
 
-function readSectionHtmlMetadata(html: string): SectionModelEntryMetadata {
+const EMPTY_SECTION_ANALYSIS: SectionModelEntryAnalysis = {
+  metadata: EMPTY_SECTION_METADATA,
+  renderedContentStats: EMPTY_RENDERED_CONTENT_HTML_STATS,
+};
+
+function readSectionHtmlAnalysis(html: string): SectionModelEntryAnalysis {
   if (typeof document === "undefined") {
-    return EMPTY_SECTION_METADATA;
+    return {
+      metadata: EMPTY_SECTION_METADATA,
+      renderedContentStats: readRenderedContentHtmlStats(html),
+    };
   }
 
   const template = document.createElement("template");
   template.innerHTML = html;
   const elements = Array.from(template.content.querySelectorAll<HTMLElement>("*"));
-  return readSectionElementMetadata(elements);
+  return {
+    metadata: readSectionElementMetadata(elements),
+    renderedContentStats: readRenderedContentMathNodeStats(elements.filter(element => element.hasAttribute("data-tex"))),
+  };
 }
 
 function readSectionElementMetadata(elements: readonly HTMLElement[]): SectionModelEntryMetadata {
