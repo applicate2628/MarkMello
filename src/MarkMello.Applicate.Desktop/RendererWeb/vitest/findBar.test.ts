@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { buildMatches, findCaseInsensitiveMatchOffsets } from "../src/findBar";
+import {
+  buildMatches,
+  createFindBar,
+  findCaseInsensitiveMatchOffsets,
+  type FindProvider,
+  type FindProviderView,
+} from "../src/findBar";
 
 // The match-offset logic — where the reported crash lived — is extracted into
 // the pure findCaseInsensitiveMatchOffsets and covered directly below.
@@ -83,5 +89,38 @@ describe("flag-off visible text parity", () => {
           ?.dataset.mmBlockIndex
       )
     ).toEqual(["1", "2"]);
+  });
+});
+
+describe("provider-backed find bar status", () => {
+  it("distinguishes shown navigation count from exact truncated total", () => {
+    let view: FindProviderView | null = null;
+    const provider: FindProvider = {
+      close: () => { },
+      navigate: () => { },
+      search: () => { },
+      setView: nextView => { view = nextView; },
+    };
+    const controller = createFindBar({
+      legacyScrollBy: () => { },
+      legacyScrollIntoView: () => { },
+      legacyScrollTo: () => { },
+      legacySetScrollTop: () => { },
+    }, provider);
+
+    controller.open();
+    const input = document.querySelector<HTMLInputElement>(".mm-find-input")!;
+    input.value = "needle";
+    view!.updateStatus({
+      currentIndex: 0,
+      query: "needle",
+      skippedCount: 1,
+      shownCount: 2,
+      totalCount: 5,
+      truncated: true,
+    });
+
+    expect(document.querySelector(".mm-find-count")?.textContent)
+      .toBe("1 of 2 shown (5 total, 1 skipped, truncated)");
   });
 });

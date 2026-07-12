@@ -71,6 +71,9 @@ export type FindNavigationDirection = "next" | "prev";
 export type FindProviderStatus = {
   query: string;
   totalCount: number;
+  shownCount: number;
+  skippedCount: number;
+  truncated: boolean;
   currentIndex: number;
 };
 
@@ -324,13 +327,42 @@ function updateProviderCountDisplay(s: State, status: FindProviderStatus): void 
     s.bar.classList.remove("mm-find-no-match");
     return;
   }
-  if (status.totalCount === 0) {
-    s.count.textContent = "0 of 0";
+  const shownCount = normalizeProviderCount(status.shownCount);
+  if (shownCount === 0) {
+    s.count.textContent = formatProviderCountText(status, shownCount);
     s.bar.classList.add("mm-find-no-match");
     return;
   }
   s.bar.classList.remove("mm-find-no-match");
-  s.count.textContent = `${status.currentIndex >= 0 ? status.currentIndex + 1 : 0} of ${status.totalCount}`;
+  s.count.textContent = formatProviderCountText(status, shownCount);
+}
+
+function normalizeProviderCount(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
+function formatProviderCountText(status: FindProviderStatus, shownCount: number): string {
+  const currentPosition = status.currentIndex >= 0 && shownCount > 0
+    ? Math.min(status.currentIndex + 1, shownCount)
+    : 0;
+  const base = `${currentPosition} of ${shownCount}`;
+  const totalCount = normalizeProviderCount(status.totalCount);
+  const skippedCount = normalizeProviderCount(status.skippedCount);
+  const details: string[] = [];
+
+  if (status.truncated || skippedCount > 0 || totalCount !== shownCount) {
+    details.push(`${totalCount} total`);
+  }
+  if (skippedCount > 0) {
+    details.push(`${skippedCount} skipped`);
+  }
+  if (status.truncated) {
+    details.push("truncated");
+  }
+
+  return details.length === 0
+    ? base
+    : `${base} shown (${details.join(", ")})`;
 }
 
 function runSearch(s: State, query: string): void {

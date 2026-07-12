@@ -41,6 +41,7 @@ export type FindResultsMessage = {
   query: string;
   renderId?: number | null;
   totalCount: number;
+  truncated?: boolean;
   matches: FindMatchDescriptor[];
   status: "pending" | "ready" | "unavailable";
   stale?: boolean;
@@ -79,6 +80,9 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
   let currentQuery = "";
   let matches: FindMatchDescriptor[] = [];
   let totalCount = 0;
+  let shownCount = 0;
+  let skippedCount = 0;
+  let truncated = false;
   let currentIndex = -1;
   let navigationSequence = 0;
 
@@ -86,7 +90,10 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
     const status: FindProviderStatus = {
       currentIndex,
       query: currentQuery,
+      shownCount,
+      skippedCount,
       totalCount,
+      truncated,
     };
     view?.updateStatus(status);
   };
@@ -95,6 +102,9 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
     currentQuery = query;
     matches = [];
     totalCount = 0;
+    shownCount = 0;
+    skippedCount = 0;
+    truncated = false;
     currentIndex = -1;
     clearFindHighlights();
     updateStatus();
@@ -125,6 +135,9 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
     navigationSequence++;
     currentIndex = -1;
     totalCount = 0;
+    shownCount = 0;
+    skippedCount = 0;
+    truncated = false;
     matches = [];
     clearFindHighlights();
     updateStatus();
@@ -171,12 +184,16 @@ export function createVirtualizedFindProvider(deps: VirtualizedFindProviderDeps)
       return;
     }
 
-    matches = message.matches
+    const usableMatches = message.matches
       .filter(isUsableDescriptor)
       .filter(hasUsableRenderedOffsetWhenLive)
       .slice()
       .sort((left, right) => left.ordinal - right.ordinal);
+    matches = usableMatches;
     totalCount = Math.max(0, Math.floor(message.totalCount));
+    shownCount = matches.length;
+    skippedCount = Math.max(0, message.matches.length - shownCount);
+    truncated = message.truncated === true;
     currentIndex = matches.length === 0 ? -1 : 0;
     paintVisibleHighlights();
     if (currentIndex >= 0) {
