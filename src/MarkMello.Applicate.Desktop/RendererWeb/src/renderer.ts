@@ -73,6 +73,10 @@ import {
   installUserInputWitnessListeners,
 } from "./userInputWitness";
 import {
+  createHeldOperationScrollPolicy,
+  type HeldOperationTargetResolution,
+} from "./heldOperationScrollPolicy";
+import {
   captureReadingAnchor,
   createDocumentWindowSectionNodeFromModel,
   createFullDocumentFragmentFromWindowModel,
@@ -507,8 +511,25 @@ type VirtualizedNavigationSession = {
   externalShiftCount: number;
   operation: VirtualizedScrollOperation;
 };
+type VirtualizedHeldOperationCorrectionTarget =
+  | Readonly<{
+      anchor: ReadingAnchor | null;
+      kind: "restore";
+      operation: VirtualizedScrollOperation;
+    }>
+  | Readonly<{
+      kind: "gesture";
+      latestTarget: number;
+      operation: VirtualizedScrollOperation;
+      witnessSequence: number;
+    }>;
 let navigationSessionRef: VirtualizedNavigationSession | null = null;
 let virtualizedProgrammaticNavigationPostSettleTarget: VirtualizedNavigationAnchor | null = null;
+const virtualizedHeldOperationScrollPolicy = virtualizationEnabled
+  ? createHeldOperationScrollPolicy<
+      VirtualizedHeldOperationCorrectionTarget | VirtualizedNavigationAnchor
+    >()
+  : null;
 let virtualizedScrollControlFrameTimestamp: number | null = null;
 let minimapScrollOperation: VirtualizedScrollOperation | null = null;
 let cachedScrollRestoreCompletion: Promise<void> | null = null;
@@ -2420,6 +2441,16 @@ function acquireVirtualizedScrollOperation(
   policy: ScrollAcquirePolicy
 ): VirtualizedScrollOperation | null {
   const operation = virtualizedScrollCoordinator.acquireOperation(owner, policy);
+  const activeHeldTarget = virtualizedHeldOperationScrollPolicy?.readActive() ?? null;
+  if (
+    activeHeldTarget !== null
+    && (
+      !("operation" in activeHeldTarget.target)
+      || activeHeldTarget.target.operation.isCurrent() !== true
+    )
+  ) {
+    virtualizedHeldOperationScrollPolicy?.clear(activeHeldTarget);
+  }
   if (navigationSessionRef !== null && !navigationSessionRef.operation.isCurrent()) {
     clearVirtualizedNavigationSession();
   }
@@ -2431,7 +2462,11 @@ function releaseVirtualizedScrollOperationAfterWrite(operation: VirtualizedScrol
 }
 
 function releaseVirtualizedScrollOperation(operation: VirtualizedScrollOperation): boolean {
-  return virtualizedScrollCoordinator.releaseOperation(operation);
+  const released = virtualizedScrollCoordinator.releaseOperation(operation);
+  if (released) {
+    virtualizedHeldOperationScrollPolicy?.clear(operation);
+  }
+  return released;
 }
 
 function scheduleVirtualizedMaintenance(
@@ -3123,6 +3158,65 @@ function getVirtualizedProgrammaticNavigationPostSettleSectionIndex(): number | 
   return target === null ? null : resolveVirtualizedNavigationTargetSectionIndex(target.descriptor);
 }
 
+function resolveVirtualizedCorrectionTarget(
+  operation: VirtualizedScrollOperation
+): HeldOperationTargetResolution<
+  VirtualizedHeldOperationCorrectionTarget | VirtualizedNavigationAnchor
+> {
+  if (virtualizedHeldOperationScrollPolicy === null) {
+    return virtualizedProgrammaticNavigationPostSettleTarget === null
+      ? { kind: "generic" }
+      : {
+          kind: "retained-navigation",
+          target: virtualizedProgrammaticNavigationPostSettleTarget,
+        };
+  }
+  return virtualizedHeldOperationScrollPolicy.resolve(
+    operation,
+    virtualizedProgrammaticNavigationPostSettleTarget
+  );
+}
+
+function readVirtualizedCorrectionTargetSectionIndex(
+  resolution: ReturnType<typeof resolveVirtualizedCorrectionTarget>
+): number | null {
+  if (resolution.kind === "generic") {
+    return null;
+  }
+  const target = resolution.kind === "active"
+    ? resolution.registration.target
+    : resolution.target;
+  if ("kind" in target && target.kind === "restore") {
+    const blockIndex = target.anchor?.blockIndex;
+    return blockIndex === undefined
+      ? null
+      : virtualizedDocumentWindowModel?.getEntryByBlockIndex(blockIndex)?.sectionIndex ?? null;
+  }
+  if ("kind" in target && target.kind === "gesture") {
+    return null;
+  }
+  return resolveVirtualizedNavigationTargetSectionIndex(target.descriptor);
+}
+
+function correctVirtualizedHeldRestoreTarget(
+  target: Extract<VirtualizedHeldOperationCorrectionTarget, { kind: "restore" }>,
+  operation: VirtualizedScrollOperation
+): void {
+  const model = virtualizedDocumentWindowModel;
+  if (model === null || !operation.isCurrent()) {
+    return;
+  }
+  const scrollTop = target.anchor === null
+    ? 0
+    : scrollTopForReadingAnchor(model, target.anchor) ?? 0;
+  if (
+    Math.abs(getDocumentScrollRoot().scrollTop - scrollTop)
+    > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX
+  ) {
+    operation.requestScrollTop(scrollTop, "cache-restore-correction");
+  }
+}
+
 function startVirtualizedProgrammaticNavigationSettle(input: {
   behavior?: ScrollBehavior | undefined;
   descriptor: WindowTargetDescriptor;
@@ -3516,28 +3610,41 @@ function adoptVirtualizedRenderedHeights(ticket: GeometryWorkTicket | null): voi
     if (controller !== virtualizedDocumentWindowController) {
       return;
     }
+    const correctionTarget = resolveVirtualizedCorrectionTarget(operation);
     const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
-    const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
+    const preserveSectionIndex = readVirtualizedCorrectionTargetSectionIndex(correctionTarget);
+    const preservesCorrectionTarget = correctionTarget.kind !== "generic";
     const result = controller.adoptRenderedHeights(
       preserveSectionIndex === null
-        ? { operation }
+        ? {
+            operation,
+            ...(preservesCorrectionTarget ? { reanchor: false } : {}),
+          }
         : {
           operation,
           preserveSectionIndex,
-          ...(postSettleTarget === null ? {} : { reanchor: false }),
+          ...(preservesCorrectionTarget ? { reanchor: false } : {}),
         }
     );
     if (hasMeasuredHeightGeometryDelta(result)) {
       mutateVirtualizedGeometry(ticket);
     }
     applyVirtualizedRenderedHeightAdoptionEffects(result, {
-      alignPostSettleTarget: postSettleTarget === null,
+      alignPostSettleTarget: correctionTarget.kind === "generic",
     });
-    if (postSettleTarget !== null && operation.isCurrent()) {
-      correctVirtualizedProgrammaticNavigationResidual({
-        ...postSettleTarget,
-        operation,
-      });
+    if (correctionTarget.kind === "active") {
+      const target = correctionTarget.registration.target;
+      if ("kind" in target && target.kind === "restore") {
+        correctVirtualizedHeldRestoreTarget(target, operation);
+      }
+    } else if (correctionTarget.kind === "retained-navigation" && operation.isCurrent()) {
+      const target = correctionTarget.target;
+      if (!("kind" in target)) {
+        correctVirtualizedProgrammaticNavigationResidual({
+          ...target,
+          operation,
+        });
+      }
     }
   }, closeTicket);
   if (!scheduled) {
@@ -3591,9 +3698,12 @@ function runVirtualizedCalibration(documentEpoch: number, ticket: GeometryWorkTi
     ) {
       return;
     }
-    const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
+    const correctionTarget = resolveVirtualizedCorrectionTarget(operation);
+    const preserveSectionIndex = readVirtualizedCorrectionTargetSectionIndex(correctionTarget);
     const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
-    const anchor = preserveSectionIndex === null ? captureCurrentVirtualizedReadingAnchor() : null;
+    const anchor = correctionTarget.kind === "generic"
+      ? captureCurrentVirtualizedReadingAnchor()
+      : null;
     const recordedCount = model.recordIntrinsicSizeCalibrationSamples(virtualizedIntrinsicCalibrator);
     if (recordedCount === 0) {
       return;
@@ -3603,17 +3713,33 @@ function runVirtualizedCalibration(documentEpoch: number, ticket: GeometryWorkTi
       return;
     }
     mutateVirtualizedGeometry(ticket);
-    const target = preserveSectionIndex !== null
-      ? model.sectionTop(preserveSectionIndex)
-      : scrollTopForReadingAnchor(model, anchor) ?? 0;
+    const target = correctionTarget.kind === "active"
+      && "kind" in correctionTarget.registration.target
+      && correctionTarget.registration.target.kind === "restore"
+      ? correctionTarget.registration.target.anchor === null
+        ? 0
+        : scrollTopForReadingAnchor(model, correctionTarget.registration.target.anchor) ?? 0
+      : correctionTarget.kind === "active"
+        && "kind" in correctionTarget.registration.target
+        && correctionTarget.registration.target.kind === "gesture"
+        ? correctionTarget.registration.target.latestTarget
+        : preserveSectionIndex !== null
+          ? model.sectionTop(preserveSectionIndex)
+          : scrollTopForReadingAnchor(model, anchor) ?? 0;
     controller.updateWindowForScroll({ desiredScrollTop: target, force: true });
-    if (postSettleTarget === null) {
+    if (correctionTarget.kind === "generic") {
       operation.requestScrollTop(target, "calibration");
-    } else {
+    } else if (correctionTarget.kind === "retained-navigation" && !("kind" in correctionTarget.target)) {
       correctVirtualizedProgrammaticNavigationResidual({
-        ...postSettleTarget,
+        ...correctionTarget.target,
         operation,
       });
+    } else if (
+      correctionTarget.kind === "active"
+      && "kind" in correctionTarget.registration.target
+      && correctionTarget.registration.target.kind === "restore"
+    ) {
+      correctVirtualizedHeldRestoreTarget(correctionTarget.registration.target, operation);
     }
     invalidateTopVisibleBlockIndexCache();
     invalidateSourceLineAnchors({ reassertPendingTarget: postSettleTarget === null });
@@ -4017,6 +4143,12 @@ function restoreCachedScrollPosition(): void {
     cachedScrollRestoreCompletion = Promise.resolve();
     return;
   }
+  const restoreTarget = Object.freeze({
+    anchor: layoutState.readingAnchor ?? null,
+    kind: "restore" as const,
+    operation,
+  });
+  virtualizedHeldOperationScrollPolicy?.register(operation, "restore", restoreTarget);
   const documentEpoch = operation.documentEpoch;
   cachedScrollRestoreCompletion = new Promise(resolve => {
     let completed = false;
@@ -4049,6 +4181,7 @@ function restoreCachedScrollPosition(): void {
       if (finishCachedScrollRestore === finish) {
         finishCachedScrollRestore = null;
       }
+      virtualizedHeldOperationScrollPolicy?.clear(operation);
       if (operation.isCurrent()) {
         releaseVirtualizedScrollOperation(operation);
       }

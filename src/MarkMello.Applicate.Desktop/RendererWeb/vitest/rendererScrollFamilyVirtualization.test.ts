@@ -1439,6 +1439,26 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationOperation\b/);
   });
 
+  it("keeps active held-operation targets separate from retained navigation", () => {
+    const rendererSource = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+    const adoption = rendererSource.slice(
+      rendererSource.indexOf("function adoptVirtualizedRenderedHeights"),
+      rendererSource.indexOf("function scheduleVirtualizedCalibration")
+    );
+    const calibration = rendererSource.slice(
+      rendererSource.indexOf("function runVirtualizedCalibration"),
+      rendererSource.indexOf("function postScroll")
+    );
+
+    expect(rendererSource).toContain("createHeldOperationScrollPolicy");
+    expect(rendererSource).toMatch(/virtualizedHeldOperationScrollPolicy\?\.register/);
+    expect(adoption).toContain("resolveVirtualizedCorrectionTarget(operation)");
+    expect(calibration).toContain("resolveVirtualizedCorrectionTarget(operation)");
+    expect(rendererSource).toContain(
+      "let virtualizedProgrammaticNavigationPostSettleTarget: VirtualizedNavigationAnchor | null = null;"
+    );
+  });
+
   it("matches the baseline post-settle target clear set", () => {
     const rendererSource = readFileSync("RendererWeb/src/renderer.ts", "utf8");
     const smoothTransition = rendererSource.slice(
