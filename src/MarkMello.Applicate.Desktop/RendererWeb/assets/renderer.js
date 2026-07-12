@@ -226,6 +226,33 @@
     return ALIASES[lower] ?? lower;
   }
 
+  // RendererWeb/src/frameYield.ts
+  var FRAME_YIELD_FALLBACK_MS = 32;
+  function yieldAnimationFrameOrTimeout() {
+    return new Promise((resolve) => {
+      let resolved = false;
+      let animationFrame;
+      let timeout;
+      const finish2 = (source) => {
+        if (resolved) return;
+        resolved = true;
+        if (source === "animation-frame" && timeout !== void 0) {
+          window.clearTimeout(timeout);
+        }
+        if (source === "timeout" && animationFrame !== void 0) {
+          window.cancelAnimationFrame(animationFrame);
+        }
+        resolve();
+      };
+      if (typeof window.requestAnimationFrame === "function") {
+        timeout = window.setTimeout(() => finish2("timeout"), FRAME_YIELD_FALLBACK_MS);
+        animationFrame = window.requestAnimationFrame(() => finish2("animation-frame"));
+        return;
+      }
+      timeout = window.setTimeout(() => finish2("timeout"), 0);
+    });
+  }
+
   // RendererWeb/src/initialRenderPipeline.ts
   var DEFAULT_INITIAL_VISIBLE_READY_TIMEOUT_MS = 1200;
   var DEFAULT_INITIAL_VISUAL_SETTLE_TIMEOUT_MS = 1800;
@@ -635,7 +662,6 @@
 
   // RendererWeb/src/mathRenderInit.ts
   var INITIAL_LOOKAHEAD_PX = 500;
-  var MATH_RENDER_FRAME_FALLBACK_MS = 32;
   var INITIAL_PAST_VIEWPORT_SCAN_LIMIT = 8;
   function complexityScore(tex) {
     let score = 1;
@@ -658,26 +684,6 @@
     }
     return node;
   }
-  function rafYield() {
-    return new Promise((resolve) => {
-      let resolved = false;
-      let timeout;
-      const finish2 = () => {
-        if (resolved) return;
-        resolved = true;
-        if (timeout !== void 0) {
-          window.clearTimeout(timeout);
-        }
-        resolve();
-      };
-      if (typeof window.requestAnimationFrame === "function") {
-        timeout = window.setTimeout(finish2, MATH_RENDER_FRAME_FALLBACK_MS);
-        window.requestAnimationFrame(finish2);
-        return;
-      }
-      timeout = window.setTimeout(finish2, 0);
-    });
-  }
   function renderMath(deps) {
     const mathNodes = Array.from(deps.documentRoot.querySelectorAll("[data-tex]"));
     const katex = deps.katex;
@@ -697,7 +703,7 @@
       katex,
       timeBudgetMs: 7,
       now: () => performance.now(),
-      yield: rafYield
+      yield: yieldAnimationFrameOrTimeout
     });
     const viewportHeight = window.innerHeight;
     const initialVisibleNodes = /* @__PURE__ */ new Set();
@@ -7243,9 +7249,7 @@
     modelRenderedContentCoordinatorState = null;
   }
   function yieldModelRenderedContentWork() {
-    return new Promise((resolve) => {
-      window.requestAnimationFrame(() => resolve());
-    });
+    return yieldAnimationFrameOrTimeout();
   }
   function handleModelRenderedContentEvent(state2, event) {
     if (event.type === "progress") {
