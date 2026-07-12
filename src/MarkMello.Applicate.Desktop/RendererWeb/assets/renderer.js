@@ -2260,6 +2260,7 @@
       this.sectionIndexByBlockIndex = /* @__PURE__ */ new Map();
       this.containingSectionIndexByBlockIndex = /* @__PURE__ */ new Map();
       this.sectionIndexByHeadingAnchor = /* @__PURE__ */ new Map();
+      this.headingAnchorPositions = [];
       this.sourceLineSpans = [];
       this.renderedContentStatsBySection = [];
       this.renderedContentSummary = createEmptyRenderedContentMathStats();
@@ -2282,6 +2283,7 @@
           }
         }
         for (const anchor of entry.headingAnchors) {
+          this.headingAnchorPositions.push({ anchor, sectionIndex: index });
           if (!this.sectionIndexByHeadingAnchor.has(anchor)) {
             this.sectionIndexByHeadingAnchor.set(anchor, index);
           }
@@ -2370,6 +2372,28 @@
       }
       const sectionIndex = this.sectionIndexByHeadingAnchor.get(normalized);
       return sectionIndex === void 0 ? void 0 : this.sections[sectionIndex];
+    }
+    headingAnchorAtOrBeforeSectionIndex(sectionIndex) {
+      if (this.headingAnchorPositions.length === 0 || !Number.isFinite(sectionIndex)) {
+        return null;
+      }
+      const normalizedSectionIndex = Math.max(
+        0,
+        Math.min(Math.floor(sectionIndex), Math.max(0, this.sections.length - 1))
+      );
+      let low = 0;
+      let high = this.headingAnchorPositions.length - 1;
+      let selectedIndex = -1;
+      while (low <= high) {
+        const mid = low + Math.floor((high - low) / 2);
+        if (this.headingAnchorPositions[mid].sectionIndex <= normalizedSectionIndex) {
+          selectedIndex = mid;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+      return this.headingAnchorPositions[selectedIndex >= 0 ? selectedIndex : 0].anchor;
     }
     getEntryBySourceLine(sourceLine) {
       if (this.sourceLineSpans.length === 0 || !Number.isFinite(sourceLine)) {
@@ -4776,6 +4800,33 @@
   function readNow() {
     return typeof performance === "undefined" ? Date.now() : performance.now();
   }
+
+  // RendererWeb/src/modelActiveHeading.ts
+  var ACTIVE_HEADING_VIEWPORT_ANCHOR_OFFSET_PX = 10;
+  var ModelActiveHeadingPublisher = class {
+    constructor(post) {
+      this.post = post;
+      this.activeModel = null;
+      this.lastPostedHeadingId = null;
+    }
+    update(model, scrollY) {
+      if (model !== this.activeModel) {
+        this.activeModel = model;
+        this.lastPostedHeadingId = null;
+      }
+      if (model === null) {
+        return null;
+      }
+      const anchorY = (Number.isFinite(scrollY) ? scrollY : 0) + ACTIVE_HEADING_VIEWPORT_ANCHOR_OFFSET_PX;
+      const sectionIndex = model.sectionIndexAtDocumentY(anchorY);
+      const headingId = model.headingAnchorAtOrBeforeSectionIndex(sectionIndex);
+      if (headingId !== null && headingId !== this.lastPostedHeadingId) {
+        this.lastPostedHeadingId = headingId;
+        this.post(headingId);
+      }
+      return headingId;
+    }
+  };
 
   // RendererWeb/src/virtualizationFlags.ts
   function readRendererBooleanFlag(input) {
@@ -8446,6 +8497,7 @@
       reassertPendingTarget: options.reassertPendingTarget !== false
     });
     refreshVirtualizedFindHighlights();
+    updateModelBasedActiveHeading();
     if (getModelMinimapSource() !== null && minimapSourceReady) {
       syncModelMinimapCloneMetadata();
       updateMinimapViewport({ skipVisibilityUpdate: true });
@@ -9311,6 +9363,7 @@
         return;
       }
       mutateVirtualizedGeometry(ticket);
+      updateModelBasedActiveHeading();
       const target = navigationRegistration !== null ? preMutationScrollTop + (result.anchorShift ?? 0) : correctionTarget.kind === "active" && correctionTarget.registration.mode === "restore" ? correctionTarget.registration.anchor === null ? 0 : scrollTopForReadingAnchor(model, correctionTarget.registration.anchor) ?? 0 : correctionTarget.kind === "active" && correctionTarget.registration.mode === "gesture" ? correctionTarget.registration.latestTarget : preserveSectionIndex !== null ? model.sectionTop(preserveSectionIndex) : scrollTopForReadingAnchor(model, anchor) ?? 0;
       controller.updateWindowForScroll({ desiredScrollTop: target, force: true });
       if (correctionTarget.kind === "generic") {
@@ -9348,6 +9401,7 @@
       ...scrollState,
       topBlockIndex
     });
+    updateModelBasedActiveHeading();
     scheduleVirtualizationShadowValidation();
   }
   function refreshSourceLineAnchors() {
@@ -10651,6 +10705,15 @@
   }
   var activeHeadingObserver = null;
   var lastPostedActiveHeadingId = null;
+  var modelActiveHeadingPublisher = new ModelActiveHeadingPublisher((id) => {
+    postHostMessage({ type: "active-heading-changed", id });
+  });
+  function updateModelBasedActiveHeading() {
+    if (!virtualizationEnabled) {
+      return;
+    }
+    modelActiveHeadingPublisher.update(virtualizedDocumentWindowModel, window.scrollY);
+  }
   function addHeadingSegment(segments, kind, text) {
     if (!text) {
       return;
@@ -10710,6 +10773,10 @@
     );
   }
   function rebuildActiveHeadingObserverFromLiveDocument() {
+    if (virtualizationEnabled) {
+      updateModelBasedActiveHeading();
+      return;
+    }
     const main = document.querySelector("main.mm-document");
     const nodes = main === null ? [] : readLiveHeadingNodes(main).filter((node) => !!node.id);
     rebuildActiveHeadingObserver(nodes);
@@ -10759,13 +10826,20 @@
       postHostMessage({ type: "headings-updated", headings: [] });
       lastExtractedHeadings = [];
       lastPostedActiveHeadingId = null;
+      if (virtualizationEnabled) {
+        modelActiveHeadingPublisher.update(null, window.scrollY);
+      }
       return;
     }
     const live = readLiveHeadingPayloads(main);
     const headings = virtualizationEnabled && virtualizedDocumentWindowModel !== null ? readModelHeadingPayloads(virtualizedDocumentWindowModel) : live.headings;
     lastExtractedHeadings = headings.map(cloneHeadingPayload);
     postHostMessage({ type: "headings-updated", headings });
-    rebuildActiveHeadingObserver(live.nodes.filter((n) => !!n.id));
+    if (virtualizationEnabled) {
+      updateModelBasedActiveHeading();
+    } else {
+      rebuildActiveHeadingObserver(live.nodes.filter((n) => !!n.id));
+    }
   }
   function postCachedHeadings() {
     const cachedHeadings = restoredCachedHeadings;
@@ -10777,6 +10851,10 @@
     const headings = cachedHeadings.map(cloneHeadingPayload);
     lastExtractedHeadings = headings.map(cloneHeadingPayload);
     postHostMessage({ type: "headings-updated", headings });
+    if (virtualizationEnabled) {
+      updateModelBasedActiveHeading();
+      return;
+    }
     if (activeHeadingObserver) {
       activeHeadingObserver.disconnect();
       activeHeadingObserver = null;
