@@ -152,6 +152,7 @@ export type ScrollOwnershipControlPlane = {
   release: (lease: ScrollLease) => boolean;
   scheduleFrameTransaction: (lease: ScrollLease, work: () => void) => boolean;
   supersedeByUser: (source: string) => void;
+  tryEmitSettled: () => boolean;
   waitForGeometrySettled: (
     documentEpoch: number,
     afterEmission?: number,
@@ -234,13 +235,6 @@ type OperationWaitCancellation = {
   reason: GeometryWaitCancellationReason;
 };
 
-type QuietCandidate = {
-  documentEpoch: number;
-  geometryEpoch: number;
-  revision: number;
-  stableFrames: number;
-};
-
 const DEFAULT_DELIVERED_FRAME_BUDGET = 120;
 const MAX_RETIRED_ECHOES = 4;
 const RETIRED_ECHO_DELIVERED_FRAME_TTL = 2;
@@ -268,7 +262,6 @@ export function createScrollOwnershipControlPlane(
   let pendingWrite: PendingWrite | null = null;
   let pendingTraceFailures = 0;
   let previousFiniteNativeScrollValue: number | null = null;
-  let quietCandidate: QuietCandidate | null = null;
   let retiredEchoes: RetiredEcho[] = [];
   let scheduledFrame: number | null = null;
   let settleEmission = 0;
@@ -332,7 +325,6 @@ export function createScrollOwnershipControlPlane(
 
   const invalidateSettleCandidate = (): void => {
     settleRevision++;
-    quietCandidate = null;
   };
 
   const pruneRetiredEchoes = (): void => {
@@ -573,21 +565,8 @@ export function createScrollOwnershipControlPlane(
     scheduledFrame = deps.requestFrame(deliverFrame);
   };
 
-  const emitSettled = (): boolean => {
-    if (hasSettlementBlocker()) {
-      quietCandidate = null;
-      return false;
-    }
-    const candidateMatches = quietCandidate !== null
-      && quietCandidate.documentEpoch === documentEpoch
-      && quietCandidate.geometryEpoch === geometryEpoch
-      && quietCandidate.revision === settleRevision;
-    if (candidateMatches && quietCandidate !== null) {
-      quietCandidate = { ...quietCandidate, stableFrames: quietCandidate.stableFrames + 1 };
-    } else {
-      quietCandidate = { documentEpoch, geometryEpoch, revision: settleRevision, stableFrames: 1 };
-    }
-    if (quietCandidate.stableFrames < 2) {
+  const tryEmitSettled = (): boolean => {
+    if (hasSettlementBlocker() || settleRevision <= lastEmittedRevision) {
       return false;
     }
 
@@ -595,7 +574,6 @@ export function createScrollOwnershipControlPlane(
     settleEmission++;
     lastEmittedPayload = payload;
     lastEmittedRevision = settleRevision;
-    quietCandidate = null;
     for (const waiter of [...waiters]) {
       if (waiter.documentEpoch !== documentEpoch || settleEmission <= waiter.afterEmission) {
         continue;
@@ -627,7 +605,6 @@ export function createScrollOwnershipControlPlane(
     frameTransaction = null;
     expectedEcho = null;
     rejectPendingWrite("non-converged");
-    quietCandidate = null;
     lastEmittedRevision = settleRevision;
     watchdogDeliveredFrames = 0;
   };
@@ -728,6 +705,7 @@ export function createScrollOwnershipControlPlane(
       actual,
       pending.supersessionSource
     );
+    tryEmitSettled();
   };
 
   function deliverFrame(_timestamp: number): void {
@@ -765,8 +743,8 @@ export function createScrollOwnershipControlPlane(
       }
     }
 
-    const emitted = emitSettled();
-    if (!emitted && needsSettlementProgress()) {
+    const emitted = tryEmitSettled();
+    if (!emitted && hasSettlementBlocker()) {
       if (consumeDeliveredFrameBudget() >= deliveredFrameBudget) {
         failNonConvergence();
       }
@@ -834,6 +812,7 @@ export function createScrollOwnershipControlPlane(
       expectedEcho = null;
     }
     trace(SCROLL_OWNERSHIP_TRACE_IDS.leaseReleased, { owner: lease.owner });
+    tryEmitSettled();
     drainDeferredAcquisition();
     return true;
   };
@@ -987,6 +966,7 @@ export function createScrollOwnershipControlPlane(
       }
       if (expectedEcho?.lease === activeLease) {
         expectedEcho = null;
+        tryEmitSettled();
       }
       ensureFrame();
       return {
@@ -1001,6 +981,7 @@ export function createScrollOwnershipControlPlane(
       && Math.abs(value - expected.value) <= SELF_ECHO_TOLERANCE_PX
     ) {
       expectedEcho = null;
+      tryEmitSettled();
       ensureFrame();
       return { expected: expected.value, kind: "self-echo", value };
     }
@@ -1133,6 +1114,7 @@ export function createScrollOwnershipControlPlane(
       source: current.source,
       ticket: current.id,
     });
+    tryEmitSettled();
     ensureFrame();
     return true;
   };
@@ -1184,6 +1166,7 @@ export function createScrollOwnershipControlPlane(
       operationEpoch: capturedOperationEpoch,
       resolve,
     });
+    tryEmitSettled();
     ensureFrame();
     return result;
   };
@@ -1211,7 +1194,6 @@ export function createScrollOwnershipControlPlane(
     retiredEchoes = [];
     documentEpoch++;
     geometryEpoch = 0;
-    quietCandidate = null;
     settleRevision++;
     lastEmittedRevision = settleRevision;
     lastEmittedPayload = null;
@@ -1238,7 +1220,6 @@ export function createScrollOwnershipControlPlane(
     expectedEcho = null;
     previousFiniteNativeScrollValue = null;
     retiredEchoes = [];
-    quietCandidate = null;
     disposed = true;
   };
 
@@ -1261,6 +1242,7 @@ export function createScrollOwnershipControlPlane(
     release,
     scheduleFrameTransaction,
     supersedeByUser,
+    tryEmitSettled,
     waitForGeometrySettled,
     write,
   };

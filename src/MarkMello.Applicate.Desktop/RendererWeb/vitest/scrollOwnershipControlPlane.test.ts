@@ -646,13 +646,9 @@ describe("scroll ownership control plane", () => {
     const waiter = plane.waitForGeometrySettled(epoch);
 
     frames.deliverFrame();
-    frames.deliverFrame();
     expect(events).toEqual([]);
 
     expect(plane.endGeometryWork(ticket)).toBe(true);
-    frames.deliverFrame();
-    expect(events).toEqual([]);
-    frames.deliverFrame();
 
     expect(events).toEqual([{ documentEpoch: epoch, geometryEpoch: 0 }]);
     expect(await waiter).toMatchObject({
@@ -661,32 +657,23 @@ describe("scroll ownership control plane", () => {
     });
   });
 
-  it("restarts two-frame quiet count on mutation", async () => {
-    const { events, frames, plane } = createHarness();
+  it("emits the current revision when the mutated ticket removes the last blocker", async () => {
+    const { events, plane } = createHarness();
     const epoch = plane.captureDocumentEpoch();
-    const waiter = plane.waitForGeometrySettled(epoch);
-
-    frames.deliverFrame();
     const ticket = plane.beginGeometryWork("resize", epoch)!;
     expect(plane.geometryMutated(ticket)).toBe(true);
+    const waiter = plane.waitForGeometrySettled(epoch);
     expect(plane.endGeometryWork(ticket)).toBe(true);
-
-    frames.deliverFrame();
-    expect(events).toEqual([]);
-    frames.deliverFrame();
 
     expect(events).toEqual([{ documentEpoch: epoch, geometryEpoch: 1 }]);
     expect(await waiter).toMatchObject({ status: "settled" });
   });
 
-  it("emits exactly after two unchanged frames", async () => {
+  it("emits a blocker-free revision without a stable-frame count", async () => {
     const { events, frames, plane } = createHarness();
     const epoch = plane.captureDocumentEpoch();
     const waiter = plane.waitForGeometrySettled(epoch);
 
-    expect(frames.deliverFrame()).toBe(true);
-    expect(events).toEqual([]);
-    expect(frames.deliverFrame()).toBe(true);
     const settled = await waiter;
 
     expect(events).toEqual([{ documentEpoch: epoch, geometryEpoch: 0 }]);
@@ -708,13 +695,9 @@ describe("scroll ownership control plane", () => {
     await receipt.result;
     const waiter = plane.waitForGeometrySettled(lease.documentEpoch, receipt.afterEmission);
 
-    frames.deliverFrame();
-    frames.deliverFrame();
     expect(events).toEqual([]);
 
     expect(plane.classifyNativeScroll(90).kind).toBe("self-echo");
-    frames.deliverFrame();
-    frames.deliverFrame();
 
     expect(await waiter).toMatchObject({ status: "settled" });
     expect(events).toEqual([{ documentEpoch: lease.documentEpoch, geometryEpoch: 0 }]);
@@ -728,9 +711,6 @@ describe("scroll ownership control plane", () => {
     frames.deliverFrame();
     const waiter = plane.waitForGeometrySettled(lease.documentEpoch, receipt.afterEmission);
 
-    frames.deliverFrame();
-    frames.deliverFrame();
-
     expect(await receipt.result).toEqual({ status: "committed", value: 0 });
     expect(await waiter).toMatchObject({ status: "settled" });
     expect(events).toEqual([{ documentEpoch: lease.documentEpoch, geometryEpoch: 0 }]);
@@ -739,26 +719,22 @@ describe("scroll ownership control plane", () => {
   });
 
   it("consumer nominal zero waits for confirmation and retries on epoch bump", async () => {
-    const { events, frames, plane } = createHarness();
+    const { events, plane } = createHarness();
     const lease = acquired(plane.acquire("navigation", "defer"));
     const firstWait = plane.waitForGeometrySettled(lease.documentEpoch);
-    frames.deliverFrame();
-    frames.deliverFrame();
     const nominal = await firstWait;
     expect(nominal).toMatchObject({ emission: 1, status: "settled" });
     if (nominal.status !== "settled") {
       throw new Error("Expected nominal settlement");
     }
 
+    const lateTicket = plane.beginGeometryWork("late-font", lease.documentEpoch)!;
+    expect(plane.geometryMutated(lateTicket)).toBe(true);
     const confirmation = plane.waitForGeometrySettled(
       lease.documentEpoch,
       nominal.emission
     );
-    const lateTicket = plane.beginGeometryWork("late-font", lease.documentEpoch)!;
-    expect(plane.geometryMutated(lateTicket)).toBe(true);
     expect(plane.endGeometryWork(lateTicket)).toBe(true);
-    frames.deliverFrame();
-    frames.deliverFrame();
     const changed = await confirmation;
     expect(changed).toMatchObject({
       emission: 2,
@@ -771,8 +747,6 @@ describe("scroll ownership control plane", () => {
     expect(plane.holds(lease, nominal.payload.geometryEpoch)).toBe(false);
 
     const retry = plane.waitForGeometrySettled(lease.documentEpoch, changed.emission);
-    frames.deliverFrame();
-    frames.deliverFrame();
     const confirmed = await retry;
     expect(confirmed).toMatchObject({
       emission: 3,
@@ -795,24 +769,25 @@ describe("scroll ownership control plane", () => {
     expect(resolved).toBe(false);
     expect(plane.holds(lease)).toBe(true);
     expect(plane.endGeometryWork(ticket)).toBe(true);
-    expect(events).toEqual([]);
+    expect(await waiter).toMatchObject({ status: "settled" });
+    expect(events).toEqual([{ documentEpoch: lease.documentEpoch, geometryEpoch: 0 }]);
     expect(traces.some(trace => trace.id === SCROLL_OWNERSHIP_TRACE_IDS.watchdogPaused)).toBe(true);
     expect(traces.some(trace => trace.id === SCROLL_OWNERSHIP_TRACE_IDS.settleTimeout)).toBe(false);
   });
 
-  it("preserves one operation's delivered-frame budget across settlement and joined maintenance", async () => {
+  it("does not consume the failure budget for blocker-free normal settlement", async () => {
     const { events, frames, plane } = createHarness(3);
     const lease = acquired(plane.acquire("cache-restore", "defer"));
     const initial = plane.waitForGeometrySettled(lease.documentEpoch);
 
-    frames.deliverFrame();
-    frames.deliverFrame();
     expect(await initial).toMatchObject({ status: "settled" });
     expect(events).toHaveLength(1);
     expect(plane.joinMaintenance("height-adoption")).toEqual({ lease, ownsLease: false });
 
     plane.beginGeometryWork("joined-height-adoption", lease.documentEpoch);
     const terminal = plane.waitForGeometrySettled(lease.documentEpoch, 1);
+    frames.deliverFrame();
+    expect(plane.holds(lease)).toBe(true);
     frames.deliverFrame();
     expect(plane.holds(lease)).toBe(true);
     frames.deliverFrame();
@@ -849,6 +824,7 @@ describe("scroll ownership control plane", () => {
   it("cancels settle waiters on document epoch change", async () => {
     const { frames, plane } = createHarness();
     const epoch = plane.captureDocumentEpoch();
+    plane.beginGeometryWork("pending", epoch);
     const waiter = plane.waitForGeometrySettled(epoch);
     expect(frames.pending()).toBe(1);
 

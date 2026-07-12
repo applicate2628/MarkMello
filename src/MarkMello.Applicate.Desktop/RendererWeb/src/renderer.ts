@@ -3616,6 +3616,12 @@ function initializeVirtualizedDocumentWindow(): void {
     onRealizationReady: mountGeneration => {
       if (mountGeneration === virtualizedWindowMountGeneration) {
         scheduleVirtualizedMeasuredHeightAdoption();
+        scrollOwnershipControlPlane?.tryEmitSettled();
+      }
+    },
+    onRealizationStateChanged: mountGeneration => {
+      if (mountGeneration === virtualizedWindowMountGeneration) {
+        scrollOwnershipControlPlane?.tryEmitSettled();
       }
     },
     onWindowMounted: mountGeneration => {

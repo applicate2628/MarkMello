@@ -46,6 +46,7 @@ export type VirtualizedDocumentWindowDeps = {
   renderAhead?: RenderAheadConfig;
   prepareInsertedContent?: (root: ParentNode, mountGeneration: number) => void;
   onRealizationReady?: (mountGeneration: number) => void;
+  onRealizationStateChanged?: (mountGeneration: number) => void;
   onWindowMounted?: (mountGeneration: number) => void;
   readMeasuredHeights?: (blocks: readonly HTMLElement[]) => MeasuredHeightUpdate[];
   realization?: VirtualizedRealizationOptions;
@@ -123,9 +124,6 @@ type RealizationWatch = {
   frameBudget: number;
   frameRequested: boolean;
   skipped: boolean;
-  stableFrameCount: number;
-  lastOffsetHeight: number | null;
-  lastOccupiedHeight: number | null;
   readyMeasuredHeight: number | null;
 };
 
@@ -537,18 +535,12 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
     if (stateEvent.skipped === true) {
       watch.skipped = true;
       watch.readyMeasuredHeight = null;
-      watch.stableFrameCount = 0;
-      watch.lastOffsetHeight = null;
-      watch.lastOccupiedHeight = null;
       watch.state = watch.state === "real-ready" ? "realized-then-skipped" : "placeholder-not-intersecting";
       return;
     }
 
     watch.skipped = false;
     watch.frameBudget = REALIZATION_FRAME_BUDGET;
-    watch.stableFrameCount = 0;
-    watch.lastOffsetHeight = null;
-    watch.lastOccupiedHeight = null;
     watch.readyMeasuredHeight = null;
     watch.state = "event-observed-settling";
     scheduleSample(watch);
@@ -611,13 +603,10 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
         element: block,
         frameBudget: REALIZATION_FRAME_BUDGET,
         frameRequested: false,
-        lastOccupiedHeight: null,
-        lastOffsetHeight: null,
         mountGeneration: currentMountGeneration,
         nonconvergentCycles: 0,
         readyMeasuredHeight: null,
         skipped: true,
-        stableFrameCount: 0,
         state: isStrictlyViewportIntersecting(block)
           ? "intersecting-await-event"
           : "placeholder-not-intersecting",
@@ -716,33 +705,18 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
       return;
     }
 
-    const offsetStable = watch.lastOffsetHeight === null
-      || Math.abs(sample.offsetHeight - watch.lastOffsetHeight) <= 1;
-    const occupiedStable = watch.lastOccupiedHeight === null
-      || Math.abs(sample.occupiedHeight - watch.lastOccupiedHeight) <= 1;
-    watch.stableFrameCount = offsetStable && occupiedStable ? watch.stableFrameCount + 1 : 1;
-    watch.lastOffsetHeight = sample.offsetHeight;
-    watch.lastOccupiedHeight = sample.occupiedHeight;
-
-    if (watch.stableFrameCount >= 2) {
-      if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) <= 1) {
-        watch.nonconvergentCycles = 0;
-        watch.state = "event-equal-fallback-noop";
-        watch.readyMeasuredHeight = null;
-        deps.onRealizationReady?.(watch.mountGeneration);
-        return;
-      }
-
-      if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) > 1) {
-        watch.nonconvergentCycles = 0;
-        watch.state = "real-ready";
-        watch.readyMeasuredHeight = Math.max(0, sample.occupiedHeight);
-        deps.onRealizationReady?.(watch.mountGeneration);
-        return;
-      }
+    if (Math.abs(sample.offsetHeight - sample.fallbackBorderBoxHeight) <= 1) {
+      watch.nonconvergentCycles = 0;
+      watch.state = "event-equal-fallback-noop";
+      watch.readyMeasuredHeight = null;
+      deps.onRealizationReady?.(watch.mountGeneration);
+      return;
     }
 
-    expireOrContinue(watch);
+    watch.nonconvergentCycles = 0;
+    watch.state = "real-ready";
+    watch.readyMeasuredHeight = Math.max(0, sample.occupiedHeight);
+    deps.onRealizationReady?.(watch.mountGeneration);
   }
 
   function expireOrContinue(watch: RealizationWatch): void {
@@ -758,6 +732,7 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
           cycles: watch.nonconvergentCycles,
         },
       });
+      deps.onRealizationStateChanged?.(watch.mountGeneration);
       return;
     }
 
@@ -775,9 +750,6 @@ function createRealizationTracker(deps: VirtualizedDocumentWindowDeps): {
       if (intersecting && watch.state === "expired-nonconvergent") {
         if (watch.nonconvergentCycles < REALIZATION_QUARANTINE_CYCLES) {
           watch.frameBudget = REALIZATION_FRAME_BUDGET;
-          watch.stableFrameCount = 0;
-          watch.lastOffsetHeight = null;
-          watch.lastOccupiedHeight = null;
           watch.readyMeasuredHeight = null;
           watch.state = "event-observed-settling";
           scheduleSample(watch);

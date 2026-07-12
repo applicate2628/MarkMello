@@ -95,6 +95,7 @@ function makeController(input: {
   model: DocumentWindowModel;
   root: HTMLElement;
   measure?: () => MeasuredHeightUpdate[];
+  onRealizationStateChanged?: (mountGeneration: number) => void;
   prepare?: (root: ParentNode) => void;
   realization?: unknown;
   trace?: (event: { id: string; details?: Readonly<Record<string, unknown>> }) => void;
@@ -104,6 +105,7 @@ function makeController(input: {
     main,
     model: input.model,
     ownerWindow: window,
+    onRealizationStateChanged: input.onRealizationStateChanged,
     prepareInsertedContent: input.prepare,
     readMeasuredHeights: input.measure,
     realization: input.realization,
@@ -585,7 +587,7 @@ describe("virtualized document window", () => {
     }
   });
 
-  it("promotes only visible event-realized geometry after two stable delivered frames", () => {
+  it("promotes visible event-realized geometry from one finite producer sample", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { root } = setScrollRoot(0, 400, 180);
     const frames = installFrameQueue();
@@ -611,7 +613,7 @@ describe("virtualized document window", () => {
       setElementLayout(bottomSpacer, { top: () => occupied });
 
       dispatchContentVisibilityState(blockNode, false);
-      frames.flush(2);
+      frames.flush();
       const adopted = controller.adoptRenderedHeights();
 
       expect(adopted.updatedCount).toBe(1);
@@ -643,7 +645,7 @@ describe("virtualized document window", () => {
       setElementLayout(blockNode, { height: () => 122, top: () => 0 });
 
       dispatchContentVisibilityState(blockNode, false);
-      frames.flush(2);
+      frames.flush();
 
       expect(controller.adoptRenderedHeights().updatedCount).toBe(0);
       expect(model.getEntryByBlockIndex(250)?.measuredHeight).toBeUndefined();
@@ -683,7 +685,7 @@ describe("virtualized document window", () => {
       setElementLayout(bottomSpacer, { top: () => 333 });
 
       dispatchContentVisibilityState(firstNode, false);
-      frames.flush(2);
+      frames.flush();
       firstHeight = 0;
       const adopted = controller.adoptRenderedHeights();
 
@@ -721,7 +723,7 @@ describe("virtualized document window", () => {
       setElementLayout(bottomSpacer, { top: () => occupiedBottom });
 
       dispatchContentVisibilityState(blockNode, false);
-      frames.flush(2);
+      frames.flush();
       expect(controller.adoptRenderedHeights().updatedCount).toBe(1);
       expect(model.getEntryByBlockIndex(253)?.measuredHeight).toBe(144);
 
@@ -768,7 +770,7 @@ describe("virtualized document window", () => {
       setElementLayout(bottomSpacer, { top: () => 104 });
 
       dispatchContentVisibilityState(blockNode, false);
-      frames.flush(2);
+      frames.flush();
 
       expect(controller.adoptRenderedHeights().updatedCount).toBe(0);
       expect(model.getEntryByBlockIndex(243)?.measuredHeight).toBeUndefined();
@@ -804,7 +806,7 @@ describe("virtualized document window", () => {
 
       expect(controller.adoptRenderedHeights().updatedCount).toBe(0);
       expect(frames.pending()).toBe(1);
-      frames.flush(2);
+      frames.flush();
       expect(controller.adoptRenderedHeights().updatedCount).toBe(1);
     } finally {
       frames.restore();
@@ -836,7 +838,7 @@ describe("virtualized document window", () => {
 
       dispatchContentVisibilityState(blockNode, false);
       setScrollTop(960);
-      frames.flush(2);
+      frames.flush();
 
       expect(controller.adoptRenderedHeights().updatedCount).toBe(1);
       expect(model.getEntryByBlockIndex(245)?.measuredHeight).toBe(144);
@@ -866,7 +868,6 @@ describe("virtualized document window", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { root } = setScrollRoot(0, 400, 180);
     const frames = installFrameQueue();
-    let frame = 0;
     let admission = 0;
     const traces: Array<{ id: string; details?: Readonly<Record<string, unknown>> }> = [];
     const model = new DocumentWindowModel([
@@ -884,11 +885,10 @@ describe("virtualized document window", () => {
 
     const expireOnce = (blockNode: HTMLElement, expectedCycle: number): void => {
       const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
-      setElementLayout(blockNode, { height: () => 120 + frame * 3, top: () => 0 });
-      setElementLayout(bottomSpacer, { top: () => 142 + frame * 3 });
+      setElementLayout(blockNode, { height: () => 120, top: () => 0 });
+      setElementLayout(bottomSpacer, { top: () => Number.NaN });
       dispatchContentVisibilityState(blockNode, false);
       for (let index = 0; index < 120; index++) {
-        frame++;
         frames.flush();
       }
       expect(traces.filter(trace => trace.id === "mm-virt-realization-expired").at(-1)?.details)
@@ -899,7 +899,7 @@ describe("virtualized document window", () => {
       const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
       settle(blockNode, bottomSpacer, admission++);
       dispatchContentVisibilityState(blockNode, false);
-      frames.flush(2);
+      frames.flush();
       expect(controller.adoptRenderedHeights().updatedCount).toBe(updatedCount);
     };
 
@@ -927,8 +927,8 @@ describe("virtualized document window", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { root } = setScrollRoot(0, 400, 180);
     const frames = installFrameQueue();
-    let frame = 0;
     const traces: Array<{ id: string; details?: Readonly<Record<string, unknown>> }> = [];
+    const realizationStateChanges: number[] = [];
     const model = new DocumentWindowModel([
       entry(0, 246, 104, {
         html: '<section data-mm-block-index="246" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 246</section>',
@@ -937,6 +937,7 @@ describe("virtualized document window", () => {
     ]);
     const controller = makeController({
       model,
+      onRealizationStateChanged: mountGeneration => realizationStateChanges.push(mountGeneration),
       realization: { enabled: true },
       root,
       trace: event => traces.push(event),
@@ -946,13 +947,12 @@ describe("virtualized document window", () => {
       controller.updateWindowForScroll();
       const blockNode = document.querySelector<HTMLElement>("[data-mm-block-index='246']")!;
       const bottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
-      setElementLayout(blockNode, { height: () => 120 + frame * 3, top: () => 0 });
-      setElementLayout(bottomSpacer, { top: () => 142 + frame * 3 });
+      setElementLayout(blockNode, { height: () => 120, top: () => 0 });
+      setElementLayout(bottomSpacer, { top: () => Number.NaN });
 
       dispatchContentVisibilityState(blockNode, false);
       for (let cycle = 1; cycle <= 3; cycle++) {
         for (let index = 0; index < 120; index++) {
-          frame++;
           frames.flush();
         }
         expect(traces.filter(trace => trace.id === "mm-virt-realization-expired").at(-1)?.details)
@@ -967,6 +967,7 @@ describe("virtualized document window", () => {
           details: expect.objectContaining({ blockIndex: 246, cycles: 3, mountGeneration: 1 }),
         }),
       ]);
+      expect(realizationStateChanges).toEqual([1, 1, 1]);
 
       dispatchContentVisibilityState(blockNode, false);
       expect(frames.pending()).toBe(0);
@@ -981,7 +982,6 @@ describe("virtualized document window", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const { root, setScrollTop } = setScrollRoot(0, 600, 100);
     const frames = installFrameQueue();
-    let frame = 0;
     const model = new DocumentWindowModel([
       entry(0, 246, 100, {
         html: '<section data-mm-block-index="246" data-mm-block-kind="paragraph" style="content-visibility:auto">Block 246</section>',
@@ -998,12 +998,11 @@ describe("virtualized document window", () => {
       controller.updateWindowForScroll();
       const quarantinedNode = document.querySelector<HTMLElement>("[data-mm-block-index='246']")!;
       const initialBottomSpacer = document.querySelector<HTMLElement>("[data-mm-virtual-spacer='bottom']")!;
-      setElementLayout(quarantinedNode, { height: () => 120 + frame * 3, top: () => 0 });
-      setElementLayout(initialBottomSpacer, { top: () => 142 + frame * 3 });
+      setElementLayout(quarantinedNode, { height: () => 120, top: () => 0 });
+      setElementLayout(initialBottomSpacer, { top: () => Number.NaN });
       dispatchContentVisibilityState(quarantinedNode, false);
       for (let cycle = 1; cycle <= 3; cycle++) {
         for (let index = 0; index < 120; index++) {
-          frame++;
           frames.flush();
         }
         expect(controller.recensusRealizationWatches()).toBe(cycle === 3);
@@ -1021,7 +1020,7 @@ describe("virtualized document window", () => {
       setElementLayout(remountedNode, { height: () => 122, top: () => 0 });
       setElementLayout(remountedSuccessor, { height: () => 100, top: () => 144 });
       dispatchContentVisibilityState(remountedNode, false);
-      frames.flush(2);
+      frames.flush();
 
       expect(controller.adoptRenderedHeights().updatedCount).toBe(1);
       expect(model.getEntryByBlockIndex(246)?.measuredHeight).toBe(144);
@@ -1308,7 +1307,7 @@ describe("virtualized document window", () => {
 
       dispatchContentVisibilityState(source, false);
       expect(frames.pending()).toBe(1);
-      frames.flush(2);
+      frames.flush();
       const adopted = controller.adoptRenderedHeights({ reanchor: false });
 
       expect(adopted.updatedCount).toBe(1);
