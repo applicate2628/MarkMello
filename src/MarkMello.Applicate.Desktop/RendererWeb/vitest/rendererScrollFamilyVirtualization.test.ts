@@ -1418,15 +1418,41 @@ afterEach(() => {
 });
 
 describe("renderer scroll-family virtualization integration", () => {
-  it("folds virtualized navigation ownership into one lease-backed session", () => {
+  it("folds in-flight navigation ownership into one lease-backed session with a retained target", () => {
     const rendererSource = readFileSync("RendererWeb/src/renderer.ts", "utf8");
 
     expect(rendererSource).toContain("let navigationSessionRef: VirtualizedNavigationSession | null = null;");
+    expect(rendererSource).toContain(
+      "let virtualizedProgrammaticNavigationPostSettleTarget: VirtualizedNavigationAnchor | null = null;"
+    );
+    expect(rendererSource).not.toMatch(/type VirtualizedNavigationSession = \{[^}]*postSettleTarget:/);
     expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationInProgress\b/);
     expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationGeneration\b/);
     expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationExternalShiftCount\b/);
-    expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationPostSettleTarget\b/);
     expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationOperation\b/);
+  });
+
+  it("matches the baseline post-settle target clear set", () => {
+    const rendererSource = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+    const smoothTransition = rendererSource.slice(
+      rendererSource.indexOf("function scheduleVirtualizedProgrammaticNavigationSmoothTransition"),
+      rendererSource.indexOf("function resolveVirtualizedNavigationTargetSectionIndex")
+    );
+    const release = rendererSource.slice(
+      rendererSource.indexOf("function releaseVirtualizedProgrammaticNavigationOperation"),
+      rendererSource.indexOf("function finishVirtualizedProgrammaticNavigationCorrection")
+    );
+    const settle = rendererSource.slice(
+      rendererSource.indexOf("async function settleVirtualizedProgrammaticNavigationTarget"),
+      rendererSource.indexOf("function landVirtualizedProgrammaticNavigation")
+    );
+
+    expect(release).toContain("clearPostSettleTarget = false");
+    expect(release).toContain("if (clearPostSettleTarget)");
+    expect(settle.match(/releaseVirtualizedProgrammaticNavigationOperation\(operation, true\)/g))
+      .toHaveLength(2);
+    expect(settle).not.toContain("clearVirtualizedNavigationSession(operation)");
+    expect(smoothTransition).not.toContain("clearVirtualizedNavigationSession(input.operation)");
   });
 
   it("emits geometry settled after a non-convergent realization watch is quarantined", async () => {
@@ -2093,6 +2119,88 @@ describe("renderer scroll-family virtualization integration", () => {
     expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(1);
   });
 
+  it("re-pins a settled block through adoption and calibration with maintenance epochs", async () => {
+    const harness = await loadRendererHarness({
+      renderedSectionHeight: SECTION_HEIGHT,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    harness.load({
+      type: "load-document",
+      html: buildSourceLineDocument(120),
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await harness.flushQueuedRafs();
+
+    harness.load({ type: "scroll-to-block", blockIndex: 90 });
+    await harness.flushQueuedRafs();
+    expect(perfDetails(harness.messages, "mm-virt-navigation-settled")).toHaveLength(1);
+    expect(document.querySelector<HTMLElement>('[data-mm-block-index="90"]')!
+      .getBoundingClientRect().top).toBeCloseTo(0, 0);
+    harness.messages.length = 0;
+
+    harness.setRenderedSectionHeight(SECTION_HEIGHT + 80);
+    harness.triggerResize();
+    await harness.flushQueuedRafs();
+
+    const maintenanceOperations = perfDetails<{ operationEpoch: number; owner?: string }>(
+      harness.messages,
+      "mm-virt-maintenance-bound"
+    ).filter(detail => detail.owner === "measured-height-adoption" || detail.owner === "calibration");
+    const maintenanceEpochs = new Set(maintenanceOperations.map(detail => detail.operationEpoch));
+    const residualWrites = perfDetails<{ operationEpoch: number; writer?: string }>(
+      harness.messages,
+      "mm-virt-scroll-write-committed"
+    ).filter(detail => detail.writer === "navigation-residual");
+
+    expect(maintenanceOperations.map(detail => detail.owner))
+      .toEqual(expect.arrayContaining(["measured-height-adoption", "calibration"]));
+    expect(residualWrites.length).toBeGreaterThan(0);
+    expect(residualWrites.every(detail => maintenanceEpochs.has(detail.operationEpoch))).toBe(true);
+    expect(perfDetails<{ writer?: string }>(harness.messages, "mm-virt-scroll-write-committed")
+      .filter(detail => detail.writer === "calibration")).toEqual([]);
+    expect(document.querySelector<HTMLElement>('[data-mm-block-index="90"]')!
+      .getBoundingClientRect().top).toBeCloseTo(0, 0);
+  });
+
+  it.each(["user-scroll", "document-reset"] as const)(
+    "clears a settled retained target on %s",
+    async clearPath => {
+      const harness = await loadRendererHarness({
+        renderedSectionHeight: SECTION_HEIGHT,
+        sectionCount: 120,
+        virtualization: true,
+      });
+      document.dispatchEvent(new Event("DOMContentLoaded"));
+      const html = buildSourceLineDocument(120);
+      harness.load({ type: "load-document", html, hasMermaid: false, hasHljs: false });
+      await harness.flushQueuedRafs();
+      harness.load({ type: "scroll-to-block", blockIndex: 90 });
+      await harness.flushQueuedRafs();
+      expect(perfDetails(harness.messages, "mm-virt-navigation-settled")).toHaveLength(1);
+
+      if (clearPath === "user-scroll") {
+        harness.root.scrollTop += 240;
+        document.dispatchEvent(new Event("scroll"));
+        await Promise.resolve();
+      } else {
+        harness.load({ type: "load-document", html, hasMermaid: false, hasHljs: false });
+        await harness.flushQueuedRafs();
+      }
+      harness.messages.length = 0;
+
+      harness.setRenderedSectionHeight(SECTION_HEIGHT + 80);
+      harness.triggerResize();
+      await harness.flushQueuedRafs();
+
+      const writes = perfDetails<{ writer?: string }>(harness.messages, "mm-virt-scroll-write-committed");
+      expect(perfDetails(harness.messages, "mm-virt-window-height-adopted").length).toBeGreaterThan(0);
+      expect(writes.some(detail => detail.writer === "navigation-residual")).toBe(false);
+    }
+  );
+
   it("classifies an active navigation write as a self echo without superseding its session", async () => {
     const { flushQueuedRafs, load, messages } = await loadRendererHarness({
       sectionCount: 120,
@@ -2614,6 +2722,36 @@ describe("renderer scroll-family virtualization integration", () => {
     });
 
     expect(readTargetTop()).toBeCloseTo(expectedAnchorTop, 0);
+  });
+
+  it("suppresses a stale source-line reassert after a settled non-source navigation", async () => {
+    const harness = await loadRendererHarness({ sectionCount: 120, virtualization: true });
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    harness.load({
+      type: "load-document",
+      html: buildSourceLineDocument(120),
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await harness.flushQueuedRafs();
+
+    harness.load({ type: "scroll-to-source-line", sourceLine: 900 });
+    await harness.flushQueuedRafs();
+    harness.load({ type: "scroll-to-block", blockIndex: 20 });
+    await harness.flushQueuedRafs();
+    expect(perfDetails(harness.messages, "mm-virt-navigation-settled")).toHaveLength(2);
+    const blockTarget = () => document.querySelector<HTMLElement>('[data-mm-block-index="20"]');
+    expect(blockTarget()!.getBoundingClientRect().top).toBeCloseTo(0, 0);
+    harness.messages.length = 0;
+
+    harness.triggerResize();
+    await harness.flushQueuedRafs();
+
+    expect(perfDetails<{ owner?: string }>(harness.messages, "mm-virt-scroll-lease-acquired")
+      .some(detail => detail.owner === "source-line-navigation")).toBe(false);
+    expect(blockTarget()!.getBoundingClientRect().top).toBeCloseTo(0, 0);
+    expect(document.querySelector<HTMLElement>('[data-mm-source-line="900"]')?.getBoundingClientRect().top ?? 999)
+      .not.toBeCloseTo(VIEWPORT_HEIGHT * 0.38, 0);
   });
 
   it("excludes the model-fragment minimap clone from source-line anchor landing", async () => {

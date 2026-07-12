@@ -505,9 +505,9 @@ type VirtualizedNavigationSession = {
   anchor: VirtualizedNavigationAnchor;
   externalShiftCount: number;
   operation: VirtualizedScrollOperation;
-  postSettleTarget: VirtualizedNavigationAnchor | null;
 };
 let navigationSessionRef: VirtualizedNavigationSession | null = null;
+let virtualizedProgrammaticNavigationPostSettleTarget: VirtualizedNavigationAnchor | null = null;
 let virtualizedScrollControlFrameTimestamp: number | null = null;
 let minimapScrollOperation: VirtualizedScrollOperation | null = null;
 let cachedScrollRestoreCompletion: Promise<void> | null = null;
@@ -2514,7 +2514,6 @@ function scheduleVirtualizedProgrammaticNavigationSmoothTransition(input: {
   let startTimestamp: number | null = null;
   const advance = (): boolean => input.operation.scheduleFrameTransaction(() => {
     if (!input.operation.isCurrent()) {
-      clearVirtualizedNavigationSession(input.operation);
       return;
     }
 
@@ -2798,13 +2797,13 @@ function adoptVirtualizedProgrammaticNavigationRenderedHeights(
 }
 
 function releaseVirtualizedProgrammaticNavigationOperation(
-  operation: VirtualizedScrollOperation
+  operation: VirtualizedScrollOperation,
+  clearPostSettleTarget = false
 ): void {
-  if (!operation.isCurrent()) {
-    clearVirtualizedNavigationSession(operation);
-    return;
+  clearVirtualizedNavigationSession(operation);
+  if (clearPostSettleTarget) {
+    clearVirtualizedProgrammaticNavigationPostSettleTarget();
   }
-  clearVirtualizedNavigationSession();
   releaseVirtualizedScrollOperation(operation);
 }
 
@@ -2939,7 +2938,6 @@ async function settleVirtualizedProgrammaticNavigationTarget(
     if (settlement === null) {
       const outcome = await waitForCurrentVirtualizedGeometry(operation, afterEmission);
       if (outcome.status === "canceled") {
-        clearVirtualizedNavigationSession(operation);
         return;
       }
       settlement = outcome;
@@ -2952,11 +2950,10 @@ async function settleVirtualizedProgrammaticNavigationTarget(
       previousResidualAbs
     );
     if (frame.kind === "canceled") {
-      clearVirtualizedNavigationSession(operation);
       return;
     }
     if (frame.kind === "missing-target") {
-      releaseVirtualizedProgrammaticNavigationOperation(operation);
+      releaseVirtualizedProgrammaticNavigationOperation(operation, true);
       return;
     }
     if (frame.kind === "geometry-changed") {
@@ -2972,13 +2969,12 @@ async function settleVirtualizedProgrammaticNavigationTarget(
         reason: "residual-non-converged",
         residual: frame.residual,
       });
-      releaseVirtualizedProgrammaticNavigationOperation(operation);
+      releaseVirtualizedProgrammaticNavigationOperation(operation, true);
       return;
     }
     if (frame.kind === "written") {
       const write = await frame.receipt.result;
       if (write.status !== "committed") {
-        clearVirtualizedNavigationSession(operation);
         return;
       }
       previousResidualAbs = Math.abs(frame.residual);
@@ -2989,7 +2985,6 @@ async function settleVirtualizedProgrammaticNavigationTarget(
     }
     const confirmation = await awaitConfirmedVirtualizedGeometry(operation, settlement);
     if (confirmation.status === "canceled") {
-      clearVirtualizedNavigationSession(operation);
       return;
     }
     if (confirmation.status === "changed") {
@@ -3012,7 +3007,6 @@ async function settleVirtualizedProgrammaticNavigationTarget(
     });
     return;
   }
-  clearVirtualizedNavigationSession(operation);
 }
 
 function landVirtualizedProgrammaticNavigation(input: {
@@ -3096,14 +3090,6 @@ function readCurrentVirtualizedNavigationSession(): VirtualizedNavigationSession
   return session?.operation.isCurrent() === true ? session : null;
 }
 
-function readCurrentVirtualizedNavigationPostSettleTarget(): VirtualizedNavigationAnchor | null {
-  return readCurrentVirtualizedNavigationSession()?.postSettleTarget ?? null;
-}
-
-function hasCurrentVirtualizedNavigationPostSettleTarget(): boolean {
-  return readCurrentVirtualizedNavigationPostSettleTarget() !== null;
-}
-
 function clearVirtualizedNavigationSession(operation?: VirtualizedScrollOperation): void {
   if (operation === undefined || navigationSessionRef?.operation === operation) {
     navigationSessionRef = null;
@@ -3111,12 +3097,12 @@ function clearVirtualizedNavigationSession(operation?: VirtualizedScrollOperatio
 }
 
 function clearVirtualizedProgrammaticNavigationPostSettleTarget(): void {
-  clearVirtualizedNavigationSession();
+  virtualizedProgrammaticNavigationPostSettleTarget = null;
 }
 
 function reassertVirtualizedProgrammaticNavigationPostSettleTarget(): void {
   const session = readCurrentVirtualizedNavigationSession();
-  const target = session?.postSettleTarget ?? null;
+  const target = virtualizedProgrammaticNavigationPostSettleTarget;
   if (session === null || target === null) {
     return;
   }
@@ -3127,14 +3113,14 @@ function reassertVirtualizedProgrammaticNavigationPostSettleTarget(): void {
 
 function alignVirtualizedProgrammaticNavigationPostSettleTarget(): void {
   const session = readCurrentVirtualizedNavigationSession();
-  const target = session?.postSettleTarget ?? null;
+  const target = virtualizedProgrammaticNavigationPostSettleTarget;
   if (session !== null && target !== null) {
     correctVirtualizedProgrammaticNavigationResidual({ ...target, operation: session.operation });
   }
 }
 
 function getVirtualizedProgrammaticNavigationPostSettleSectionIndex(): number | null {
-  const target = readCurrentVirtualizedNavigationPostSettleTarget();
+  const target = virtualizedProgrammaticNavigationPostSettleTarget;
   return target === null ? null : resolveVirtualizedNavigationTargetSectionIndex(target.descriptor);
 }
 
@@ -3162,8 +3148,8 @@ function startVirtualizedProgrammaticNavigationSettle(input: {
     anchor,
     externalShiftCount: 0,
     operation: input.operation,
-    postSettleTarget: anchor,
   };
+  virtualizedProgrammaticNavigationPostSettleTarget = anchor;
   cancelVirtualizedCalibration();
   if (input.behavior === "smooth" && input.initialContext !== undefined) {
     const destinationScrollTop = computeVirtualizedProgrammaticNavigationScrollTop(
@@ -3231,6 +3217,7 @@ function resetVirtualizedDocumentWindow(resetCalibrator = true): void {
   virtualizedWindowMountGeneration++;
   virtualizedMeasureFrameRequested = false;
   clearVirtualizedNavigationSession();
+  clearVirtualizedProgrammaticNavigationPostSettleTarget();
   if (resetCalibrator) {
     virtualizedIntrinsicCalibrator.reset();
   }
@@ -3268,7 +3255,7 @@ function prepareVirtualizedInsertedContent(root: ParentNode, mountGeneration: nu
     }
 
     invalidateSourceLineAnchors({
-      reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget(),
+      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
     });
     refreshVirtualizedFindHighlights();
     scheduleVirtualizedMeasuredHeightAdoption();
@@ -3457,7 +3444,7 @@ function updateVirtualizedWindowForScroll(options: { force?: boolean } = {}): vo
     if (controller.updateWindowForScroll({ ...options, operation })) {
       invalidateTopVisibleBlockIndexCache();
       invalidateSourceLineAnchors({
-        reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget(),
+        reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
       });
       refreshVirtualizedFindHighlights();
       scheduleVirtualizedMeasuredHeightAdoption();
@@ -3530,8 +3517,7 @@ function adoptVirtualizedRenderedHeights(ticket: GeometryWorkTicket | null): voi
     if (controller !== virtualizedDocumentWindowController) {
       return;
     }
-    const navigationSession = readCurrentVirtualizedNavigationSession();
-    const postSettleTarget = navigationSession?.postSettleTarget ?? null;
+    const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
     const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
     const result = controller.adoptRenderedHeights(
       preserveSectionIndex === null
@@ -3548,10 +3534,10 @@ function adoptVirtualizedRenderedHeights(ticket: GeometryWorkTicket | null): voi
     applyVirtualizedRenderedHeightAdoptionEffects(result, {
       alignPostSettleTarget: postSettleTarget === null,
     });
-    if (postSettleTarget !== null && navigationSession !== null) {
+    if (postSettleTarget !== null && operation.isCurrent()) {
       correctVirtualizedProgrammaticNavigationResidual({
         ...postSettleTarget,
-        operation: navigationSession.operation,
+        operation,
       });
     }
   }, closeTicket);
@@ -3606,9 +3592,8 @@ function runVirtualizedCalibration(documentEpoch: number, ticket: GeometryWorkTi
     ) {
       return;
     }
-    const navigationSession = readCurrentVirtualizedNavigationSession();
     const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
-    const postSettleTarget = navigationSession?.postSettleTarget ?? null;
+    const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
     const anchor = preserveSectionIndex === null ? captureCurrentVirtualizedReadingAnchor() : null;
     const recordedCount = model.recordIntrinsicSizeCalibrationSamples(virtualizedIntrinsicCalibrator);
     if (recordedCount === 0) {
@@ -3625,10 +3610,10 @@ function runVirtualizedCalibration(documentEpoch: number, ticket: GeometryWorkTi
     controller.updateWindowForScroll({ desiredScrollTop: target, force: true });
     if (postSettleTarget === null) {
       operation.requestScrollTop(target, "calibration");
-    } else if (navigationSession !== null) {
+    } else {
       correctVirtualizedProgrammaticNavigationResidual({
         ...postSettleTarget,
-        operation: navigationSession.operation,
+        operation,
       });
     }
     invalidateTopVisibleBlockIndexCache();
@@ -7841,7 +7826,7 @@ function runLegacyResizeObserverWork(documentEpoch: number | undefined): void {
   queueMinimapRefreshAfterLayoutSettles();
   scheduleResizeReactions(documentEpoch);
   invalidateSourceLineAnchors({
-    reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget(),
+    reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
   });
   scheduleVirtualizedMeasuredHeightAdoption();
   window.requestAnimationFrame(() => {
@@ -7863,7 +7848,7 @@ function runLegacyDocumentFontsReadyWork(documentEpoch: number | undefined): voi
   }
   queueMinimapRefreshAfterLayoutSettles();
   invalidateSourceLineAnchors({
-    reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget(),
+    reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null,
   });
   scheduleVirtualizedMeasuredHeightAdoption();
 }
@@ -7976,6 +7961,7 @@ document.addEventListener("scroll", () => {
     if (classification.kind === "user-supersession") {
       cancelPendingVirtualizedMaintenance("user-supersession");
       clearVirtualizedNavigationSession();
+      clearVirtualizedProgrammaticNavigationPostSettleTarget();
       queuePreviewSourceLinePost();
     } else if (classification.kind === "unattributed-failure") {
       cancelPendingVirtualizedMaintenance("unattributed-failure");
@@ -7983,6 +7969,7 @@ document.addEventListener("scroll", () => {
         navigationSession.externalShiftCount++;
       }
       clearVirtualizedNavigationSession();
+      clearVirtualizedProgrammaticNavigationPostSettleTarget();
     }
   } else {
     const programmaticNavigationScroll = isVirtualizedProgrammaticNavigationInProgress();

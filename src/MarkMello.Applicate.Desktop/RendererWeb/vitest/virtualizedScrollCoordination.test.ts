@@ -362,8 +362,13 @@ describe("virtualized scroll coordinator", () => {
       calls.push(operation.operationEpoch);
     })).toBe(true);
 
-    expect(traceDetails(coordinatorTraces, "mm-virt-maintenance-retry"))
-      .toMatchObject([{ owner: "maintenance", requestSerial: 1 }]);
+    const retryDetails = traceDetails(coordinatorTraces, "mm-virt-maintenance-retry");
+    expect(retryDetails).toMatchObject([{
+      owner: "maintenance",
+      reason: "frame-transaction-occupied",
+      requestSerial: 1,
+    }]);
+    expect(retryDetails[0]).not.toHaveProperty("policy");
 
     expect(frames.deliverFrame()).toBe(true);
     expect(calls).toEqual([]);

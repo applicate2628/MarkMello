@@ -135,7 +135,6 @@ type VirtualizedMaintenanceReleaseAction = {
   operation: VirtualizedScrollOperation;
 };
 
-const VIRTUALIZED_MAINTENANCE_RETRY_POLICY = "maintenance-retry-on-occupied" as const;
 const VIRTUALIZED_MAINTENANCE_RETRY_REASON = "frame-transaction-occupied" as const;
 
 export function createVirtualizedScrollCoordinator(
@@ -583,7 +582,6 @@ export function createVirtualizedScrollCoordinator(
       attemptVirtualizedMaintenance(request);
     });
     postVirtualizedMaintenanceEvent("mm-virt-maintenance-retry", request, {
-      policy: VIRTUALIZED_MAINTENANCE_RETRY_POLICY,
       reason: VIRTUALIZED_MAINTENANCE_RETRY_REASON,
     });
   }

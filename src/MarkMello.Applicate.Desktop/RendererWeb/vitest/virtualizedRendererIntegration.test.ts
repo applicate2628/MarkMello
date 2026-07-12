@@ -273,7 +273,6 @@ describe("renderer virtualization wiring", () => {
     expect(cacheRestore).toContain("finishCachedScrollRestore");
     expect(cacheRestore).toContain("catch");
     expect(cacheRestore).toContain("mm-virt-cache-restore-terminal");
-    expect(coordinator).toContain("maintenance-retry-on-occupied");
     expect(coordinator).toContain("frame-transaction-occupied");
     expect(source).not.toContain("scheduleVirtualizedMaintenanceRetry");
     expect(source).not.toContain("VirtualizedMaintenanceRetryReasonProvider");
@@ -300,7 +299,6 @@ describe("renderer virtualization wiring", () => {
       "existing-release-after-write",
       "element-landing-release-after-write",
       "empty-commit-retain-operation",
-      "maintenance-retry-on-occupied",
     ]) {
       expect(coordinator).toContain(policy);
     }
