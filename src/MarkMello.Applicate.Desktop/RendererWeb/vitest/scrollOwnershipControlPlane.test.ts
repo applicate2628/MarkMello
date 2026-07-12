@@ -819,6 +819,11 @@ describe("scroll ownership control plane", () => {
 
     expect(result).toMatchObject({ status: "canceled", reason: "non-converged" });
     expect(plane.holds(lease)).toBe(false);
+    expect(await plane.waitForGeometrySettled(
+      lease.documentEpoch,
+      0,
+      lease.operationEpoch
+    )).toMatchObject({ status: "canceled", reason: "non-converged" });
     expect(events).toEqual([]);
     expect(traces.some(trace => trace.id === SCROLL_OWNERSHIP_TRACE_IDS.settleTimeout)).toBe(true);
   });

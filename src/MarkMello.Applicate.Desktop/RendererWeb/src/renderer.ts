@@ -2402,10 +2402,14 @@ async function waitForCurrentVirtualizedGeometry(
   afterEmission: number
 ): Promise<GeometrySettledWaitOutcome> {
   const plane = scrollOwnershipControlPlane;
-  if (plane === null || !operation.isCurrent()) {
+  if (plane === null) {
     return { reason: "programmatic-supersession", status: "canceled" };
   }
-  return plane.waitForGeometrySettled(operation.documentEpoch, afterEmission);
+  return plane.waitForGeometrySettled(
+    operation.documentEpoch,
+    afterEmission,
+    operation.operationEpoch
+  );
 }
 
 async function awaitConfirmedVirtualizedGeometry(
@@ -2417,12 +2421,16 @@ async function awaitConfirmedVirtualizedGeometry(
   | Extract<GeometrySettledWaitOutcome, { status: "canceled" }>
 > {
   const plane = scrollOwnershipControlPlane;
-  if (plane === null || !operation.isCurrent()) {
+  if (plane === null) {
     return { reason: "programmatic-supersession", status: "canceled" };
   }
   const documentEpoch = operation.documentEpoch;
   const afterEmission = nominal.emission;
-  const confirmation = await plane.waitForGeometrySettled(documentEpoch, afterEmission);
+  const confirmation = await plane.waitForGeometrySettled(
+    documentEpoch,
+    afterEmission,
+    operation.operationEpoch
+  );
   if (confirmation.status === "canceled") {
     return confirmation;
   }
@@ -4356,6 +4364,8 @@ function restoreCachedScrollPosition(): void {
       }
 
       let afterEmission = firstSettlement.emission;
+      let correctionPass = 0;
+      let previousResidualAbs = Number.POSITIVE_INFINITY;
       let settlement: CurrentGeometrySettlement | null = null;
       while (!completed) {
         const plane = scrollOwnershipControlPlane;
@@ -4388,7 +4398,19 @@ function restoreCachedScrollPosition(): void {
           ? scrollTopForReadingAnchor(model, anchor)
           : null;
         const expectedTarget = target ?? 0;
-        if (Math.abs(getDocumentScrollRoot().scrollTop - expectedTarget) > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
+        const residualAbs = Math.abs(getDocumentScrollRoot().scrollTop - expectedTarget);
+        if (residualAbs > VIRTUALIZED_NAVIGATION_CORRECTION_TOLERANCE_PX) {
+          if (
+            correctionPass >= VIRTUALIZED_NAVIGATION_CORRECTION_MAX_PASSES
+            || (
+              correctionPass > 0
+              && residualAbs
+                >= previousResidualAbs - VIRTUALIZED_NAVIGATION_CORRECTION_MIN_SHRINK_PX
+            )
+          ) {
+            finish("failed", "residual-non-converged", "non-converged");
+            return;
+          }
           const correctionReceipt = await scheduleWrite(
             expectedTarget,
             target === null ? "cache-cold-top" : "cache-restore-correction"
@@ -4401,6 +4423,8 @@ function restoreCachedScrollPosition(): void {
             finish("failed", correction.reason, "failed");
             return;
           }
+          correctionPass++;
+          previousResidualAbs = residualAbs;
           afterEmission = settlement.emission;
           settlement = null;
           continue;

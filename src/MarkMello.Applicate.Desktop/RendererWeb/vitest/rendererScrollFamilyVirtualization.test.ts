@@ -86,6 +86,7 @@ const makeReadingPreferences = (
 async function loadRendererHarness(options: {
   controllerFaults?: ControllerFaults;
   deliverRealizationEventsAfterFrame?: boolean;
+  deliveredFrameBudget?: number;
   fontsReady?: Promise<unknown>;
   intersectionObserverAvailable?: boolean;
   katex?: TestKatexApi;
@@ -96,6 +97,7 @@ async function loadRendererHarness(options: {
   simulateUnregisteredHeldOperation?: boolean;
   staleRenderedFindLeaseAcquisition?: boolean;
   suppressModelRenderedContentRaf?: boolean;
+  transformScrollWrite?: (value: number) => number;
   virtualization: boolean;
 }): Promise<RendererHarness> {
   vi.resetModules();
@@ -104,6 +106,7 @@ async function loadRendererHarness(options: {
   vi.doUnmock("../src/scrollOwnershipControlPlane");
   if (
     options.simulateUnregisteredHeldOperation === true
+    || options.deliveredFrameBudget !== undefined
     || options.staleRenderedFindLeaseAcquisition === true
   ) {
     vi.doMock("../src/scrollOwnershipControlPlane", async () => {
@@ -116,11 +119,15 @@ async function loadRendererHarness(options: {
           deps: Parameters<typeof actual.createScrollOwnershipControlPlane>[0]
         ) => {
           let injectedUnregisteredFrame = false;
-          const plane = actual.createScrollOwnershipControlPlane(
-            options.simulateUnregisteredHeldOperation === true
-              ? { ...deps, readHeldOperationMode: () => null }
-              : deps
-          );
+          const plane = actual.createScrollOwnershipControlPlane({
+            ...deps,
+            ...(options.deliveredFrameBudget === undefined
+              ? {}
+              : { deliveredFrameBudget: options.deliveredFrameBudget }),
+            ...(options.simulateUnregisteredHeldOperation === true
+              ? { readHeldOperationMode: () => null }
+              : {}),
+          });
           return {
             ...plane,
             captureDocumentEpoch: () => {
@@ -338,8 +345,9 @@ async function loadRendererHarness(options: {
     set: value => {
       const previous = scrollTopDescriptor?.get?.call(root) as number;
       scrollWrites.push(value);
-      scrollTopDescriptor?.set?.call(root, value);
-      if (value !== previous && !scrollEventQueued) {
+      const appliedValue = options.transformScrollWrite?.(value) ?? value;
+      scrollTopDescriptor?.set?.call(root, appliedValue);
+      if (appliedValue !== previous && !scrollEventQueued) {
         scrollEventQueued = true;
         queueMicrotask(() => {
           scrollEventQueued = false;
@@ -1654,6 +1662,9 @@ describe("renderer scroll-family virtualization integration", () => {
     await settleFakeTimedRenderer(harness);
     harness.load({ type: "load-document", html: secondHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 2 });
     await settleFakeTimedRenderer(harness);
+    harness.root.scrollTop = 0;
+    document.dispatchEvent(new Event("scroll"));
+    await settleFakeTimedRenderer(harness);
 
     harness.messages.length = 0;
     controllerFaults.ensureSectionRendered = ensureThrows;
@@ -1698,6 +1709,56 @@ describe("renderer scroll-family virtualization integration", () => {
       type: "post-ready-enhancements-complete",
       renderId: 4,
     }));
+  });
+
+  it("publishes live non-converged cache geometry and unblocks cached readiness", async () => {
+    vi.useFakeTimers();
+    let rejectRestoreWrites = false;
+    const harness = await loadRendererHarness({
+      deliveredFrameBudget: 12,
+      sectionCount: 120,
+      transformScrollWrite: value => rejectRestoreWrites ? 0 : value,
+      virtualization: true,
+    });
+    const firstHtml = buildHeadingDocument(120);
+    const secondHtml = buildHeadingDocument(8);
+
+    harness.load({ type: "load-document", html: firstHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 1 });
+    await settleFakeTimedRenderer(harness);
+    harness.root.scrollTop = 4_800;
+    document.dispatchEvent(new Event("scroll"));
+    await settleFakeTimedRenderer(harness);
+    harness.load({ type: "load-document", html: secondHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 2 });
+    await settleFakeTimedRenderer(harness);
+
+    harness.messages.length = 0;
+    rejectRestoreWrites = true;
+    harness.load({ type: "load-document", html: firstHtml, theme: "light", hasMermaid: false, hasHljs: false, renderId: 3 });
+    await settleFakeTimedRenderer(harness);
+
+    expect(latestPerfDetail<{
+      geometryStatus: string;
+      reason: string;
+      scrollTop: number;
+    }>(harness.messages, "mm-virt-cache-restore-ready-terminal")).toEqual(expect.objectContaining({
+      geometryStatus: "non-converged",
+      reason: "residual-non-converged",
+      scrollTop: harness.root.scrollTop,
+    }));
+    expect(terminalCacheRestoreDetails(harness.messages)).toEqual([
+      expect.objectContaining({
+        geometryStatus: "non-converged",
+        reason: "residual-non-converged",
+        status: "failed",
+      }),
+    ]);
+    expect(harness.messages).toContainEqual(expect.objectContaining({
+      type: "post-ready-enhancements-complete",
+      renderId: 3,
+    }));
+    const writesAtTerminal = harness.scrollWrites.length;
+    await harness.flushQueuedRafs();
+    expect(harness.scrollWrites).toHaveLength(writesAtTerminal);
   });
 
   it("posts all model headings to the TOC when virtualization has rendered only the first window", async () => {

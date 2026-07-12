@@ -303,6 +303,9 @@ describe("renderer document cache", () => {
     const restore = readCacheRestoreSource();
     expect(restore).toContain("non-converged");
     expect(restore).toContain('finish("failed", "non-converged", "non-converged")');
+    expect(restore).toContain("VIRTUALIZED_NAVIGATION_CORRECTION_MAX_PASSES");
+    expect(restore).toContain("VIRTUALIZED_NAVIGATION_CORRECTION_MIN_SHRINK_PX");
+    expect(restore).toContain('finish("failed", "residual-non-converged", "non-converged")');
     expect(restore).not.toContain('status: "settled", reason: "non-converged"');
   });
 

@@ -153,7 +153,8 @@ export type ScrollOwnershipControlPlane = {
   supersedeByUser: (source: string) => void;
   waitForGeometrySettled: (
     documentEpoch: number,
-    afterEmission?: number
+    afterEmission?: number,
+    operationEpoch?: number
   ) => Promise<GeometrySettledWaitOutcome>;
   write: (lease: ScrollLease, request: ScrollWriteRequest) => ScrollWriteReceipt;
 };
@@ -226,6 +227,12 @@ type GeometryWaiter = {
   resolve: (outcome: GeometrySettledWaitOutcome) => void;
 };
 
+type OperationWaitCancellation = {
+  documentEpoch: number;
+  operationEpoch: number;
+  reason: GeometryWaitCancellationReason;
+};
+
 type QuietCandidate = {
   documentEpoch: number;
   geometryEpoch: number;
@@ -254,6 +261,7 @@ export function createScrollOwnershipControlPlane(
   let geometryEpoch = 0;
   let lastEmittedPayload: GeometrySettledPayload | null = null;
   let lastEmittedRevision = 0;
+  let lastOperationWaitCancellation: OperationWaitCancellation | null = null;
   let nextGeometryTicketId = 1;
   let operationEpoch = 0;
   let pendingWrite: PendingWrite | null = null;
@@ -475,6 +483,11 @@ export function createScrollOwnershipControlPlane(
     }
     activeLease = null;
     activeSupersessionSource = null;
+    lastOperationWaitCancellation = {
+      documentEpoch: previous.documentEpoch,
+      operationEpoch: previous.operationEpoch,
+      reason: waiterReason,
+    };
     if (pendingWrite?.lease === previous) {
       rejectPendingWrite(reason);
     }
@@ -1117,7 +1130,8 @@ export function createScrollOwnershipControlPlane(
 
   const waitForGeometrySettled = (
     capturedDocumentEpoch: number,
-    afterEmission = 0
+    afterEmission = 0,
+    capturedOperationEpoch = activeLease?.operationEpoch ?? operationEpoch
   ): Promise<GeometrySettledWaitOutcome> => {
     if (disposed) {
       return Promise.resolve({ reason: "disposed", status: "canceled" });
@@ -1127,6 +1141,15 @@ export function createScrollOwnershipControlPlane(
     }
     if (!Number.isSafeInteger(afterEmission) || afterEmission < 0) {
       return Promise.resolve({ reason: "invalid-after-emission", status: "canceled" });
+    }
+    if (
+      lastOperationWaitCancellation?.documentEpoch === capturedDocumentEpoch
+      && lastOperationWaitCancellation.operationEpoch === capturedOperationEpoch
+    ) {
+      return Promise.resolve({
+        reason: lastOperationWaitCancellation.reason,
+        status: "canceled",
+      });
     }
     if (
       lastEmittedPayload !== null
@@ -1149,7 +1172,7 @@ export function createScrollOwnershipControlPlane(
     waiters.add({
       afterEmission,
       documentEpoch: capturedDocumentEpoch,
-      operationEpoch: activeLease?.operationEpoch ?? operationEpoch,
+      operationEpoch: capturedOperationEpoch,
       resolve,
     });
     ensureFrame();
@@ -1183,6 +1206,7 @@ export function createScrollOwnershipControlPlane(
     settleRevision++;
     lastEmittedRevision = settleRevision;
     lastEmittedPayload = null;
+    lastOperationWaitCancellation = null;
     watchdogDeliveredFrames = 0;
     watchdogDocumentEpoch = documentEpoch;
     watchdogOperationEpoch = operationEpoch;
