@@ -93,6 +93,7 @@ async function loadRendererHarness(options: {
   rectTopShiftByBlockIndex?: Record<number, number>;
   renderedSectionHeight?: number;
   sectionCount: number;
+  simulateUnregisteredHeldOperation?: boolean;
   staleRenderedFindLeaseAcquisition?: boolean;
   suppressModelRenderedContentRaf?: boolean;
   virtualization: boolean;
@@ -101,7 +102,10 @@ async function loadRendererHarness(options: {
   vi.doUnmock("../src/virtualizedDocumentWindow");
   vi.doUnmock("../src/mathRenderInit");
   vi.doUnmock("../src/scrollOwnershipControlPlane");
-  if (options.staleRenderedFindLeaseAcquisition === true) {
+  if (
+    options.simulateUnregisteredHeldOperation === true
+    || options.staleRenderedFindLeaseAcquisition === true
+  ) {
     vi.doMock("../src/scrollOwnershipControlPlane", async () => {
       const actual = await vi.importActual<typeof import("../src/scrollOwnershipControlPlane")>(
         "../src/scrollOwnershipControlPlane"
@@ -111,14 +115,39 @@ async function loadRendererHarness(options: {
         createScrollOwnershipControlPlane: (
           deps: Parameters<typeof actual.createScrollOwnershipControlPlane>[0]
         ) => {
-          const plane = actual.createScrollOwnershipControlPlane(deps);
+          let injectedUnregisteredFrame = false;
+          const plane = actual.createScrollOwnershipControlPlane(
+            options.simulateUnregisteredHeldOperation === true
+              ? { ...deps, readHeldOperationMode: () => null }
+              : deps
+          );
           return {
             ...plane,
             captureDocumentEpoch: () => {
               const captured = plane.captureDocumentEpoch();
-              return (new Error().stack ?? "").includes("acquireCurrentModelRenderedContentLease")
+              return options.staleRenderedFindLeaseAcquisition === true
+                && (new Error().stack ?? "").includes("acquireCurrentModelRenderedContentLease")
                 ? captured + 1
                 : captured;
+            },
+            write: (
+              lease: Parameters<typeof plane.write>[0],
+              request: Parameters<typeof plane.write>[1]
+            ) => {
+              if (
+                options.simulateUnregisteredHeldOperation === true
+                && !injectedUnregisteredFrame
+                && request.composition === "held-operation-target"
+              ) {
+                injectedUnregisteredFrame = true;
+                plane.scheduleFrameTransaction(lease, () => undefined);
+              }
+              return plane.write(
+                lease,
+                options.simulateUnregisteredHeldOperation === true
+                  ? { ...request, composition: undefined }
+                  : request
+              );
             },
           };
         },
@@ -1307,11 +1336,13 @@ function expectExactMaintenanceLifecycle(
 }
 
 async function loadMaintenanceLifecycleHarness(
-  controllerFaults: ControllerFaults = {}
+  controllerFaults: ControllerFaults = {},
+  simulateUnregisteredHeldOperation = false
 ): Promise<RendererHarness> {
   const harness = await loadRendererHarness({
     controllerFaults,
     sectionCount: 120,
+    simulateUnregisteredHeldOperation,
     virtualization: true,
   });
   document.dispatchEvent(new Event("DOMContentLoaded"));
@@ -3871,17 +3902,16 @@ describe("renderer scroll-family virtualization integration", () => {
       }
 
       if (owner === "minimap") {
-        await harness.flushRafsUntil(() => perfDetails(
-          harness.messages,
-          "mm-virt-maintenance-retry"
-        ).some(detail => detail["owner"] === "measured-height-adoption"));
-        expect(perfDetails(harness.messages, "mm-virt-maintenance-retry")).toContainEqual(
-          expect.objectContaining({ owner: "measured-height-adoption" })
-        );
+        expect(perfDetails(harness.messages, "mm-virt-maintenance-retry")
+          .filter(detail => detail["owner"] === "measured-height-adoption")).toEqual([]);
         minimap!.dispatchEvent(pointerEvent("pointerup", 588));
       }
       await harness.flushQueuedRafs();
 
+      if (owner === "minimap") {
+        expect(perfDetails(harness.messages, "mm-virt-maintenance-retry")
+          .filter(detail => detail["owner"] === "measured-height-adoption")).toEqual([]);
+      }
       expect(perfDetails(harness.messages, "mm-virt-window-height-adopted").length).toBeGreaterThan(0);
       expect(maintenanceTerminalDetails(harness.messages)).toContainEqual(expect.objectContaining({
         owner: "measured-height-adoption",
@@ -3973,7 +4003,7 @@ describe("renderer scroll-family virtualization integration", () => {
   });
 
   it("frame-transaction rejection is the only retry edge and retains the request id", async () => {
-    const harness = await loadMaintenanceLifecycleHarness();
+    const harness = await loadMaintenanceLifecycleHarness({}, true);
     const request = await startMeasuredMaintenanceInState(harness, "retry-pending");
     expect(maintenanceEventsForRequest(harness.messages, request)
       .filter(event => event.name === "mm-virt-maintenance-retry")).toEqual([
@@ -4023,7 +4053,7 @@ describe("renderer scroll-family virtualization integration", () => {
   });
 
   it("programmatic supersession cancels retry-pending maintenance without migration", async () => {
-    const harness = await loadMaintenanceLifecycleHarness();
+    const harness = await loadMaintenanceLifecycleHarness({}, true);
     const request = await startMeasuredMaintenanceInState(harness, "retry-pending");
     harness.load({ type: "scroll-to-block", blockIndex: 90 });
     expectExactMaintenanceLifecycle(harness.messages, request, {
@@ -4058,7 +4088,7 @@ describe("renderer scroll-family virtualization integration", () => {
   it.each(["joined", "owned", "retry-pending"] as const)(
     "document replacement terminalizes joined owned and retry-pending requests exactly once (%s)",
     async state => {
-      const harness = await loadMaintenanceLifecycleHarness();
+      const harness = await loadMaintenanceLifecycleHarness({}, state === "retry-pending");
       const request = await startMeasuredMaintenanceInState(harness, state);
       harness.load({
         type: "load-document",
@@ -4080,7 +4110,7 @@ describe("renderer scroll-family virtualization integration", () => {
   it.each(["joined", "owned", "retry-pending"] as const)(
     "pagehide terminalizes joined owned and retry-pending requests exactly once (%s)",
     async state => {
-      const harness = await loadMaintenanceLifecycleHarness();
+      const harness = await loadMaintenanceLifecycleHarness({}, state === "retry-pending");
       const request = await startMeasuredMaintenanceInState(harness, state);
       window.dispatchEvent(new Event("pagehide"));
       await harness.flushQueuedRafs();
@@ -4096,7 +4126,7 @@ describe("renderer scroll-family virtualization integration", () => {
   it.each(["owned", "retry-pending"] as const)(
     "stale frame and retry callbacks cannot execute or emit a second terminal (%s)",
     async state => {
-      const harness = await loadMaintenanceLifecycleHarness();
+      const harness = await loadMaintenanceLifecycleHarness({}, state === "retry-pending");
       const request = await startMeasuredMaintenanceInState(harness, state);
       harness.load({ type: "scroll-to-block", blockIndex: 90 });
       const eventsAtTerminal = maintenanceEventsForRequest(harness.messages, request);
@@ -4543,7 +4573,7 @@ describe("renderer scroll-family virtualization integration", () => {
   it.each(["user", "document", "teardown"] as const)(
     "terminalizes a retry-pending producer ticket exactly once on %s cancellation",
     async cancellation => {
-      const harness = await loadMaintenanceLifecycleHarness();
+      const harness = await loadMaintenanceLifecycleHarness({}, true);
       const request = await startMeasuredMaintenanceInState(harness, "retry-pending");
       const producerTicket = perfDetails<{
         source?: string;

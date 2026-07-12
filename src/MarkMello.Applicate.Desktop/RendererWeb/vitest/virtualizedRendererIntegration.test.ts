@@ -298,10 +298,11 @@ describe("renderer virtualization wiring", () => {
       "standalone-release-after-write",
       "existing-release-after-write",
       "element-landing-release-after-write",
-      "empty-commit-retain-operation",
     ]) {
       expect(coordinator).toContain(policy);
     }
+    expect(coordinator).toContain("requestHeldOperationTarget");
+    expect(source).not.toContain("empty-commit-retain-operation");
   });
 
   it("consumes initial-window reconciliation only inside an owning frame transaction", () => {

@@ -6183,12 +6183,7 @@ function requestMinimapScrollTarget(target: number, writer: string): boolean {
       latestTarget: target,
     }));
   }
-  operation.requestScrollTop(target, writer);
-  virtualizedScrollCoordinator.runFrameTransaction({
-    kind: "empty-commit",
-    operation,
-    policy: "empty-commit-retain-operation",
-  });
+  operation.requestHeldOperationTarget(target, writer);
   queuePreviewSourceLinePost();
   return true;
 }

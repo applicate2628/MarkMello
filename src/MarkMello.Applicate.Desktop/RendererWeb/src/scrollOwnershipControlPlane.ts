@@ -64,6 +64,7 @@ export type MaintenanceLeaseAcquisition = {
 };
 
 export type ScrollWriteRequest = {
+  composition?: "held-operation-target";
   target: number;
   writer: string;
 };
@@ -201,8 +202,9 @@ type DeferredAcquisition = {
 };
 
 type FrameTransaction = {
+  heldTargetWrite: PendingWrite | null;
   lease: ScrollLease;
-  work: () => void;
+  works: Array<() => void>;
 };
 
 type ExpectedEcho = {
@@ -395,19 +397,34 @@ export function createScrollOwnershipControlPlane(
     trace(id, details);
   };
 
+  const rejectWrite = (pending: PendingWrite, reason: ScrollWriteRejectionReason): void => {
+    pending.resolve({ reason, status: "rejected" });
+    traceWrite(
+      SCROLL_OWNERSHIP_TRACE_IDS.writeRejected,
+      pending.writer,
+      finiteOrNull(deps.root.scrollTop),
+      null,
+      pending.supersessionSource,
+      reason
+    );
+  };
+
   const rejectPendingWrite = (reason: ScrollWriteRejectionReason): void => {
     const pending = pendingWrite;
     pendingWrite = null;
     if (pending !== null) {
-      pending.resolve({ reason, status: "rejected" });
-      traceWrite(
-        SCROLL_OWNERSHIP_TRACE_IDS.writeRejected,
-        pending.writer,
-        finiteOrNull(deps.root.scrollTop),
-        null,
-        pending.supersessionSource,
-        reason
-      );
+      rejectWrite(pending, reason);
+    }
+  };
+
+  const rejectFrameTargetWrite = (
+    transaction: FrameTransaction,
+    reason: ScrollWriteRejectionReason
+  ): void => {
+    const target = transaction.heldTargetWrite;
+    transaction.heldTargetWrite = null;
+    if (target !== null) {
+      rejectWrite(target, reason);
     }
   };
 
@@ -460,6 +477,7 @@ export function createScrollOwnershipControlPlane(
       rejectPendingWrite(reason);
     }
     if (frameTransaction?.lease === previous) {
+      rejectFrameTargetWrite(frameTransaction, reason);
       frameTransaction = null;
     }
     if (expectedEcho?.lease === previous) {
@@ -697,9 +715,12 @@ export function createScrollOwnershipControlPlane(
     frameTransaction = null;
     if (transaction !== null && holds(transaction.lease)) {
       try {
-        transaction.work();
+        for (const work of transaction.works) {
+          work();
+        }
       } catch {
         trace(SCROLL_OWNERSHIP_TRACE_IDS.frameTransactionRejected, { reason: "frame-work-failed" });
+        rejectFrameTargetWrite(transaction, "programmatic-supersession");
         clearActiveOperation(
           "programmatic-supersession",
           "programmatic-supersession",
@@ -707,6 +728,11 @@ export function createScrollOwnershipControlPlane(
         );
       }
       if (holds(transaction.lease)) {
+        if (transaction.heldTargetWrite !== null) {
+          rejectPendingWrite("coalesced");
+          pendingWrite = transaction.heldTargetWrite;
+          transaction.heldTargetWrite = null;
+        }
         commitPendingWrite(transaction.lease);
       }
     }
@@ -773,6 +799,7 @@ export function createScrollOwnershipControlPlane(
       rejectPendingWrite("released");
     }
     if (frameTransaction?.lease === lease) {
+      rejectFrameTargetWrite(frameTransaction, "released");
       frameTransaction = null;
     }
     if (expectedEcho?.lease === lease) {
@@ -817,22 +844,49 @@ export function createScrollOwnershipControlPlane(
     if (maxScrollTop === null) {
       return rejected("non-finite-root-range");
     }
-    if (pendingWrite !== null) {
-      rejectPendingWrite("coalesced");
-    }
     if (expectedEcho?.lease === lease) {
       retireEcho(expectedEcho);
       expectedEcho = null;
     }
     let resolve!: (outcome: ScrollWriteOutcome) => void;
     const result = new Promise<ScrollWriteOutcome>(completed => { resolve = completed; });
-    pendingWrite = {
+    const writeRequest: PendingWrite = {
       requestedTarget: request.target,
       lease,
       resolve,
       supersessionSource: activeSupersessionSource,
       writer: request.writer,
     };
+    const heldMode = deps.readHeldOperationMode?.(lease) ?? null;
+    if (request.composition === "held-operation-target" && heldMode === "gesture") {
+      if (frameTransaction === null) {
+        frameTransaction = {
+          heldTargetWrite: writeRequest,
+          lease,
+          works: [],
+        };
+      } else if (frameTransaction.lease === lease) {
+        rejectFrameTargetWrite(frameTransaction, "coalesced");
+        frameTransaction.heldTargetWrite = writeRequest;
+      } else {
+        rejectWrite(writeRequest, "coalesced");
+        return { ...receiptBase, result };
+      }
+      invalidateSettleCandidate();
+      traceWrite(
+        SCROLL_OWNERSHIP_TRACE_IDS.writeRequest,
+        request.writer,
+        finiteOrNull(deps.root.scrollTop),
+        writeRequest.requestedTarget,
+        writeRequest.supersessionSource
+      );
+      ensureFrame();
+      return { ...receiptBase, result };
+    }
+    if (pendingWrite !== null) {
+      rejectPendingWrite("coalesced");
+    }
+    pendingWrite = writeRequest;
     invalidateSettleCandidate();
     traceWrite(
       SCROLL_OWNERSHIP_TRACE_IDS.writeRequest,
@@ -853,10 +907,19 @@ export function createScrollOwnershipControlPlane(
       return false;
     }
     if (frameTransaction !== null) {
+      if (
+        frameTransaction.lease === lease
+        && deps.readHeldOperationMode?.(lease) === "gesture"
+      ) {
+        frameTransaction.works.push(work);
+        invalidateSettleCandidate();
+        ensureFrame();
+        return true;
+      }
       trace(SCROLL_OWNERSHIP_TRACE_IDS.writeRejected, { reason: "frame-transaction-already-scheduled" });
       return false;
     }
-    frameTransaction = { lease, work };
+    frameTransaction = { heldTargetWrite: null, lease, works: [work] };
     invalidateSettleCandidate();
     ensureFrame();
     return true;

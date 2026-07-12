@@ -355,6 +355,48 @@ describe("scroll ownership control plane", () => {
     expect(plane.holds(host)).toBe(false);
   });
 
+  it("composes gesture maintenance and the latest held target into one final write", async () => {
+    let gestureLease: ScrollLease | null = null;
+    const { frames, plane, root } = createHarness(120, () => true, {
+      readHeldGestureEvidence: () => null,
+      readHeldOperationMode: lease => lease === gestureLease ? "gesture" : null,
+    });
+    gestureLease = acquired(plane.acquire("minimap-gesture", "supersede-as-user"));
+    const firstTarget = plane.write(gestureLease, {
+      composition: "held-operation-target",
+      target: 100,
+      writer: "minimap-drag",
+    });
+    const latestTarget = plane.write(gestureLease, {
+      composition: "held-operation-target",
+      target: 300,
+      writer: "minimap-drag",
+    });
+    let maintenanceReceipt: ScrollWriteReceipt | null = null;
+    const workOrder: string[] = [];
+
+    expect(plane.scheduleFrameTransaction(gestureLease, () => {
+      workOrder.push("window-maintenance");
+      maintenanceReceipt = plane.write(gestureLease!, {
+        target: 40,
+        writer: "scroll-window-reanchor",
+      });
+    })).toBe(true);
+    expect(plane.scheduleFrameTransaction(gestureLease, () => {
+      workOrder.push("adoption-maintenance");
+    })).toBe(true);
+    expect(frames.pending()).toBe(1);
+
+    frames.deliverFrame();
+
+    expect(workOrder).toEqual(["window-maintenance", "adoption-maintenance"]);
+    expect(root.writes).toEqual([300]);
+    expect(await firstTarget.result).toEqual({ reason: "coalesced", status: "rejected" });
+    expect(await latestTarget.result).toEqual({ status: "committed", value: 300 });
+    expect(maintenanceReceipt).not.toBeNull();
+    expect(await maintenanceReceipt!.result).toEqual({ reason: "coalesced", status: "rejected" });
+  });
+
   it("traces finite no-echo movement without a recent user-input witness", () => {
     const witnessWindows: number[] = [];
     const { plane, traces } = createHarness(120, withinMs => {

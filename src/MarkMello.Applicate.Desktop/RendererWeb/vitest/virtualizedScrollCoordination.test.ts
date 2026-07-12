@@ -99,11 +99,6 @@ type RunFrameTransactionRequest =
       policy: "element-landing-release-after-write";
       viewportOffsetY?: number;
       writer: string;
-    }>
-  | Readonly<{
-      kind: "empty-commit";
-      operation: VirtualizedScrollOperation;
-      policy: "empty-commit-retain-operation";
     }>;
 
 type RunFrameTransactionResult = Readonly<{
@@ -115,7 +110,7 @@ type RunFrameTransactionCoordinator = VirtualizedScrollCoordinator & {
   runFrameTransaction: (request: RunFrameTransactionRequest) => RunFrameTransactionResult;
 };
 
-function createHarness(): Harness {
+function createHarness(gestureOwner: string | null = null): Harness {
   const events: GeometrySettledPayload[] = [];
   const frames = new FakeFrameQueue();
   const root = new FakeScrollRoot();
@@ -125,6 +120,7 @@ function createHarness(): Harness {
     cancelFrame: frames.cancel,
     emitGeometrySettled: payload => events.push(payload),
     hasRecentUserInput: () => true,
+    readHeldOperationMode: lease => lease.owner === gestureOwner ? "gesture" : null,
     requestFrame: frames.request,
     root,
     trace: event => planeTraces.push(event),
@@ -736,19 +732,12 @@ describe("virtualized scroll coordinator", () => {
     expect(plane.holds(operation.lease)).toBe(false);
   });
 
-  it("commits an empty minimap frame without releasing the operation", async () => {
-    const { coordinator, frames, plane, root } = createHarness();
+  it("commits a held minimap target without a separate empty transaction", async () => {
+    const { coordinator, frames, plane, root } = createHarness("minimap");
     const operation = acquireOperation(coordinator, "minimap");
-    operation.requestScrollTop(240, "minimap-click-fallback");
+    operation.requestHeldOperationTarget(240, "minimap-click-fallback");
     const receipt = coordinator.getWriteReceipt(operation);
 
-    const result = runFrameCoordinator(coordinator).runFrameTransaction({
-      kind: "empty-commit",
-      operation,
-      policy: "empty-commit-retain-operation",
-    });
-
-    expect(result).toEqual({ operation, scheduled: true });
     expect(frames.deliverFrame()).toBe(true);
 
     expect(root.writes).toEqual([240]);
@@ -759,23 +748,19 @@ describe("virtualized scroll coordinator", () => {
     expect(coordinator.releaseOperation(operation)).toBe(true);
   });
 
-  it("retains a minimap operation when the empty commit frame is rejected", () => {
-    const { coordinator, frames, plane } = createHarness();
+  it("composes a held minimap target into an occupied gesture transaction", async () => {
+    const { coordinator, frames, plane, root } = createHarness("minimap");
     const operation = acquireOperation(coordinator, "minimap");
     const calls: string[] = [];
 
     expect(operation.scheduleFrameTransaction(() => calls.push("blocker"))).toBe(true);
-
-    const result = runFrameCoordinator(coordinator).runFrameTransaction({
-      kind: "empty-commit",
-      operation,
-      policy: "empty-commit-retain-operation",
-    });
-
-    expect(result).toEqual({ operation, scheduled: false });
+    operation.requestHeldOperationTarget(320, "minimap-drag");
+    const receipt = coordinator.getWriteReceipt(operation);
     expect(plane.holds(operation.lease)).toBe(true);
     expect(frames.deliverFrame()).toBe(true);
     expect(calls).toEqual(["blocker"]);
+    expect(root.writes).toEqual([320]);
+    expect(await receipt!.result).toEqual({ status: "committed", value: 320 });
     expect(coordinator.releaseOperation(operation)).toBe(true);
   });
 });

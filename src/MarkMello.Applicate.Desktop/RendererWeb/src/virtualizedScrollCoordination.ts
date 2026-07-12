@@ -8,6 +8,7 @@ import type {
 
 export type VirtualizedScrollOperation = WindowTargetOperation & {
   lease: ScrollLease;
+  requestHeldOperationTarget: (target: number, writer: string) => void;
 };
 
 export type VirtualizedMaintenanceTerminal = Readonly<{
@@ -56,8 +57,7 @@ export type VirtualizedScrollCoordinator = Readonly<{
 export type VirtualizedFrameTransactionPolicy =
   | "standalone-release-after-write"
   | "existing-release-after-write"
-  | "element-landing-release-after-write"
-  | "empty-commit-retain-operation";
+  | "element-landing-release-after-write";
 
 export type VirtualizedFrameTransactionRequest =
   | Readonly<{
@@ -80,11 +80,6 @@ export type VirtualizedFrameTransactionRequest =
       policy: "element-landing-release-after-write";
       viewportOffsetY?: number;
       writer: string;
-    }>
-  | Readonly<{
-      kind: "empty-commit";
-      operation: VirtualizedScrollOperation;
-      policy: "empty-commit-retain-operation";
     }>;
 
 export type VirtualizedFrameTransactionResult = Readonly<{
@@ -163,23 +158,34 @@ export function createVirtualizedScrollCoordinator(
     if (plane === null) {
       return null;
     }
+    const requestScroll = (
+      target: number,
+      writer: string,
+      composition?: "held-operation-target"
+    ): void => {
+      if (!plane.isCurrentDocumentEpoch(lease.documentEpoch) || !plane.holds(lease)) {
+        return;
+      }
+      const receipt = plane.write(lease, {
+        ...(composition === undefined ? {} : { composition }),
+        target,
+        writer,
+      });
+      virtualizedWriteReceipts.set(lease.operationEpoch, receipt);
+      void receipt.result.then(() => {
+        if (virtualizedWriteReceipts.get(lease.operationEpoch) === receipt) {
+          virtualizedWriteReceipts.delete(lease.operationEpoch);
+        }
+      });
+    };
     return {
       documentEpoch: lease.documentEpoch,
       operationEpoch: lease.operationEpoch,
       lease,
       isCurrent: () => plane.isCurrentDocumentEpoch(lease.documentEpoch) && plane.holds(lease),
-      requestScrollTop: (target, writer) => {
-        if (!plane.isCurrentDocumentEpoch(lease.documentEpoch) || !plane.holds(lease)) {
-          return;
-        }
-        const receipt = plane.write(lease, { target, writer });
-        virtualizedWriteReceipts.set(lease.operationEpoch, receipt);
-        void receipt.result.then(() => {
-          if (virtualizedWriteReceipts.get(lease.operationEpoch) === receipt) {
-            virtualizedWriteReceipts.delete(lease.operationEpoch);
-          }
-        });
-      },
+      requestHeldOperationTarget: (target, writer) =>
+        requestScroll(target, writer, "held-operation-target"),
+      requestScrollTop: (target, writer) => requestScroll(target, writer),
       scheduleFrameTransaction: work => plane.scheduleFrameTransaction(lease, work),
     };
   }
@@ -295,13 +301,6 @@ export function createVirtualizedScrollCoordinator(
     });
   }
 
-  function runEmptyCommitRetainOperation(
-    request: Extract<VirtualizedFrameTransactionRequest, { kind: "empty-commit" }>
-  ): VirtualizedFrameTransactionResult {
-    const scheduled = request.operation.scheduleFrameTransaction(() => undefined);
-    return { operation: request.operation, scheduled };
-  }
-
   function runFrameTransaction(
     request: VirtualizedFrameTransactionRequest
   ): VirtualizedFrameTransactionResult {
@@ -312,8 +311,6 @@ export function createVirtualizedScrollCoordinator(
         return runExistingReleaseAfterWrite(request);
       case "element-landing":
         return runElementLandingReleaseAfterWrite(request);
-      case "empty-commit":
-        return runEmptyCommitRetainOperation(request);
     }
   }
 
