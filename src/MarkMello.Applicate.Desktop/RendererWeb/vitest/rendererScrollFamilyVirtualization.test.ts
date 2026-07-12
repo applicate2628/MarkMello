@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createH3DiagnosticMonitor } from "./h3DiagnosticMonitor";
 
@@ -1417,6 +1418,17 @@ afterEach(() => {
 });
 
 describe("renderer scroll-family virtualization integration", () => {
+  it("folds virtualized navigation ownership into one lease-backed session", () => {
+    const rendererSource = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+
+    expect(rendererSource).toContain("let navigationSessionRef: VirtualizedNavigationSession | null = null;");
+    expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationInProgress\b/);
+    expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationGeneration\b/);
+    expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationExternalShiftCount\b/);
+    expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationPostSettleTarget\b/);
+    expect(rendererSource).not.toMatch(/\bvirtualizedProgrammaticNavigationOperation\b/);
+  });
+
   it("emits geometry settled after a non-convergent realization watch is quarantined", async () => {
     const sectionCount = 120;
     const harness = await loadRendererHarness({
@@ -1958,6 +1970,153 @@ describe("renderer scroll-family virtualization integration", () => {
 
     expect(await land(false)).toBeCloseTo(0, 0);
     expect(Math.abs(await land(true))).toBeGreaterThan(100);
+  });
+
+  it("drops a stale continuation after a newer virtualized navigation supersedes its lease", async () => {
+    const { flushAnimationFrameAt, flushQueuedRafs, load, messages } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    messages.length = 0;
+
+    load({ type: "scroll-to-heading", id: "heading-95" });
+    const smoothWrites = () => perfDetails<{ operationEpoch: number; writer?: string }>(
+      messages,
+      "mm-virt-scroll-write-committed"
+    ).filter(detail => detail.writer === "navigation-smooth");
+    for (const timestamp of [0, 16, 32, 48]) {
+      await flushAnimationFrameAt(timestamp);
+      if (smoothWrites().length > 0) {
+        break;
+      }
+    }
+
+    const headingOperation = perfDetails<{ operationEpoch: number; owner?: string }>(
+      messages,
+      "mm-virt-scroll-lease-acquired"
+    ).find(detail => detail.owner === "heading-navigation");
+    expect(headingOperation).toBeDefined();
+    const staleWriteCount = smoothWrites()
+      .filter(detail => detail.operationEpoch === headingOperation!.operationEpoch).length;
+    expect(staleWriteCount).toBeGreaterThan(0);
+
+    load({ type: "scroll-to-block", blockIndex: 20 });
+    await flushQueuedRafs();
+
+    expect(smoothWrites().filter(detail => detail.operationEpoch === headingOperation!.operationEpoch))
+      .toHaveLength(staleWriteCount);
+    expect(perfDetails<{ owner?: string; supersessionSource?: string }>(
+      messages,
+      "mm-virt-scroll-lease-superseded"
+    )).toContainEqual(expect.objectContaining({
+      owner: "heading-navigation",
+      supersessionSource: "block-navigation",
+    }));
+    expect(document.querySelector<HTMLElement>('[data-mm-block-index="20"]')!
+      .getBoundingClientRect().top).toBeCloseTo(0, 0);
+  });
+
+  it("clears a user-superseded navigation once without leaking its post-settle target", async () => {
+    const { flushAnimationFrameAt, flushQueuedRafs, load, messages, root, triggerResize } =
+      await loadRendererHarness({
+        sectionCount: 120,
+        virtualization: true,
+      });
+    load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    messages.length = 0;
+
+    load({ type: "scroll-to-heading", id: "heading-95" });
+    const smoothWriteCount = () => perfDetails<{ writer?: string }>(
+      messages,
+      "mm-virt-scroll-write-committed"
+    ).filter(detail => detail.writer === "navigation-smooth").length;
+    for (const timestamp of [0, 16, 32, 48]) {
+      await flushAnimationFrameAt(timestamp);
+      if (smoothWriteCount() > 0) {
+        break;
+      }
+    }
+
+    root.scrollTop += 333;
+    document.dispatchEvent(new Event("scroll"));
+    await Promise.resolve();
+    const smoothWritesAfterSupersession = smoothWriteCount();
+
+    load({ type: "scroll-to-block", blockIndex: 20 });
+    await flushQueuedRafs();
+    triggerResize();
+    await flushQueuedRafs();
+
+    expect(perfDetails<{ owner?: string; supersessionSource?: string }>(
+      messages,
+      "mm-virt-scroll-lease-superseded"
+    ).filter(detail =>
+      detail.owner === "heading-navigation"
+      && detail.supersessionSource === "native-scroll")).toHaveLength(1);
+    expect(smoothWriteCount()).toBe(smoothWritesAfterSupersession);
+    expect(document.querySelector<HTMLElement>('[data-mm-block-index="20"]')!
+      .getBoundingClientRect().top).toBeCloseTo(0, 0);
+    expect(document.getElementById("heading-95")?.getBoundingClientRect().top ?? 999)
+      .not.toBeCloseTo(0, 0);
+  });
+
+  it("completes post-settle residual correction on the navigation session lease", async () => {
+    const { flushQueuedRafs, load, messages, triggerResize } = await loadRendererHarness({
+      rectTopShiftByBlockIndex: { 90: -64 },
+      renderedSectionHeight: SECTION_PITCH,
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildSourceLineDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    messages.length = 0;
+
+    load({ type: "scroll-to-block", blockIndex: 90 });
+    triggerResize();
+    await flushQueuedRafs();
+
+    const blockOperation = perfDetails<{ operationEpoch: number; owner?: string }>(
+      messages,
+      "mm-virt-scroll-lease-acquired"
+    ).find(detail => detail.owner === "block-navigation");
+    expect(blockOperation).toBeDefined();
+    const navigationWrites = perfDetails<{ operationEpoch: number; writer?: string }>(
+      messages,
+      "mm-virt-scroll-write-committed"
+    ).filter(detail => detail.writer === "navigation-initial" || detail.writer === "navigation-residual");
+    expect(navigationWrites.map(detail => detail.writer))
+      .toEqual(expect.arrayContaining(["navigation-initial", "navigation-residual"]));
+    expect(navigationWrites.every(detail => detail.operationEpoch === blockOperation!.operationEpoch)).toBe(true);
+    expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(1);
+  });
+
+  it("classifies an active navigation write as a self echo without superseding its session", async () => {
+    const { flushQueuedRafs, load, messages } = await loadRendererHarness({
+      sectionCount: 120,
+      virtualization: true,
+    });
+    load({ type: "load-document", html: buildHeadingDocument(120), hasMermaid: false, hasHljs: false });
+    await flushQueuedRafs();
+    messages.length = 0;
+
+    load({ type: "scroll-to-block", blockIndex: 90 });
+    await flushQueuedRafs();
+
+    expect(perfDetails<{ writer?: string }>(messages, "mm-virt-scroll-write-committed"))
+      .toContainEqual(expect.objectContaining({ writer: "navigation-initial" }));
+    expect(perfDetails<{ owner?: string; supersessionSource?: string }>(
+      messages,
+      "mm-virt-scroll-lease-superseded"
+    ).filter(detail =>
+      detail.owner === "block-navigation"
+      && (
+        detail.supersessionSource === "native-scroll"
+        || detail.supersessionSource === "unattributed-external-movement"
+      ))).toEqual([]);
+    expect(perfDetails(messages, "mm-virt-navigation-settled")).toHaveLength(1);
   });
 
   it("corrects a deep block landing after estimated and rendered heights diverge", async () => {

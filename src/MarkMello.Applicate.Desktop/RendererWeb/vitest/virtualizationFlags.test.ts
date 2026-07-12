@@ -161,7 +161,13 @@ describe("renderer virtualization flags", () => {
     const normalizedMatches = (source: string, patterns: readonly RegExp[]) => patterns.map(pattern => {
       const match = source.match(pattern)?.[0];
       expect(match).toBeDefined();
-      return match!.replace(/\s+/g, " ").trim();
+      return match!
+        .replace(/\s+/g, " ")
+        .replace(
+          /reassertPendingTarget: (?:virtualizedProgrammaticNavigationPostSettleTarget === null|!hasCurrentVirtualizedNavigationPostSettleTarget\(\))/,
+          "reassertPendingTarget: <no-current-navigation-target>"
+        )
+        .trim();
     });
     const resizeStatements = [
       /queueMinimapRefreshAfterLayoutSettles\(\);/,
@@ -180,6 +186,8 @@ describe("renderer virtualization flags", () => {
       .toEqual(normalizedMatches(baselineShared, resizeStatements));
     expect(normalizedMatches(currentFontsOwner, fontStatements))
       .toEqual(normalizedMatches(baselineShared, fontStatements));
+    expect(currentResizeOwner).toContain("reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget()");
+    expect(currentFontsOwner).toContain("reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget()");
     expect(currentShared).toContain("if (!virtualizationEnabled) {\n        runLegacyResizeObserverWork(documentEpoch);");
     expect(currentShared).toContain("if (!virtualizationEnabled) {\n      runLegacyDocumentFontsReadyWork(fontsDocumentEpoch);");
     expect(current.match(/virtualizationEnabled \? \{ manageVirtualizedProxyLifecycle: true \} : undefined/g))

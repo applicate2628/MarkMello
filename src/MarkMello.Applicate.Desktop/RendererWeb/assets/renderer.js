@@ -6662,11 +6662,7 @@
   var virtualizedCalibrationGeometryTicket = null;
   var virtualizedWindowMountGeneration = 0;
   var virtualizedWindowFontGeometryTicket = null;
-  var virtualizedProgrammaticNavigationInProgress = false;
-  var virtualizedProgrammaticNavigationGeneration = 0;
-  var virtualizedProgrammaticNavigationExternalShiftCount = 0;
-  var virtualizedProgrammaticNavigationPostSettleTarget = null;
-  var virtualizedProgrammaticNavigationOperation = null;
+  var navigationSessionRef = null;
   var virtualizedScrollControlFrameTimestamp = null;
   var minimapScrollOperation = null;
   var cachedScrollRestoreCompletion = null;
@@ -8066,7 +8062,11 @@
     return virtualizedScrollCoordinator.consumePendingInitialWindow(operation);
   }
   function acquireVirtualizedScrollOperation(owner, policy) {
-    return virtualizedScrollCoordinator.acquireOperation(owner, policy);
+    const operation = virtualizedScrollCoordinator.acquireOperation(owner, policy);
+    if (navigationSessionRef !== null && !navigationSessionRef.operation.isCurrent()) {
+      clearVirtualizedNavigationSession();
+    }
+    return operation;
   }
   function releaseVirtualizedScrollOperationAfterWrite(operation) {
     virtualizedScrollCoordinator.releaseOperationAfterWrite(operation);
@@ -8107,7 +8107,7 @@
     };
   }
   function isVirtualizedProgrammaticNavigationInProgress() {
-    return virtualizationEnabled && virtualizedProgrammaticNavigationInProgress && virtualizedProgrammaticNavigationOperation?.isCurrent() === true;
+    return navigationSessionRef?.operation.isCurrent() === true;
   }
   function writeVirtualizedProgrammaticNavigationScrollTop(operation, scrollTop, writer) {
     operation.requestScrollTop(Math.max(0, scrollTop), writer);
@@ -8123,7 +8123,8 @@
     }
     let startTimestamp = null;
     const advance = () => input.operation.scheduleFrameTransaction(() => {
-      if (!input.operation.isCurrent() || input.generation !== virtualizedProgrammaticNavigationGeneration) {
+      if (!input.operation.isCurrent()) {
+        clearVirtualizedNavigationSession(input.operation);
         return;
       }
       const timestamp = virtualizedScrollControlFrameTimestamp;
@@ -8150,7 +8151,6 @@
       }
       void settleVirtualizedProgrammaticNavigationTarget(
         { descriptor: input.descriptor, viewportOffsetY: input.viewportOffsetY },
-        input.generation,
         input.operation
       );
     });
@@ -8326,21 +8326,26 @@
       endVirtualizedGeometryWork(ticket);
     }
   }
-  function releaseVirtualizedProgrammaticNavigationOperation(operation, clearPostSettleTarget = false) {
-    virtualizedProgrammaticNavigationInProgress = false;
-    virtualizedProgrammaticNavigationOperation = null;
-    if (clearPostSettleTarget) {
-      virtualizedProgrammaticNavigationPostSettleTarget = null;
+  function releaseVirtualizedProgrammaticNavigationOperation(operation) {
+    if (!operation.isCurrent()) {
+      clearVirtualizedNavigationSession(operation);
+      return;
     }
+    clearVirtualizedNavigationSession();
     releaseVirtualizedScrollOperation(operation);
   }
-  function finishVirtualizedProgrammaticNavigationCorrection(generation, operation, input) {
-    if (generation !== virtualizedProgrammaticNavigationGeneration || !operation.isCurrent()) {
+  function finishVirtualizedProgrammaticNavigationCorrection(operation, input) {
+    if (!operation.isCurrent()) {
+      clearVirtualizedNavigationSession(operation);
+      return;
+    }
+    const session = navigationSessionRef;
+    if (session === null) {
       return;
     }
     postPerfMark("mm-virt-navigation-settled", {
       descriptorKind: input.descriptor.kind,
-      externalShiftCount: virtualizedProgrammaticNavigationExternalShiftCount,
+      externalShiftCount: session.externalShiftCount,
       passCount: input.passCount,
       residual: input.residual
     });
@@ -8348,15 +8353,15 @@
     postScroll();
     releaseVirtualizedProgrammaticNavigationOperation(operation);
   }
-  function scheduleVirtualizedProgrammaticNavigationFrame(input, generation, operation, settlement, pass, previousResidualAbs = Number.POSITIVE_INFINITY) {
+  function scheduleVirtualizedProgrammaticNavigationFrame(input, operation, settlement, pass, previousResidualAbs = Number.POSITIVE_INFINITY) {
     return new Promise((resolve) => {
       const attempt = () => {
-        if (!operation.isCurrent() || generation !== virtualizedProgrammaticNavigationGeneration) {
+        if (!operation.isCurrent()) {
           resolve({ kind: "canceled" });
           return;
         }
         const scheduled = operation.scheduleFrameTransaction(() => {
-          if (!operation.isCurrent() || generation !== virtualizedProgrammaticNavigationGeneration) {
+          if (!operation.isCurrent()) {
             resolve({ kind: "canceled" });
             return;
           }
@@ -8421,32 +8426,33 @@
       attempt();
     });
   }
-  async function settleVirtualizedProgrammaticNavigationTarget(input, generation, operation) {
+  async function settleVirtualizedProgrammaticNavigationTarget(input, operation) {
     let afterEmission = 0;
     let pass = 0;
     let previousResidualAbs = Number.POSITIVE_INFINITY;
     let settlement = null;
-    while (generation === virtualizedProgrammaticNavigationGeneration && operation.isCurrent()) {
+    while (operation.isCurrent()) {
       if (settlement === null) {
         const outcome = await waitForCurrentVirtualizedGeometry(operation, afterEmission);
         if (outcome.status === "canceled") {
+          clearVirtualizedNavigationSession(operation);
           return;
         }
         settlement = outcome;
       }
       const frame = await scheduleVirtualizedProgrammaticNavigationFrame(
         input,
-        generation,
         operation,
         settlement,
         pass,
         previousResidualAbs
       );
       if (frame.kind === "canceled") {
+        clearVirtualizedNavigationSession(operation);
         return;
       }
       if (frame.kind === "missing-target") {
-        releaseVirtualizedProgrammaticNavigationOperation(operation, true);
+        releaseVirtualizedProgrammaticNavigationOperation(operation);
         return;
       }
       if (frame.kind === "geometry-changed") {
@@ -8462,12 +8468,13 @@
           reason: "residual-non-converged",
           residual: frame.residual
         });
-        releaseVirtualizedProgrammaticNavigationOperation(operation, true);
+        releaseVirtualizedProgrammaticNavigationOperation(operation);
         return;
       }
       if (frame.kind === "written") {
         const write = await frame.receipt.result;
         if (write.status !== "committed") {
+          clearVirtualizedNavigationSession(operation);
           return;
         }
         previousResidualAbs = Math.abs(frame.residual);
@@ -8478,6 +8485,7 @@
       }
       const confirmation = await awaitConfirmedVirtualizedGeometry(operation, settlement);
       if (confirmation.status === "canceled") {
+        clearVirtualizedNavigationSession(operation);
         return;
       }
       if (confirmation.status === "changed") {
@@ -8485,7 +8493,7 @@
         continue;
       }
       const plane = scrollOwnershipControlPlane;
-      if (!operation.isCurrent() || generation !== virtualizedProgrammaticNavigationGeneration) {
+      if (!operation.isCurrent()) {
         return;
       }
       if (plane?.holds(operation.lease, confirmation.confirmation.payload.geometryEpoch) !== true) {
@@ -8493,13 +8501,14 @@
         settlement = null;
         continue;
       }
-      finishVirtualizedProgrammaticNavigationCorrection(generation, operation, {
+      finishVirtualizedProgrammaticNavigationCorrection(operation, {
         descriptor: input.descriptor,
         passCount: pass,
         residual: frame.residual
       });
       return;
     }
+    clearVirtualizedNavigationSession(operation);
   }
   function landVirtualizedProgrammaticNavigation(input) {
     startVirtualizedProgrammaticNavigationSettle({
@@ -8555,39 +8564,50 @@
     });
     return true;
   }
-  function rememberVirtualizedProgrammaticNavigationPostSettleTarget(input) {
-    virtualizedProgrammaticNavigationPostSettleTarget = input;
+  function readCurrentVirtualizedNavigationSession() {
+    const session = navigationSessionRef;
+    return session?.operation.isCurrent() === true ? session : null;
+  }
+  function readCurrentVirtualizedNavigationPostSettleTarget() {
+    return readCurrentVirtualizedNavigationSession()?.postSettleTarget ?? null;
+  }
+  function hasCurrentVirtualizedNavigationPostSettleTarget() {
+    return readCurrentVirtualizedNavigationPostSettleTarget() !== null;
+  }
+  function clearVirtualizedNavigationSession(operation) {
+    if (operation === void 0 || navigationSessionRef?.operation === operation) {
+      navigationSessionRef = null;
+    }
   }
   function clearVirtualizedProgrammaticNavigationPostSettleTarget() {
-    virtualizedProgrammaticNavigationPostSettleTarget = null;
-  }
-  function cancelVirtualizedProgrammaticNavigationState() {
-    virtualizedProgrammaticNavigationInProgress = false;
-    virtualizedProgrammaticNavigationGeneration++;
-    virtualizedProgrammaticNavigationOperation = null;
-    virtualizedProgrammaticNavigationPostSettleTarget = null;
+    clearVirtualizedNavigationSession();
   }
   function alignVirtualizedProgrammaticNavigationPostSettleTarget() {
-    const target = virtualizedProgrammaticNavigationPostSettleTarget;
-    const operation = virtualizedProgrammaticNavigationOperation;
-    if (target !== null && operation !== null && operation.isCurrent()) {
-      correctVirtualizedProgrammaticNavigationResidual({ ...target, operation });
+    const session = readCurrentVirtualizedNavigationSession();
+    const target = session?.postSettleTarget ?? null;
+    if (session !== null && target !== null) {
+      correctVirtualizedProgrammaticNavigationResidual({ ...target, operation: session.operation });
     }
   }
   function getVirtualizedProgrammaticNavigationPostSettleSectionIndex() {
-    const target = virtualizedProgrammaticNavigationPostSettleTarget;
+    const target = readCurrentVirtualizedNavigationPostSettleTarget();
     return target === null ? null : resolveVirtualizedNavigationTargetSectionIndex(target.descriptor);
   }
   function startVirtualizedProgrammaticNavigationSettle(input) {
-    if (!virtualizationEnabled || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
+    if (!virtualizationEnabled || !input.operation.isCurrent() || virtualizedDocumentWindowModel === null || virtualizedDocumentWindowController === null) {
       return;
     }
-    const generation = ++virtualizedProgrammaticNavigationGeneration;
-    virtualizedProgrammaticNavigationInProgress = true;
-    virtualizedProgrammaticNavigationOperation = input.operation;
-    virtualizedProgrammaticNavigationExternalShiftCount = 0;
+    const anchor = {
+      descriptor: input.descriptor,
+      viewportOffsetY: input.viewportOffsetY
+    };
+    navigationSessionRef = {
+      anchor,
+      externalShiftCount: 0,
+      operation: input.operation,
+      postSettleTarget: anchor
+    };
     cancelVirtualizedCalibration();
-    rememberVirtualizedProgrammaticNavigationPostSettleTarget(input);
     if (input.behavior === "smooth" && input.initialContext !== void 0) {
       const destinationScrollTop = computeVirtualizedProgrammaticNavigationScrollTop(
         input.initialContext,
@@ -8597,7 +8617,6 @@
       const transitionScheduled = scheduleVirtualizedProgrammaticNavigationSmoothTransition({
         descriptor: input.descriptor,
         destinationScrollTop,
-        generation,
         operation: input.operation,
         startScrollTop: getDocumentScrollRoot().scrollTop,
         viewportOffsetY: input.viewportOffsetY
@@ -8618,7 +8637,7 @@
         input.operation
       );
     }
-    void settleVirtualizedProgrammaticNavigationTarget(input, generation, input.operation);
+    void settleVirtualizedProgrammaticNavigationTarget(input, input.operation);
   }
   function cancelVirtualizedCalibration() {
     if (virtualizedCalibrationHandle !== null) {
@@ -8652,11 +8671,7 @@
     virtualizedWindowFontGeometryTicket = null;
     virtualizedWindowMountGeneration++;
     virtualizedMeasureFrameRequested = false;
-    virtualizedProgrammaticNavigationInProgress = false;
-    virtualizedProgrammaticNavigationGeneration++;
-    virtualizedProgrammaticNavigationOperation = null;
-    virtualizedProgrammaticNavigationExternalShiftCount = 0;
-    virtualizedProgrammaticNavigationPostSettleTarget = null;
+    clearVirtualizedNavigationSession();
     if (resetCalibrator) {
       virtualizedIntrinsicCalibrator.reset();
     }
@@ -8681,7 +8696,7 @@
         return;
       }
       invalidateSourceLineAnchors({
-        reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
+        reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget()
       });
       refreshVirtualizedFindHighlights();
       scheduleVirtualizedMeasuredHeightAdoption();
@@ -8851,7 +8866,7 @@
       if (controller.updateWindowForScroll({ ...options, operation })) {
         invalidateTopVisibleBlockIndexCache();
         invalidateSourceLineAnchors({
-          reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
+          reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget()
         });
         refreshVirtualizedFindHighlights();
         scheduleVirtualizedMeasuredHeightAdoption();
@@ -8917,7 +8932,8 @@
       if (controller !== virtualizedDocumentWindowController) {
         return;
       }
-      const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
+      const navigationSession = readCurrentVirtualizedNavigationSession();
+      const postSettleTarget = navigationSession?.postSettleTarget ?? null;
       const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
       const result = controller.adoptRenderedHeights(
         preserveSectionIndex === null ? { operation } : {
@@ -8932,10 +8948,10 @@
       applyVirtualizedRenderedHeightAdoptionEffects(result, {
         alignPostSettleTarget: postSettleTarget === null
       });
-      if (postSettleTarget !== null && operation.isCurrent()) {
+      if (postSettleTarget !== null && navigationSession !== null) {
         correctVirtualizedProgrammaticNavigationResidual({
           ...postSettleTarget,
-          operation
+          operation: navigationSession.operation
         });
       }
     }, closeTicket);
@@ -8980,8 +8996,9 @@
       if (!operation.isCurrent() || operation.documentEpoch !== documentEpoch || model !== virtualizedDocumentWindowModel || controller !== virtualizedDocumentWindowController) {
         return;
       }
+      const navigationSession = readCurrentVirtualizedNavigationSession();
       const preserveSectionIndex = getVirtualizedProgrammaticNavigationPostSettleSectionIndex();
-      const postSettleTarget = virtualizedProgrammaticNavigationPostSettleTarget;
+      const postSettleTarget = navigationSession?.postSettleTarget ?? null;
       const anchor = preserveSectionIndex === null ? captureCurrentVirtualizedReadingAnchor() : null;
       const recordedCount = model.recordIntrinsicSizeCalibrationSamples(virtualizedIntrinsicCalibrator);
       if (recordedCount === 0) {
@@ -8996,10 +9013,10 @@
       controller.updateWindowForScroll({ desiredScrollTop: target, force: true });
       if (postSettleTarget === null) {
         operation.requestScrollTop(target, "calibration");
-      } else {
+      } else if (navigationSession !== null) {
         correctVirtualizedProgrammaticNavigationResidual({
           ...postSettleTarget,
-          operation
+          operation: navigationSession.operation
         });
       }
       invalidateTopVisibleBlockIndexCache();
@@ -12215,7 +12232,7 @@
     queueMinimapRefreshAfterLayoutSettles();
     scheduleResizeReactions(documentEpoch);
     invalidateSourceLineAnchors({
-      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
+      reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget()
     });
     scheduleVirtualizedMeasuredHeightAdoption();
     window.requestAnimationFrame(() => {
@@ -12230,7 +12247,7 @@
     }
     queueMinimapRefreshAfterLayoutSettles();
     invalidateSourceLineAnchors({
-      reassertPendingTarget: virtualizedProgrammaticNavigationPostSettleTarget === null
+      reassertPendingTarget: !hasCurrentVirtualizedNavigationPostSettleTarget()
     });
     scheduleVirtualizedMeasuredHeightAdoption();
   }
@@ -12309,18 +12326,21 @@
   });
   document.addEventListener("scroll", () => {
     if (scrollOwnershipControlPlane !== null) {
+      const navigationSession = readCurrentVirtualizedNavigationSession();
       const classification = scrollOwnershipControlPlane.classifyNativeScroll(
         getDocumentScrollRoot().scrollTop,
         "native-scroll"
       );
       if (classification.kind === "user-supersession") {
         cancelPendingVirtualizedMaintenance("user-supersession");
-        cancelVirtualizedProgrammaticNavigationState();
+        clearVirtualizedNavigationSession();
         queuePreviewSourceLinePost();
       } else if (classification.kind === "unattributed-failure") {
         cancelPendingVirtualizedMaintenance("unattributed-failure");
-        virtualizedProgrammaticNavigationExternalShiftCount++;
-        cancelVirtualizedProgrammaticNavigationState();
+        if (navigationSession !== null) {
+          navigationSession.externalShiftCount++;
+        }
+        clearVirtualizedNavigationSession();
       }
     } else {
       const programmaticNavigationScroll = isVirtualizedProgrammaticNavigationInProgress();
