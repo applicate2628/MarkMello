@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Globalization;
 using System.Text;
 using Avalonia;
@@ -7,7 +8,9 @@ using Avalonia.Input;
 using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.VisualTree;
 using MarkMello.Applicate.Desktop.Rendering;
+using MarkMello.Presentation.Localization;
 
 namespace MarkMello.Applicate.Desktop.Views;
 
@@ -24,18 +27,14 @@ namespace MarkMello.Applicate.Desktop.Views;
 ///   internal no-op; consumers should not display this user-facing.</item>
 /// </list>
 ///
-/// The view is invisible by default and is shown by the host's failure
-/// routing in Phase 4. In Phase 2 it exists as a buildable component with
-/// tests; nothing yet instantiates or shows it at runtime.
-///
-/// Strings are hardcoded RU placeholders with <c>// TODO: localize</c>
-/// markers. The plan permits this fallback when the surrounding code does
-/// not already wire <see cref="MarkMello.Presentation.Localization.ILocalizationService"/>;
-/// Applicate desktop views do not currently subscribe to it. The localisation
-/// migration is a follow-up after Phase 4 routes consumers through the host.
+/// The view is invisible by default and is shown by the host's failure routing.
+/// User-facing copy resolves through the application-owned
+/// <see cref="ILocalizationService"/> resource and refreshes when its language
+/// changes. English fallbacks keep resource-less construction deterministic.
 /// </summary>
 public sealed class ApplicateRendererFailureView : UserControl
 {
+    private readonly ILocalizationService? _localization;
     private readonly Border _root;
     private readonly TextBlock _title;
     private readonly TextBlock _body;
@@ -50,9 +49,12 @@ public sealed class ApplicateRendererFailureView : UserControl
     private DateTime _timestamp = DateTime.UtcNow;
     private Action? _retryCallback;
     private Action<string>? _copyDiagnosticsCallback;
+    private bool _isLocalizationSubscribed;
 
     public ApplicateRendererFailureView()
     {
+        _localization = ResolveLocalization();
+
         _title = new TextBlock
         {
             FontSize = 22,
@@ -88,7 +90,7 @@ public sealed class ApplicateRendererFailureView : UserControl
 
         _retryButton = new Button
         {
-            Content = "Повторить", // TODO: localize (MmRendererFailureRetry)
+            Content = ResolveText("MmRendererFailureRetry", "Retry"),
             MinWidth = 120,
             Padding = new Thickness(18, 8),
             Cursor = new Cursor(StandardCursorType.Hand),
@@ -98,7 +100,7 @@ public sealed class ApplicateRendererFailureView : UserControl
 
         _copyDiagnosticsButton = new Button
         {
-            Content = "Скопировать диагностику", // TODO: localize (MmRendererFailureCopyDiagnostics)
+            Content = ResolveText("MmRendererFailureCopyDiagnostics", "Copy diagnostics"),
             MinWidth = 120,
             Padding = new Thickness(18, 8),
             Cursor = new Cursor(StandardCursorType.Hand),
@@ -145,8 +147,11 @@ public sealed class ApplicateRendererFailureView : UserControl
 
         ActualThemeVariantChanged += OnAppearanceChanged;
         ResourcesChanged += OnResourcesChanged;
+        AttachedToVisualTree += OnAttachedToVisualTree;
+        DetachedFromVisualTree += OnDetachedFromVisualTree;
 
-        ApplyFailureKind();
+        SubscribeToLocalization();
+        RefreshLocalizedText();
     }
 
     /// <summary>
@@ -294,11 +299,10 @@ public sealed class ApplicateRendererFailureView : UserControl
         switch (_failureKind)
         {
             case ApplicateRendererFailureKind.WebView2RuntimeMissing:
-                // TODO: localize (MmRendererFailureTitle / MmRendererFailureDetailRuntime).
-                _title.Text = "Среда WebView2 недоступна";
-                _body.Text =
-                    "Для отображения документа требуется Microsoft Edge WebView2 Runtime. " +
-                    "Установите его и перезапустите приложение.";
+                _title.Text = ResolveText("MmRendererFailureTitleRuntime", "WebView2 Runtime is unavailable");
+                _body.Text = ResolveText(
+                    "MmRendererFailureDetailRuntime",
+                    "Microsoft Edge WebView2 Runtime is required to display the document. Install it and restart the application.");
                 _retryButton.IsVisible = false;
                 break;
 
@@ -306,18 +310,19 @@ public sealed class ApplicateRendererFailureView : UserControl
                 // Stale navigation is an internal no-op per D3. Keep the
                 // surface neutral; consumers should normally not show this
                 // class to the user.
-                _title.Text = "Загрузка отменена";
-                _body.Text = "Открытие документа было прервано более новой навигацией.";
+                _title.Text = ResolveText("MmRendererFailureTitleStaleNavigation", "Loading canceled");
+                _body.Text = ResolveText(
+                    "MmRendererFailureDetailStaleNavigation",
+                    "Opening the document was interrupted by a newer navigation.");
                 _retryButton.IsVisible = false;
                 break;
 
             case ApplicateRendererFailureKind.DocumentRenderFailed:
             default:
-                // TODO: localize (MmRendererFailureTitle / MmRendererFailureDetailRender).
-                _title.Text = "Не удалось отобразить документ";
-                _body.Text =
-                    "Произошла ошибка при подготовке предпросмотра. " +
-                    "Попробуйте повторить или скопируйте диагностику для отчёта.";
+                _title.Text = ResolveText("MmRendererFailureTitle", "Could not display the document");
+                _body.Text = ResolveText(
+                    "MmRendererFailureDetailRender",
+                    "An error occurred while preparing the preview. Try again or copy the diagnostics for a report.");
                 _retryButton.IsVisible = true;
                 break;
         }
@@ -377,6 +382,78 @@ public sealed class ApplicateRendererFailureView : UserControl
     private void OnAppearanceChanged(object? sender, EventArgs e) => RefreshBrushes();
 
     private void OnResourcesChanged(object? sender, ResourcesChangedEventArgs e) => RefreshBrushes();
+
+    private void OnAttachedToVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
+    {
+        SubscribeToLocalization();
+        RefreshLocalizedText();
+    }
+
+    private void OnDetachedFromVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
+        => UnsubscribeFromLocalization();
+
+    private void OnLocalizationChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (!IsLocalizationChangeNotification(e.PropertyName))
+        {
+            return;
+        }
+
+        RefreshLocalizedText();
+    }
+
+    private void RefreshLocalizedText()
+    {
+        _retryButton.Content = ResolveText("MmRendererFailureRetry", "Retry");
+        _copyDiagnosticsButton.Content = ResolveText("MmRendererFailureCopyDiagnostics", "Copy diagnostics");
+        ApplyFailureKind();
+    }
+
+    private void SubscribeToLocalization()
+    {
+        if (_localization is null || _isLocalizationSubscribed)
+        {
+            return;
+        }
+
+        _localization.PropertyChanged += OnLocalizationChanged;
+        _isLocalizationSubscribed = true;
+    }
+
+    private void UnsubscribeFromLocalization()
+    {
+        if (_localization is null || !_isLocalizationSubscribed)
+        {
+            return;
+        }
+
+        _localization.PropertyChanged -= OnLocalizationChanged;
+        _isLocalizationSubscribed = false;
+    }
+
+    private static bool IsLocalizationChangeNotification(string? propertyName)
+        => string.IsNullOrEmpty(propertyName)
+           || propertyName == nameof(ILocalizationService.SelectedLanguage)
+           || propertyName == nameof(ILocalizationService.EffectiveLanguage)
+           || propertyName == nameof(ILocalizationService.Culture)
+           || propertyName == "Item"
+           || propertyName == "Item[]";
+
+    private string ResolveText(string resourceKey, string fallback)
+        => _localization?[resourceKey] ?? fallback;
+
+    private static ILocalizationService? ResolveLocalization()
+    {
+        var app = Avalonia.Application.Current;
+        if (app is not null
+            && app.TryGetResource("Localization", null, out var value)
+            && value is ILocalizationService localization)
+        {
+            return localization;
+        }
+
+        return null;
+    }
 
     private void RefreshBrushes()
     {

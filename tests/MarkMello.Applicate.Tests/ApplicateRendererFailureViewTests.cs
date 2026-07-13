@@ -1,15 +1,55 @@
 using System;
 using System.Reflection;
 using System.Threading;
+using System.Threading.Tasks;
 using Avalonia.Headless;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views;
+using MarkMello.Domain;
+using MarkMello.Presentation.Localization;
 using Xunit;
 
 namespace MarkMello.Applicate.Tests;
 
 public sealed class ApplicateRendererFailureViewTests
 {
+    [Fact]
+    public async Task FailureTitleUsesEnglishAndUpdatesForRussianLanguage()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        await session.Dispatch(() =>
+        {
+            var application = Avalonia.Application.Current
+                ?? throw new InvalidOperationException("Headless Avalonia application is unavailable.");
+            var resources = application.Resources;
+            var hadExistingLocalization = resources.TryGetValue("Localization", out var existingLocalization);
+            var localization = new LocalizationService(AppLanguage.English);
+            resources["Localization"] = localization;
+
+            try
+            {
+                var view = new ApplicateRendererFailureView();
+
+                Assert.Equal("Could not display the document", view.TitleTextForTesting);
+
+                localization.SetLanguage(AppLanguage.Russian);
+
+                Assert.Equal("Не удалось отобразить документ", view.TitleTextForTesting);
+            }
+            finally
+            {
+                if (hadExistingLocalization)
+                {
+                    resources["Localization"] = existingLocalization!;
+                }
+                else
+                {
+                    resources.Remove("Localization");
+                }
+            }
+        }, CancellationToken.None);
+    }
+
     [Fact]
     public void ConstructsHiddenWithDefaultDocumentRenderFailedKind()
     {
