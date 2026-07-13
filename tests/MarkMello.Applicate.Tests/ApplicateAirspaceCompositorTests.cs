@@ -54,7 +54,7 @@ public sealed class ApplicateAirspaceCompositorTests
     }
 
     [Fact]
-    public void DocumentSessionHidesOnlyAfterMatchingNonTransactionalCommitAndRevealReadyPaintGate()
+    public void DocumentSessionHidesOnlyAfterMatchingCommitRevealReadyAndFirstPaint()
     {
         var state = new FakeDocumentRevealState { Document = Source("old.md") };
         var host = new FakeDocumentSignals();
@@ -87,6 +87,11 @@ public sealed class ApplicateAirspaceCompositorTests
 
         host.RaiseCommitCompleted(transactionGeneration: 0, ApplicateMode.Viewer);
 
+        Assert.Equal(0, paintGate.PendingCount);
+        Assert.Equal(0, cover.HideAnimatedCount);
+
+        host.RaiseDocumentFirstPaint();
+
         Assert.Equal(1, paintGate.PendingCount);
         Assert.Equal(0, cover.HideAnimatedCount);
 
@@ -94,6 +99,103 @@ public sealed class ApplicateAirspaceCompositorTests
 
         Assert.Equal(1, cover.HideAnimatedCount);
         Assert.Equal(0, cover.HideImmediateCount);
+    }
+
+    [Fact]
+    public void DocumentSessionRendererFailureBeforeFirstPaintResolvesCover()
+    {
+        var state = new FakeDocumentRevealState { Document = Source("old.md") };
+        var host = new FakeDocumentSignals();
+        var covers = new FakeCoverFactory();
+        var paintGate = new FakePaintGate();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            paintGate);
+        compositor.RegisterDocumentSession(
+            host,
+            ApplicateMode.Viewer,
+            isActiveSurface: () => true);
+        state.RaiseDocumentTransitionStarting();
+        var cover = Assert.Single(covers.Created);
+
+        host.RaiseCommitCompleted(transactionGeneration: 0, ApplicateMode.Viewer);
+        host.RaiseDocumentRevealReady();
+        host.RaiseRendererFailed();
+
+        Assert.Equal(0, paintGate.PendingCount);
+        Assert.Equal(1, cover.HideImmediateCount);
+        Assert.Equal(0, cover.HideAnimatedCount);
+    }
+
+    [Fact]
+    public void DocumentSessionResetBeforeFirstPaintResolvesCover()
+    {
+        var state = new FakeDocumentRevealState { Document = Source("old.md") };
+        var host = new FakeDocumentSignals();
+        var covers = new FakeCoverFactory();
+        var paintGate = new FakePaintGate();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            paintGate);
+        compositor.RegisterDocumentSession(
+            host,
+            ApplicateMode.Viewer,
+            isActiveSurface: () => true);
+        state.RaiseDocumentTransitionStarting();
+        var cover = Assert.Single(covers.Created);
+
+        host.RaiseCommitCompleted(transactionGeneration: 0, ApplicateMode.Viewer);
+        host.RaiseDocumentRevealReady();
+        state.SetDocument(null);
+
+        Assert.Equal(0, paintGate.PendingCount);
+        Assert.Equal(1, cover.HideImmediateCount);
+        Assert.Equal(0, cover.HideAnimatedCount);
+    }
+
+    [Fact]
+    public void DocumentSessionRenderInvalidationResetsFirstPaintQuorum()
+    {
+        var state = new FakeDocumentRevealState { Document = Source("old.md") };
+        var host = new FakeDocumentSignals();
+        var covers = new FakeCoverFactory();
+        var paintGate = new FakePaintGate();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            paintGate);
+        compositor.RegisterDocumentSession(
+            host,
+            ApplicateMode.Viewer,
+            isActiveSurface: () => true);
+        state.RaiseDocumentTransitionStarting();
+
+        host.RaiseCommitCompleted(transactionGeneration: 0, ApplicateMode.Viewer);
+        host.RaiseDocumentRevealReady();
+        host.RaiseDocumentFirstPaint();
+
+        Assert.Equal(1, paintGate.PendingCount);
+
+        host.RaiseDocumentRenderInvalidated();
+        paintGate.Flush();
+
+        var cover = Assert.Single(covers.Created);
+        Assert.Equal(0, cover.HideAnimatedCount);
+
+        host.RaiseCommitCompleted(transactionGeneration: 0, ApplicateMode.Viewer);
+        host.RaiseDocumentRevealReady();
+        host.RaiseDocumentFirstPaint();
+
+        Assert.Equal(1, paintGate.PendingCount);
+
+        paintGate.Flush();
+
+        Assert.Equal(1, cover.HideAnimatedCount);
     }
 
     [Fact]
@@ -885,6 +987,10 @@ public sealed class ApplicateAirspaceCompositorTests
 
         public event EventHandler? DocumentRevealReady;
 
+        public event EventHandler? DocumentFirstPaint;
+
+        public event EventHandler? DocumentRenderInvalidated;
+
         public void RaiseCommitCompleted(long transactionGeneration, ApplicateMode mode)
             => CommitCompleted?.Invoke(
                 this,
@@ -895,6 +1001,12 @@ public sealed class ApplicateAirspaceCompositorTests
 
         public void RaiseDocumentRevealReady()
             => DocumentRevealReady?.Invoke(this, EventArgs.Empty);
+
+        public void RaiseDocumentFirstPaint()
+            => DocumentFirstPaint?.Invoke(this, EventArgs.Empty);
+
+        public void RaiseDocumentRenderInvalidated()
+            => DocumentRenderInvalidated?.Invoke(this, EventArgs.Empty);
 
         public void RaiseRendererFailed()
             => RendererFailed?.Invoke(

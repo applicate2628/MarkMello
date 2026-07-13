@@ -99,6 +99,7 @@ type RendererMessage =
   | { type: "preview-source-line"; sourceLine: number }
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number }
   | { type: "document-cache-miss"; renderId?: number; cacheKey?: string }
+  | { type: "document-first-paint"; renderId: number }
   // Mode-toggle reveal gate (2026-05-20). Posted in response to a host-sent
   // `mode-settle-probe` message after the renderer has applied pending reading
   // preferences and let layout chrome such as the minimap paint at the new slot
@@ -3990,6 +3991,11 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
         message.cacheKey = cacheKey;
       }
       postHostMessage(message);
+    },
+    notifyDocumentFirstPaint: (renderId) => {
+      if (renderId !== undefined) {
+        postHostMessage({ type: "document-first-paint", renderId });
+      }
     },
   };
 }

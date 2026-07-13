@@ -35,6 +35,7 @@ export type LoadDocumentDeps = {
   restoreCachedScrollPosition?: () => void;
   completeCachedDocumentLoad?: (renderId?: number, hasMermaid?: boolean, hasHljs?: boolean, skipFrameWait?: boolean) => void;
   notifyDocumentCacheMiss?: (renderId?: number, cacheKey?: string) => void;
+  notifyDocumentFirstPaint?: (renderId?: number) => void;
 };
 
 export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocumentDeps): void {
@@ -95,6 +96,13 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
     main.replaceChildren(cachedFragment);
   } else {
     main.innerHTML = message.html ?? "";
+  }
+  if (deps.notifyDocumentFirstPaint) {
+    const notifyDocumentFirstPaint = deps.notifyDocumentFirstPaint;
+    const renderId = message.renderId;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => notifyDocumentFirstPaint(renderId));
+    });
   }
   deps.setCurrentDocumentCacheKey?.(message.cacheKey ?? null);
   const firstHeading = main.querySelector("h1,h2,h3")?.textContent?.trim().replace(/\s+/g, " ").slice(0, 120) ?? "";

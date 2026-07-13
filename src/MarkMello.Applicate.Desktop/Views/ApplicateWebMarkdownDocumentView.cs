@@ -95,6 +95,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _postReadyEnhancementsComplete = true;
     private bool _documentRenderedRaised;
     private bool _documentRevealReadyRaised;
+    private bool _documentFirstPaintReceived;
+    private bool _documentFirstPaintRaised;
     private bool _progressiveAppendPending;
     private long _activeRevealRenderId;
     private bool _disposed;
@@ -237,6 +239,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     public event EventHandler? DocumentRevealReady;
 
+    public event EventHandler? DocumentFirstPaint;
+
     public event EventHandler? ProgressiveAppendCompleted;
 
     public bool HasPendingProgressiveAppend => _progressiveAppendPending;
@@ -320,6 +324,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             "document-reveal-ready-reemit-noop",
             $"path={source?.Path ?? "(null)"}");
         DocumentRevealReady?.Invoke(this, EventArgs.Empty);
+        DocumentFirstPaint?.Invoke(this, EventArgs.Empty);
     }
 
     internal bool LastLayoutReadyWasCached => _lastLayoutReadyWasCached;
@@ -1059,6 +1064,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _postReadyEnhancementsComplete = true;
         _documentRenderedRaised = false;
         _documentRevealReadyRaised = false;
+        _documentFirstPaintReceived = false;
+        _documentFirstPaintRaised = false;
         _scrollTop = 0;
         _scrollHeight = 0;
         _clientHeight = 0;
@@ -1763,6 +1770,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             }
 
             var type = SafeGetString(typeProperty);
+            if (type == "document-first-paint")
+            {
+                HandleDocumentFirstPaintMessage(document.RootElement);
+                return;
+            }
+
             if (type == "document-ready")
             {
                 if (_shellMode && !_shellDocumentReadyConsumed)
@@ -2497,11 +2510,28 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _postReadyEnhancementsComplete = !requiresPostReadyEnhancements;
         _documentRenderedRaised = false;
         _documentRevealReadyRaised = false;
+        _documentFirstPaintReceived = false;
+        _documentFirstPaintRaised = false;
         _progressiveAppendPending = false;
         ApplicateTrace.DiagMs(
             "diag-gate",
             "document-reveal-gate-configured",
             $"renderId={renderId} requiresPostReady={requiresPostReadyEnhancements}");
+    }
+
+    private void HandleDocumentFirstPaintMessage(JsonElement root)
+    {
+        if (!root.TryGetProperty("renderId", out var renderIdProperty)
+            || renderIdProperty.ValueKind != JsonValueKind.Number
+            || !renderIdProperty.TryGetInt64(out var renderId)
+            || renderId <= 0
+            || renderId != _activeRevealRenderId)
+        {
+            return;
+        }
+
+        _documentFirstPaintReceived = true;
+        CompleteDocumentFirstPaint();
     }
 
     private void HandlePostReadyEnhancementsComplete(JsonElement root)
@@ -2626,6 +2656,24 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             "document-reveal-ready",
             $"renderId={_activeRevealRenderId} requiresPostReady={_requiresPostReadyEnhancements}");
         DocumentRevealReady?.Invoke(this, EventArgs.Empty);
+        CompleteDocumentFirstPaint();
+    }
+
+    private void CompleteDocumentFirstPaint()
+    {
+        if (_documentFirstPaintRaised
+            || !_documentRevealReadyRaised
+            || !_documentFirstPaintReceived)
+        {
+            return;
+        }
+
+        _documentFirstPaintRaised = true;
+        ApplicateTrace.DiagMs(
+            "diag-gate",
+            "document-first-paint",
+            $"renderId={_activeRevealRenderId}");
+        DocumentFirstPaint?.Invoke(this, EventArgs.Empty);
     }
 
     internal static bool ShouldCompleteRenderForTesting(

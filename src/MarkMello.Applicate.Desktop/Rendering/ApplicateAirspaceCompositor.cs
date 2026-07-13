@@ -826,12 +826,13 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
 
         private MarkdownSource? _lastSource;
         private bool _covered;
-        // Bumped per document-switch cover session so a stale reveal RAF chain
-        // from a prior switch cannot hide the cover belonging to a newer switch.
+        // Bumped per document-switch cover session and renderer epoch so a stale
+        // reveal RAF chain cannot hide the cover for replacement content.
         private long _coverGeneration;
         private bool _pendingShowOnBounds;
         private bool _commitCompletedForCover;
         private bool _documentRevealReadyForCover;
+        private bool _documentFirstPaintForCover;
         private bool _skipNextCoverSession;
         private bool _skipNextDocumentChangeCover;
         private DispatcherTimer? _fallbackTimer;
@@ -867,6 +868,8 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             _signals.CommitCompleted += OnCommitCompleted;
             _signals.RendererFailed += OnRendererFailed;
             _signals.DocumentRevealReady += OnDocumentRevealReady;
+            _signals.DocumentFirstPaint += OnDocumentFirstPaint;
+            _signals.DocumentRenderInvalidated += OnDocumentRenderInvalidated;
         }
 
         // Cover-first (atomic teardown). The VM raises this immediately BEFORE
@@ -987,6 +990,7 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             _coverGeneration++;
             _commitCompletedForCover = false;
             _documentRevealReadyForCover = false;
+            _documentFirstPaintForCover = false;
         }
 
         private void ShowCover()
@@ -1004,7 +1008,7 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
                 _pendingShowOnBounds = false;
                 RestartFallback();
                 ApplicateTrace.DiagMs("pane-seq", "doc-switch-cover-shown");
-                TryHideCoverAfterCommitAndRevealReady();
+                TryHideCoverAfterCommitRevealReadyAndFirstPaint();
                 return;
             }
 
@@ -1054,7 +1058,7 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             }
 
             _commitCompletedForCover = true;
-            TryHideCoverAfterCommitAndRevealReady();
+            TryHideCoverAfterCommitRevealReadyAndFirstPaint();
         }
 
         private void OnDocumentRevealReady(object? sender, EventArgs e)
@@ -1065,19 +1069,48 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             }
 
             _documentRevealReadyForCover = true;
-            TryHideCoverAfterCommitAndRevealReady();
+            TryHideCoverAfterCommitRevealReadyAndFirstPaint();
         }
 
-        private void TryHideCoverAfterCommitAndRevealReady()
+        private void OnDocumentFirstPaint(object? sender, EventArgs e)
         {
-            if (!_covered || !_commitCompletedForCover || !_documentRevealReadyForCover)
+            if (!_covered && !_pendingShowOnBounds)
             {
                 return;
             }
 
-            // The DOM has committed and the renderer has finished post-ready
-            // preparation for this document; wait two Avalonia frames so the new
-            // content has actually painted before dropping the cover.
+            _documentFirstPaintForCover = true;
+            TryHideCoverAfterCommitRevealReadyAndFirstPaint();
+        }
+
+        private void OnDocumentRenderInvalidated(object? sender, EventArgs e)
+        {
+            if (!_covered && !_pendingShowOnBounds)
+            {
+                return;
+            }
+
+            // Invalidate any two-frame callback already queued for the prior
+            // renderer epoch before accepting readiness for the replacement.
+            _coverGeneration++;
+            _commitCompletedForCover = false;
+            _documentRevealReadyForCover = false;
+            _documentFirstPaintForCover = false;
+        }
+
+        private void TryHideCoverAfterCommitRevealReadyAndFirstPaint()
+        {
+            if (!_covered
+                || !_commitCompletedForCover
+                || !_documentRevealReadyForCover
+                || !_documentFirstPaintForCover)
+            {
+                return;
+            }
+
+            // The active renderer epoch has committed, completed post-ready work,
+            // and reported its double-rAF first-paint opportunity. Keep the two
+            // Avalonia frames only as a final host-compositor stabilizer.
             HideCoverAfterPaint();
         }
 
@@ -1135,6 +1168,7 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             _covered = false;
             _commitCompletedForCover = false;
             _documentRevealReadyForCover = false;
+            _documentFirstPaintForCover = false;
             var duration = animated
                 ? ApplicateMotion.ModeSwitchDuration(_documentState.ReadingPreferences)
                 : TimeSpan.Zero;
@@ -1182,6 +1216,8 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             _signals.CommitCompleted -= OnCommitCompleted;
             _signals.RendererFailed -= OnRendererFailed;
             _signals.DocumentRevealReady -= OnDocumentRevealReady;
+            _signals.DocumentFirstPaint -= OnDocumentFirstPaint;
+            _signals.DocumentRenderInvalidated -= OnDocumentRenderInvalidated;
             if (_pendingShowOnBounds)
             {
                 _coverHost.LayoutUpdated -= OnCoverHostLayoutUpdated;
@@ -2371,6 +2407,10 @@ internal interface IApplicateDocumentRevealSignals
     event EventHandler<ApplicateRendererFailureEvent>? RendererFailed;
 
     event EventHandler? DocumentRevealReady;
+
+    event EventHandler? DocumentFirstPaint;
+
+    event EventHandler? DocumentRenderInvalidated;
 }
 
 internal interface IApplicateStartupRevealState : INotifyPropertyChanged

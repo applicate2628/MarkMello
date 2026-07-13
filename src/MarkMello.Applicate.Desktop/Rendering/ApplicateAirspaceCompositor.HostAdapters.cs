@@ -75,6 +75,18 @@ internal sealed partial class ApplicateAirspaceCompositor
             add => _host.View.DocumentRevealReady += value;
             remove => _host.View.DocumentRevealReady -= value;
         }
+
+        public event EventHandler? DocumentFirstPaint
+        {
+            add => _host.View.DocumentFirstPaint += value;
+            remove => _host.View.DocumentFirstPaint -= value;
+        }
+
+        public event EventHandler? DocumentRenderInvalidated
+        {
+            add => _host.View.DocumentRenderInvalidated += value;
+            remove => _host.View.DocumentRenderInvalidated -= value;
+        }
     }
 
     private sealed class SharedWebViewStartupRevealSignals(IApplicateSharedWebViewHost host)

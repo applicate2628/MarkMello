@@ -379,7 +379,7 @@ public sealed class ApplicateWebHostMessagingTests
     }
 
     [Fact]
-    public void DocumentSwitchCoverWaitsForPostReadyRevealSignal()
+    public void DocumentSwitchCoverWaitsForPostReadyRevealAndFirstPaintSignals()
     {
         var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
         var compositorSource = File.ReadAllText(AirspaceCompositorSourcePath);
@@ -392,6 +392,10 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("\"post-ready-enhancements-complete\"", viewSource, StringComparison.Ordinal);
         Assert.Contains("CompleteDocumentRevealReady()", viewSource, StringComparison.Ordinal);
         Assert.Contains("DocumentRevealReady?.Invoke", viewSource, StringComparison.Ordinal);
+        Assert.Contains("public event EventHandler? DocumentFirstPaint;", viewSource, StringComparison.Ordinal);
+        Assert.Contains("\"document-first-paint\"", viewSource, StringComparison.Ordinal);
+        Assert.Contains("CompleteDocumentFirstPaint()", viewSource, StringComparison.Ordinal);
+        Assert.Contains("DocumentFirstPaint?.Invoke", viewSource, StringComparison.Ordinal);
         Assert.DoesNotContain("RevealNativeDocument(TimeSpan.Zero);", completeLayoutReady, StringComparison.Ordinal);
         Assert.DoesNotContain("DocumentRendered?.Invoke", completeLayoutReady, StringComparison.Ordinal);
         Assert.Contains("_postReadyEnhancementsComplete", completeDocumentRenderVisualReady, StringComparison.Ordinal);
@@ -399,7 +403,10 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("DocumentRendered?.Invoke", completeDocumentRenderVisualReady, StringComparison.Ordinal);
 
         Assert.Contains("_host.View.DocumentRevealReady += value;", compositorHostAdaptersSource, StringComparison.Ordinal);
+        Assert.Contains("_host.View.DocumentFirstPaint += value;", compositorHostAdaptersSource, StringComparison.Ordinal);
         Assert.Contains("_signals.DocumentRevealReady += OnDocumentRevealReady;", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_signals.DocumentFirstPaint += OnDocumentFirstPaint;", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_signals.DocumentRenderInvalidated += OnDocumentRenderInvalidated;", compositorSource, StringComparison.Ordinal);
         Assert.Contains("ApplicateMode _mode", compositorSource, StringComparison.Ordinal);
         Assert.Contains("e.Mode != _mode", compositorSource, StringComparison.Ordinal);
         Assert.Contains("clearHeadingsOnRendererFailure", compositorSource, StringComparison.Ordinal);
@@ -413,12 +420,15 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("\"doc-switch-cover-fallback\"", compositorSource, StringComparison.Ordinal);
         Assert.Contains("_commitCompletedForCover", compositorSource, StringComparison.Ordinal);
         Assert.Contains("_documentRevealReadyForCover", compositorSource, StringComparison.Ordinal);
-        Assert.Contains("TryHideCoverAfterCommitAndRevealReady()", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("_documentFirstPaintForCover", compositorSource, StringComparison.Ordinal);
+        Assert.Contains("TryHideCoverAfterCommitRevealReadyAndFirstPaint()", compositorSource, StringComparison.Ordinal);
         Assert.Contains("ApplicateMotion.ModeSwitchDuration(_documentState.ReadingPreferences)", compositorSource, StringComparison.Ordinal);
         Assert.Contains("_cover.Hide(duration)", compositorSource, StringComparison.Ordinal);
 
         Assert.Contains("postReadyEnhancementsCompleted", rendererSource, StringComparison.Ordinal);
         Assert.Contains("post-ready-enhancements-complete", rendererSource, StringComparison.Ordinal);
+        Assert.Contains("document-first-paint", rendererSource, StringComparison.Ordinal);
+        Assert.Contains("notifyDocumentFirstPaint", rendererSource, StringComparison.Ordinal);
     }
 
     [Fact]

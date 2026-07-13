@@ -262,6 +262,13 @@
     } else {
       main.innerHTML = message.html ?? "";
     }
+    if (deps.notifyDocumentFirstPaint) {
+      const notifyDocumentFirstPaint = deps.notifyDocumentFirstPaint;
+      const renderId = message.renderId;
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => notifyDocumentFirstPaint(renderId));
+      });
+    }
     deps.setCurrentDocumentCacheKey?.(message.cacheKey ?? null);
     const firstHeading = main.querySelector("h1,h2,h3")?.textContent?.trim().replace(/\s+/g, " ").slice(0, 120) ?? "";
     deps.debugLog(`load-document:swapped id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${document.documentElement.dataset.theme ?? "(none)"} firstHeading=${firstHeading}`);
@@ -4135,6 +4142,11 @@
           message.cacheKey = cacheKey;
         }
         postHostMessage(message);
+      },
+      notifyDocumentFirstPaint: (renderId) => {
+        if (renderId !== void 0) {
+          postHostMessage({ type: "document-first-paint", renderId });
+        }
       }
     };
   }
