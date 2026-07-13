@@ -785,6 +785,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void SyncNativeWebViewWindowSize(IntPtr handle)
     {
+        const int NativeWindowPlacementTolerance = 1;
+
         var bounds = _webView.Bounds;
         if (bounds.Width <= 0 || bounds.Height <= 0)
         {
@@ -799,7 +801,13 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             | NativeMethods.SwpNoActivate
             | NativeMethods.SwpNoOwnerZOrder
             | NativeMethods.SwpNoCopyBits;
-        var ok = NativeMethods.SetWindowPos(handle, IntPtr.Zero, 0, 0, width, height, flags);
+        var hasMatchingPlacement = TryCaptureNativeWebViewPlacement(handle, out var currentPlacement)
+            && SysMath.Abs(currentPlacement.X) <= NativeWindowPlacementTolerance
+            && SysMath.Abs(currentPlacement.Y) <= NativeWindowPlacementTolerance
+            && SysMath.Abs(currentPlacement.Width - width) <= NativeWindowPlacementTolerance
+            && SysMath.Abs(currentPlacement.Height - height) <= NativeWindowPlacementTolerance;
+        var ok = hasMatchingPlacement
+            || NativeMethods.SetWindowPos(handle, IntPtr.Zero, 0, 0, width, height, flags);
         SyncNativeWebViewChildTree(handle);
         var parent = NativeMethods.GetParent(handle);
         _ = NativeMethods.GetWindowRect(handle, out var rect);
