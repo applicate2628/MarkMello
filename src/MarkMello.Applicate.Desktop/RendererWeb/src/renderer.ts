@@ -359,8 +359,6 @@ let currentDocumentRenderId: number | null = null;
 let restoredCachedLayoutState: CachedLayoutState | null = null;
 let restoredCachedHeadings: HeadingPayload[] | null = null;
 let restoredCachedMinimapSnapshot: CachedMinimapSnapshot | null = null;
-let processedDocumentCacheCloneGeneration = 0;
-let processedDocumentCacheCloneHandle: { kind: "idle" | "timeout"; id: number } | null = null;
 let lastExtractedHeadings: HeadingPayload[] = [];
 let lastKnownLayoutState: CachedLayoutState = {
   scrollTop: 0,
@@ -389,208 +387,14 @@ function getCachedProcessedDocumentFragment(cacheKey: string): DocumentFragment 
   }
 
   processedDocumentCache.delete(cacheKey);
-  processedDocumentCache.set(cacheKey, cached);
   restoredCachedLayoutState = { ...cached.layoutState };
   restoredCachedHeadings = cached.headings.map(cloneHeadingPayload);
   restoredCachedMinimapSnapshot = cached.minimapSnapshot;
-  return cached.fragment.cloneNode(true) as DocumentFragment;
+  return cached.fragment;
 }
 
 function setCurrentProcessedDocumentCacheKey(cacheKey: string | null): void {
   currentDocumentCacheKey = cacheKey;
-}
-
-function cancelProcessedDocumentCacheClone(): void {
-  if (!processedDocumentCacheCloneHandle) {
-    return;
-  }
-
-  const handle = processedDocumentCacheCloneHandle;
-  processedDocumentCacheCloneHandle = null;
-  if (handle.kind === "idle") {
-    (window as Window & { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback?.(handle.id);
-  } else {
-    window.clearTimeout(handle.id);
-  }
-}
-
-function captureCurrentProcessedDocumentCacheEntry(mode: "clone" | "move"): ProcessedDocumentCacheEntry | null {
-  const main = document.querySelector<HTMLElement>("main.mm-document");
-  if (!main || main.childNodes.length === 0) {
-    return null;
-  }
-
-  const sourceNodes = Array.from(main.childNodes);
-  const fragment = document.createDocumentFragment();
-  if (mode === "clone") {
-    const clones = sourceNodes.map(node => node.cloneNode(true));
-    // Stamp each realized block's settled height onto its clone as
-    // contain-intrinsic-size. Top-level blocks are `content-visibility: auto;
-    // contain-intrinsic-size: auto 120px` (renderer.css): Chromium's
-    // last-remembered size is per-ELEMENT internal state that does NOT survive
-    // cloneNode, so a re-mounted clone reverts every off-screen block to the
-    // 120px estimate — the whole layout re-mounts ~1300px too short (runtime:
-    // scrollHeight 14107 on every cached re-mount vs ~15400 settled), the raw
-    // scrollTop restore then lands on the wrong content and scroll-anchoring
-    // drifts the endpoint (~127px/round-trip, .scratch/trace-offset.log).
-    // Persisting the realized offsetHeight of the blocks that WERE laid out at
-    // capture (near the viewport — the ones the restore position depends on)
-    // makes the clone re-mount at truthful geometry, so the existing pixel
-    // restore is simply correct. Off-screen blocks were themselves estimated at
-    // capture; stamping their estimate is a no-op, harmless.
-    for (let index = 0; index < sourceNodes.length; index++) {
-      const live = sourceNodes[index];
-      const clone = clones[index];
-      if (live instanceof HTMLElement && clone instanceof HTMLElement) {
-        const settledHeight = live.offsetHeight;
-        if (settledHeight > 0) {
-          clone.style.containIntrinsicSize = `auto ${settledHeight}px`;
-        }
-      }
-    }
-    fragment.append(...clones);
-  } else {
-    // "move" mode reuses the live nodes; read their settled height BEFORE the
-    // append detaches them (offsetHeight is 0 once out of the document).
-    // Two-pass (read ALL heights, then write) so a containIntrinsicSize write
-    // on one live in-document node cannot dirty layout and force a synchronous
-    // reflow on the next node's offsetHeight read (layout thrash on the
-    // synchronous swap-away path). Clone mode writes to detached clones and has
-    // no such hazard.
-    const settledHeights = sourceNodes.map(node =>
-      node instanceof HTMLElement ? node.offsetHeight : 0);
-    for (let index = 0; index < sourceNodes.length; index++) {
-      const node = sourceNodes[index];
-      const settledHeight = settledHeights[index] ?? 0;
-      if (node instanceof HTMLElement && settledHeight > 0) {
-        node.style.containIntrinsicSize = `auto ${settledHeight}px`;
-      }
-    }
-    fragment.append(...sourceNodes);
-  }
-
-  const minimapSnapshot = captureMinimapSnapshot({
-    ownerDocument: document,
-    minimapContent,
-    minimapViewport,
-    documentHeight: minimapDocumentHeight,
-    lastPostedState: lastPostedMinimapState,
-  });
-
-  return {
-    fragment,
-    nodeCount: sourceNodes.length,
-    layoutState: { ...lastKnownLayoutState },
-    headings: lastExtractedHeadings.map(cloneHeadingPayload),
-    minimapSnapshot,
-  };
-}
-
-function storeProcessedDocumentCacheEntry(cacheKey: string, entry: ProcessedDocumentCacheEntry): void {
-  processedDocumentCache.delete(cacheKey);
-  processedDocumentCache.set(cacheKey, entry);
-  while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
-    const oldest = processedDocumentCache.keys().next().value;
-    if (oldest === undefined) {
-      break;
-    }
-    processedDocumentCache.delete(oldest);
-  }
-}
-
-function cachedFragmentIsBehindLiveDocument(cached: ProcessedDocumentCacheEntry): boolean {
-  const main = document.querySelector<HTMLElement>("main.mm-document");
-  if (!main) {
-    return false;
-  }
-
-  if (main.childNodes.length > cached.nodeCount) {
-    return true;
-  }
-
-  const liveHeadingCount = main.querySelectorAll("h1,h2,h3,h4,h5,h6").length;
-  if (liveHeadingCount > cached.headings.length) {
-    return true;
-  }
-
-  return cached.minimapSnapshot === null
-    && minimapContent !== null
-    && minimapContent.childNodes.length > 0;
-}
-
-function refreshProcessedDocumentCacheState(cacheKey: string, markName: string): boolean {
-  const cached = processedDocumentCache.get(cacheKey);
-  if (cached === undefined) {
-    return false;
-  }
-  if (cachedFragmentIsBehindLiveDocument(cached)) {
-    return false;
-  }
-
-  const minimapSnapshot = captureMinimapSnapshot({
-    ownerDocument: document,
-    minimapContent,
-    minimapViewport,
-    documentHeight: minimapDocumentHeight,
-    lastPostedState: lastPostedMinimapState,
-  });
-
-  processedDocumentCache.delete(cacheKey);
-  processedDocumentCache.set(cacheKey, {
-    ...cached,
-    layoutState: { ...lastKnownLayoutState },
-    headings: lastExtractedHeadings.map(cloneHeadingPayload),
-    minimapSnapshot,
-  });
-  postPerfMark(markName, {
-    entries: processedDocumentCache.size,
-    nodeCount: cached.nodeCount,
-  });
-  return true;
-}
-
-function scheduleCurrentProcessedDocumentCacheClone(delayMs = 240): void {
-  const cacheKey = currentDocumentCacheKey;
-  if (!cacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
-    return;
-  }
-
-  const generation = ++processedDocumentCacheCloneGeneration;
-  cancelProcessedDocumentCacheClone();
-
-  const run = () => {
-    if (generation !== processedDocumentCacheCloneGeneration || currentDocumentCacheKey !== cacheKey) {
-      return;
-    }
-
-    processedDocumentCacheCloneHandle = null;
-    const entry = captureCurrentProcessedDocumentCacheEntry("clone");
-    if (!entry) {
-      return;
-    }
-
-    storeProcessedDocumentCacheEntry(cacheKey, entry);
-    postPerfMark("mm-document-cache-prestore", {
-      entries: processedDocumentCache.size,
-      nodeCount: entry.nodeCount,
-    });
-  };
-
-  const requestIdle = (window as Window & {
-    requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
-  }).requestIdleCallback;
-
-  if (requestIdle) {
-    processedDocumentCacheCloneHandle = {
-      kind: "idle",
-      id: requestIdle(run, { timeout: Math.max(delayMs, 1200) }),
-    };
-  } else {
-    processedDocumentCacheCloneHandle = {
-      kind: "timeout",
-      id: window.setTimeout(run, delayMs),
-    };
-  }
 }
 
 function preserveCurrentProcessedDocument(): void {
@@ -599,22 +403,40 @@ function preserveCurrentProcessedDocument(): void {
   }
 
   const cacheKey = currentDocumentCacheKey;
-  cancelProcessedDocumentCacheClone();
-  if (refreshProcessedDocumentCacheState(cacheKey, "mm-document-cache-refresh")) {
-    currentDocumentCacheKey = null;
+  const main = document.querySelector<HTMLElement>("main.mm-document");
+  if (!main || main.childNodes.length === 0) {
     return;
   }
 
-  const entry = captureCurrentProcessedDocumentCacheEntry("move");
-  if (!entry) {
-    return;
+  const fragment = document.createDocumentFragment();
+  const nodes = Array.from(main.childNodes);
+  fragment.append(...nodes);
+  const minimapSnapshot = captureMinimapSnapshot({
+    ownerDocument: document,
+    minimapContent,
+    minimapViewport,
+    documentHeight: minimapDocumentHeight,
+    lastPostedState: lastPostedMinimapState,
+  });
+  processedDocumentCache.delete(cacheKey);
+  processedDocumentCache.set(cacheKey, {
+    fragment,
+    nodeCount: nodes.length,
+    layoutState: { ...lastKnownLayoutState },
+    headings: lastExtractedHeadings.map(cloneHeadingPayload),
+    minimapSnapshot,
+  });
+  while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
+    const oldest = processedDocumentCache.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    processedDocumentCache.delete(oldest);
   }
-
-  storeProcessedDocumentCacheEntry(cacheKey, entry);
   currentDocumentCacheKey = null;
   postPerfMark("mm-document-cache-store", {
     entries: processedDocumentCache.size,
-    nodeCount: entry.nodeCount,
+    nodeCount: nodes.length,
   });
 }
 
@@ -1073,7 +895,6 @@ function scheduleProgressiveDeferredEnhancements(message: Extract<HostMessage, {
     });
     renderMath();
     scheduleCachedMermaidResume(message.hasMermaid);
-    scheduleCurrentProcessedDocumentCacheClone(1200);
     postPerfMark("mm-progressive-enhancements-end", {
       renderId: renderId ?? null
     });
@@ -1154,7 +975,6 @@ function enqueueLazyMermaidRender(
       await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
       if (generation === mermaidRenderGeneration) {
         postPerfMark("mm-mermaid-lazy-render-end");
-        scheduleCurrentProcessedDocumentCacheClone();
       }
     });
 }
@@ -1205,7 +1025,6 @@ function postPostReadyEnhancementsComplete(
     message.renderId = renderId;
   }
   postHostMessage(message);
-  scheduleCurrentProcessedDocumentCacheClone();
 }
 
 function hasMermaidNodes(): boolean {
@@ -2221,7 +2040,6 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   updateMinimapViewport({ skipVisibilityUpdate: true });
   emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
   postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
-  scheduleCurrentProcessedDocumentCacheClone();
 }
 
 function ensureDetailedMinimapContentForVisiblePath(phase: "A" | "B" = "A"): void {
@@ -3551,7 +3369,6 @@ function handleHostMessage(raw: unknown): void {
     // tab-away cannot store this DOM under the stale key (cache poisoning);
     // the next tab-return then does a full truthful render.
     currentDocumentCacheKey = null;
-    cancelProcessedDocumentCacheClone();
     return;
   }
 
@@ -3775,9 +3592,7 @@ function applyModeSettleProbePreferences(message: Extract<HostMessage, { type: "
 
 function resetModuleGlobalsForLoadDocument(): void {
   ++initialRenderPipelineGeneration;
-  ++processedDocumentCacheCloneGeneration;
   ++progressiveMinimapRefreshGeneration;
-  cancelProcessedDocumentCacheClone();
   cancelDeferredMinimapContentRefresh(false);
   initialRenderPipelineCompleted = false;
   firstPrefsBootstrapSuppressedByLoadGeneration = null;

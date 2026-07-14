@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 type HostBridge = (msg: unknown) => void;
 
@@ -42,7 +43,7 @@ afterEach(() => {
 });
 
 describe("renderer document cache", () => {
-  it("prestores the prepared active document so leaving a tab refreshes state instead of moving DOM", async () => {
+  it("moves the prepared active document into the cache when leaving a tab", async () => {
     const root = document.documentElement;
     Object.defineProperty(root, "scrollHeight", { configurable: true, value: 2400 });
     Object.defineProperty(root, "clientHeight", { configurable: true, value: 800 });
@@ -54,7 +55,7 @@ describe("renderer document cache", () => {
     load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
     await letPipelineSettle();
 
-    expect(messages).toContainEqual(expect.objectContaining({
+    expect(messages).not.toContainEqual(expect.objectContaining({
       type: "perf-mark",
       name: "mm-document-cache-prestore",
     }));
@@ -63,14 +64,74 @@ describe("renderer document cache", () => {
     load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
     await letPipelineSettle();
 
-    expect(messages).toContainEqual(expect.objectContaining({
+    expect(messages).not.toContainEqual(expect.objectContaining({
       type: "perf-mark",
       name: "mm-document-cache-refresh",
     }));
-    expect(messages).not.toContainEqual(expect.objectContaining({
+    expect(messages).toContainEqual(expect.objectContaining({
       type: "perf-mark",
       name: "mm-document-cache-store",
     }));
+  });
+
+  it("restores the exact live document elements preserved on switch-away", async () => {
+    const { load } = await loadRendererWithMessages();
+    const firstHtml = "<h1 id='first'>First</h1><p>cached document</p>";
+    const secondHtml = "<h1 id='second'>Second</h1><p>other document</p>";
+
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+    const preservedHeading = document.querySelector<HTMLElement>("#first");
+    expect(preservedHeading).not.toBeNull();
+
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+    await letPipelineSettle();
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 3 });
+    await letPipelineSettle();
+
+    expect(document.querySelector("#first")).toBe(preservedHeading);
+  });
+
+  it("does not read top-level block heights while preserving a document", async () => {
+    vi.stubGlobal("requestIdleCallback", vi.fn(() => 1));
+    const { load } = await loadRendererWithMessages();
+    const firstHtml = "<h1 id='first'>First</h1><p id='first-body'>cached document</p>";
+    const secondHtml = "<h1 id='second'>Second</h1><p>other document</p>";
+
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+
+    let heightReads = 0;
+    for (const node of document.querySelectorAll<HTMLElement>("main.mm-document > *")) {
+      Object.defineProperty(node, "offsetHeight", {
+        configurable: true,
+        get: () => {
+          heightReads++;
+          return 40;
+        },
+      });
+    }
+
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+
+    expect(heightReads).toBe(0);
+  });
+
+  it("keeps the processed-document cache owner clone-free and timer-free", () => {
+    const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+    const cacheOwnerStart = source.indexOf("function getCachedProcessedDocumentFragment");
+    const cacheOwnerEnd = source.indexOf("function applyViewerChromeState", cacheOwnerStart);
+    expect(cacheOwnerStart).toBeGreaterThanOrEqual(0);
+    expect(cacheOwnerEnd).toBeGreaterThan(cacheOwnerStart);
+    const cacheOwner = source.slice(cacheOwnerStart, cacheOwnerEnd);
+
+    expect(cacheOwner).not.toContain("cloneNode(true)");
+    expect(cacheOwner).not.toContain("offsetHeight");
+    expect(cacheOwner).not.toContain("containIntrinsicSize");
+    expect(cacheOwner).not.toContain("scheduleCurrentProcessedDocumentCacheClone");
+    expect(cacheOwner).not.toContain("requestIdleCallback");
+    expect(cacheOwner).not.toContain("setTimeout");
+    expect(cacheOwner).toContain("return cached.fragment;");
   });
 
   it("reports cached geometry immediately and refreshes current geometry after cached reveal", async () => {

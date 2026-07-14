@@ -1424,8 +1424,6 @@
   var restoredCachedLayoutState = null;
   var restoredCachedHeadings = null;
   var restoredCachedMinimapSnapshot = null;
-  var processedDocumentCacheCloneGeneration = 0;
-  var processedDocumentCacheCloneHandle = null;
   var lastExtractedHeadings = [];
   var lastKnownLayoutState = {
     scrollTop: 0,
@@ -1450,106 +1448,26 @@
       return void 0;
     }
     processedDocumentCache.delete(cacheKey);
-    processedDocumentCache.set(cacheKey, cached);
     restoredCachedLayoutState = { ...cached.layoutState };
     restoredCachedHeadings = cached.headings.map(cloneHeadingPayload);
     restoredCachedMinimapSnapshot = cached.minimapSnapshot;
-    return cached.fragment.cloneNode(true);
+    return cached.fragment;
   }
   function setCurrentProcessedDocumentCacheKey(cacheKey) {
     currentDocumentCacheKey = cacheKey;
   }
-  function cancelProcessedDocumentCacheClone() {
-    if (!processedDocumentCacheCloneHandle) {
+  function preserveCurrentProcessedDocument() {
+    if (!currentDocumentCacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
       return;
     }
-    const handle = processedDocumentCacheCloneHandle;
-    processedDocumentCacheCloneHandle = null;
-    if (handle.kind === "idle") {
-      window.cancelIdleCallback?.(handle.id);
-    } else {
-      window.clearTimeout(handle.id);
-    }
-  }
-  function captureCurrentProcessedDocumentCacheEntry(mode) {
+    const cacheKey = currentDocumentCacheKey;
     const main = document.querySelector("main.mm-document");
     if (!main || main.childNodes.length === 0) {
-      return null;
+      return;
     }
-    const sourceNodes = Array.from(main.childNodes);
     const fragment = document.createDocumentFragment();
-    if (mode === "clone") {
-      const clones = sourceNodes.map((node) => node.cloneNode(true));
-      for (let index = 0; index < sourceNodes.length; index++) {
-        const live = sourceNodes[index];
-        const clone = clones[index];
-        if (live instanceof HTMLElement && clone instanceof HTMLElement) {
-          const settledHeight = live.offsetHeight;
-          if (settledHeight > 0) {
-            clone.style.containIntrinsicSize = `auto ${settledHeight}px`;
-          }
-        }
-      }
-      fragment.append(...clones);
-    } else {
-      const settledHeights = sourceNodes.map((node) => node instanceof HTMLElement ? node.offsetHeight : 0);
-      for (let index = 0; index < sourceNodes.length; index++) {
-        const node = sourceNodes[index];
-        const settledHeight = settledHeights[index] ?? 0;
-        if (node instanceof HTMLElement && settledHeight > 0) {
-          node.style.containIntrinsicSize = `auto ${settledHeight}px`;
-        }
-      }
-      fragment.append(...sourceNodes);
-    }
-    const minimapSnapshot = captureMinimapSnapshot({
-      ownerDocument: document,
-      minimapContent,
-      minimapViewport,
-      documentHeight: minimapDocumentHeight,
-      lastPostedState: lastPostedMinimapState
-    });
-    return {
-      fragment,
-      nodeCount: sourceNodes.length,
-      layoutState: { ...lastKnownLayoutState },
-      headings: lastExtractedHeadings.map(cloneHeadingPayload),
-      minimapSnapshot
-    };
-  }
-  function storeProcessedDocumentCacheEntry(cacheKey, entry) {
-    processedDocumentCache.delete(cacheKey);
-    processedDocumentCache.set(cacheKey, entry);
-    while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
-      const oldest = processedDocumentCache.keys().next().value;
-      if (oldest === void 0) {
-        break;
-      }
-      processedDocumentCache.delete(oldest);
-    }
-  }
-  function cachedFragmentIsBehindLiveDocument(cached) {
-    const main = document.querySelector("main.mm-document");
-    if (!main) {
-      return false;
-    }
-    if (main.childNodes.length > cached.nodeCount) {
-      return true;
-    }
-    const liveHeadingCount = main.querySelectorAll("h1,h2,h3,h4,h5,h6").length;
-    if (liveHeadingCount > cached.headings.length) {
-      return true;
-    }
-    return cached.minimapSnapshot === null && minimapContent !== null && minimapContent.childNodes.length > 0;
-  }
-  function refreshProcessedDocumentCacheState(cacheKey, markName) {
-    const cached = processedDocumentCache.get(cacheKey);
-    if (cached === void 0) {
-      return false;
-    }
-    if (cachedFragmentIsBehindLiveDocument(cached)) {
-      return false;
-    }
+    const nodes = Array.from(main.childNodes);
+    fragment.append(...nodes);
     const minimapSnapshot = captureMinimapSnapshot({
       ownerDocument: document,
       minimapContent,
@@ -1559,71 +1477,23 @@
     });
     processedDocumentCache.delete(cacheKey);
     processedDocumentCache.set(cacheKey, {
-      ...cached,
+      fragment,
+      nodeCount: nodes.length,
       layoutState: { ...lastKnownLayoutState },
       headings: lastExtractedHeadings.map(cloneHeadingPayload),
       minimapSnapshot
     });
-    postPerfMark(markName, {
-      entries: processedDocumentCache.size,
-      nodeCount: cached.nodeCount
-    });
-    return true;
-  }
-  function scheduleCurrentProcessedDocumentCacheClone(delayMs = 240) {
-    const cacheKey = currentDocumentCacheKey;
-    if (!cacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
-      return;
-    }
-    const generation = ++processedDocumentCacheCloneGeneration;
-    cancelProcessedDocumentCacheClone();
-    const run = () => {
-      if (generation !== processedDocumentCacheCloneGeneration || currentDocumentCacheKey !== cacheKey) {
-        return;
+    while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
+      const oldest = processedDocumentCache.keys().next().value;
+      if (oldest === void 0) {
+        break;
       }
-      processedDocumentCacheCloneHandle = null;
-      const entry = captureCurrentProcessedDocumentCacheEntry("clone");
-      if (!entry) {
-        return;
-      }
-      storeProcessedDocumentCacheEntry(cacheKey, entry);
-      postPerfMark("mm-document-cache-prestore", {
-        entries: processedDocumentCache.size,
-        nodeCount: entry.nodeCount
-      });
-    };
-    const requestIdle = window.requestIdleCallback;
-    if (requestIdle) {
-      processedDocumentCacheCloneHandle = {
-        kind: "idle",
-        id: requestIdle(run, { timeout: Math.max(delayMs, 1200) })
-      };
-    } else {
-      processedDocumentCacheCloneHandle = {
-        kind: "timeout",
-        id: window.setTimeout(run, delayMs)
-      };
+      processedDocumentCache.delete(oldest);
     }
-  }
-  function preserveCurrentProcessedDocument() {
-    if (!currentDocumentCacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
-      return;
-    }
-    const cacheKey = currentDocumentCacheKey;
-    cancelProcessedDocumentCacheClone();
-    if (refreshProcessedDocumentCacheState(cacheKey, "mm-document-cache-refresh")) {
-      currentDocumentCacheKey = null;
-      return;
-    }
-    const entry = captureCurrentProcessedDocumentCacheEntry("move");
-    if (!entry) {
-      return;
-    }
-    storeProcessedDocumentCacheEntry(cacheKey, entry);
     currentDocumentCacheKey = null;
     postPerfMark("mm-document-cache-store", {
       entries: processedDocumentCache.size,
-      nodeCount: entry.nodeCount
+      nodeCount: nodes.length
     });
   }
   function applyViewerChromeState() {
@@ -1976,7 +1846,6 @@
       });
       renderMath2();
       scheduleCachedMermaidResume(message.hasMermaid);
-      scheduleCurrentProcessedDocumentCacheClone(1200);
       postPerfMark("mm-progressive-enhancements-end", {
         renderId: renderId ?? null
       });
@@ -2035,7 +1904,6 @@
       await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
       if (generation === mermaidRenderGeneration) {
         postPerfMark("mm-mermaid-lazy-render-end");
-        scheduleCurrentProcessedDocumentCacheClone();
       }
     });
   }
@@ -2079,7 +1947,6 @@
       message.renderId = renderId;
     }
     postHostMessage(message);
-    scheduleCurrentProcessedDocumentCacheClone();
   }
   function hasMermaidNodes() {
     return document.querySelector("pre.mm-mermaid") !== null;
@@ -2878,7 +2745,6 @@
     updateMinimapViewport({ skipVisibilityUpdate: true });
     emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
     postPerfMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
-    scheduleCurrentProcessedDocumentCacheClone();
   }
   function ensureDetailedMinimapContentForVisiblePath(phase = "A") {
     if (minimapSourceReady || !shouldBuildDetailedMinimapContent().allowed) {
@@ -3804,7 +3670,6 @@
     }
     if (message.type === "invalidate-document-cache-key") {
       currentDocumentCacheKey = null;
-      cancelProcessedDocumentCacheClone();
       return;
     }
     if (message.type === "set-task-checkbox") {
@@ -3979,9 +3844,7 @@
   }
   function resetModuleGlobalsForLoadDocument() {
     ++initialRenderPipelineGeneration;
-    ++processedDocumentCacheCloneGeneration;
     ++progressiveMinimapRefreshGeneration;
-    cancelProcessedDocumentCacheClone();
     cancelDeferredMinimapContentRefresh(false);
     initialRenderPipelineCompleted = false;
     firstPrefsBootstrapSuppressedByLoadGeneration = null;
