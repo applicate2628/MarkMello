@@ -23,6 +23,7 @@ import {
   findScrollTopForSourceLine,
   findSourceLineAtDocumentY,
   readSourceLineAnchors,
+  shouldQueuePreviewSourceLinePost,
   type SourceLineAnchor
 } from "./sourceLineSync";
 import {
@@ -68,6 +69,7 @@ type RendererWindow = Window & {
     };
   };
   invokeCSharpAction?: (message: string) => void;
+  __mmMathObserverPerfEnabled?: boolean;
 };
 
 type RendererMessage =
@@ -704,7 +706,14 @@ function renderMath(): MathReadinessController {
   // rendering loop to the seam in mathRenderInit.ts.
   emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
   const katex = hostWindow.katex ?? undefined;
-  const controller = renderMathInit({ katex, documentRoot: document });
+  const controller = renderMathInit({
+    katex,
+    documentRoot: document,
+    initialObservationTopBlockIndex: findTopVisibleBlockIndex(),
+    initialObservationBottomBlockIndex: findBottomVisibleBlockIndex(),
+    isMathObserverWindowTelemetryEnabled: () => hostWindow.__mmMathObserverPerfEnabled === true,
+    emitMathObserverWindowMark: (detail) => emitMark("mm-math-observer-window", detail),
+  });
   // Phase B fires after allMathRendered to re-clone the minimap when the
   // document height genuinely drifted (>=100px). The staleness guard must key
   // off document IDENTITY (currentDocumentCacheKey — same token used by
@@ -1188,9 +1197,19 @@ function findTopVisibleBlockIndex(): number | null {
   return findTopVisibleBlockIndexFromBlocks(getLiveDocumentBlockElements(), root.scrollTop);
 }
 
+function findBottomVisibleBlockIndex(): number | null {
+  const root = document.scrollingElement ?? document.documentElement;
+  return findTopVisibleBlockIndexFromBlocks(
+    getLiveDocumentBlockElements(),
+    root.scrollTop + root.clientHeight
+  );
+}
+
 function postScroll(): void {
   const scrollState = getScrollState();
   const topBlockIndex = findTopVisibleBlockIndex();
+  const bottomBlockIndex = findBottomVisibleBlockIndex();
+  currentController?.updateMathObservationWindow?.(topBlockIndex, "scroll", bottomBlockIndex);
   lastKnownLayoutState = { ...scrollState, topBlockIndex };
   recordScrollIpc();
   postHostMessage({
@@ -4262,7 +4281,9 @@ const queuePostScroll = createScrollCoalescer({
 
 document.addEventListener("scroll", () => {
   queuePostScroll();
-  queuePreviewSourceLinePost();
+  if (shouldQueuePreviewSourceLinePost(viewerChromeEnabled)) {
+    queuePreviewSourceLinePost();
+  }
 }, { passive: true });
 
 hostWindow.chrome?.webview?.addEventListener?.("message", (event) => handleHostMessage(event.data));

@@ -529,6 +529,8 @@
   var INITIAL_LOOKAHEAD_PX = 500;
   var MATH_RENDER_FRAME_FALLBACK_MS = 32;
   var INITIAL_PAST_VIEWPORT_SCAN_LIMIT = 8;
+  var MATH_OBSERVER_WINDOW_CAP = 320;
+  var MATH_OBSERVER_MIN_PADDING_BLOCKS = 8;
   function complexityScore(tex) {
     let score = 1;
     score += (tex.match(/\\frac/g)?.length ?? 0) * 2;
@@ -549,6 +551,38 @@
       return node.parentElement ?? node;
     }
     return node;
+  }
+  function parseNonNegativeInt(value) {
+    if (value === void 0 || value.trim() === "") {
+      return null;
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+  function getMathBlockIndex(visEl) {
+    const direct = parseNonNegativeInt(visEl.dataset["mmBlockIndex"]);
+    if (direct !== null) return direct;
+    const ancestor = visEl.closest("[data-mm-block-index]");
+    return parseNonNegativeInt(ancestor?.dataset["mmBlockIndex"]);
+  }
+  function isBucketTerminal(bucket) {
+    return bucket.nodes.every((node) => isTerminalMathState(node.dataset["mmMathRendered"]));
+  }
+  function lowerBound(values, target) {
+    let low = 0;
+    let high = values.length;
+    while (low < high) {
+      const mid = low + Math.floor((high - low) / 2);
+      if (values[mid] < target) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low;
+  }
+  function nowMs() {
+    return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : 0;
   }
   function rafYield() {
     return new Promise((resolve) => {
@@ -656,19 +690,54 @@
       });
     });
     const allMathRendered = queue.start();
-    const observedToMathNodes = /* @__PURE__ */ new Map();
+    const bucketByElement = /* @__PURE__ */ new Map();
+    const buckets = [];
     for (const node of mathNodes) {
       const visEl = getVisibilityElement(node);
-      const bucket = observedToMathNodes.get(visEl) ?? [];
-      bucket.push(node);
-      observedToMathNodes.set(visEl, bucket);
+      let bucket = bucketByElement.get(visEl);
+      if (!bucket) {
+        bucket = {
+          visEl,
+          nodes: [],
+          blockIndex: getMathBlockIndex(visEl),
+          order: buckets.length,
+          observed: false,
+          terminal: false
+        };
+        buckets.push(bucket);
+        bucketByElement.set(visEl, bucket);
+      }
+      bucket.nodes.push(node);
     }
+    for (const bucket of buckets) {
+      bucket.terminal = isBucketTerminal(bucket);
+    }
+    const bucketIndexesByBlock = /* @__PURE__ */ new Map();
+    const unindexedBucketIndexes = [];
+    for (const bucket of buckets) {
+      if (bucket.blockIndex === null) {
+        unindexedBucketIndexes.push(bucket.order);
+        continue;
+      }
+      const indexes = bucketIndexesByBlock.get(bucket.blockIndex) ?? [];
+      indexes.push(bucket.order);
+      bucketIndexesByBlock.set(bucket.blockIndex, indexes);
+    }
+    const sortedBlockIndexes = Array.from(bucketIndexesByBlock.keys()).sort((left, right) => left - right);
+    const activeObservedBuckets = /* @__PURE__ */ new Set();
+    let lastTopBlockIndex = null;
+    let lastBottomBlockIndex = null;
+    let lastWindowStartBlockIndex = null;
+    let lastWindowEndBlockIndex = null;
+    let observerDisconnected = false;
     const observer = new IntersectionObserver((entries) => {
+      const telemetryEnabled = isObservationTelemetryEnabled();
+      const callbackStart = telemetryEnabled ? nowMs() : 0;
       for (const entry of entries) {
-        const visEl = entry.target;
-        const targets = observedToMathNodes.get(visEl);
-        if (!targets) continue;
-        for (const targetNode of targets) {
+        const bucket = bucketByElement.get(entry.target);
+        if (!bucket || bucket.terminal) continue;
+        if (markBucketTerminal(bucket)) continue;
+        for (const targetNode of bucket.nodes) {
           if (isTerminalMathState(targetNode.dataset["mmMathRendered"])) continue;
           const tex = targetNode.dataset["tex"] ?? "";
           const task = {
@@ -679,32 +748,198 @@
           queue.enqueue(task, entry.isIntersecting ? "high" : "low");
         }
       }
+      if (!telemetryEnabled) return;
+      emitObservationMark({
+        observedCount: activeObservedBuckets.size,
+        candidateCount: entries.length,
+        maxObservedCount: MATH_OBSERVER_WINDOW_CAP,
+        topBlockIndex: lastTopBlockIndex,
+        bottomBlockIndex: lastBottomBlockIndex,
+        windowStartBlockIndex: lastWindowStartBlockIndex,
+        windowEndBlockIndex: lastWindowEndBlockIndex,
+        addedCount: 0,
+        removedCount: 0,
+        terminalRemovedCount: 0,
+        updateDurationMs: 0,
+        callbackDurationMs: nowMs() - callbackStart,
+        reason: "callback"
+      });
     }, { rootMargin: `${INITIAL_LOOKAHEAD_PX}px` });
-    for (const visEl of observedToMathNodes.keys()) {
-      observer.observe(visEl);
+    function markBucketTerminal(bucket) {
+      if (bucket.terminal) return true;
+      if (!isBucketTerminal(bucket)) return false;
+      bucket.terminal = true;
+      return true;
     }
+    function pushCandidate(bucketIndex, candidates) {
+      if (candidates.length >= MATH_OBSERVER_WINDOW_CAP) return;
+      const bucket = buckets[bucketIndex];
+      if (!bucket || markBucketTerminal(bucket)) return;
+      candidates.push(bucket);
+    }
+    function collectDocumentOrderCandidates() {
+      const candidates = [];
+      let windowStartBlockIndex = null;
+      let windowEndBlockIndex = null;
+      for (let index = 0; index < buckets.length && candidates.length < MATH_OBSERVER_WINDOW_CAP; index++) {
+        pushCandidate(index, candidates);
+      }
+      for (const bucket of candidates) {
+        if (bucket.blockIndex === null) continue;
+        windowStartBlockIndex = windowStartBlockIndex === null ? bucket.blockIndex : Math.min(windowStartBlockIndex, bucket.blockIndex);
+        windowEndBlockIndex = windowEndBlockIndex === null ? bucket.blockIndex : Math.max(windowEndBlockIndex, bucket.blockIndex);
+      }
+      return { candidates, windowStartBlockIndex, windowEndBlockIndex };
+    }
+    function collectWindowCandidates(topBlockIndex, bottomBlockIndex) {
+      if (sortedBlockIndexes.length === 0) {
+        return collectDocumentOrderCandidates();
+      }
+      if (topBlockIndex === null) {
+        return { candidates: [], windowStartBlockIndex: null, windowEndBlockIndex: null };
+      }
+      const candidates = [];
+      const visibleStart = bottomBlockIndex === null ? topBlockIndex : Math.min(topBlockIndex, bottomBlockIndex);
+      const visibleEnd = bottomBlockIndex === null ? topBlockIndex : Math.max(topBlockIndex, bottomBlockIndex);
+      const visibleSpan = Math.max(0, visibleEnd - visibleStart);
+      const padding = Math.max(MATH_OBSERVER_MIN_PADDING_BLOCKS, visibleSpan);
+      const windowStartBlockIndex = Math.max(0, visibleStart - padding);
+      const windowEndBlockIndex = visibleEnd + padding;
+      const startIndex = lowerBound(sortedBlockIndexes, windowStartBlockIndex);
+      for (let index = startIndex; index < sortedBlockIndexes.length && sortedBlockIndexes[index] <= windowEndBlockIndex; index++) {
+        const blockIndex = sortedBlockIndexes[index];
+        for (const bucketIndex of bucketIndexesByBlock.get(blockIndex) ?? []) {
+          pushCandidate(bucketIndex, candidates);
+          if (candidates.length >= MATH_OBSERVER_WINDOW_CAP) break;
+        }
+        if (candidates.length >= MATH_OBSERVER_WINDOW_CAP) break;
+      }
+      return { candidates, windowStartBlockIndex, windowEndBlockIndex };
+    }
+    function unobserveBucket(bucket) {
+      if (!bucket.observed) return;
+      observer.unobserve(bucket.visEl);
+      bucket.observed = false;
+      activeObservedBuckets.delete(bucket);
+    }
+    function emitObservationMark(detail) {
+      deps.emitMathObserverWindowMark?.(detail);
+    }
+    function isObservationTelemetryEnabled() {
+      if (!deps.emitMathObserverWindowMark) return false;
+      return deps.isMathObserverWindowTelemetryEnabled?.() ?? true;
+    }
+    function updateMathObservationWindow(topBlockIndex, reason = "scroll", bottomBlockIndex = topBlockIndex, priorTerminalRemovedCount = 0) {
+      if (observerDisconnected) {
+        return null;
+      }
+      const telemetryEnabled = isObservationTelemetryEnabled();
+      const updateStart = telemetryEnabled ? nowMs() : 0;
+      lastTopBlockIndex = topBlockIndex;
+      lastBottomBlockIndex = bottomBlockIndex;
+      let terminalRemovedCount = priorTerminalRemovedCount;
+      for (const bucket of Array.from(activeObservedBuckets)) {
+        if (markBucketTerminal(bucket)) {
+          unobserveBucket(bucket);
+          terminalRemovedCount++;
+        }
+      }
+      const selection = collectWindowCandidates(topBlockIndex, bottomBlockIndex);
+      lastWindowStartBlockIndex = selection.windowStartBlockIndex;
+      lastWindowEndBlockIndex = selection.windowEndBlockIndex;
+      const desired = new Set(selection.candidates);
+      let addedCount = 0;
+      let removedCount = 0;
+      for (const bucket of Array.from(activeObservedBuckets)) {
+        if (!desired.has(bucket)) {
+          unobserveBucket(bucket);
+          removedCount++;
+        }
+      }
+      for (const bucket of selection.candidates) {
+        if (bucket.observed || markBucketTerminal(bucket)) continue;
+        observer.observe(bucket.visEl);
+        bucket.observed = true;
+        activeObservedBuckets.add(bucket);
+        addedCount++;
+      }
+      if (!telemetryEnabled) return null;
+      const detail = {
+        observedCount: activeObservedBuckets.size,
+        candidateCount: selection.candidates.length,
+        maxObservedCount: MATH_OBSERVER_WINDOW_CAP,
+        topBlockIndex,
+        bottomBlockIndex,
+        windowStartBlockIndex: lastWindowStartBlockIndex,
+        windowEndBlockIndex: lastWindowEndBlockIndex,
+        addedCount,
+        removedCount,
+        terminalRemovedCount,
+        updateDurationMs: nowMs() - updateStart,
+        callbackDurationMs: 0,
+        reason
+      };
+      emitObservationMark(detail);
+      return detail;
+    }
+    function disconnectObserver(reason) {
+      if (observerDisconnected) return;
+      observerDisconnected = true;
+      observer.disconnect();
+      for (const bucket of activeObservedBuckets) {
+        bucket.observed = false;
+      }
+      activeObservedBuckets.clear();
+      if (!isObservationTelemetryEnabled()) return;
+      emitObservationMark({
+        observedCount: 0,
+        candidateCount: 0,
+        maxObservedCount: MATH_OBSERVER_WINDOW_CAP,
+        topBlockIndex: lastTopBlockIndex,
+        bottomBlockIndex: lastBottomBlockIndex,
+        windowStartBlockIndex: lastWindowStartBlockIndex,
+        windowEndBlockIndex: lastWindowEndBlockIndex,
+        addedCount: 0,
+        removedCount: 0,
+        terminalRemovedCount: 0,
+        updateDurationMs: 0,
+        callbackDurationMs: 0,
+        reason
+      });
+    }
+    updateMathObservationWindow(
+      deps.initialObservationTopBlockIndex ?? null,
+      "initial",
+      deps.initialObservationBottomBlockIndex ?? deps.initialObservationTopBlockIndex ?? null
+    );
     const unobserveCompletedMath = queue.onTaskComplete((node) => {
-      const visEl = getVisibilityElement(node);
-      const targets = observedToMathNodes.get(visEl);
-      if (!targets) return;
-      if (targets.every((t) => isTerminalMathState(t.dataset["mmMathRendered"]))) {
-        observer.unobserve(visEl);
-        observedToMathNodes.delete(visEl);
+      const bucket = bucketByElement.get(getVisibilityElement(node));
+      if (!bucket || !markBucketTerminal(bucket)) return;
+      const wasObserved = bucket.observed;
+      unobserveBucket(bucket);
+      if (wasObserved) {
+        updateMathObservationWindow(lastTopBlockIndex, "complete-backfill", lastBottomBlockIndex, 1);
       }
     });
     let cancelled = false;
+    void allMathRendered.then(() => {
+      if (!cancelled) {
+        disconnectObserver("drain");
+      }
+    });
     return {
       initialVisibleReady,
       allMathRendered,
       cancel: () => {
         cancelled = true;
         unobserveCompletedMath();
-        observer.disconnect();
+        disconnectObserver("cancel");
         queue.cancel();
       },
       initialVisibleNodes,
       totalMathCount: mathNodes.length,
-      isCancelled: () => cancelled
+      isCancelled: () => cancelled,
+      updateMathObservationWindow
     };
   }
 
@@ -1137,14 +1372,17 @@
 
   // RendererWeb/src/sourceLineSync.ts
   var SOURCE_LINE_ANCHOR_SELECTOR = "[data-mm-source-line]";
+  function shouldQueuePreviewSourceLinePost(viewerChromeEnabled2) {
+    return !viewerChromeEnabled2;
+  }
   function readSourceLineAnchors(root = document, scrollY = window.scrollY) {
     const anchors = [];
     for (const element of Array.from(root.querySelectorAll(SOURCE_LINE_ANCHOR_SELECTOR))) {
-      const sourceLine = parseNonNegativeInt(element.dataset["mmSourceLine"]);
+      const sourceLine = parseNonNegativeInt2(element.dataset["mmSourceLine"]);
       if (sourceLine === null) {
         continue;
       }
-      const endLine = parseNonNegativeInt(element.dataset["mmSourceEndLine"]) ?? sourceLine;
+      const endLine = parseNonNegativeInt2(element.dataset["mmSourceEndLine"]) ?? sourceLine;
       anchors.push({
         sourceLine,
         endLine: Math.max(sourceLine, endLine),
@@ -1232,7 +1470,7 @@
     }
     return result;
   }
-  function parseNonNegativeInt(value) {
+  function parseNonNegativeInt2(value) {
     if (value === void 0 || value.trim() === "") {
       return null;
     }
@@ -1723,7 +1961,14 @@
   function renderMath2() {
     emitMark("mm-render-math-start", { mathCount: document.querySelectorAll("[data-tex]").length });
     const katex = hostWindow.katex ?? void 0;
-    const controller = renderMath({ katex, documentRoot: document });
+    const controller = renderMath({
+      katex,
+      documentRoot: document,
+      initialObservationTopBlockIndex: findTopVisibleBlockIndex(),
+      initialObservationBottomBlockIndex: findBottomVisibleBlockIndex(),
+      isMathObserverWindowTelemetryEnabled: () => hostWindow.__mmMathObserverPerfEnabled === true,
+      emitMathObserverWindowMark: (detail) => emitMark("mm-math-observer-window", detail)
+    });
     const phaseBDocumentCacheKey = currentDocumentCacheKey;
     const initialVisualSettleReady = schedulePhaseBRebuild({
       allMathRendered: controller.allMathRendered,
@@ -2088,9 +2333,18 @@
     const root = document.scrollingElement ?? document.documentElement;
     return findTopVisibleBlockIndexFromBlocks(getLiveDocumentBlockElements(), root.scrollTop);
   }
+  function findBottomVisibleBlockIndex() {
+    const root = document.scrollingElement ?? document.documentElement;
+    return findTopVisibleBlockIndexFromBlocks(
+      getLiveDocumentBlockElements(),
+      root.scrollTop + root.clientHeight
+    );
+  }
   function postScroll() {
     const scrollState = getScrollState();
     const topBlockIndex = findTopVisibleBlockIndex();
+    const bottomBlockIndex = findBottomVisibleBlockIndex();
+    currentController?.updateMathObservationWindow?.(topBlockIndex, "scroll", bottomBlockIndex);
     lastKnownLayoutState = { ...scrollState, topBlockIndex };
     recordScrollIpc();
     postHostMessage({
@@ -4339,7 +4593,9 @@
   });
   document.addEventListener("scroll", () => {
     queuePostScroll();
-    queuePreviewSourceLinePost();
+    if (shouldQueuePreviewSourceLinePost(viewerChromeEnabled)) {
+      queuePreviewSourceLinePost();
+    }
   }, { passive: true });
   hostWindow.chrome?.webview?.addEventListener?.("message", (event) => handleHostMessage(event.data));
   window.addEventListener("message", (event) => handleHostMessage(event.data));

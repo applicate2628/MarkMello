@@ -3,6 +3,7 @@ import {
   findScrollTopForSourceLine,
   findSourceLineAtDocumentY,
   readSourceLineAnchors,
+  shouldQueuePreviewSourceLinePost,
   type SourceLineAnchor
 } from "../src/sourceLineSync";
 
@@ -39,5 +40,10 @@ describe("sourceLineSync", () => {
       { sourceLine: 0, endLine: 0, top: 30 },
       { sourceLine: 3, endLine: 5, top: 90 },
     ]);
+  });
+
+  it("only queues preview source-line posts for edit preview mode", () => {
+    expect(shouldQueuePreviewSourceLinePost(true)).toBe(false);
+    expect(shouldQueuePreviewSourceLinePost(false)).toBe(true);
   });
 });

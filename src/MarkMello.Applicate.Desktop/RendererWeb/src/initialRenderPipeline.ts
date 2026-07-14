@@ -1,3 +1,28 @@
+export type MathObserverWindowReason =
+  | "initial"
+  | "scroll"
+  | "complete-backfill"
+  | "terminal"
+  | "drain"
+  | "cancel"
+  | "callback";
+
+export type MathObserverWindowStats = {
+  observedCount: number;
+  candidateCount: number;
+  maxObservedCount: number;
+  topBlockIndex: number | null;
+  bottomBlockIndex: number | null;
+  windowStartBlockIndex: number | null;
+  windowEndBlockIndex: number | null;
+  addedCount: number;
+  removedCount: number;
+  terminalRemovedCount: number;
+  updateDurationMs: number;
+  callbackDurationMs: number;
+  reason: MathObserverWindowReason;
+};
+
 export type MathReadinessController = {
   initialVisibleReady: Promise<void>;
   allMathRendered: Promise<void>;
@@ -10,6 +35,11 @@ export type MathReadinessController = {
   initialVisibleNodes: ReadonlySet<HTMLElement>;
   totalMathCount: number;
   isCancelled(): boolean;
+  updateMathObservationWindow?: (
+    topBlockIndex: number | null,
+    reason?: MathObserverWindowReason,
+    bottomBlockIndex?: number | null
+  ) => MathObserverWindowStats | null;
 };
 
 export type RendererTheme = "light" | "dark" | "classic-white";

@@ -6,6 +6,10 @@ export type SourceLineAnchor = {
 
 const SOURCE_LINE_ANCHOR_SELECTOR = "[data-mm-source-line]";
 
+export function shouldQueuePreviewSourceLinePost(viewerChromeEnabled: boolean): boolean {
+  return !viewerChromeEnabled;
+}
+
 export function readSourceLineAnchors(root: ParentNode = document, scrollY = window.scrollY): SourceLineAnchor[] {
   const anchors: SourceLineAnchor[] = [];
   for (const element of Array.from(root.querySelectorAll<HTMLElement>(SOURCE_LINE_ANCHOR_SELECTOR))) {
