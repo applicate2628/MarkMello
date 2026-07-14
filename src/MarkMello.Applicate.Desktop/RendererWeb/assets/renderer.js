@@ -1668,6 +1668,8 @@
   var minimapDragStartClientY = null;
   var minimapDragStartScrollTop = 0;
   var minimapDragMode = "tentative";
+  var minimapDragSuppressedScrollFrames = 0;
+  var minimapDragFinalFlushPending = false;
   var minimapDragGrabOffset = 0;
   var MINIMAP_DRAG_THRESHOLD_PX = 4;
   var minimapSourceReady = false;
@@ -2013,6 +2015,13 @@
       }
     }
     postHostMessage(message);
+  }
+  function emitMinimapDragSuppressPerfMark(name, detail) {
+    if (hostWindow.__mmMathObserverPerfEnabled !== true) {
+      return;
+    }
+    emitMark(name, detail);
+    postPerfMark(name, detail);
   }
   function countFailedInSet(nodes) {
     let count = 0;
@@ -2428,7 +2437,11 @@
       root.scrollTop + root.clientHeight
     );
   }
-  function postScroll() {
+  function postScroll(suppressed = false) {
+    if (suppressed) {
+      minimapDragSuppressedScrollFrames++;
+      return null;
+    }
     const scrollState = getScrollState();
     const topBlockIndex = findTopVisibleBlockIndex();
     const bottomBlockIndex = findBottomVisibleBlockIndex();
@@ -2440,6 +2453,15 @@
       type: "scroll",
       ...layoutState
     });
+    if (minimapDragFinalFlushPending) {
+      minimapDragFinalFlushPending = false;
+      emitMinimapDragSuppressPerfMark("mm-minimap-drag-suppress-end", {
+        suppressedScrollFrames: minimapDragSuppressedScrollFrames,
+        intermediateHeavyUpdates: 0,
+        finalHeavyUpdates: 1,
+        finalScrollTop: layoutState.scrollTop
+      });
+    }
     return layoutState;
   }
   function refreshSourceLineAnchors() {
@@ -2487,13 +2509,13 @@
     });
   }
   function queuePreviewSourceLinePost() {
-    if (suppressPreviewSourceLineEmit || !documentScrollEnabled || previewSourceLineFrameRequested) {
+    if (isMinimapPanningDrag() || suppressPreviewSourceLineEmit || !documentScrollEnabled || previewSourceLineFrameRequested) {
       return;
     }
     previewSourceLineFrameRequested = true;
     window.requestAnimationFrame(() => {
       previewSourceLineFrameRequested = false;
-      if (suppressPreviewSourceLineEmit || !documentScrollEnabled) {
+      if (isMinimapPanningDrag() || suppressPreviewSourceLineEmit || !documentScrollEnabled) {
         return;
       }
       pendingSourceLineTarget = null;
@@ -3610,6 +3632,9 @@
     minimapRoot?.setPointerCapture(event.pointerId);
     event.preventDefault();
   }
+  function isMinimapPanningDrag() {
+    return minimapDragging && minimapDragMode === "panning";
+  }
   function handleMinimapPointerMove(event) {
     if (!minimapDragging || minimapDragStartClientY === null) {
       return;
@@ -3618,7 +3643,14 @@
     if (minimapDragMode === "tentative" && Math.abs(delta) < MINIMAP_DRAG_THRESHOLD_PX) {
       return;
     }
-    minimapDragMode = "panning";
+    if (minimapDragMode === "tentative") {
+      minimapDragMode = "panning";
+      minimapDragSuppressedScrollFrames = 0;
+      minimapDragFinalFlushPending = false;
+      emitMinimapDragSuppressPerfMark("mm-minimap-drag-suppress-start", {
+        startScrollTop: minimapDragStartScrollTop
+      });
+    }
     const root = document.scrollingElement ?? document.documentElement;
     const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
     if (minimapRoot && minimapViewport && currentMinimapLayout && minimapContent && currentMinimapLayout.thumbSlope > 0) {
@@ -3645,6 +3677,7 @@
       return;
     }
     const wasTap = minimapDragMode === "tentative";
+    const wasPanning = minimapDragMode === "panning";
     minimapDragging = false;
     minimapDragStartClientY = null;
     minimapDragMode = "tentative";
@@ -3654,6 +3687,13 @@
     }
     if (wasTap) {
       scrollFromMinimapClientY(event.clientY);
+    }
+    if (wasPanning) {
+      minimapDragFinalFlushPending = true;
+      queuePostScroll();
+      if (shouldQueuePreviewSourceLinePost(viewerChromeEnabled)) {
+        queuePreviewSourceLinePost();
+      }
     }
   }
   function queueMinimapViewportUpdate(layoutState, perfMarkName) {
@@ -4677,7 +4717,7 @@
         queueMinimapRefreshAfterLayoutSettles();
         scheduleResizeReactions();
         invalidateSourceLineAnchors();
-        window.requestAnimationFrame(postScroll);
+        window.requestAnimationFrame(() => postScroll());
       });
       resizeObserver.observe(documentElement);
       resizeObserver.observe(document.body);
@@ -4689,8 +4729,10 @@
   });
   var queuePostScroll = createScrollCoalescer({
     postScroll: () => {
-      const layoutState = postScroll();
-      queueMinimapViewportUpdate(layoutState);
+      const layoutState = postScroll(isMinimapPanningDrag());
+      if (layoutState !== null) {
+        queueMinimapViewportUpdate(layoutState);
+      }
     },
     schedule: (cb) => {
       window.requestAnimationFrame(cb);

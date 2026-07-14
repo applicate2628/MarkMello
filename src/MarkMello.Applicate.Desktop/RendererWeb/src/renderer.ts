@@ -255,6 +255,8 @@ let minimapDragging = false;
 let minimapDragStartClientY: number | null = null;
 let minimapDragStartScrollTop = 0;
 let minimapDragMode: "tentative" | "panning" = "tentative";
+let minimapDragSuppressedScrollFrames = 0;
+let minimapDragFinalFlushPending = false;
 // Minimap-local offset between the grab point and the viewport-indicator top at
 // pointer-down, so the block-anchor drag keeps the grabbed point under the cursor.
 let minimapDragGrabOffset = 0;
@@ -694,6 +696,15 @@ function postPerfMark(name: string, detail?: Record<string, unknown>): void {
     }
   }
   postHostMessage(message);
+}
+
+function emitMinimapDragSuppressPerfMark(name: string, detail: Record<string, unknown>): void {
+  if (hostWindow.__mmMathObserverPerfEnabled !== true) {
+    return;
+  }
+
+  emitMark(name, detail);
+  postPerfMark(name, detail);
 }
 
 function countFailedInSet(nodes: Iterable<HTMLElement>): number {
@@ -1236,7 +1247,12 @@ function findBottomVisibleBlockIndex(): number | null {
   );
 }
 
-function postScroll(): CachedLayoutState {
+function postScroll(suppressed = false): CachedLayoutState | null {
+  if (suppressed) {
+    minimapDragSuppressedScrollFrames++;
+    return null;
+  }
+
   const scrollState = getScrollState();
   const topBlockIndex = findTopVisibleBlockIndex();
   const bottomBlockIndex = findBottomVisibleBlockIndex();
@@ -1248,6 +1264,15 @@ function postScroll(): CachedLayoutState {
     type: "scroll",
     ...layoutState
   });
+  if (minimapDragFinalFlushPending) {
+    minimapDragFinalFlushPending = false;
+    emitMinimapDragSuppressPerfMark("mm-minimap-drag-suppress-end", {
+      suppressedScrollFrames: minimapDragSuppressedScrollFrames,
+      intermediateHeavyUpdates: 0,
+      finalHeavyUpdates: 1,
+      finalScrollTop: layoutState.scrollTop,
+    });
+  }
   return layoutState;
 }
 
@@ -1314,14 +1339,17 @@ function suppressPreviewSourceLinePost(): void {
 }
 
 function queuePreviewSourceLinePost(): void {
-  if (suppressPreviewSourceLineEmit || !documentScrollEnabled || previewSourceLineFrameRequested) {
+  if (isMinimapPanningDrag()
+    || suppressPreviewSourceLineEmit
+    || !documentScrollEnabled
+    || previewSourceLineFrameRequested) {
     return;
   }
 
   previewSourceLineFrameRequested = true;
   window.requestAnimationFrame(() => {
     previewSourceLineFrameRequested = false;
-    if (suppressPreviewSourceLineEmit || !documentScrollEnabled) {
+    if (isMinimapPanningDrag() || suppressPreviewSourceLineEmit || !documentScrollEnabled) {
       return;
     }
 
@@ -2812,6 +2840,10 @@ function handleMinimapPointerDown(event: PointerEvent): void {
   event.preventDefault();
 }
 
+function isMinimapPanningDrag(): boolean {
+  return minimapDragging && minimapDragMode === "panning";
+}
+
 function handleMinimapPointerMove(event: PointerEvent): void {
   if (!minimapDragging || minimapDragStartClientY === null) {
     return;
@@ -2821,7 +2853,14 @@ function handleMinimapPointerMove(event: PointerEvent): void {
   if (minimapDragMode === "tentative" && Math.abs(delta) < MINIMAP_DRAG_THRESHOLD_PX) {
     return;
   }
-  minimapDragMode = "panning";
+  if (minimapDragMode === "tentative") {
+    minimapDragMode = "panning";
+    minimapDragSuppressedScrollFrames = 0;
+    minimapDragFinalFlushPending = false;
+    emitMinimapDragSuppressPerfMark("mm-minimap-drag-suppress-start", {
+      startScrollTop: minimapDragStartScrollTop,
+    });
+  }
 
   const root = document.scrollingElement ?? document.documentElement;
   const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
@@ -2866,6 +2905,7 @@ function handleMinimapPointerUp(event: PointerEvent): void {
     return;
   }
   const wasTap = minimapDragMode === "tentative";
+  const wasPanning = minimapDragMode === "panning";
   minimapDragging = false;
   minimapDragStartClientY = null;
   minimapDragMode = "tentative";
@@ -2877,6 +2917,13 @@ function handleMinimapPointerUp(event: PointerEvent): void {
   if (wasTap) {
     // Below drag threshold — treat as click → centered jump.
     scrollFromMinimapClientY(event.clientY);
+  }
+  if (wasPanning) {
+    minimapDragFinalFlushPending = true;
+    queuePostScroll();
+    if (shouldQueuePreviewSourceLinePost(viewerChromeEnabled)) {
+      queuePreviewSourceLinePost();
+    }
   }
 }
 
@@ -4296,7 +4343,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // does not snap the chrome on every observer tick.
       scheduleResizeReactions();
       invalidateSourceLineAnchors();
-      window.requestAnimationFrame(postScroll);
+      window.requestAnimationFrame(() => postScroll());
     });
     resizeObserver.observe(documentElement);
     resizeObserver.observe(document.body);
@@ -4310,8 +4357,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
 const queuePostScroll = createScrollCoalescer({
   postScroll: () => {
-    const layoutState = postScroll();
-    queueMinimapViewportUpdate(layoutState);
+    const layoutState = postScroll(isMinimapPanningDrag());
+    if (layoutState !== null) {
+      queueMinimapViewportUpdate(layoutState);
+    }
   },
   schedule: (cb) => { window.requestAnimationFrame(cb); },
 });
