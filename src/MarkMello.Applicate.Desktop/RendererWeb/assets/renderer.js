@@ -3008,6 +3008,8 @@
     minimapRoot.addEventListener("pointermove", handleMinimapPointerMove);
     minimapRoot.addEventListener("pointerup", handleMinimapPointerUp);
     minimapRoot.addEventListener("pointercancel", handleMinimapPointerUp);
+    window.addEventListener("pointerup", handleMinimapPointerUp, true);
+    window.addEventListener("pointercancel", handleMinimapPointerUp, true);
   }
   var minimapDocumentHeight = 0;
   function clearMinimapCloneReadCache() {

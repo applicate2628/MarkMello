@@ -1976,6 +1976,12 @@ function ensureMinimap(): void {
   minimapRoot.addEventListener("pointermove", handleMinimapPointerMove);
   minimapRoot.addEventListener("pointerup", handleMinimapPointerUp);
   minimapRoot.addEventListener("pointercancel", handleMinimapPointerUp);
+  // R1 hardening (fable): window-level fallback so a panning drag always
+  // terminates + flushes even if pointer capture is lost and pointerup/
+  // pointercancel land outside the minimap (mirrors the width-handle). The
+  // handler guards on minimapDragging, so this is a no-op otherwise.
+  window.addEventListener("pointerup", handleMinimapPointerUp, true);
+  window.addEventListener("pointercancel", handleMinimapPointerUp, true);
 }
 
 // Read by Task 15 schedulePhaseBRebuild to decide if Phase B rebuild is needed.
