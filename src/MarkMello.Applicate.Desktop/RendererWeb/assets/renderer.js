@@ -683,12 +683,22 @@
     for (const visEl of observedToMathNodes.keys()) {
       observer.observe(visEl);
     }
+    const unobserveCompletedMath = queue.onTaskComplete((node) => {
+      const visEl = getVisibilityElement(node);
+      const targets = observedToMathNodes.get(visEl);
+      if (!targets) return;
+      if (targets.every((t) => isTerminalMathState(t.dataset["mmMathRendered"]))) {
+        observer.unobserve(visEl);
+        observedToMathNodes.delete(visEl);
+      }
+    });
     let cancelled = false;
     return {
       initialVisibleReady,
       allMathRendered,
       cancel: () => {
         cancelled = true;
+        unobserveCompletedMath();
         observer.disconnect();
         queue.cancel();
       },
