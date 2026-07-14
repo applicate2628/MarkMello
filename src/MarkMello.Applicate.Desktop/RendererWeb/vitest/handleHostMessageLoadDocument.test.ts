@@ -178,7 +178,8 @@ describe("handleHostMessage(load-document)", () => {
     expect(renderMath).toContain("refreshInitialVisibleMinimapContent();");
     expect(helper).toContain("if (!minimapSourceReady)");
     expect(helper).toContain('postPerfMark("mm-minimap-refresh-skipped"');
-    expect(helper).toContain("updateMinimapViewport();");
+    expect(helper).toContain("updateMinimapVisibility(true);");
+    expect(helper).toContain("updateMinimapViewport({ skipVisibilityUpdate: true });");
   });
 
   it("prepares and starts mode reveal on the renderer document", () => {

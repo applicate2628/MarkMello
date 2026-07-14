@@ -33,7 +33,11 @@ import {
 } from "./minimapCache";
 import {
   collectLiveDocumentBlockElements,
-  findTopVisibleBlockIndexFromBlocks
+  createBlockElementIndex,
+  elementTopWithinContainer,
+  findTopVisibleBlockIndexFromBlocks,
+  getDocumentViewportTopCloneYFromIndex,
+  type BlockElementIndex
 } from "./topVisibleBlockIndex";
 
 type KatexApi = {
@@ -211,6 +215,7 @@ let hasReceivedHostPreferences = false;
 // переходит". Gate flipped once in `controller.initialVisibleReady.then(...)`.
 let hasInitialLayoutSettled = false;
 let minimapViewportFrameRequested = false;
+let pendingMinimapViewportLayoutState: CachedLayoutState | null = null;
 let minimapRefreshTimer: number | undefined;
 let minimapContentRefreshTimer: number | undefined;
 let minimapDeferredContentRefreshHandle: { kind: "idle" | "timeout"; id: number } | null = null;
@@ -243,6 +248,8 @@ let documentRevealShield: HTMLElement | null = null;
 let minimapRoot: HTMLElement | null = null;
 let minimapContent: HTMLElement | null = null;
 let minimapViewport: HTMLElement | null = null;
+let minimapCloneBlockElementIndex: BlockElementIndex = createBlockElementIndex([]);
+let minimapContentHeight: number | null = null;
 let currentMinimapLayout: MinimapViewportLayout | null = null;
 let minimapDragging = false;
 let minimapDragStartClientY: number | null = null;
@@ -319,6 +326,7 @@ let suppressPreviewSourceLineEmit = false;
 let suppressPreviewSourceLineSequence = 0;
 let lastPostedPreviewSourceLine: number | null = null;
 let liveDocumentBlockElements: HTMLElement[] = [];
+let liveDocumentBlockElementIndex: BlockElementIndex = createBlockElementIndex([]);
 let liveDocumentBlockElementsStale = true;
 const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
 type ProcessedDocumentCacheEntry = {
@@ -1174,11 +1182,13 @@ function getScrollState(): { scrollTop: number; scrollHeight: number; clientHeig
 
 function invalidateTopVisibleBlockIndexCache(): void {
   liveDocumentBlockElements = [];
+  liveDocumentBlockElementIndex = createBlockElementIndex([]);
   liveDocumentBlockElementsStale = true;
 }
 
 function refreshTopVisibleBlockIndexCache(): void {
   liveDocumentBlockElements = collectLiveDocumentBlockElements(document);
+  liveDocumentBlockElementIndex = createBlockElementIndex(liveDocumentBlockElements);
   liveDocumentBlockElementsStale = false;
 }
 
@@ -1187,6 +1197,13 @@ function getLiveDocumentBlockElements(): readonly HTMLElement[] {
     refreshTopVisibleBlockIndexCache();
   }
   return liveDocumentBlockElements;
+}
+
+function getLiveDocumentBlockElementIndex(): BlockElementIndex {
+  if (liveDocumentBlockElementsStale) {
+    refreshTopVisibleBlockIndexCache();
+  }
+  return liveDocumentBlockElementIndex;
 }
 
 // The top visible block: the first element with data-mm-block-index whose
@@ -1205,18 +1222,19 @@ function findBottomVisibleBlockIndex(): number | null {
   );
 }
 
-function postScroll(): void {
+function postScroll(): CachedLayoutState {
   const scrollState = getScrollState();
   const topBlockIndex = findTopVisibleBlockIndex();
   const bottomBlockIndex = findBottomVisibleBlockIndex();
   currentController?.updateMathObservationWindow?.(topBlockIndex, "scroll", bottomBlockIndex);
-  lastKnownLayoutState = { ...scrollState, topBlockIndex };
+  const layoutState = { ...scrollState, topBlockIndex };
+  lastKnownLayoutState = layoutState;
   recordScrollIpc();
   postHostMessage({
     type: "scroll",
-    ...scrollState,
-    topBlockIndex
+    ...layoutState
   });
+  return layoutState;
 }
 
 function refreshSourceLineAnchors(): void {
@@ -1921,6 +1939,17 @@ function ensureMinimap(): void {
 // Read by Task 15 schedulePhaseBRebuild to decide if Phase B rebuild is needed.
 let minimapDocumentHeight = 0;
 
+function clearMinimapCloneReadCache(): void {
+  minimapCloneBlockElementIndex = createBlockElementIndex([]);
+  minimapContentHeight = null;
+}
+
+function rebuildMinimapCloneBlockElementIndex(root: ParentNode): void {
+  const blocks = Array.from(root.querySelectorAll<HTMLElement>("[data-mm-block-index]"));
+  minimapCloneBlockElementIndex = createBlockElementIndex(blocks);
+  minimapContentHeight = null;
+}
+
 function getDocumentScrollMetrics(): { documentHeight: number; viewportHeight: number } {
   const root = document.scrollingElement ?? document.documentElement;
   return {
@@ -2030,6 +2059,7 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
     minimapSourceReady = false;
     minimapDocumentHeight = buildDecision.documentHeight;
     minimapContent.replaceChildren();
+    clearMinimapCloneReadCache();
     updateMinimapVisibility(true);
     emitMark("mm-minimap-refresh-skipped", {
       phase,
@@ -2045,6 +2075,7 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   }
   const clone = cloneDocumentForMinimap();
   if (!clone) {
+    clearMinimapCloneReadCache();
     emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
     postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
     return;
@@ -2055,6 +2086,7 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
     minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
   }
   minimapContent.replaceChildren(clone);
+  rebuildMinimapCloneBlockElementIndex(clone);
   updateMinimapVisibility(true);
   updateMinimapViewport({ skipVisibilityUpdate: true });
   emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
@@ -2082,7 +2114,7 @@ function refreshInitialVisibleMinimapContent(): void {
   const root = document.scrollingElement ?? document.documentElement;
   minimapDocumentHeight = root.scrollHeight;
   updateMinimapVisibility(true);
-  updateMinimapViewport();
+  updateMinimapViewport({ skipVisibilityUpdate: true });
   emitMark("mm-minimap-refresh-skipped", {
     phase: "A",
     reason: "initial-source-ready",
@@ -2124,6 +2156,7 @@ function restoreCachedMinimapContent(): boolean {
 
   minimapDocumentHeight = restored.documentHeight;
   minimapSourceReady = true;
+  rebuildMinimapCloneBlockElementIndex(minimapContent!);
   postCachedMinimapState(restored.lastPostedState);
   emitMark("mm-minimap-cache-hit", {
     documentHeight: restored.documentHeight,
@@ -2141,7 +2174,7 @@ function restoreCachedMinimapContent(): boolean {
     }
 
     updateMinimapVisibility(true);
-    updateMinimapViewport();
+    updateMinimapViewport({ skipVisibilityUpdate: true });
     updateWidthHandlePositionForCurrentLayout();
   });
   return true;
@@ -2359,10 +2392,10 @@ function rebuildActiveHeadingObserver(headingNodes: HTMLHeadingElement[]): void 
   });
 }
 
-function shouldShowMinimap(): boolean {
+function shouldShowMinimap(layoutState?: CachedLayoutState): boolean {
   const root = document.scrollingElement ?? document.documentElement;
-  const documentHeight = root.scrollHeight;
-  const viewportHeight = root.clientHeight;
+  const documentHeight = layoutState?.scrollHeight ?? root.scrollHeight;
+  const viewportHeight = layoutState?.clientHeight ?? root.clientHeight;
   // F-07 fix: minimap decisions require both host preferences AND the
   // canonical minimap policy delivered via the minimap-policy IPC
   // message. Either missing means the renderer is still in the pre-
@@ -2390,7 +2423,7 @@ function shouldShowMinimap(): boolean {
     && documentHeight >= viewportHeight * minimapPolicy.minScrollableViewportRatio;
 }
 
-function updateMinimapVisibility(forcePostState = false): boolean {
+function updateMinimapVisibility(forcePostState = false, layoutState?: CachedLayoutState): boolean {
   ensureMinimap();
   if (!minimapRoot) {
     return false;
@@ -2398,7 +2431,7 @@ function updateMinimapVisibility(forcePostState = false): boolean {
 
   const wasVisible = !minimapRoot.hidden;
   const hadClass = document.body.classList.contains(MINIMAP_VISIBLE_CLASS);
-  const visible = shouldShowMinimap();
+  const visible = shouldShowMinimap(layoutState);
   minimapRoot.hidden = !visible;
   document.body.classList.toggle(MINIMAP_VISIBLE_CLASS, visible);
   postMinimapState(visible, forcePostState);
@@ -2477,40 +2510,8 @@ function postTransactionMinimapSettled(transactionGeneration: number): void {
 
 type MinimapViewportUpdateOptions = {
   skipVisibilityUpdate?: boolean;
+  layoutState?: CachedLayoutState;
 };
-
-// [block-anchor] Sum offsetTop up the offsetParent chain to the container.
-// Transform-independent (offsetTop ignores the clone's scale()/translateY()).
-// Returns null when the walk does not terminate at the container.
-function cloneSpaceTop(el: HTMLElement, container: HTMLElement): number | null {
-  let y = 0;
-  let n: HTMLElement | null = el;
-  while (n && n !== container) {
-    y += n.offsetTop;
-    n = n.offsetParent as HTMLElement | null;
-  }
-  return n === container ? y : null;
-}
-
-// [block-anchor] Map a document client-Y at/above a document block to the
-// clone-space Y of the same-index clone block. Within the block: fraction ×
-// clone height (block heights differ doc↔clone under content-visibility). In
-// the padding/gap above the block (offset <= 0): raw px, 1:1 — the clone
-// restores vertical padding (renderer.ts cloneDocumentForMinimap) and inter-
-// block gaps are structural copies. Returns null → caller falls back.
-function cloneYForDocBlock(docBlock: HTMLElement, clone: HTMLElement, rect: DOMRect, clientY: number): number | null {
-  const idx = docBlock.dataset["mmBlockIndex"];
-  if (idx === undefined) return null;
-  const cln = clone.querySelector<HTMLElement>(`[data-mm-block-index="${idx}"]`);
-  if (!cln) return null;
-  const top = cloneSpaceTop(cln, clone);
-  if (top === null) return null;
-  const offset = clientY - rect.top;
-  const contribution = offset <= 0
-    ? offset
-    : (rect.height > 0 ? (offset / rect.height) * cln.offsetHeight : 0);
-  return top + contribution;
-}
 
 // [block-anchor forward] Clone-space Y of the document viewport's TOP edge via
 // the block index shared between document and clone — drift-free under content-
@@ -2520,23 +2521,14 @@ function cloneYForDocBlock(docBlock: HTMLElement, clone: HTMLElement, rect: DOMR
 // visibility lags, so on-screen blocks are collapsed in the document (~120px)
 // but full in the clone (~hundreds px); a clone-space span would then inflate
 // and stretch the thumb — up to the whole minimap. Null → caller falls back.
-function getDocumentViewportTopCloneY(clone: HTMLElement): number | null {
-  const docRoot = document.querySelector<HTMLElement>("body > main.mm-document");
-  if (!docRoot) return null;
-  for (const b of Array.from(docRoot.querySelectorAll<HTMLElement>("[data-mm-block-index]"))) {
-    const r = b.getBoundingClientRect();
-    // Skip zero-box blocks. A display:none element (e.g. a mermaid `<pre>` that is
-    // hidden once its SVG has rendered) reports rect (0,0,0,0) — so rect.bottom===0
-    // would FALSELY match as the top block at any scroll, and its clone twin has no
-    // offsetParent, so cloneYForDocBlock returns null and the forward map drops to
-    // the legacy fallback (observed: minimap leads the document at the very bottom).
-    // Anchor on the first VISIBLE block whose clone twin also resolves.
-    if (r.height > 0 && r.bottom >= 0) {
-      const y = cloneYForDocBlock(b, clone, r, 0);
-      if (y !== null) return y;
-    }
-  }
-  return null;
+function getDocumentViewportTopCloneY(clone: HTMLElement, topBlockIndex: number | null): number | null {
+  return getDocumentViewportTopCloneYFromIndex({
+    topBlockIndex,
+    documentBlocks: getLiveDocumentBlockElementIndex(),
+    cloneBlocks: minimapCloneBlockElementIndex,
+    cloneContainer: clone,
+    clientY: 0,
+  });
 }
 
 // [block-anchor inverse] Clone block whose range contains clone-space Y (or the
@@ -2547,7 +2539,7 @@ function cloneBlockAtCloneY(clone: HTMLElement, y: number):
   let prev: HTMLElement | null = null;
   let prevTop = 0;
   for (const b of Array.from(clone.querySelectorAll<HTMLElement>("[data-mm-block-index]"))) {
-    const top = cloneSpaceTop(b, clone);
+    const top = elementTopWithinContainer(b, clone);
     if (top === null) continue;
     const h = b.offsetHeight;
     if (y < top) return { block: b, mode: "gap", value: y - top };
@@ -2581,13 +2573,22 @@ function docScrollTopForCloneY(root: Element, y: number): number | null {
 }
 
 function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void {
+  const startedAt = performance.now();
+  try {
+    updateMinimapViewportCore(options);
+  } finally {
+    postPerfMark("mm-minimap-viewport-update", { ms: performance.now() - startedAt });
+  }
+}
+
+function updateMinimapViewportCore(options: MinimapViewportUpdateOptions): void {
   ensureMinimap();
   if (!minimapRoot || !minimapContent || !minimapViewport) {
     return;
   }
 
   if (options.skipVisibilityUpdate !== true) {
-    updateMinimapVisibility();
+    updateMinimapVisibility(false, options.layoutState);
   }
   if (minimapRoot.hidden) {
     currentMinimapLayout = null;
@@ -2602,7 +2603,7 @@ function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void
   // RESTORE (455c485): progress must track the LIVE scroll range. The cached
   // minimapDocumentHeight (c-v estimate, fixed at build) goes stale as content-visibility
   // grows the document during through-scroll, freezing the minimap in the lower portion.
-  const documentScrollHeight = root.scrollHeight;
+  const documentScrollHeight = options.layoutState?.scrollHeight ?? root.scrollHeight;
   const policyHeavyDocument = knownPolicyHeavyDocument
     || (minimapPolicy !== null && documentScrollHeight > minimapPolicy.maxDetailedDocumentHeight);
   const source = policyHeavyDocument ? null : document.querySelector<HTMLElement>(".mm-document");
@@ -2628,7 +2629,7 @@ function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void
       })();
   const viewportHeight = policyHeavyDocument
     ? Math.max(0, window.innerHeight)
-    : root.clientHeight;
+    : (options.layoutState?.clientHeight ?? root.clientHeight);
   if (minimapHeight <= 0 || minimapWidth <= 0 || documentScrollHeight <= 0 || viewportHeight <= 0) {
     return;
   }
@@ -2642,9 +2643,18 @@ function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void
   const nextContentWidth = `${documentWidth}px`;
   if (minimapContent.style.width !== nextContentWidth) {
     minimapContent.style.width = nextContentWidth;
+    minimapContentHeight = null;
   }
-  const measuredContentHeight = minimapContent.scrollHeight;
-  const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
+  // Scroll frames reuse the height measured for this clone/width generation.
+  // Non-scroll callers invalidate it so font, resize, restore, and rebuild paths
+  // retain the existing fresh-measure behavior without a forced read per scroll.
+  if (options.layoutState === undefined) {
+    minimapContentHeight = null;
+  }
+  if (minimapContentHeight === null) {
+    minimapContentHeight = minimapContent.scrollHeight;
+  }
+  const contentHeight = minimapContentHeight > 0 ? minimapContentHeight : documentScrollHeight;
 
   // Map document→clone position through the BLOCK INDEX (identical in document
   // and clone), which is drift-free under content-visibility — unlike the
@@ -2656,7 +2666,8 @@ function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void
   let layout: MinimapViewportLayout | null;
   // Block-anchor drives the POSITION (anchor.topY); the thumb HEIGHT stays on the
   // stable document viewport height so it cannot jump/stretch during fast drag.
-  const anchorTopY = getDocumentViewportTopCloneY(minimapContent);
+  const topBlockIndex = options.layoutState?.topBlockIndex ?? findTopVisibleBlockIndex();
+  const anchorTopY = getDocumentViewportTopCloneY(minimapContent, topBlockIndex);
   if (anchorTopY !== null) {
     layout = calculateMinimapViewportLayout({
       minimapWidth,
@@ -2669,7 +2680,7 @@ function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void
   } else {
     const realMaxScrollTop = Math.max(0, documentScrollHeight - viewportHeight);
     const scrollProgress = realMaxScrollTop > 0
-      ? Math.min(1, Math.max(0, root.scrollTop / realMaxScrollTop))
+      ? Math.min(1, Math.max(0, (options.layoutState?.scrollTop ?? root.scrollTop) / realMaxScrollTop))
       : 0;
     const contentScrollTop = scrollProgress * Math.max(0, contentHeight - viewportHeight);
     layout = calculateMinimapViewportLayout({
@@ -2850,7 +2861,12 @@ function handleMinimapPointerUp(event: PointerEvent): void {
   }
 }
 
-function queueMinimapViewportUpdate(perfMarkName?: string): void {
+function queueMinimapViewportUpdate(layoutState?: CachedLayoutState, perfMarkName?: string): void {
+  if (layoutState !== undefined) {
+    pendingMinimapViewportLayoutState = { ...layoutState };
+  } else {
+    minimapContentHeight = null;
+  }
   if (minimapViewportFrameRequested) {
     return;
   }
@@ -2858,8 +2874,9 @@ function queueMinimapViewportUpdate(perfMarkName?: string): void {
   minimapViewportFrameRequested = true;
   window.requestAnimationFrame(() => {
     minimapViewportFrameRequested = false;
-    updateMinimapVisibility();
-    updateMinimapViewport();
+    const queuedLayoutState = pendingMinimapViewportLayoutState;
+    pendingMinimapViewportLayoutState = null;
+    updateMinimapViewport(queuedLayoutState === null ? {} : { layoutState: queuedLayoutState });
     if (perfMarkName) {
       postPerfMark(perfMarkName);
     }
@@ -3491,7 +3508,7 @@ function handleHostMessage(raw: unknown): void {
       flushPendingReadingPreferences();
       ensureDetailedMinimapContentForVisiblePath();
       updateMinimapVisibility();
-      updateMinimapViewport();
+      updateMinimapViewport({ skipVisibilityUpdate: true });
       updateWidthHandlePositionForCurrentLayout();
 
       if (!viewerChromeEnabled) {
@@ -3508,7 +3525,7 @@ function handleHostMessage(raw: unknown): void {
         flushPendingReadingPreferences();
         ensureDetailedMinimapContentForVisiblePath();
         updateMinimapVisibility();
-        updateMinimapViewport();
+        updateMinimapViewport({ skipVisibilityUpdate: true });
         updateWidthHandlePositionForCurrentLayout();
         completeModeToggleSettleAfterPaint();
       });
@@ -3649,6 +3666,7 @@ function resetModuleGlobalsForLoadDocument(): void {
   // old-document diagram onto the new document. (Codex review 2026-05-15.)
   ++mermaidRenderGeneration;
   minimapDocumentHeight = 0;
+  clearMinimapCloneReadCache();
   lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
   minimapSourceReady = false;
   // Polish #5 — reset the width-handle reveal gate so the next document's
@@ -4273,8 +4291,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
 const queuePostScroll = createScrollCoalescer({
   postScroll: () => {
-    postScroll();
-    queueMinimapViewportUpdate();
+    const layoutState = postScroll();
+    queueMinimapViewportUpdate(layoutState);
   },
   schedule: (cb) => { window.requestAnimationFrame(cb); },
 });

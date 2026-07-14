@@ -1527,6 +1527,22 @@
   function collectLiveDocumentBlockElements(ownerDocument) {
     return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR));
   }
+  function createBlockElementIndex(elements) {
+    const elementsByBlockIndex = /* @__PURE__ */ new Map();
+    const positionsByBlockIndex = /* @__PURE__ */ new Map();
+    for (let position = 0; position < elements.length; position++) {
+      const element = elements[position];
+      const blockIndex = readBlockIndex(element);
+      if (blockIndex === null) {
+        continue;
+      }
+      if (!elementsByBlockIndex.has(blockIndex)) {
+        elementsByBlockIndex.set(blockIndex, element);
+        positionsByBlockIndex.set(blockIndex, position);
+      }
+    }
+    return { elements, elementsByBlockIndex, positionsByBlockIndex };
+  }
   function findTopVisibleBlockIndexFromBlocks(blocks, scrollTop) {
     if (blocks.length === 0) {
       return null;
@@ -1547,6 +1563,38 @@
     const index = firstAtOrBelowViewportTop === blocks.length ? blocks.length - 1 : firstAtOrBelowViewportTop;
     return readBlockIndex(blocks[index]);
   }
+  function getDocumentViewportTopCloneYFromIndex(input) {
+    if (input.topBlockIndex === null) {
+      return null;
+    }
+    const startPosition = input.documentBlocks.positionsByBlockIndex.get(input.topBlockIndex);
+    if (startPosition === void 0) {
+      return null;
+    }
+    for (let position = startPosition; position < input.documentBlocks.elements.length; position++) {
+      const documentBlock = input.documentBlocks.elements[position];
+      const rect = documentBlock.getBoundingClientRect();
+      if (rect.height <= 0 || rect.bottom < input.clientY) {
+        continue;
+      }
+      const blockIndex = readBlockIndex(documentBlock);
+      if (blockIndex === null) {
+        continue;
+      }
+      const cloneBlock = input.cloneBlocks.elementsByBlockIndex.get(blockIndex);
+      if (!cloneBlock) {
+        continue;
+      }
+      const cloneTop = elementTopWithinContainer(cloneBlock, input.cloneContainer);
+      if (cloneTop === null) {
+        continue;
+      }
+      const offset = input.clientY - rect.top;
+      const contribution = offset <= 0 ? offset : rect.height > 0 ? offset / rect.height * cloneBlock.offsetHeight : 0;
+      return cloneTop + contribution;
+    }
+    return null;
+  }
   function readBlockIndex(block) {
     const raw = block.dataset["mmBlockIndex"];
     const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
@@ -1565,6 +1613,16 @@
     }
     return top;
   }
+  function elementTopWithinContainer(element, container) {
+    let top = 0;
+    let current = element;
+    while (current !== null && current !== container) {
+      top += current.offsetTop;
+      const nextOffsetParent = current.offsetParent;
+      current = nextOffsetParent instanceof HTMLElement ? nextOffsetParent : null;
+    }
+    return current === container ? top : null;
+  }
 
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
@@ -1582,6 +1640,7 @@
   var hasReceivedHostPreferences = false;
   var hasInitialLayoutSettled = false;
   var minimapViewportFrameRequested = false;
+  var pendingMinimapViewportLayoutState = null;
   var minimapRefreshTimer;
   var minimapContentRefreshTimer;
   var minimapDeferredContentRefreshHandle = null;
@@ -1598,6 +1657,8 @@
   var minimapRoot = null;
   var minimapContent = null;
   var minimapViewport = null;
+  var minimapCloneBlockElementIndex = createBlockElementIndex([]);
+  var minimapContentHeight = null;
   var currentMinimapLayout = null;
   var minimapDragging = false;
   var minimapDragStartClientY = null;
@@ -1658,6 +1719,7 @@
   var suppressPreviewSourceLineSequence = 0;
   var lastPostedPreviewSourceLine = null;
   var liveDocumentBlockElements = [];
+  var liveDocumentBlockElementIndex = createBlockElementIndex([]);
   var liveDocumentBlockElementsStale = true;
   var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
   function cloneHeadingPayload(heading) {
@@ -2317,10 +2379,12 @@
   }
   function invalidateTopVisibleBlockIndexCache() {
     liveDocumentBlockElements = [];
+    liveDocumentBlockElementIndex = createBlockElementIndex([]);
     liveDocumentBlockElementsStale = true;
   }
   function refreshTopVisibleBlockIndexCache() {
     liveDocumentBlockElements = collectLiveDocumentBlockElements(document);
+    liveDocumentBlockElementIndex = createBlockElementIndex(liveDocumentBlockElements);
     liveDocumentBlockElementsStale = false;
   }
   function getLiveDocumentBlockElements() {
@@ -2328,6 +2392,12 @@
       refreshTopVisibleBlockIndexCache();
     }
     return liveDocumentBlockElements;
+  }
+  function getLiveDocumentBlockElementIndex() {
+    if (liveDocumentBlockElementsStale) {
+      refreshTopVisibleBlockIndexCache();
+    }
+    return liveDocumentBlockElementIndex;
   }
   function findTopVisibleBlockIndex() {
     const root = document.scrollingElement ?? document.documentElement;
@@ -2345,13 +2415,14 @@
     const topBlockIndex = findTopVisibleBlockIndex();
     const bottomBlockIndex = findBottomVisibleBlockIndex();
     currentController?.updateMathObservationWindow?.(topBlockIndex, "scroll", bottomBlockIndex);
-    lastKnownLayoutState = { ...scrollState, topBlockIndex };
+    const layoutState = { ...scrollState, topBlockIndex };
+    lastKnownLayoutState = layoutState;
     recordScrollIpc();
     postHostMessage({
       type: "scroll",
-      ...scrollState,
-      topBlockIndex
+      ...layoutState
     });
+    return layoutState;
   }
   function refreshSourceLineAnchors() {
     sourceLineAnchors = readSourceLineAnchors(document);
@@ -2899,6 +2970,15 @@
     minimapRoot.addEventListener("pointercancel", handleMinimapPointerUp);
   }
   var minimapDocumentHeight = 0;
+  function clearMinimapCloneReadCache() {
+    minimapCloneBlockElementIndex = createBlockElementIndex([]);
+    minimapContentHeight = null;
+  }
+  function rebuildMinimapCloneBlockElementIndex(root) {
+    const blocks = Array.from(root.querySelectorAll("[data-mm-block-index]"));
+    minimapCloneBlockElementIndex = createBlockElementIndex(blocks);
+    minimapContentHeight = null;
+  }
   function getDocumentScrollMetrics() {
     const root = document.scrollingElement ?? document.documentElement;
     return {
@@ -2980,6 +3060,7 @@
       minimapSourceReady = false;
       minimapDocumentHeight = buildDecision.documentHeight;
       minimapContent.replaceChildren();
+      clearMinimapCloneReadCache();
       updateMinimapVisibility(true);
       emitMark("mm-minimap-refresh-skipped", {
         phase,
@@ -2995,6 +3076,7 @@
     }
     const clone = cloneDocumentForMinimap();
     if (!clone) {
+      clearMinimapCloneReadCache();
       emitMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
       postPerfMark("mm-minimap-refresh-end", { phase, skipped: "no-source" });
       return;
@@ -3005,6 +3087,7 @@
       minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
     }
     minimapContent.replaceChildren(clone);
+    rebuildMinimapCloneBlockElementIndex(clone);
     updateMinimapVisibility(true);
     updateMinimapViewport({ skipVisibilityUpdate: true });
     emitMark("mm-minimap-refresh-end", { phase, documentHeight: minimapDocumentHeight });
@@ -3028,7 +3111,7 @@
     const root = document.scrollingElement ?? document.documentElement;
     minimapDocumentHeight = root.scrollHeight;
     updateMinimapVisibility(true);
-    updateMinimapViewport();
+    updateMinimapViewport({ skipVisibilityUpdate: true });
     emitMark("mm-minimap-refresh-skipped", {
       phase: "A",
       reason: "initial-source-ready",
@@ -3065,6 +3148,7 @@
     }
     minimapDocumentHeight = restored.documentHeight;
     minimapSourceReady = true;
+    rebuildMinimapCloneBlockElementIndex(minimapContent);
     postCachedMinimapState(restored.lastPostedState);
     emitMark("mm-minimap-cache-hit", {
       documentHeight: restored.documentHeight,
@@ -3080,7 +3164,7 @@
         return;
       }
       updateMinimapVisibility(true);
-      updateMinimapViewport();
+      updateMinimapViewport({ skipVisibilityUpdate: true });
       updateWidthHandlePositionForCurrentLayout();
     });
     return true;
@@ -3242,10 +3326,10 @@
       }
     });
   }
-  function shouldShowMinimap() {
+  function shouldShowMinimap(layoutState) {
     const root = document.scrollingElement ?? document.documentElement;
-    const documentHeight = root.scrollHeight;
-    const viewportHeight = root.clientHeight;
+    const documentHeight = layoutState?.scrollHeight ?? root.scrollHeight;
+    const viewportHeight = layoutState?.clientHeight ?? root.clientHeight;
     if (!hasReceivedHostPreferences || !minimapPolicy || !viewerChromeEnabled || !minimapSourceReady || minimapMode === "off" || viewportHeight <= 0 || documentHeight <= viewportHeight) {
       return false;
     }
@@ -3257,14 +3341,14 @@
     }
     return window.innerWidth >= minimapPolicy.minHostWidth && documentHeight >= viewportHeight * minimapPolicy.minScrollableViewportRatio;
   }
-  function updateMinimapVisibility(forcePostState = false) {
+  function updateMinimapVisibility(forcePostState = false, layoutState) {
     ensureMinimap();
     if (!minimapRoot) {
       return false;
     }
     const wasVisible = !minimapRoot.hidden;
     const hadClass = document.body.classList.contains(MINIMAP_VISIBLE_CLASS);
-    const visible = shouldShowMinimap();
+    const visible = shouldShowMinimap(layoutState);
     minimapRoot.hidden = !visible;
     document.body.classList.toggle(MINIMAP_VISIBLE_CLASS, visible);
     postMinimapState(visible, forcePostState);
@@ -3319,43 +3403,20 @@
       reservedWidth
     });
   }
-  function cloneSpaceTop(el, container) {
-    let y = 0;
-    let n = el;
-    while (n && n !== container) {
-      y += n.offsetTop;
-      n = n.offsetParent;
-    }
-    return n === container ? y : null;
-  }
-  function cloneYForDocBlock(docBlock, clone, rect, clientY) {
-    const idx = docBlock.dataset["mmBlockIndex"];
-    if (idx === void 0) return null;
-    const cln = clone.querySelector(`[data-mm-block-index="${idx}"]`);
-    if (!cln) return null;
-    const top = cloneSpaceTop(cln, clone);
-    if (top === null) return null;
-    const offset = clientY - rect.top;
-    const contribution = offset <= 0 ? offset : rect.height > 0 ? offset / rect.height * cln.offsetHeight : 0;
-    return top + contribution;
-  }
-  function getDocumentViewportTopCloneY(clone) {
-    const docRoot = document.querySelector("body > main.mm-document");
-    if (!docRoot) return null;
-    for (const b of Array.from(docRoot.querySelectorAll("[data-mm-block-index]"))) {
-      const r = b.getBoundingClientRect();
-      if (r.height > 0 && r.bottom >= 0) {
-        const y = cloneYForDocBlock(b, clone, r, 0);
-        if (y !== null) return y;
-      }
-    }
-    return null;
+  function getDocumentViewportTopCloneY(clone, topBlockIndex) {
+    return getDocumentViewportTopCloneYFromIndex({
+      topBlockIndex,
+      documentBlocks: getLiveDocumentBlockElementIndex(),
+      cloneBlocks: minimapCloneBlockElementIndex,
+      cloneContainer: clone,
+      clientY: 0
+    });
   }
   function cloneBlockAtCloneY(clone, y) {
     let prev = null;
     let prevTop = 0;
     for (const b of Array.from(clone.querySelectorAll("[data-mm-block-index]"))) {
-      const top = cloneSpaceTop(b, clone);
+      const top = elementTopWithinContainer(b, clone);
       if (top === null) continue;
       const h = b.offsetHeight;
       if (y < top) return { block: b, mode: "gap", value: y - top };
@@ -3380,12 +3441,20 @@
     return Math.max(0, Math.min(maxScrollTop, root.scrollTop + r.top + contribution));
   }
   function updateMinimapViewport(options = {}) {
+    const startedAt = performance.now();
+    try {
+      updateMinimapViewportCore(options);
+    } finally {
+      postPerfMark("mm-minimap-viewport-update", { ms: performance.now() - startedAt });
+    }
+  }
+  function updateMinimapViewportCore(options) {
     ensureMinimap();
     if (!minimapRoot || !minimapContent || !minimapViewport) {
       return;
     }
     if (options.skipVisibilityUpdate !== true) {
-      updateMinimapVisibility();
+      updateMinimapVisibility(false, options.layoutState);
     }
     if (minimapRoot.hidden) {
       currentMinimapLayout = null;
@@ -3393,7 +3462,7 @@
     }
     const root = document.scrollingElement ?? document.documentElement;
     const knownPolicyHeavyDocument = isPolicyHeavyMinimapDocument();
-    const documentScrollHeight = root.scrollHeight;
+    const documentScrollHeight = options.layoutState?.scrollHeight ?? root.scrollHeight;
     const policyHeavyDocument = knownPolicyHeavyDocument || minimapPolicy !== null && documentScrollHeight > minimapPolicy.maxDetailedDocumentHeight;
     const source = policyHeavyDocument ? null : document.querySelector(".mm-document");
     if (!policyHeavyDocument && !source) {
@@ -3410,18 +3479,25 @@
         paddingRight: readPixelValue(sourceStyle.paddingRight)
       });
     })();
-    const viewportHeight = policyHeavyDocument ? Math.max(0, window.innerHeight) : root.clientHeight;
+    const viewportHeight = policyHeavyDocument ? Math.max(0, window.innerHeight) : options.layoutState?.clientHeight ?? root.clientHeight;
     if (minimapHeight <= 0 || minimapWidth <= 0 || documentScrollHeight <= 0 || viewportHeight <= 0) {
       return;
     }
     const nextContentWidth = `${documentWidth}px`;
     if (minimapContent.style.width !== nextContentWidth) {
       minimapContent.style.width = nextContentWidth;
+      minimapContentHeight = null;
     }
-    const measuredContentHeight = minimapContent.scrollHeight;
-    const contentHeight = measuredContentHeight > 0 ? measuredContentHeight : documentScrollHeight;
+    if (options.layoutState === void 0) {
+      minimapContentHeight = null;
+    }
+    if (minimapContentHeight === null) {
+      minimapContentHeight = minimapContent.scrollHeight;
+    }
+    const contentHeight = minimapContentHeight > 0 ? minimapContentHeight : documentScrollHeight;
     let layout;
-    const anchorTopY = getDocumentViewportTopCloneY(minimapContent);
+    const topBlockIndex = options.layoutState?.topBlockIndex ?? findTopVisibleBlockIndex();
+    const anchorTopY = getDocumentViewportTopCloneY(minimapContent, topBlockIndex);
     if (anchorTopY !== null) {
       layout = calculateMinimapViewportLayout({
         minimapWidth,
@@ -3433,7 +3509,7 @@
       });
     } else {
       const realMaxScrollTop = Math.max(0, documentScrollHeight - viewportHeight);
-      const scrollProgress = realMaxScrollTop > 0 ? Math.min(1, Math.max(0, root.scrollTop / realMaxScrollTop)) : 0;
+      const scrollProgress = realMaxScrollTop > 0 ? Math.min(1, Math.max(0, (options.layoutState?.scrollTop ?? root.scrollTop) / realMaxScrollTop)) : 0;
       const contentScrollTop = scrollProgress * Math.max(0, contentHeight - viewportHeight);
       layout = calculateMinimapViewportLayout({
         minimapWidth,
@@ -3558,15 +3634,21 @@
       scrollFromMinimapClientY(event.clientY);
     }
   }
-  function queueMinimapViewportUpdate(perfMarkName) {
+  function queueMinimapViewportUpdate(layoutState, perfMarkName) {
+    if (layoutState !== void 0) {
+      pendingMinimapViewportLayoutState = { ...layoutState };
+    } else {
+      minimapContentHeight = null;
+    }
     if (minimapViewportFrameRequested) {
       return;
     }
     minimapViewportFrameRequested = true;
     window.requestAnimationFrame(() => {
       minimapViewportFrameRequested = false;
-      updateMinimapVisibility();
-      updateMinimapViewport();
+      const queuedLayoutState = pendingMinimapViewportLayoutState;
+      pendingMinimapViewportLayoutState = null;
+      updateMinimapViewport(queuedLayoutState === null ? {} : { layoutState: queuedLayoutState });
       if (perfMarkName) {
         postPerfMark(perfMarkName);
       }
@@ -4018,7 +4100,7 @@
         flushPendingReadingPreferences();
         ensureDetailedMinimapContentForVisiblePath();
         updateMinimapVisibility();
-        updateMinimapViewport();
+        updateMinimapViewport({ skipVisibilityUpdate: true });
         updateWidthHandlePositionForCurrentLayout();
         if (!viewerChromeEnabled) {
           completeModeToggleSettleAfterPaint();
@@ -4032,7 +4114,7 @@
           flushPendingReadingPreferences();
           ensureDetailedMinimapContentForVisiblePath();
           updateMinimapVisibility();
-          updateMinimapViewport();
+          updateMinimapViewport({ skipVisibilityUpdate: true });
           updateWidthHandlePositionForCurrentLayout();
           completeModeToggleSettleAfterPaint();
         });
@@ -4142,6 +4224,7 @@
     mermaidLazyRenderQueue = Promise.resolve();
     ++mermaidRenderGeneration;
     minimapDocumentHeight = 0;
+    clearMinimapCloneReadCache();
     lastPostedMinimapState = { hasPosted: false, visible: false, reservedWidth: 0 };
     minimapSourceReady = false;
     hasInitialLayoutSettled = false;
@@ -4584,8 +4667,8 @@
   });
   var queuePostScroll = createScrollCoalescer({
     postScroll: () => {
-      postScroll();
-      queueMinimapViewportUpdate();
+      const layoutState = postScroll();
+      queueMinimapViewportUpdate(layoutState);
     },
     schedule: (cb) => {
       window.requestAnimationFrame(cb);
