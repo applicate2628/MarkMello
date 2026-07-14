@@ -845,7 +845,14 @@ async function renderMermaidNodes(
 
   try {
     for (const node of eagerNodes) {
-      await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+      await renderMermaidNode(
+        node,
+        generation,
+        () => mermaidRenderGeneration,
+        mermaid,
+        MERMAID_PER_DIAGRAM_TIMEOUT_MS,
+        invalidateTopVisibleBlockIndexCache
+      );
       if (eagerBudgetExpired || generation !== mermaidRenderGeneration) return;
     }
   } finally {
@@ -989,7 +996,14 @@ function enqueueLazyMermaidRender(
     .then(async () => {
       if (generation !== mermaidRenderGeneration) return;
       postPerfMark("mm-mermaid-lazy-render-start");
-      await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+      await renderMermaidNode(
+        node,
+        generation,
+        () => mermaidRenderGeneration,
+        mermaid,
+        MERMAID_PER_DIAGRAM_TIMEOUT_MS,
+        invalidateTopVisibleBlockIndexCache
+      );
       if (generation === mermaidRenderGeneration) {
         postPerfMark("mm-mermaid-lazy-render-end");
       }
@@ -2573,6 +2587,11 @@ function docScrollTopForCloneY(root: Element, y: number): number | null {
 }
 
 function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void {
+  if (hostWindow.__mmMathObserverPerfEnabled !== true) {
+    updateMinimapViewportCore(options);
+    return;
+  }
+
   const startedAt = performance.now();
   try {
     updateMinimapViewportCore(options);

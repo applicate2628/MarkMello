@@ -11,10 +11,16 @@ type MathPerfWindow = Window & {
   katex?: {
     render: () => void;
   };
+  chrome?: {
+    webview?: {
+      postMessage: HostBridge;
+    };
+  };
 };
 
 describe("renderer math observer performance marker", () => {
   let observerCallback: IntersectionObserverCallback | null;
+  let postedHostMessages: unknown[];
   let rafCallbacks: FrameRequestCallback[];
 
   beforeEach(async () => {
@@ -77,7 +83,14 @@ describe("renderer math observer performance marker", () => {
       return rafCallbacks.length;
     });
 
-    (window as MathPerfWindow).katex = { render: vi.fn() };
+    postedHostMessages = [];
+    const hostWindow = window as MathPerfWindow;
+    hostWindow.katex = { render: vi.fn() };
+    hostWindow.chrome = {
+      webview: {
+        postMessage: (message) => postedHostMessages.push(message),
+      },
+    };
     await import("../src/renderer");
   });
 
@@ -86,6 +99,7 @@ describe("renderer math observer performance marker", () => {
     hostWindow.__mmRendererLoad?.({ type: "clear-document" });
     delete hostWindow.__mmMathObserverPerfEnabled;
     delete hostWindow.katex;
+    delete hostWindow.chrome;
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     document.body.innerHTML = "";
@@ -95,6 +109,32 @@ describe("renderer math observer performance marker", () => {
     return (window as MathPerfWindow).__mmPerfReport().marks.filter(
       mark => mark.name === "mm-math-observer-window"
     );
+  }
+
+  function minimapViewportPerfMarks(): unknown[] {
+    return postedHostMessages.filter(message => {
+      if (typeof message !== "object" || message === null) {
+        return false;
+      }
+      const record = message as Record<string, unknown>;
+      return record["type"] === "perf-mark" && record["name"] === "mm-minimap-viewport-update";
+    });
+  }
+
+  function runScrollFrame(): void {
+    document.dispatchEvent(new Event("scroll"));
+    let frameCount = 0;
+    while (rafCallbacks.length > 0) {
+      const frame = rafCallbacks.shift()!;
+      frame(performance.now());
+      frameCount++;
+      if (frameCount > 20) {
+        throw new Error("Renderer kept queuing animation frames during the scroll probe");
+      }
+    }
+    if (frameCount === 0) {
+      throw new Error("Expected scroll IPC to queue a frame");
+    }
   }
 
   it("emits only while the dynamic renderer-window flag is exactly true", () => {
@@ -127,5 +167,22 @@ describe("renderer math observer performance marker", () => {
     hostWindow.__mmMathObserverPerfEnabled = false;
     observerCallback!([], {} as IntersectionObserver);
     expect(mathObserverMarks()).toHaveLength(1);
+  });
+
+  it("posts minimap viewport timing only while the telemetry flag is exactly true", () => {
+    const hostWindow = window as MathPerfWindow;
+    postedHostMessages = [];
+
+    runScrollFrame();
+    expect(minimapViewportPerfMarks()).toHaveLength(0);
+
+    hostWindow.__mmMathObserverPerfEnabled = true;
+    runScrollFrame();
+    const enabledMarkCount = minimapViewportPerfMarks().length;
+    expect(enabledMarkCount).toBeGreaterThan(0);
+
+    hostWindow.__mmMathObserverPerfEnabled = false;
+    runScrollFrame();
+    expect(minimapViewportPerfMarks()).toHaveLength(enabledMarkCount);
   });
 });

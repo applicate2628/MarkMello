@@ -15,7 +15,10 @@ export type DocumentViewportTopCloneYInput = {
 };
 
 export function collectLiveDocumentBlockElements(ownerDocument: Document): HTMLElement[] {
-  return Array.from(ownerDocument.querySelectorAll<HTMLElement>(LIVE_DOCUMENT_BLOCK_SELECTOR));
+  // The binary search requires monotonic document bottoms. Rendered Mermaid
+  // sources are display:none and report a synthetic zero in the middle.
+  return Array.from(ownerDocument.querySelectorAll<HTMLElement>(LIVE_DOCUMENT_BLOCK_SELECTOR))
+    .filter(block => block.offsetParent !== null || block.offsetHeight > 0);
 }
 
 export function createBlockElementIndex(elements: readonly HTMLElement[]): BlockElementIndex {

@@ -16,7 +16,8 @@ export async function renderMermaidNode(
   generation: number,
   getCurrentGeneration: () => number,
   mermaid: MermaidApiLike,
-  perDiagramTimeoutMs: number
+  perDiagramTimeoutMs: number,
+  onLayoutBoxChange?: () => void
 ): Promise<void> {
   const codeEl = node.querySelector<HTMLElement>("code[data-mm-mermaid]");
   if (!codeEl) return;
@@ -39,12 +40,16 @@ export async function renderMermaidNode(
       node.after(svgHost);
     }
     svgHost.innerHTML = svg;
+    const wasRendered = node.classList.contains("is-rendered");
     node.classList.add("is-rendered");
+    if (!wasRendered) onLayoutBoxChange?.();
   } catch {
     if (getCurrentGeneration() !== generation) return;
+    const wasRendered = node.classList.contains("is-rendered");
     node.classList.remove("is-rendered");
     const sibling = node.nextElementSibling;
     if (sibling?.classList.contains("mm-mermaid-svg")) sibling.remove();
+    if (wasRendered) onLayoutBoxChange?.();
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }

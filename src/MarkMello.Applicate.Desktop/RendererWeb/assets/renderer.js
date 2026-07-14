@@ -63,7 +63,7 @@
     const rect = node.getBoundingClientRect();
     return rect.bottom >= -marginPx && rect.top <= viewportHeight + marginPx;
   }
-  async function renderMermaidNode(node, generation, getCurrentGeneration, mermaid, perDiagramTimeoutMs) {
+  async function renderMermaidNode(node, generation, getCurrentGeneration, mermaid, perDiagramTimeoutMs, onLayoutBoxChange) {
     const codeEl = node.querySelector("code[data-mm-mermaid]");
     if (!codeEl) return;
     const source = codeEl.textContent ?? "";
@@ -82,12 +82,16 @@
         node.after(svgHost);
       }
       svgHost.innerHTML = svg;
+      const wasRendered = node.classList.contains("is-rendered");
       node.classList.add("is-rendered");
+      if (!wasRendered) onLayoutBoxChange?.();
     } catch {
       if (getCurrentGeneration() !== generation) return;
+      const wasRendered = node.classList.contains("is-rendered");
       node.classList.remove("is-rendered");
       const sibling = node.nextElementSibling;
       if (sibling?.classList.contains("mm-mermaid-svg")) sibling.remove();
+      if (wasRendered) onLayoutBoxChange?.();
     } finally {
       if (timeoutHandle !== void 0) clearTimeout(timeoutHandle);
     }
@@ -1525,7 +1529,7 @@
   // RendererWeb/src/topVisibleBlockIndex.ts
   var LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]";
   function collectLiveDocumentBlockElements(ownerDocument) {
-    return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR));
+    return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR)).filter((block) => block.offsetParent !== null || block.offsetHeight > 0);
   }
   function createBlockElementIndex(elements) {
     const elementsByBlockIndex = /* @__PURE__ */ new Map();
@@ -2109,7 +2113,14 @@
     }, MERMAID_WATCHDOG_MS);
     try {
       for (const node of eagerNodes) {
-        await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+        await renderMermaidNode(
+          node,
+          generation,
+          () => mermaidRenderGeneration,
+          mermaid,
+          MERMAID_PER_DIAGRAM_TIMEOUT_MS,
+          invalidateTopVisibleBlockIndexCache
+        );
         if (eagerBudgetExpired || generation !== mermaidRenderGeneration) return;
       }
     } finally {
@@ -2218,7 +2229,14 @@
     mermaidLazyRenderQueue = mermaidLazyRenderQueue.catch(() => void 0).then(async () => {
       if (generation !== mermaidRenderGeneration) return;
       postPerfMark("mm-mermaid-lazy-render-start");
-      await renderMermaidNode(node, generation, () => mermaidRenderGeneration, mermaid, MERMAID_PER_DIAGRAM_TIMEOUT_MS);
+      await renderMermaidNode(
+        node,
+        generation,
+        () => mermaidRenderGeneration,
+        mermaid,
+        MERMAID_PER_DIAGRAM_TIMEOUT_MS,
+        invalidateTopVisibleBlockIndexCache
+      );
       if (generation === mermaidRenderGeneration) {
         postPerfMark("mm-mermaid-lazy-render-end");
       }
@@ -3441,6 +3459,10 @@
     return Math.max(0, Math.min(maxScrollTop, root.scrollTop + r.top + contribution));
   }
   function updateMinimapViewport(options = {}) {
+    if (hostWindow.__mmMathObserverPerfEnabled !== true) {
+      updateMinimapViewportCore(options);
+      return;
+    }
     const startedAt = performance.now();
     try {
       updateMinimapViewportCore(options);

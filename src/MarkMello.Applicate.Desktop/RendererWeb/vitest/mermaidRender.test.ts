@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { isMermaidNodeNearViewport, renderMermaidNode, type MermaidApiLike } from "../src/mermaidRender";
 
 function makeNode(source: string): HTMLElement {
@@ -16,25 +16,47 @@ function makeNode(source: string): HTMLElement {
 describe("renderMermaidNode", () => {
   it("on success adds is-rendered class and sibling .mm-mermaid-svg", async () => {
     const node = makeNode("graph TD");
+    const onLayoutBoxChange = vi.fn();
     const api: MermaidApiLike = {
       render: async () => ({ svg: "<svg>OK</svg>" })
     };
-    await renderMermaidNode(node, 1, () => 1, api, 1000);
+    await renderMermaidNode(node, 1, () => 1, api, 1000, onLayoutBoxChange);
 
     expect(node.classList.contains("is-rendered")).toBe(true);
     expect(node.nextElementSibling?.className).toBe("mm-mermaid-svg");
     expect(node.nextElementSibling?.innerHTML).toBe("<svg>OK</svg>");
+    expect(onLayoutBoxChange).toHaveBeenCalledTimes(1);
   });
 
   it("on syntax error leaves pre/code visible without svg sibling", async () => {
     const node = makeNode("bad syntax");
+    const onLayoutBoxChange = vi.fn();
     const api: MermaidApiLike = {
       render: async () => { throw new Error("syntax"); }
     };
-    await renderMermaidNode(node, 1, () => 1, api, 1000);
+    await renderMermaidNode(node, 1, () => 1, api, 1000, onLayoutBoxChange);
 
     expect(node.classList.contains("is-rendered")).toBe(false);
     expect(node.nextElementSibling).toBeNull();
+    expect(onLayoutBoxChange).not.toHaveBeenCalled();
+  });
+
+  it("notifies when a failed re-render restores the source layout box", async () => {
+    const node = makeNode("bad syntax");
+    node.classList.add("is-rendered");
+    const svgHost = document.createElement("div");
+    svgHost.className = "mm-mermaid-svg";
+    node.after(svgHost);
+    const onLayoutBoxChange = vi.fn();
+    const api: MermaidApiLike = {
+      render: async () => { throw new Error("syntax"); }
+    };
+
+    await renderMermaidNode(node, 1, () => 1, api, 1000, onLayoutBoxChange);
+
+    expect(node.classList.contains("is-rendered")).toBe(false);
+    expect(node.nextElementSibling).toBeNull();
+    expect(onLayoutBoxChange).toHaveBeenCalledTimes(1);
   });
 
   it("on timeout leaves pre/code visible", async () => {

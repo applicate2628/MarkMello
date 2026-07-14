@@ -17,6 +17,13 @@ function setBlockGeometry(element: HTMLElement, top: number, height: number): vo
   });
 }
 
+function setBlockOffsetParent(element: HTMLElement, offsetParent: HTMLElement | null): void {
+  Object.defineProperty(element, "offsetParent", {
+    configurable: true,
+    get: () => offsetParent,
+  });
+}
+
 function block(index: number, top: number, height: number): HTMLElement {
   const element = document.createElement("p");
   element.dataset.mmBlockIndex = String(index);
@@ -42,6 +49,7 @@ function referenceTopVisibleBlockIndex(blocks: readonly HTMLElement[], scrollTop
 }
 
 type AnchorFixture = {
+  allDocumentBlocks: HTMLElement[];
   clone: HTMLElement;
   cloneBlocks: HTMLElement[];
   documentBlocks: HTMLElement[];
@@ -51,17 +59,22 @@ type AnchorFixture = {
 };
 
 function createAnchorFixture(blockCount: number, hiddenMermaidIndex: number): AnchorFixture {
+  const documentRoot = document.createElement("main");
+  documentRoot.className = "mm-document";
+  document.body.replaceChildren(documentRoot);
   const clone = document.createElement("main");
-  const documentBlocks: HTMLElement[] = [];
+  const allDocumentBlocks: HTMLElement[] = [];
   const cloneBlocks: HTMLElement[] = [];
   let scrollTop = 0;
   let rectReadCount = 0;
+  let documentTop = 0;
   let cloneTop = 0;
 
   for (let index = 0; index < blockCount; index++) {
     const hidden = index === hiddenMermaidIndex;
-    const documentTop = index * 32;
+    const blockDocumentTop = hidden ? 0 : documentTop;
     const documentHeight = hidden ? 0 : 24 + (index % 3);
+    const blockCloneTop = hidden ? 0 : cloneTop;
     const cloneHeight = hidden ? 0 : 40 + (index % 7);
     const documentBlock = document.createElement(hidden ? "pre" : "p");
     const cloneBlock = document.createElement(hidden ? "pre" : "p");
@@ -74,27 +87,32 @@ function createAnchorFixture(blockCount: number, hiddenMermaidIndex: number): An
       cloneBlock.style.display = "none";
     }
 
-    setBlockGeometry(documentBlock, documentTop, documentHeight);
-    setBlockGeometry(cloneBlock, cloneTop, cloneHeight);
-    Object.defineProperty(cloneBlock, "offsetParent", {
-      configurable: true,
-      get: () => hidden ? null : clone,
-    });
+    setBlockGeometry(documentBlock, blockDocumentTop, documentHeight);
+    setBlockOffsetParent(documentBlock, hidden ? null : documentRoot);
+    setBlockGeometry(cloneBlock, blockCloneTop, cloneHeight);
+    setBlockOffsetParent(cloneBlock, hidden ? null : clone);
     documentBlock.getBoundingClientRect = () => {
       rectReadCount++;
-      return new DOMRect(0, documentTop - scrollTop, 800, documentHeight);
+      return hidden
+        ? new DOMRect(0, 0, 0, 0)
+        : new DOMRect(0, blockDocumentTop - scrollTop, 800, documentHeight);
     };
 
-    documentBlocks.push(documentBlock);
+    allDocumentBlocks.push(documentBlock);
     cloneBlocks.push(cloneBlock);
+    documentRoot.append(documentBlock);
     clone.append(cloneBlock);
-    cloneTop += cloneHeight + 11 + (index % 2);
+    if (!hidden) {
+      documentTop += 32;
+      cloneTop += cloneHeight + 11 + (index % 2);
+    }
   }
 
   return {
+    allDocumentBlocks,
     clone,
     cloneBlocks,
-    documentBlocks,
+    documentBlocks: collectLiveDocumentBlockElements(document),
     getRectReadCount: () => rectReadCount,
     resetRectReadCount: () => { rectReadCount = 0; },
     setScrollTop: (value: number) => { scrollTop = value; },
@@ -187,6 +205,43 @@ describe("top visible block index lookup", () => {
     expect(findTopVisibleBlockIndexFromBlocks(collected, 121)).toBe(1);
   });
 
+  it("matches the old linear scan at every position with a real display:none Mermaid at the median", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    const blockCount = 2776;
+    const hiddenMermaidIndex = Math.floor(blockCount / 2);
+    const allBlocks: HTMLElement[] = [];
+    let documentTop = 0;
+
+    for (let index = 0; index < blockCount; index++) {
+      const hidden = index === hiddenMermaidIndex;
+      const element = document.createElement(hidden ? "pre" : "p");
+      element.dataset.mmBlockIndex = String(index);
+      if (hidden) {
+        element.className = "mm-mermaid is-rendered";
+        element.style.display = "none";
+      }
+      setBlockGeometry(element, hidden ? 0 : documentTop, hidden ? 0 : 1);
+      setBlockOffsetParent(element, hidden ? null : main);
+      main.append(element);
+      allBlocks.push(element);
+      if (!hidden) {
+        documentTop++;
+      }
+    }
+
+    const searchableBlocks = collectLiveDocumentBlockElements(document);
+    expect(searchableBlocks).toHaveLength(blockCount - 1);
+    expect(searchableBlocks).not.toContain(allBlocks[hiddenMermaidIndex]);
+
+    for (let scrollTop = 0; scrollTop < blockCount - 1; scrollTop++) {
+      expect(
+        findTopVisibleBlockIndexFromBlocks(searchableBlocks, scrollTop),
+        `scrollTop=${scrollTop}`
+      ).toBe(referenceTopVisibleBlockIndex(allBlocks, scrollTop));
+    }
+  });
+
   it("reads logarithmically instead of measuring every block", () => {
     let offsetReadCount = 0;
     const blocks = Array.from({ length: 4096 }, (_, index) => {
@@ -227,7 +282,7 @@ describe("top visible block index lookup", () => {
 
     for (const { name, scrollTop } of scrollDepths) {
       fixture.setScrollTop(scrollTop);
-      const expected = referenceDocumentViewportTopCloneY(fixture.documentBlocks, fixture.clone);
+      const expected = referenceDocumentViewportTopCloneY(fixture.allDocumentBlocks, fixture.clone);
       const topBlockIndex = findTopVisibleBlockIndexFromBlocks(fixture.documentBlocks, scrollTop);
       const actual = getDocumentViewportTopCloneYFromIndex({
         topBlockIndex,
@@ -250,7 +305,7 @@ describe("top visible block index lookup", () => {
 
     for (const scrollTop of scrollDepths) {
       fixture.setScrollTop(scrollTop);
-      const expected = referenceDocumentViewportTopCloneY(fixture.documentBlocks, fixture.clone);
+      const expected = referenceDocumentViewportTopCloneY(fixture.allDocumentBlocks, fixture.clone);
       const topBlockIndex = findTopVisibleBlockIndexFromBlocks(fixture.documentBlocks, scrollTop);
       fixture.resetRectReadCount();
 
