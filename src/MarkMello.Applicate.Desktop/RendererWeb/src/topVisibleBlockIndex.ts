@@ -1,4 +1,9 @@
-const LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]";
+// `:not(.is-rendered)` excludes rendered Mermaid <pre> (renderer.css
+// `pre.mm-mermaid.is-rendered { display:none }`) natively in querySelectorAll,
+// so the monotonic block list is built WITHOUT reading layout. `is-rendered` is
+// mermaid-only (mermaidRender.ts, findBar SKIP_SELECTOR) and always display:none;
+// runtime-verified the only display:none [data-mm-block-index] blocks are these.
+const LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]:not(.is-rendered)";
 
 export type BlockElementIndex = {
   readonly elements: readonly HTMLElement[];
@@ -16,9 +21,11 @@ export type DocumentViewportTopCloneYInput = {
 
 export function collectLiveDocumentBlockElements(ownerDocument: Document): HTMLElement[] {
   // The binary search requires monotonic document bottoms. Rendered Mermaid
-  // sources are display:none and report a synthetic zero in the middle.
-  return Array.from(ownerDocument.querySelectorAll<HTMLElement>(LIVE_DOCUMENT_BLOCK_SELECTOR))
-    .filter(block => block.offsetParent !== null || block.offsetHeight > 0);
+  // sources are display:none and report a synthetic zero in the middle; the
+  // selector excludes them by class so this NEVER reads offsetParent/offsetHeight.
+  // Reading layout on ~18k content-visibility blocks forces a full layout flush
+  // (~856ms) on every lazy-Mermaid-render cache invalidation — the far-jump freeze.
+  return Array.from(ownerDocument.querySelectorAll<HTMLElement>(LIVE_DOCUMENT_BLOCK_SELECTOR));
 }
 
 export function createBlockElementIndex(elements: readonly HTMLElement[]): BlockElementIndex {

@@ -205,6 +205,39 @@ describe("top visible block index lookup", () => {
     expect(findTopVisibleBlockIndexFromBlocks(collected, 121)).toBe(1);
   });
 
+  it("excludes rendered Mermaid <pre> by class WITHOUT reading layout (guards the far-jump freeze)", () => {
+    document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    const visibleA = document.createElement("p");
+    visibleA.dataset.mmBlockIndex = "0";
+    const hiddenMermaid = document.createElement("pre");
+    hiddenMermaid.dataset.mmBlockIndex = "1";
+    hiddenMermaid.className = "mm-mermaid is-rendered";
+    const visibleB = document.createElement("p");
+    visibleB.dataset.mmBlockIndex = "2";
+    // Reading offsetParent/offsetHeight on N content-visibility blocks was the
+    // ~856ms far-jump freeze (a full layout flush per lazy-Mermaid invalidation).
+    // The class-based selector must build the list WITHOUT touching layout, so
+    // trip a failure if collect reads either property on any block.
+    for (const el of [visibleA, hiddenMermaid, visibleB]) {
+      Object.defineProperty(el, "offsetParent", {
+        configurable: true,
+        get: () => { throw new Error("collectLiveDocumentBlockElements read offsetParent (forced layout)"); },
+      });
+      Object.defineProperty(el, "offsetHeight", {
+        configurable: true,
+        get: () => { throw new Error("collectLiveDocumentBlockElements read offsetHeight (forced layout)"); },
+      });
+    }
+    main.append(visibleA, hiddenMermaid, visibleB);
+
+    const collected = collectLiveDocumentBlockElements(document);
+
+    expect(collected).toHaveLength(2);
+    expect(collected[0]).toBe(visibleA);
+    expect(collected[1]).toBe(visibleB);
+  });
+
   it("matches the old linear scan at every position with a real display:none Mermaid at the median", () => {
     document.documentElement.innerHTML = "<body><main class='mm-document'></main></body>";
     const main = document.querySelector<HTMLElement>("main.mm-document")!;

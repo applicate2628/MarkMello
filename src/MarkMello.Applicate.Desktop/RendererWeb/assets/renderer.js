@@ -1527,9 +1527,9 @@
   }
 
   // RendererWeb/src/topVisibleBlockIndex.ts
-  var LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]";
+  var LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]:not(.is-rendered)";
   function collectLiveDocumentBlockElements(ownerDocument) {
-    return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR)).filter((block) => block.offsetParent !== null || block.offsetHeight > 0);
+    return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR));
   }
   function createBlockElementIndex(elements) {
     const elementsByBlockIndex = /* @__PURE__ */ new Map();
