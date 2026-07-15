@@ -1662,6 +1662,9 @@
   var minimapContent = null;
   var minimapViewport = null;
   var minimapCloneBlockElementIndex = createBlockElementIndex([]);
+  var minimapCloneDirectBlockElements = [];
+  var minimapCloneGeometryGeneration = 0;
+  var minimapCloneSpaceLayout = null;
   var minimapContentHeight = null;
   var currentMinimapLayout = null;
   var minimapDragging = false;
@@ -3014,12 +3017,36 @@
   var minimapDocumentHeight = 0;
   function clearMinimapCloneReadCache() {
     minimapCloneBlockElementIndex = createBlockElementIndex([]);
-    minimapContentHeight = null;
+    minimapCloneDirectBlockElements = [];
+    invalidateMinimapCloneMeasuredGeometry();
   }
   function rebuildMinimapCloneBlockElementIndex(root) {
     const blocks = Array.from(root.querySelectorAll("[data-mm-block-index]"));
     minimapCloneBlockElementIndex = createBlockElementIndex(blocks);
+    const cloneRoot = resolveMinimapCloneRoot(root);
+    minimapCloneDirectBlockElements = cloneRoot === null ? [] : blocks.filter((block) => block.parentElement === cloneRoot);
+    invalidateMinimapCloneMeasuredGeometry();
+  }
+  function resolveMinimapCloneRoot(root) {
+    if (!(root instanceof HTMLElement)) {
+      return null;
+    }
+    if (root.classList.contains("mm-minimap-content")) {
+      for (const child of Array.from(root.children)) {
+        if (child instanceof HTMLElement && child.classList.contains("mm-document")) {
+          return child;
+        }
+      }
+    }
+    return root;
+  }
+  function invalidateMinimapCloneGeometry() {
+    minimapCloneGeometryGeneration++;
+    minimapCloneSpaceLayout = null;
+  }
+  function invalidateMinimapCloneMeasuredGeometry() {
     minimapContentHeight = null;
+    invalidateMinimapCloneGeometry();
   }
   function getDocumentScrollMetrics() {
     const root = document.scrollingElement ?? document.documentElement;
@@ -3454,20 +3481,52 @@
       clientY: 0
     });
   }
-  function cloneBlockAtCloneY(clone, y) {
-    let prev = null;
-    let prevTop = 0;
-    for (const b of Array.from(clone.querySelectorAll("[data-mm-block-index]"))) {
-      const top = elementTopWithinContainer(b, clone);
-      if (top === null) continue;
-      const h = b.offsetHeight;
-      if (y < top) return { block: b, mode: "gap", value: y - top };
-      if (y < top + h) return { block: b, mode: "frac", value: h > 0 ? (y - top) / h : 0 };
-      prev = b;
-      prevTop = top;
+  function getCloneSpaceLayout() {
+    if (!minimapContent) return null;
+    const builtAtWidth = minimapContent.style.width;
+    const builtAtGeneration = minimapCloneGeometryGeneration;
+    const forElements = minimapCloneDirectBlockElements;
+    if (minimapCloneSpaceLayout && minimapCloneSpaceLayout.builtAtWidth === builtAtWidth && minimapCloneSpaceLayout.builtAtGeneration === builtAtGeneration && minimapCloneSpaceLayout.forElements === forElements) {
+      return minimapCloneSpaceLayout;
     }
-    if (prev) return { block: prev, mode: "tail", value: y - (prevTop + prev.offsetHeight) };
-    return null;
+    const blocks = [];
+    const tops = [];
+    const bottoms = [];
+    for (const block of forElements) {
+      const top = elementTopWithinContainer(block, minimapContent);
+      if (top === null) continue;
+      blocks.push(block);
+      tops.push(top);
+      bottoms.push(top + block.offsetHeight);
+    }
+    minimapCloneSpaceLayout = { blocks, tops, bottoms, builtAtWidth, builtAtGeneration, forElements };
+    return minimapCloneSpaceLayout;
+  }
+  function cloneBlockAtCloneY(clone, y) {
+    const layout = getCloneSpaceLayout();
+    if (!layout || layout.blocks.length === 0) return null;
+    let lo = 0;
+    let hi = layout.bottoms.length - 1;
+    let firstBottomAfterY = layout.bottoms.length;
+    while (lo <= hi) {
+      const mid = lo + (hi - lo >> 1);
+      if (layout.bottoms[mid] > y) {
+        firstBottomAfterY = mid;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    if (firstBottomAfterY === layout.blocks.length) {
+      const last = layout.blocks.length - 1;
+      return { block: layout.blocks[last], mode: "tail", value: y - layout.bottoms[last] };
+    }
+    const block = layout.blocks[firstBottomAfterY];
+    const top = layout.tops[firstBottomAfterY];
+    if (y < top) return { block, mode: "gap", value: y - top };
+    const bottom = layout.bottoms[firstBottomAfterY];
+    const height = bottom - top;
+    return { block, mode: "frac", value: height > 0 ? (y - top) / height : 0 };
   }
   function docScrollTopForCloneY(root, y) {
     if (!minimapContent) return null;
@@ -3475,12 +3534,30 @@
     if (!hit) return null;
     const idx = hit.block.dataset["mmBlockIndex"];
     if (idx === void 0) return null;
-    const docBlock = document.querySelector(`body > main.mm-document [data-mm-block-index="${idx}"]`);
+    const mapHit = getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(Number(idx)) ?? null;
+    const docBlock = mapHit ?? document.querySelector(`body > main.mm-document [data-mm-block-index="${idx}"]`);
     if (!docBlock) return null;
     const r = docBlock.getBoundingClientRect();
+    if (mapHit !== null && r.height <= 0) return null;
     const contribution = hit.mode === "gap" ? hit.value : hit.mode === "tail" ? r.height + hit.value : hit.value * r.height;
     const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
     return Math.max(0, Math.min(maxScrollTop, root.scrollTop + r.top + contribution));
+  }
+  function __testSetMinimapCloneBlockElementsForTesting(clone, elements) {
+    minimapContent = clone;
+    minimapCloneBlockElementIndex = createBlockElementIndex(elements);
+    minimapCloneDirectBlockElements = elements.filter((block) => block.parentElement === clone);
+    invalidateMinimapCloneGeometry();
+  }
+  function __testCloneBlockAtCloneYForTesting(clone, y) {
+    return cloneBlockAtCloneY(clone, y);
+  }
+  function __testInvalidateMinimapCloneGeometryForTesting() {
+    invalidateMinimapCloneGeometry();
+  }
+  function __testDocScrollTopForCloneYForTesting(root, y) {
+    refreshTopVisibleBlockIndexCache();
+    return docScrollTopForCloneY(root, y);
   }
   function updateMinimapViewport(options = {}) {
     if (hostWindow.__mmMathObserverPerfEnabled !== true) {
@@ -3532,10 +3609,10 @@
     const nextContentWidth = `${documentWidth}px`;
     if (minimapContent.style.width !== nextContentWidth) {
       minimapContent.style.width = nextContentWidth;
-      minimapContentHeight = null;
+      invalidateMinimapCloneMeasuredGeometry();
     }
     if (options.layoutState === void 0) {
-      minimapContentHeight = null;
+      invalidateMinimapCloneMeasuredGeometry();
     }
     if (minimapContentHeight === null) {
       minimapContentHeight = minimapContent.scrollHeight;
@@ -3702,7 +3779,7 @@
     if (layoutState !== void 0) {
       pendingMinimapViewportLayoutState = { ...layoutState };
     } else {
-      minimapContentHeight = null;
+      invalidateMinimapCloneMeasuredGeometry();
     }
     if (minimapViewportFrameRequested) {
       return;
@@ -3899,6 +3976,7 @@
     lastAppliedReadingPreferences = next;
     const layoutAffectingChange = fontFamilyChanged || fontSizeChanged || lineHeightChanged || maxWidthChanged || minimapModeChanged || viewerChromeChanged;
     if (layoutAffectingChange) {
+      invalidateMinimapCloneMeasuredGeometry();
       if (!minimapSourceReady && shouldBuildDetailedMinimapContent().allowed) {
         queueMinimapContentRefreshAfterLayoutSettles();
       } else {
