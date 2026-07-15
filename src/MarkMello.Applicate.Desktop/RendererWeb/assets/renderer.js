@@ -1787,6 +1787,11 @@
     const fragment = document.createDocumentFragment();
     const nodes = Array.from(main.childNodes);
     fragment.append(...nodes);
+    for (const node of nodes) {
+      if (node instanceof HTMLElement) {
+        node.classList.remove("mm-warmed");
+      }
+    }
     const minimapSnapshot = captureMinimapSnapshot({
       ownerDocument: document,
       minimapContent,
@@ -2292,32 +2297,35 @@
     window.requestAnimationFrame(warmupSlice);
   }
   function warmupSlice() {
-    if (!warmupAllowed) {
-      warmupRunning = false;
-      return;
-    }
-    const unwarmed = document.querySelectorAll(
-      "body > main.mm-document > *:not(.mm-warmed)"
-    );
-    if (unwarmed.length === 0) {
-      warmupRunning = false;
-      return;
-    }
-    const topIndex = findTopVisibleBlockIndex();
-    const anchorEl = topIndex === null ? null : getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(topIndex) ?? null;
-    const beforeTop = anchorEl !== null ? anchorEl.getBoundingClientRect().top : 0;
-    const count = Math.min(WARMUP_BLOCKS_PER_SLICE, unwarmed.length);
-    for (let i = 0; i < count; i++) {
-      unwarmed[i].classList.add("mm-warmed");
-    }
-    if (anchorEl !== null) {
-      const delta = anchorEl.getBoundingClientRect().top - beforeTop;
-      if (delta !== 0) {
-        const root = document.scrollingElement ?? document.documentElement;
-        root.scrollTop += delta;
+    let scheduleNext = false;
+    try {
+      if (!warmupAllowed) return;
+      const unwarmed = document.querySelectorAll(
+        "body > main.mm-document > *:not(.mm-warmed)"
+      );
+      if (unwarmed.length === 0) return;
+      const topIndex = findTopVisibleBlockIndex();
+      const anchorEl = topIndex === null ? null : getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(topIndex) ?? null;
+      const beforeTop = anchorEl !== null ? anchorEl.getBoundingClientRect().top : 0;
+      const count = Math.min(WARMUP_BLOCKS_PER_SLICE, unwarmed.length);
+      for (let i = 0; i < count; i++) {
+        unwarmed[i].classList.add("mm-warmed");
+      }
+      if (anchorEl !== null) {
+        const delta = anchorEl.getBoundingClientRect().top - beforeTop;
+        if (delta !== 0) {
+          const root = document.scrollingElement ?? document.documentElement;
+          root.scrollTop += delta;
+        }
+      }
+      scheduleNext = true;
+    } finally {
+      if (scheduleNext) {
+        window.requestAnimationFrame(warmupSlice);
+      } else {
+        warmupRunning = false;
       }
     }
-    window.requestAnimationFrame(warmupSlice);
   }
   function postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs) {
     postReadyEnhancementsCompleted = true;
@@ -2450,6 +2458,7 @@
     liveDocumentBlockElements = [];
     liveDocumentBlockElementIndex = createBlockElementIndex([]);
     liveDocumentBlockElementsStale = true;
+    ensureDocumentWarmup();
   }
   function refreshTopVisibleBlockIndexCache() {
     liveDocumentBlockElements = collectLiveDocumentBlockElements(document);
@@ -4377,6 +4386,7 @@
     firstPrefsBootstrapSuppressedByLoadGeneration = null;
     postReadyEnhancementsCompleted = false;
     warmupAllowed = false;
+    warmupRunning = false;
     currentController?.cancel();
     currentController = null;
     ++layoutReadyGeneration;

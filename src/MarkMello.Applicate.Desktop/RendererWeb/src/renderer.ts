@@ -433,6 +433,16 @@ function preserveCurrentProcessedDocument(): void {
   const fragment = document.createDocumentFragment();
   const nodes = Array.from(main.childNodes);
   fragment.append(...nodes);
+  // Warm-up sets content-visibility:visible on blocks; do NOT persist that into
+  // the processed-document cache. A cache-hit restore re-inserts the cached
+  // nodes and a tab-switch back would then force a full-document synchronous
+  // layout with every block realized. The restored document re-warms through
+  // the normal post-ready path instead.
+  for (const node of nodes) {
+    if (node instanceof HTMLElement) {
+      node.classList.remove("mm-warmed");
+    }
+  }
   const minimapSnapshot = captureMinimapSnapshot({
     ownerDocument: document,
     minimapContent,
@@ -1086,37 +1096,42 @@ function ensureDocumentWarmup(): void {
 }
 
 function warmupSlice(): void {
-  if (!warmupAllowed) {
-    warmupRunning = false;
-    return;
-  }
-  const unwarmed = document.querySelectorAll<HTMLElement>(
-    "body > main.mm-document > *:not(.mm-warmed)"
-  );
-  if (unwarmed.length === 0) {
-    warmupRunning = false;
-    return;
-  }
-  // Anchor the current top-visible block across the height changes this slice
-  // introduces; restore the scroll after warming so the view never shifts. On an
-  // anchor miss we still warm (nothing to anchor yet) but skip the restore.
-  const topIndex = findTopVisibleBlockIndex();
-  const anchorEl = topIndex === null
-    ? null
-    : (getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(topIndex) ?? null);
-  const beforeTop = anchorEl !== null ? anchorEl.getBoundingClientRect().top : 0;
-  const count = Math.min(WARMUP_BLOCKS_PER_SLICE, unwarmed.length);
-  for (let i = 0; i < count; i++) {
-    unwarmed[i]!.classList.add("mm-warmed");
-  }
-  if (anchorEl !== null) {
-    const delta = anchorEl.getBoundingClientRect().top - beforeTop;
-    if (delta !== 0) {
-      const root = document.scrollingElement ?? document.documentElement;
-      root.scrollTop += delta;
+  let scheduleNext = false;
+  try {
+    if (!warmupAllowed) return;
+    const unwarmed = document.querySelectorAll<HTMLElement>(
+      "body > main.mm-document > *:not(.mm-warmed)"
+    );
+    if (unwarmed.length === 0) return;
+    // Anchor the current top-visible block across the height changes this slice
+    // introduces; restore the scroll after warming so the view never shifts. On
+    // an anchor miss we still warm (nothing to anchor yet) but skip the restore.
+    const topIndex = findTopVisibleBlockIndex();
+    const anchorEl = topIndex === null
+      ? null
+      : (getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(topIndex) ?? null);
+    const beforeTop = anchorEl !== null ? anchorEl.getBoundingClientRect().top : 0;
+    const count = Math.min(WARMUP_BLOCKS_PER_SLICE, unwarmed.length);
+    for (let i = 0; i < count; i++) {
+      unwarmed[i]!.classList.add("mm-warmed");
+    }
+    if (anchorEl !== null) {
+      const delta = anchorEl.getBoundingClientRect().top - beforeTop;
+      if (delta !== 0) {
+        const root = document.scrollingElement ?? document.documentElement;
+        root.scrollTop += delta;
+      }
+    }
+    scheduleNext = true;
+  } finally {
+    // Never strand warmupRunning=true with no pending rAF (an exception or an
+    // early return would otherwise disable warm-up for the rest of the session).
+    if (scheduleNext) {
+      window.requestAnimationFrame(warmupSlice);
+    } else {
+      warmupRunning = false;
     }
   }
-  window.requestAnimationFrame(warmupSlice);
 }
 
 function postPostReadyEnhancementsComplete(
@@ -1279,6 +1294,10 @@ function invalidateTopVisibleBlockIndexCache(): void {
   liveDocumentBlockElements = [];
   liveDocumentBlockElementIndex = createBlockElementIndex([]);
   liveDocumentBlockElementsStale = true;
+  // A changed block set (progressive append, lazy Mermaid svg host insertion)
+  // may add a new unwarmed top-level block; re-kick the warm-up so it is not
+  // left permanently unwarmed (white on drag). No-op unless warmupAllowed.
+  ensureDocumentWarmup();
 }
 
 function refreshTopVisibleBlockIndexCache(): void {
@@ -3877,6 +3896,7 @@ function resetModuleGlobalsForLoadDocument(): void {
   firstPrefsBootstrapSuppressedByLoadGeneration = null;
   postReadyEnhancementsCompleted = false;
   warmupAllowed = false;
+  warmupRunning = false;
   currentController?.cancel();
   currentController = null;
   ++layoutReadyGeneration;
