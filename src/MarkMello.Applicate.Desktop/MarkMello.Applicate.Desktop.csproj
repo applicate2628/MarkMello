@@ -5,7 +5,7 @@
     <RootNamespace>MarkMello.Applicate.Desktop</RootNamespace>
     <AssemblyName>MarkMello.Applicate</AssemblyName>
     <Product>MarkMello Applicate</Product>
-    <Version>0.3.22-applicate</Version>
+    <Version>0.3.23-applicate</Version>
     <Authors>MarkMello contributors; Dmitry Denisenko (@applicate2628)</Authors>
     <Copyright>Original MarkMello: (c) 2026 MarkMello contributors; Applicate additions: (c) 2026 Dmitry Denisenko (@applicate2628)</Copyright>
     <ApplicationManifest>..\MarkMello.Desktop\app.manifest</ApplicationManifest>
