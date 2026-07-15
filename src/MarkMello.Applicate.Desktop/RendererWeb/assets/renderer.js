@@ -1788,7 +1788,7 @@
     const nodes = Array.from(main.childNodes);
     fragment.append(...nodes);
     for (const node of nodes) {
-      if (node instanceof HTMLElement) {
+      if (node instanceof Element) {
         node.classList.remove("mm-warmed");
       }
     }

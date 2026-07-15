@@ -439,7 +439,7 @@ function preserveCurrentProcessedDocument(): void {
   // layout with every block realized. The restored document re-warms through
   // the normal post-ready path instead.
   for (const node of nodes) {
-    if (node instanceof HTMLElement) {
+    if (node instanceof Element) {
       node.classList.remove("mm-warmed");
     }
   }

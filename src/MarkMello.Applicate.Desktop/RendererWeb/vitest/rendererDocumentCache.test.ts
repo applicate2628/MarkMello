@@ -302,8 +302,12 @@ describe("renderer document cache", () => {
 
     messages.length = 0;
     expect(() => load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 3 })).not.toThrow();
-    await letPipelineSettle();
+    // The synchronous cache-hit restore must not scan block geometry (it reuses the
+    // cached top block index). The background document warm-up legitimately reads
+    // the anchor block's geometry in a LATER rAF; restore the spy before letting the
+    // pipeline (and warm-up) settle so a warm-up anchor read doesn't trip this spy.
     rectSpy.mockRestore();
+    await letPipelineSettle();
 
     const cachedScroll = messages.find((message): message is { type: "scroll"; topBlockIndex: number | null } =>
       typeof message === "object"
