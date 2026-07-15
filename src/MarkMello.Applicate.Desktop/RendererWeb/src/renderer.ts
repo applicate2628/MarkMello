@@ -1339,6 +1339,17 @@ function findBottomVisibleBlockIndex(): number | null {
 function postScroll(suppressed = false): CachedLayoutState | null {
   if (suppressed) {
     minimapDragSuppressedScrollFrames++;
+    // Still publish the scroll POSITION so the host scrollbar overlay tracks the
+    // minimap-drag live (it positions its thumb from scrollTop/scrollHeight/
+    // clientHeight). Only the heavy per-frame work (block-index searches + math
+    // window update) stays suppressed; those recompute on the final unsuppressed
+    // postScroll at drag end.
+    const draggedScrollState = getScrollState();
+    postHostMessage({
+      type: "scroll",
+      ...draggedScrollState,
+      topBlockIndex: lastKnownLayoutState?.topBlockIndex ?? null,
+    });
     return null;
   }
 

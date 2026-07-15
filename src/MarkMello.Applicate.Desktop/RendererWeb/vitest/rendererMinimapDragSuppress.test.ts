@@ -233,7 +233,14 @@ describe("renderer minimap panning suppression", () => {
     expect(finalDragScrollTop).toBeGreaterThan(1000);
     expect(liveBlockLayoutReadCount).toBe(0);
     expect(countMathScrollMarks()).toBe(initialMathScrollMarks);
-    expect(messagesOfType("scroll")).toHaveLength(0);
+    // The host scrollbar overlay tracks the live drag: the scroll POSITION is
+    // published each suppressed frame (2 pointermoves -> 2 messages), so the
+    // scrollbar follows the minimap instead of jumping only on release. The heavy
+    // per-frame work stays suppressed (liveBlockLayoutReadCount === 0 above, math /
+    // minimap-update / preview-source-line below), flushed once at drag end.
+    const dragScrollMessages = messagesOfType("scroll");
+    expect(dragScrollMessages).toHaveLength(2);
+    expect(dragScrollMessages[dragScrollMessages.length - 1]).toMatchObject({ scrollTop: finalDragScrollTop });
     expect(messagesOfType("preview-source-line")).toHaveLength(0);
     expect(perfMessages("mm-minimap-viewport-update")).toHaveLength(0);
 
@@ -243,7 +250,8 @@ describe("renderer minimap panning suppression", () => {
     expect(document.documentElement.scrollTop).toBe(finalDragScrollTop);
     expect(liveBlockLayoutReadCount).toBeGreaterThan(0);
     expect(countMathScrollMarks()).toBe(initialMathScrollMarks + 1);
-    expect(messagesOfType("scroll")).toHaveLength(1);
+    // 2 lightweight position-only messages during the drag + 1 full flush at release.
+    expect(messagesOfType("scroll")).toHaveLength(3);
     expect(messagesOfType("preview-source-line")).toHaveLength(1);
     expect(perfMessages("mm-minimap-viewport-update")).toHaveLength(1);
     const endMarks = perfMessages("mm-minimap-drag-suppress-end");

@@ -2491,6 +2491,12 @@
   function postScroll(suppressed = false) {
     if (suppressed) {
       minimapDragSuppressedScrollFrames++;
+      const draggedScrollState = getScrollState();
+      postHostMessage({
+        type: "scroll",
+        ...draggedScrollState,
+        topBlockIndex: lastKnownLayoutState?.topBlockIndex ?? null
+      });
       return null;
     }
     const scrollState = getScrollState();
