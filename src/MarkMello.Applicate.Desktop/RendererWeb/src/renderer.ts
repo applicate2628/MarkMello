@@ -1062,12 +1062,71 @@ function deferPostReadyEnhancements(work: () => void): void {
   postLayoutReadyWorkQueue.push({ generation: layoutReadyGeneration, work });
 }
 
+// --- Document warm-up ---------------------------------------------------
+// content-visibility:auto (renderer.css) RE-skips + RE-paints a top-level block
+// every scroll-off/scroll-on, so a fast minimap/scrollbar drag over dense math
+// paints white until release. Progressively mark every top-level block
+// `mm-warmed` (content-visibility:visible, permanently painted) in bounded rAF
+// slices so drags show no white. RESUMABLE across progressive append: each slice
+// RE-QUERIES the unwarmed blocks (the document loads in chunks, so a one-shot
+// block-list capture would only warm the first chunk). Gated to run after the
+// initial render (warmupAllowed) so it never competes with first paint, and
+// re-kicked on each append. DRIFT SAFE: warming grows a block from its
+// intrinsic-size estimate to real height; the current top-visible block's
+// viewport position is anchored across each slice so the view never shifts (the
+// class that killed the shelved virtualization experiment). No timer.
+let warmupAllowed = false;
+let warmupRunning = false;
+const WARMUP_BLOCKS_PER_SLICE = 60;
+
+function ensureDocumentWarmup(): void {
+  if (!warmupAllowed || warmupRunning) return;
+  warmupRunning = true;
+  window.requestAnimationFrame(warmupSlice);
+}
+
+function warmupSlice(): void {
+  if (!warmupAllowed) {
+    warmupRunning = false;
+    return;
+  }
+  const unwarmed = document.querySelectorAll<HTMLElement>(
+    "body > main.mm-document > *:not(.mm-warmed)"
+  );
+  if (unwarmed.length === 0) {
+    warmupRunning = false;
+    return;
+  }
+  // Anchor the current top-visible block across the height changes this slice
+  // introduces; restore the scroll after warming so the view never shifts. On an
+  // anchor miss we still warm (nothing to anchor yet) but skip the restore.
+  const topIndex = findTopVisibleBlockIndex();
+  const anchorEl = topIndex === null
+    ? null
+    : (getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(topIndex) ?? null);
+  const beforeTop = anchorEl !== null ? anchorEl.getBoundingClientRect().top : 0;
+  const count = Math.min(WARMUP_BLOCKS_PER_SLICE, unwarmed.length);
+  for (let i = 0; i < count; i++) {
+    unwarmed[i]!.classList.add("mm-warmed");
+  }
+  if (anchorEl !== null) {
+    const delta = anchorEl.getBoundingClientRect().top - beforeTop;
+    if (delta !== 0) {
+      const root = document.scrollingElement ?? document.documentElement;
+      root.scrollTop += delta;
+    }
+  }
+  window.requestAnimationFrame(warmupSlice);
+}
+
 function postPostReadyEnhancementsComplete(
   renderId: number | undefined,
   hasMermaid: boolean | undefined,
   hasHljs: boolean | undefined
 ): void {
   postReadyEnhancementsCompleted = true;
+  warmupAllowed = true;
+  ensureDocumentWarmup();
   const message: RendererMessage = {
     type: "post-ready-enhancements-complete",
     hasMermaid: hasMermaid === true,
@@ -1149,6 +1208,7 @@ function appendProgressiveDocumentHtml(message: Extract<HostMessage, { type: "ap
 
   main.append(template.content);
   invalidateTopVisibleBlockIndexCache();
+  ensureDocumentWarmup();
 
   const isFinal = message.isFinal !== false;
   if (!isFinal) {
@@ -3816,6 +3876,7 @@ function resetModuleGlobalsForLoadDocument(): void {
   initialRenderPipelineCompleted = false;
   firstPrefsBootstrapSuppressedByLoadGeneration = null;
   postReadyEnhancementsCompleted = false;
+  warmupAllowed = false;
   currentController?.cancel();
   currentController = null;
   ++layoutReadyGeneration;

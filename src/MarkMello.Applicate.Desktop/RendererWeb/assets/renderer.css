@@ -238,6 +238,10 @@ body > main.mm-document > * {
   contain-intrinsic-size: auto 120px;
 }
 
+body > main.mm-document > .mm-warmed {
+  content-visibility: visible;
+}
+
 a {
   color: inherit;
   text-decoration-color: color-mix(in srgb, currentColor 42%, transparent);

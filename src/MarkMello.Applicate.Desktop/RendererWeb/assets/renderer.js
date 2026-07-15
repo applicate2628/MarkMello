@@ -2283,8 +2283,46 @@
   function deferPostReadyEnhancements(work) {
     postLayoutReadyWorkQueue.push({ generation: layoutReadyGeneration, work });
   }
+  var warmupAllowed = false;
+  var warmupRunning = false;
+  var WARMUP_BLOCKS_PER_SLICE = 60;
+  function ensureDocumentWarmup() {
+    if (!warmupAllowed || warmupRunning) return;
+    warmupRunning = true;
+    window.requestAnimationFrame(warmupSlice);
+  }
+  function warmupSlice() {
+    if (!warmupAllowed) {
+      warmupRunning = false;
+      return;
+    }
+    const unwarmed = document.querySelectorAll(
+      "body > main.mm-document > *:not(.mm-warmed)"
+    );
+    if (unwarmed.length === 0) {
+      warmupRunning = false;
+      return;
+    }
+    const topIndex = findTopVisibleBlockIndex();
+    const anchorEl = topIndex === null ? null : getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(topIndex) ?? null;
+    const beforeTop = anchorEl !== null ? anchorEl.getBoundingClientRect().top : 0;
+    const count = Math.min(WARMUP_BLOCKS_PER_SLICE, unwarmed.length);
+    for (let i = 0; i < count; i++) {
+      unwarmed[i].classList.add("mm-warmed");
+    }
+    if (anchorEl !== null) {
+      const delta = anchorEl.getBoundingClientRect().top - beforeTop;
+      if (delta !== 0) {
+        const root = document.scrollingElement ?? document.documentElement;
+        root.scrollTop += delta;
+      }
+    }
+    window.requestAnimationFrame(warmupSlice);
+  }
   function postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs) {
     postReadyEnhancementsCompleted = true;
+    warmupAllowed = true;
+    ensureDocumentWarmup();
     const message = {
       type: "post-ready-enhancements-complete",
       hasMermaid: hasMermaid === true,
@@ -2353,6 +2391,7 @@
     }
     main.append(template.content);
     invalidateTopVisibleBlockIndexCache();
+    ensureDocumentWarmup();
     const isFinal = message.isFinal !== false;
     if (!isFinal) {
       postPerfMark("mm-progressive-append-end", {
@@ -4337,6 +4376,7 @@
     initialRenderPipelineCompleted = false;
     firstPrefsBootstrapSuppressedByLoadGeneration = null;
     postReadyEnhancementsCompleted = false;
+    warmupAllowed = false;
     currentController?.cancel();
     currentController = null;
     ++layoutReadyGeneration;
