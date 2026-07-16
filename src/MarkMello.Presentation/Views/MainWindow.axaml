@@ -494,7 +494,11 @@
 
       <views:WelcomeView ZIndex="0"
                          IsVisible="{Binding IsWelcome}" />
-      <ContentControl IsVisible="{Binding IsViewer}"
+      <!-- Named anchor: the Applicate fork mounts its viewer host into this slot
+           (ApplicateMountPoints.ViewerContentSlot). Renaming or removing it fails
+           the fork fast at startup instead of silently disabling the viewer. -->
+      <ContentControl Name="ViewerContentSlot"
+                      IsVisible="{Binding IsViewer}"
                       ZIndex="0"
                       Content="{Binding ActiveDocumentContent}" />
       <views:LoadErrorView ZIndex="0"
