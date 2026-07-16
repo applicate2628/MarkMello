@@ -293,3 +293,66 @@ internal sealed class StubUpdateService : IUpdateService
         CancellationToken cancellationToken = default)
         => Task.FromResult(NextPrepareResult);
 }
+
+/// <summary>
+/// A loader that HOLDS a load mid-flight until released, so an interleaving can be engineered
+/// deterministically instead of raced. Per race-window-assertion discipline: a regression test for a
+/// transient window must make the window deterministic via an injection seam, never rely on the
+/// natural window staying measurable (nondeterministic fast-machine failure is a design defect, not
+/// a flake). Backs the document-load currency tests.
+/// </summary>
+internal sealed class GatedDocumentLoader : IDocumentLoader
+{
+    private readonly Dictionary<string, TaskCompletionSource<MarkdownSource>> _gates =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public Dictionary<string, MarkdownSource> Sources { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Paths whose load parks until <see cref="Release"/>; others complete synchronously.</summary>
+    public HashSet<string> GatedPaths { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Task<MarkdownSource> LoadAsync(string path, CancellationToken cancellationToken = default)
+    {
+        if (!GatedPaths.Contains(path))
+        {
+            return Sources.TryGetValue(path, out var ready)
+                ? Task.FromResult(ready)
+                : Task.FromException<MarkdownSource>(new FileNotFoundException("Document was not found.", path));
+        }
+
+        var tcs = new TaskCompletionSource<MarkdownSource>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _gates[path] = tcs;
+        return tcs.Task;
+    }
+
+    public void Release(string path)
+    {
+        if (!_gates.TryGetValue(path, out var tcs))
+        {
+            throw new InvalidOperationException($"No load parked for '{path}'.");
+        }
+
+        _gates.Remove(path);
+        if (Sources.TryGetValue(path, out var source))
+        {
+            tcs.SetResult(source);
+        }
+        else
+        {
+            tcs.SetException(new FileNotFoundException("Document was not found.", path));
+        }
+    }
+
+    public void ReleaseWithFailure(string path, Exception exception)
+    {
+        if (!_gates.TryGetValue(path, out var tcs))
+        {
+            throw new InvalidOperationException($"No load parked for '{path}'.");
+        }
+
+        _gates.Remove(path);
+        tcs.SetException(exception);
+    }
+
+    public bool IsParked(string path) => _gates.ContainsKey(path);
+}

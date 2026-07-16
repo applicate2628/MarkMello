@@ -46,6 +46,18 @@ public partial class MainWindowViewModel : ObservableObject
     private string? _currentPath;
     private readonly object _openingPathsGate = new();
     private readonly Dictionary<string, int> _openingPathCounts = new(StringComparer.OrdinalIgnoreCase);
+
+    // Document-load currency. Every load REQUEST takes a ticket; every PUBLISH of current-document
+    // identity bumps the epoch. A load may publish only while its ticket is still the epoch --
+    // "newest wins", independent of which load finishes first.
+    //
+    // NOT _currentPath equality: that is a derived mirror with six writers, and for a fresh open
+    // target != current is the NORMAL state until the publish lands, so a path-equality guard would
+    // veto every ordinary open. NOT a _currentPath snapshot-compare either: with requests A then B,
+    // if older A completes first it would publish (snapshot unchanged) and newer B would then bail --
+    // first-completer-wins, a NEW wrongness. A monotonic counter gives newest-wins in both
+    // completion orders. Pure event-ordered state, no timing (no-timers law).
+    private long _documentLoadEpoch;
     private Func<Task>? _pendingDirtyAction;
     // Fired ONLY when the user cancels the dirty prompt; lets a queued
     // tab-switch revert the tab strip to the previous document (the service
@@ -1733,6 +1745,10 @@ public partial class MainWindowViewModel : ObservableObject
 
     private async Task LoadDocumentAsync(string path, bool preserveEditModeAfterLoad)
     {
+        // Take a currency ticket BEFORE the cache-hit branch below, so both publish paths are
+        // covered. A newer load request, or any publish of current-document identity, moves the
+        // epoch past this ticket and this load must then NOT publish -- it lost.
+        var ticket = ++_documentLoadEpoch;
         var openingPath = NormalizeOpeningPath(path);
         TrackOpeningPath(openingPath);
         try
@@ -1817,6 +1833,19 @@ public partial class MainWindowViewModel : ObservableObject
                     StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-hit-startup-publish-ready", $"path={cached.Path}");
                 }
 
+                // Currency guard, cache-hit publish path. Dominates every suspension above it
+                // (renderer-readiness wait / Background InvokeAsync): the dispatcher is
+                // single-threaded and nothing between here and the apply can suspend, so the
+                // state checked here is the state applied.
+                if (_documentLoadEpoch != ticket)
+                {
+                    StartupDiag.DiagMs(
+                        "startup-pre-window",
+                        "load-superseded",
+                        $"path={path} at=cache-hit");
+                    return;
+                }
+
                 ApplyOpenResult(
                     new OpenDocumentResult.Success(cached),
                     preserveEditModeAfterLoad,
@@ -1826,6 +1855,21 @@ public partial class MainWindowViewModel : ObservableObject
 
             StartupDiag.DiagMs("startup-pre-window", "perf-doc cache-miss", $"path={path}");
             var result = await _openDocument.ExecuteAsync(path).ConfigureAwait(true);
+
+            // Currency guard, cache-miss publish path — after this path's last suspension, before
+            // its first side effect. Runtime-proven: a reload suspended on a 7MB read while a tab
+            // switch won, then published over it (.scratch/bug9/PROOF-site4-trace.txt). Suppresses
+            // a superseded FailOpenResult too: publishing LoadError for a document the user already
+            // left is the same harm as a stale success.
+            if (_documentLoadEpoch != ticket)
+            {
+                StartupDiag.DiagMs(
+                    "startup-pre-window",
+                    "load-superseded",
+                    $"path={path} at=cache-miss");
+                return;
+            }
+
             ApplyOpenResult(result, preserveEditModeAfterLoad);
         }
         finally
@@ -1931,6 +1975,16 @@ public partial class MainWindowViewModel : ObservableObject
         bool preserveEditModeAfterLoad,
         bool deferRenderedDocument = false)
     {
+        // Every publish of current-document identity invalidates in-flight loads. This bump is
+        // what makes the guards catch the RUNTIME-PROVEN case: the load that lost was superseded
+        // by a tab switch, and that switch arrives through ApplyOpenedDocumentInPlace -> here,
+        // NOT as a load request. Bumping only on load requests would leave the reload's ticket
+        // still latest, and it would publish over the switch exactly as it does today — the fix
+        // would ship and silently do nothing (.scratch/bug9/PROOF-site4-trace.txt).
+        // Safe for the load path itself: its own guard runs BEFORE this, so the bump lands after
+        // the check it would otherwise invalidate.
+        _documentLoadEpoch++;
+
         // PE r2 E1: publish State BEFORE Document so the sibling-mount bridge
         // sees a single Reconcile with viewerVis=true on the Document write,
         // not a cascade of viewerVis=false→true straddling the State flip.
