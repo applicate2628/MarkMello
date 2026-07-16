@@ -5,6 +5,16 @@
 // runtime-verified the only display:none [data-mm-block-index] blocks are these.
 const LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]:not(.is-rendered)";
 
+// Scoped selector for ONE block index that carries the SAME contract as
+// LIVE_DOCUMENT_BLOCK_SELECTOR: live document only (excludes minimap clones via `body >`)
+// AND excludes display:none rendered-mermaid <pre> via `:not(.is-rendered)` (which keep their
+// data-mm-block-index but have no layout box). For scroll-anchor selection (finding the visible
+// block to scrollIntoView). NOT for geometry-mapping paths that intentionally measure the hidden
+// rendered-mermaid box (see docScrollTopForCloneY) — those keep their own rendered-inclusive form.
+export function liveBlockSelectorForIndex(blockIndex: number | string): string {
+  return `body > main.mm-document [data-mm-block-index="${blockIndex}"]:not(.is-rendered)`;
+}
+
 export type BlockElementIndex = {
   readonly elements: readonly HTMLElement[];
   readonly elementsByBlockIndex: ReadonlyMap<number, HTMLElement>;
@@ -132,7 +142,7 @@ function blockDocumentBottom(block: HTMLElement): number {
   return blockDocumentTop(block) + block.offsetHeight;
 }
 
-function blockDocumentTop(block: HTMLElement): number {
+export function blockDocumentTop(block: HTMLElement): number {
   let top = 0;
   let current: HTMLElement | null = block;
   while (current !== null) {

@@ -32,7 +32,9 @@ import {
   type CachedMinimapSnapshot
 } from "./minimapCache";
 import {
+  blockDocumentTop,
   collectLiveDocumentBlockElements,
+  liveBlockSelectorForIndex,
   createBlockElementIndex,
   elementTopWithinContainer,
   findTopVisibleBlockIndexFromBlocks,
@@ -373,6 +375,7 @@ type CachedLayoutState = {
   scrollHeight: number;
   clientHeight: number;
   topBlockIndex: number | null;
+  topBlockOffsetPx: number | null;
 };
 
 const processedDocumentCache = new Map<string, ProcessedDocumentCacheEntry>();
@@ -387,6 +390,7 @@ let lastKnownLayoutState: CachedLayoutState = {
   scrollHeight: 0,
   clientHeight: 0,
   topBlockIndex: null,
+  topBlockOffsetPx: null,
 };
 
 function hashDocumentHtml(html: string): string {
@@ -1357,7 +1361,8 @@ function postScroll(suppressed = false): CachedLayoutState | null {
   const topBlockIndex = findTopVisibleBlockIndex();
   const bottomBlockIndex = findBottomVisibleBlockIndex();
   currentController?.updateMathObservationWindow?.(topBlockIndex, "scroll", bottomBlockIndex);
-  const layoutState = { ...scrollState, topBlockIndex };
+  const topBlockOffsetPx = topBlockOffsetForIndex(topBlockIndex, scrollState.scrollTop);
+  const layoutState = { ...scrollState, topBlockIndex, topBlockOffsetPx };
   lastKnownLayoutState = layoutState;
   recordScrollIpc();
   postHostMessage({
@@ -1486,11 +1491,21 @@ function getViewportAnchorY(): number {
   return Math.max(24, Math.min(viewportHeight * 0.38, viewportHeight - 24));
 }
 
+function topBlockOffsetForIndex(index: number | null, scrollTop: number): number | null {
+  if (index === null) {
+    return null;
+  }
+  const el = getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(index);
+  // Viewport-top of the block via the same offsetTop mechanism findTopVisibleBlockIndex
+  // already runs this frame (no NEW forced layout, no getBoundingClientRect on the hot path).
+  return el ? Math.round(blockDocumentTop(el) - scrollTop) : null;
+}
+
 function postLayoutReady(renderId: number | null): void {
   try {
     const scrollState = getScrollState();
     const topBlockIndex = findTopVisibleBlockIndex();
-    lastKnownLayoutState = { ...scrollState, topBlockIndex };
+    lastKnownLayoutState = { ...scrollState, topBlockIndex, topBlockOffsetPx: topBlockOffsetForIndex(topBlockIndex, scrollState.scrollTop) };
     recordScrollIpc();
     postHostMessage({
       type: "scroll",
@@ -1515,9 +1530,14 @@ function postLayoutReady(renderId: number | null): void {
 function postCachedLayoutReady(): void {
   const cachedLayoutState = restoredCachedLayoutState;
   restoredCachedLayoutState = null;
-  const layoutState = cachedLayoutState !== null
-    ? { ...cachedLayoutState }
-    : { ...getScrollState(), topBlockIndex: findTopVisibleBlockIndex() };
+  let layoutState: CachedLayoutState;
+  if (cachedLayoutState !== null) {
+    layoutState = { ...cachedLayoutState };
+  } else {
+    const freshScrollState = getScrollState();
+    const freshTopBlockIndex = findTopVisibleBlockIndex();
+    layoutState = { ...freshScrollState, topBlockIndex: freshTopBlockIndex, topBlockOffsetPx: topBlockOffsetForIndex(freshTopBlockIndex, freshScrollState.scrollTop) };
+  }
   lastKnownLayoutState = { ...layoutState };
   recordScrollIpc();
   postHostMessage({
@@ -1542,7 +1562,7 @@ function postCachedLayoutReady(): void {
   }
 }
 
-function queueCachedGeometryRefresh(topBlockIndex: number | null): void {
+function queueCachedGeometryRefresh(_previousTopBlockIndex: number | null): void {
   const cacheKey = currentDocumentCacheKey;
   window.clearTimeout(cachedGeometryRefreshTimer);
   cachedGeometryRefreshTimer = window.setTimeout(() => {
@@ -1552,7 +1572,8 @@ function queueCachedGeometryRefresh(topBlockIndex: number | null): void {
     }
 
     const scrollState = getScrollState();
-    const layoutState = { ...scrollState, topBlockIndex };
+    const freshTopBlockIndex = findTopVisibleBlockIndex();
+    const layoutState = { ...scrollState, topBlockIndex: freshTopBlockIndex, topBlockOffsetPx: topBlockOffsetForIndex(freshTopBlockIndex, scrollState.scrollTop) };
     lastKnownLayoutState = { ...layoutState };
     recordScrollIpc();
     postHostMessage({
@@ -1590,6 +1611,23 @@ function flushPostLayoutReadyWork(): void {
 
 function restoreCachedScrollPosition(): void {
   const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
+  // A3: restore by BLOCK anchor + intra-block offset (drift-immune same-frame pair), not raw
+  // scrollTop. Raw scrollTop is re-captured post-settle by queueCachedGeometryRefresh after
+  // Chromium scroll-anchoring drift, which then compounds forward across tab returns.
+  if (layoutState.topBlockIndex !== null) {
+    const target = getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(layoutState.topBlockIndex)
+      ?? document.querySelector<HTMLElement>(liveBlockSelectorForIndex(layoutState.topBlockIndex));
+    if (target && target.isConnected) {
+      // Realize the block, then set scrollTop to its LIVE document top minus the captured intra-block
+      // offset in a SINGLE clamp. Using the block's own doc-top (not scrollIntoView's already-clamped
+      // result) makes a bottom-edge anchor (docTop > maxScroll) restore the exact saved position
+      // instead of the doubly-clamped M - offset.
+      target.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
+      const offset = layoutState.topBlockOffsetPx ?? 0;
+      window.scrollTo({ left: 0, top: blockDocumentTop(target) - offset, behavior: "instant" as ScrollBehavior });
+      return;
+    }
+  }
   window.scrollTo({
     left: 0,
     top: layoutState.scrollTop,
@@ -2781,6 +2819,11 @@ function docScrollTopForCloneY(root: Element, y: number): number | null {
   if (idx === undefined) return null;
   const mapHit = getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(Number(idx)) ?? null;
   const docBlock = mapHit
+    // NOT liveBlockSelectorForIndex: clone-Y mapping INTENTIONALLY matches rendered-mermaid <pre>
+    // (display:none -> zero-rect; the click caller refines after the block renders) so it still
+    // participates in inverse mapping — distinct contract from the scroll-anchor restore fallback,
+    // which needs a real layout box. Locked by rendererMinimapCloneLookup "uses the original
+    // live document selector when the block-index map misses rendered Mermaid".
     ?? document.querySelector<HTMLElement>(`body > main.mm-document [data-mm-block-index="${idx}"]`);
   if (!docBlock) return null;
   const r = docBlock.getBoundingClientRect();

@@ -1528,6 +1528,9 @@
 
   // RendererWeb/src/topVisibleBlockIndex.ts
   var LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]:not(.is-rendered)";
+  function liveBlockSelectorForIndex(blockIndex) {
+    return `body > main.mm-document [data-mm-block-index="${blockIndex}"]:not(.is-rendered)`;
+  }
   function collectLiveDocumentBlockElements(ownerDocument) {
     return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR));
   }
@@ -1748,7 +1751,8 @@
     scrollTop: 0,
     scrollHeight: 0,
     clientHeight: 0,
-    topBlockIndex: null
+    topBlockIndex: null,
+    topBlockOffsetPx: null
   };
   function hashDocumentHtml(html) {
     let hash = 2166136261;
@@ -2503,7 +2507,8 @@
     const topBlockIndex = findTopVisibleBlockIndex();
     const bottomBlockIndex = findBottomVisibleBlockIndex();
     currentController?.updateMathObservationWindow?.(topBlockIndex, "scroll", bottomBlockIndex);
-    const layoutState = { ...scrollState, topBlockIndex };
+    const topBlockOffsetPx = topBlockOffsetForIndex(topBlockIndex, scrollState.scrollTop);
+    const layoutState = { ...scrollState, topBlockIndex, topBlockOffsetPx };
     lastKnownLayoutState = layoutState;
     recordScrollIpc();
     postHostMessage({
@@ -2600,11 +2605,18 @@
     }
     return Math.max(24, Math.min(viewportHeight * 0.38, viewportHeight - 24));
   }
+  function topBlockOffsetForIndex(index, scrollTop) {
+    if (index === null) {
+      return null;
+    }
+    const el = getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(index);
+    return el ? Math.round(blockDocumentTop(el) - scrollTop) : null;
+  }
   function postLayoutReady(renderId) {
     try {
       const scrollState = getScrollState();
       const topBlockIndex = findTopVisibleBlockIndex();
-      lastKnownLayoutState = { ...scrollState, topBlockIndex };
+      lastKnownLayoutState = { ...scrollState, topBlockIndex, topBlockOffsetPx: topBlockOffsetForIndex(topBlockIndex, scrollState.scrollTop) };
       recordScrollIpc();
       postHostMessage({
         type: "scroll",
@@ -2628,7 +2640,14 @@
   function postCachedLayoutReady() {
     const cachedLayoutState = restoredCachedLayoutState;
     restoredCachedLayoutState = null;
-    const layoutState = cachedLayoutState !== null ? { ...cachedLayoutState } : { ...getScrollState(), topBlockIndex: findTopVisibleBlockIndex() };
+    let layoutState;
+    if (cachedLayoutState !== null) {
+      layoutState = { ...cachedLayoutState };
+    } else {
+      const freshScrollState = getScrollState();
+      const freshTopBlockIndex = findTopVisibleBlockIndex();
+      layoutState = { ...freshScrollState, topBlockIndex: freshTopBlockIndex, topBlockOffsetPx: topBlockOffsetForIndex(freshTopBlockIndex, freshScrollState.scrollTop) };
+    }
     lastKnownLayoutState = { ...layoutState };
     recordScrollIpc();
     postHostMessage({
@@ -2652,7 +2671,7 @@
       queueCachedGeometryRefresh(cachedLayoutState.topBlockIndex);
     }
   }
-  function queueCachedGeometryRefresh(topBlockIndex) {
+  function queueCachedGeometryRefresh(_previousTopBlockIndex) {
     const cacheKey = currentDocumentCacheKey;
     window.clearTimeout(cachedGeometryRefreshTimer);
     cachedGeometryRefreshTimer = window.setTimeout(() => {
@@ -2661,7 +2680,8 @@
         return;
       }
       const scrollState = getScrollState();
-      const layoutState = { ...scrollState, topBlockIndex };
+      const freshTopBlockIndex = findTopVisibleBlockIndex();
+      const layoutState = { ...scrollState, topBlockIndex: freshTopBlockIndex, topBlockOffsetPx: topBlockOffsetForIndex(freshTopBlockIndex, scrollState.scrollTop) };
       lastKnownLayoutState = { ...layoutState };
       recordScrollIpc();
       postHostMessage({
@@ -2695,6 +2715,15 @@
   }
   function restoreCachedScrollPosition() {
     const layoutState = restoredCachedLayoutState ?? lastKnownLayoutState;
+    if (layoutState.topBlockIndex !== null) {
+      const target = getLiveDocumentBlockElementIndex().elementsByBlockIndex.get(layoutState.topBlockIndex) ?? document.querySelector(liveBlockSelectorForIndex(layoutState.topBlockIndex));
+      if (target && target.isConnected) {
+        target.scrollIntoView({ block: "start", behavior: "instant" });
+        const offset = layoutState.topBlockOffsetPx ?? 0;
+        window.scrollTo({ left: 0, top: blockDocumentTop(target) - offset, behavior: "instant" });
+        return;
+      }
+    }
     window.scrollTo({
       left: 0,
       top: layoutState.scrollTop,
