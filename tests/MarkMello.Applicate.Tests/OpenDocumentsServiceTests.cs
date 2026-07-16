@@ -298,6 +298,25 @@ public sealed class OpenDocumentsServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task EnsureLoadedAsyncDoesNotOverwriteNewerTextInstalledWhileItWasReading()
+    {
+        // EnsureLoadedAsync tests IsLoaded BEFORE awaiting the disk read. UpdateSourceText can
+        // install newer text (and mark the document loaded) while that read is in flight — e.g. the
+        // bridge mirror pushing the editor's content. The bytes read from disk are then STALE and
+        // must not silently revert the newer text.
+        var path = WriteTemp("racy.md", "old disk content");
+        var service = new OpenDocumentsService();
+        var stub = await service.OpenStubAsync(path);
+
+        var loading = service.EnsureLoadedAsync(stub);
+        service.UpdateSourceText(stub, "newer in-memory content");
+        await loading;
+
+        Assert.True(stub.IsLoaded);
+        Assert.Equal("newer in-memory content", stub.SourceText);
+    }
+
+    [Fact]
     public async Task EnsureLoadedAsyncIsNoOpOnAlreadyLoadedDocument()
     {
         var path = WriteTemp("loaded.md", "fresh");

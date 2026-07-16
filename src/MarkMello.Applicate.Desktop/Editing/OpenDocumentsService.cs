@@ -133,6 +133,16 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
         // dispatches to the thread pool, so the UI thread is not blocked
         // for the duration of the file read.
         var content = await File.ReadAllTextAsync(document.FilePath).ConfigureAwait(true);
+
+        // Re-check AFTER the await. The IsLoaded test at the top of this method was made before
+        // yielding, and UpdateSourceText can install newer text and mark the document loaded while
+        // this disk read is still in flight (e.g. the bridge mirror pushing the editor's content).
+        // The bytes we just read are then STALE, and writing them would silently revert newer text.
+        if (document.IsLoaded)
+        {
+            return;
+        }
+
         document.SourceText = content;
         document.IsLoaded = true;
     }

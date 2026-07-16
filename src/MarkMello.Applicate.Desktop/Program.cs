@@ -50,13 +50,19 @@ internal static class Program
 
         try
         {
+            // Listen BEFORE building services. TryCreatePrimary already took the mutex above, so from
+            // that instant a second launch resolves us as the primary and forwards its activation —
+            // but the pipe was not up until after ConfigureServices, so anything launched in that
+            // window hit the forwarder's timeout and the activation was silently LOST (open-with,
+            // double-click, shell integration). Starting early is safe by design: the service queues
+            // requests and flushes them to the first ActivationRequested subscriber.
+            ApplicateTrace.DiagMs("startup-pre-window", "single-instance-start");
+            singleInstance!.StartListening();
+            ApplicateTrace.DiagMs("startup-pre-window", "single-instance-end");
             ApplicateTrace.DiagMs("startup-pre-window", "configure-services-start");
             var services = ConfigureServices(metrics, args, singleInstance);
             ApplicateTrace.DiagMs("startup-pre-window", "configure-services-end");
             App.RegisterServices(services);
-            ApplicateTrace.DiagMs("startup-pre-window", "single-instance-start");
-            singleInstance!.StartListening();
-            ApplicateTrace.DiagMs("startup-pre-window", "single-instance-end");
 
             // PE r2 §2 item D — Parallelize active-document I/O with shell load.
             // Fire-and-forget thread-pool task that pre-reads the argv document

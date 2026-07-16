@@ -5,6 +5,28 @@ namespace MarkMello.Applicate.Tests;
 
 public sealed class ApplicateSingleInstanceServiceTests : IDisposable
 {
+    [Fact]
+    public void ProgramStartsListeningBeforeBuildingServices()
+    {
+        // TryCreatePrimary takes the mutex, and from that instant a second launch resolves this
+        // process as the primary and forwards its activation. If the pipe only comes up after
+        // ConfigureServices, anything launched in that window hits the forwarder's timeout and the
+        // activation is silently LOST. Starting early is safe: the service queues requests and
+        // flushes them to the first ActivationRequested subscriber.
+        var programSource = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+            "src", "MarkMello.Applicate.Desktop", "Program.cs"));
+
+        var startListening = programSource.IndexOf("singleInstance!.StartListening();", StringComparison.Ordinal);
+        var configureServices = programSource.IndexOf("ConfigureServices(metrics, args, singleInstance)", StringComparison.Ordinal);
+
+        Assert.True(startListening >= 0, "StartListening call not found in Program.cs");
+        Assert.True(configureServices >= 0, "ConfigureServices call not found in Program.cs");
+        Assert.True(
+            startListening < configureServices,
+            "StartListening must precede ConfigureServices or early activations are dropped.");
+    }
+
     private readonly string _tempRoot;
 
     public ApplicateSingleInstanceServiceTests()
