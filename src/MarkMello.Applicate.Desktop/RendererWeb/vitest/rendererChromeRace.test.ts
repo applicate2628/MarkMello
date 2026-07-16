@@ -249,6 +249,36 @@ describe("renderer chrome race handling", () => {
     expect(countRendererMarks("mm-render-math-start")).toBe(2);
   });
 
+  it("stamps layout-ready with the pipeline's own renderId when a superseded cache-miss advances the global", async () => {
+    vi.useFakeTimers();
+    const messages: unknown[] = [];
+    (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
+      webview: { postMessage: (message: unknown) => messages.push(message) }
+    };
+
+    load({
+      type: "load-document",
+      html: "<h1>Doc one</h1><p>Ready</p>",
+      hasMermaid: false,
+      renderId: 1,
+    });
+
+    // While that pipeline is still in flight, a restore-only cache MISS advances
+    // currentDocumentRenderId to 2 and returns early WITHOUT bumping the pipeline generation —
+    // so the renderId-1 pipeline still passes its isCurrent guard and goes on to post.
+    load({ type: "load-cached-document", cacheKey: "never-cached", renderId: 2 });
+
+    await advanceLayoutReadyTimer();
+    flushQueuedRafs();
+
+    const index = findMessageIndex("layout-ready", messages);
+    expect(index).toBeGreaterThanOrEqual(0);
+
+    // Stamping the global (2) let the host's reveal gate ACCEPT this stale layout-ready and reveal
+    // document 2 with document 1's scroll/layout. Its own id (1) makes the gate reject it.
+    expect((messages[index] as { renderId?: number | null }).renderId).toBe(1);
+  });
+
   it("keeps detailed minimap content visible for heavy scrollable documents when mode is on", async () => {
     const messages: unknown[] = [];
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {

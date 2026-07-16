@@ -2730,9 +2730,9 @@
       behavior: "instant"
     });
   }
-  function scheduleLayoutReady(skipFrameWait = false) {
+  function scheduleLayoutReady(skipFrameWait, renderId) {
     const generation = ++layoutReadyGeneration;
-    const scheduledRenderId = currentDocumentRenderId;
+    const scheduledRenderId = renderId;
     let completed = false;
     let posted = false;
     let frameFallbackTimer;
@@ -4072,6 +4072,7 @@
     }
     if (!hadHostPreferences && !suppressFirstPrefsBootstrap) {
       const pipelineGeneration = ++initialRenderPipelineGeneration;
+      const bootstrapRenderId = currentDocumentRenderId;
       void runInitialRenderPipeline({
         getCurrentTheme,
         applyTheme,
@@ -4082,7 +4083,7 @@
         deferPostReadyWork: deferPostReadyEnhancements,
         scheduleLayoutReady: () => {
           initialRenderPipelineCompleted = true;
-          scheduleLayoutReady(skipFrameWait);
+          scheduleLayoutReady(skipFrameWait, bootstrapRenderId);
         },
         postPerfMark,
         notifyPostReadyEnhancementsComplete: () => {
@@ -4499,7 +4500,7 @@
       deferPostReadyWork: deferPostReadyEnhancements,
       scheduleLayoutReady: () => {
         initialRenderPipelineCompleted = true;
-        scheduleLayoutReady(skipFrameWait === true);
+        scheduleLayoutReady(skipFrameWait === true, renderId ?? null);
         postHostMessage({
           type: "document-ready",
           mathCount: document.querySelectorAll("[data-tex]").length

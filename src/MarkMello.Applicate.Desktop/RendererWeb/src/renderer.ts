@@ -1634,12 +1634,17 @@ function restoreCachedScrollPosition(): void {
   });
 }
 
-function scheduleLayoutReady(skipFrameWait = false): void {
+// `renderId` is REQUIRED: every caller must hand over the render this layout-ready belongs to.
+// Reading the global here instead let a SUPERSEDED in-flight pipeline stamp the NEWER
+// currentDocumentRenderId — a restore-only cache-miss advances the global and returns without
+// bumping the pipeline generation, so the stale pipeline's isCurrent guard stays true and, once its
+// math wait resolves, it posts. Stamped with the new id, the host gate accepted it and revealed the
+// new document with the OLD render's scroll/layout. Stamping the render's own id makes that gate
+// reject it, which is what the gate was for. Keeping an optional global fallback here would leave
+// exactly that footgun reachable, so the compiler enforces the hand-off.
+function scheduleLayoutReady(skipFrameWait: boolean, renderId: number | null): void {
   const generation = ++layoutReadyGeneration;
-  // Capture the render this layout-ready belongs to NOW, so the host can gate a
-  // stale layout-ready by renderId even when a later render mutated the global
-  // currentDocumentRenderId before this scheduled callback fired.
-  const scheduledRenderId = currentDocumentRenderId;
+  const scheduledRenderId = renderId;
   let completed = false;
   let posted = false;
   let frameFallbackTimer: number | undefined;
@@ -3499,6 +3504,10 @@ function flushPendingReadingPreferences(): void {
     // Mermaid/code-block enhancement is deferred behind the first readable
     // paint so large full-DOM documents do not block on off-screen work.
     const pipelineGeneration = ++initialRenderPipelineGeneration;
+    // Snapshot the render this bootstrap pipeline belongs to HERE (construction time). Reading
+    // the global inside the callback would let a later document's id be stamped on this
+    // pipeline's layout-ready — see scheduleLayoutReady.
+    const bootstrapRenderId = currentDocumentRenderId;
     void runInitialRenderPipeline({
       getCurrentTheme,
       applyTheme,
@@ -3509,7 +3518,7 @@ function flushPendingReadingPreferences(): void {
       deferPostReadyWork: deferPostReadyEnhancements,
       scheduleLayoutReady: () => {
         initialRenderPipelineCompleted = true;
-        scheduleLayoutReady(skipFrameWait);
+        scheduleLayoutReady(skipFrameWait, bootstrapRenderId);
       },
       postPerfMark,
       notifyPostReadyEnhancementsComplete: () => {
@@ -4071,7 +4080,8 @@ async function runLoadDocumentInitialRenderPipeline(
     deferPostReadyWork: deferPostReadyEnhancements,
     scheduleLayoutReady: () => {
       initialRenderPipelineCompleted = true;
-      scheduleLayoutReady(skipFrameWait === true);
+      // This pipeline's OWN renderId (param), never the global — see scheduleLayoutReady.
+      scheduleLayoutReady(skipFrameWait === true, renderId ?? null);
       // Re-emit document-ready so the host's _hasLoadedDocument state
       // machine restarts for the new document.
       postHostMessage({

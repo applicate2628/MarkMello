@@ -145,7 +145,9 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("skipFrameWait = skipFrameWaitUntilRenderReady", viewSource, StringComparison.Ordinal);
         Assert.Contains("skipFrameWait?: boolean", rendererSource, StringComparison.Ordinal);
         Assert.Contains("mm-layout-ready-frame-wait-skipped", rendererSource, StringComparison.Ordinal);
-        Assert.Contains("scheduleLayoutReady(skipFrameWait === true)", rendererSource, StringComparison.Ordinal);
+        // The second argument pins the pipeline's OWN renderId onto layout-ready (a superseded
+        // pipeline must not stamp the newer global id); the first still carries the frame-wait skip.
+        Assert.Contains("scheduleLayoutReady(skipFrameWait === true, renderId ?? null)", rendererSource, StringComparison.Ordinal);
     }
 
     [Fact]
