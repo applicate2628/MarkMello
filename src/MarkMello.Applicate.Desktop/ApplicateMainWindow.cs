@@ -2272,6 +2272,33 @@ public sealed class ApplicateMainWindow : MainWindow
                 // "tabs and file don't match" desync (user-reported).
                 if (viewModel.IsEditMode && viewModel.EditorSession is not null)
                 {
+                    // Stale-activation guard — the edit-branch counterpart of the
+                    // reader guard at its apply site below. This lambda is POSTED, and
+                    // EnsureLoadedAsync above really suspends whenever the activated tab
+                    // is a restored stub the startup pre-read did not cache (it caches
+                    // only the active path). A newer activation then runs to completion
+                    // inside that window, and this one resumes stale. Applying it would
+                    // clobber the newer document AND drag the tab strip back to the stale
+                    // one (the posted reconciler re-asserts `target`) — the user's last
+                    // click loses to an older one.
+                    //
+                    // Placed before the H2 load-failure guard on purpose: a stale failed
+                    // load must not toast "load failed" for a tab the user already left,
+                    // nor snap the strip back to `previous`. The current activation's own
+                    // lambda owns the current tab.
+                    //
+                    // One currency check per return path, after that path's last
+                    // suspension, before its first side effect. This is NOT a second layer
+                    // over the reader guard: the branches are disjoint return paths — this
+                    // one returns below and never reaches the reader guard.
+                    //
+                    // Runtime-proven (first reproduction of this race in the repo):
+                    // .scratch/bug9/PROOF-trace.txt.
+                    if (!ReferenceEquals(args.ActiveDocument, openDocs.ActiveDocument))
+                    {
+                        return;
+                    }
+
                     var target = args.ActiveDocument;
 
                     // The tab we are leaving = the document the editor holds.
