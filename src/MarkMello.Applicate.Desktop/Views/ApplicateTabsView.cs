@@ -1188,25 +1188,34 @@ internal sealed class ApplicateTabsView : UserControl
             return;
         }
 
-        var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        try
         {
-            Title = "Open Markdown file",
-            AllowMultiple = false,
-            FileTypeFilter = PickerFilters
-        }).ConfigureAwait(true);
+            var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "Open Markdown file",
+                AllowMultiple = false,
+                FileTypeFilter = PickerFilters
+            }).ConfigureAwait(true);
 
-        if (files is null || files.Count == 0)
-        {
-            return;
+            if (files is null || files.Count == 0)
+            {
+                return;
+            }
+
+            var path = files[0].TryGetLocalPath();
+            if (string.IsNullOrEmpty(path))
+            {
+                return;
+            }
+
+            await _openDocsService.OpenAsync(path).ConfigureAwait(true);
         }
-
-        var path = files[0].TryGetLocalPath();
-        if (string.IsNullOrEmpty(path))
+        catch (System.Exception ex)
         {
-            return;
+            // Top-level UI click handler (async-void via the "+" Click lambda): an unhandled throw
+            // here is unobserved and crashes the process. Log and keep the app alive.
+            System.Console.Error.WriteLine($"[open-file] add-tab open failed: {ex}");
         }
-
-        await _openDocsService.OpenAsync(path).ConfigureAwait(true);
     }
 
     private sealed record DragState(

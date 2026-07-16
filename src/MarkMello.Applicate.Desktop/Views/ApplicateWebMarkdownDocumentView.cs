@@ -1041,7 +1041,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
            // edit in the split editor changes only the body, not the document,
            // so the cover otherwise flashed a "disappear/reappear" on every
            // edit-render. A real document switch (different path) still covers;
-           // reload is covered separately by the document-switch coordinator.
+           // reload is covered separately by the airspace compositor.
            && !IsSameDocumentContentUpdate(currentSource, nextSource);
 
     private static bool IsSameDocumentContentUpdate(MarkdownSource? current, MarkdownSource? next)
@@ -2056,18 +2056,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             {
                 HandleMinimapSettledMessage(document.RootElement);
                 return;
-            }
-
-            if (type == "debug-log")
-            {
-                if (document.RootElement.TryGetProperty("message", out var messageElement))
-                {
-                    var message = SafeGetString(messageElement);
-                    if (!string.IsNullOrEmpty(message))
-                    {
-                        Console.Error.WriteLine(message);
-                    }
-                }
             }
         }
         catch (JsonException)

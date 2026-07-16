@@ -1218,6 +1218,56 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task CheckForUpdatesCommandWhenCheckFailsKeepsAlreadyDownloadedPackage()
+    {
+        var harness = CreateHarness();
+        var package = CreateUpdatePackage();
+        var downloadedPath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", package.AssetName);
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
+        harness.UpdateService.NextDownloadResult = new UpdateDownloadResult.Success(package, downloadedPath);
+
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+        await harness.ViewModel.DownloadUpdateCommand.ExecuteAsync(null);
+
+        // A later check FAILS (the periodic 5-min tick hitting a network blip). The completed
+        // download must survive — symmetric with the same-release preservation above.
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.Failed("network unreachable");
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+
+        Assert.Equal(downloadedPath, harness.ViewModel.DownloadedUpdatePath);
+        Assert.Equal("Update ready", harness.ViewModel.UpdateStatusTitle);
+        Assert.True(harness.ViewModel.CanOpenDownloadedUpdate);
+        Assert.Equal("Ready", harness.ViewModel.UpdateStateBadge);
+    }
+
+    [Fact]
+    public async Task DismissedUpdateNotificationStaysDismissedForSameReleaseAndReturnsForNewer()
+    {
+        var harness = CreateHarness();
+        var package = CreateUpdatePackage();
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
+
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+        Assert.True(harness.ViewModel.IsUpdateNotificationVisible);
+
+        harness.ViewModel.DismissUpdateNotificationCommand.Execute(null);
+        Assert.False(harness.ViewModel.IsUpdateNotificationVisible);
+
+        // The periodic re-check returns the SAME release: a dismissed banner must NOT resurrect.
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+
+        Assert.False(harness.ViewModel.IsUpdateNotificationVisible);
+
+        // A genuinely NEWER release is a different dismissal subject and must show again.
+        var newer = package with { ReleaseVersion = "2.0.0", ReleaseTag = "v2.0.0" };
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(newer);
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+
+        Assert.True(harness.ViewModel.IsUpdateNotificationVisible);
+    }
+
+    [Fact]
     public async Task DownloadUpdateCommandWhilePendingKeepsDownloadSlotVisible()
     {
         var harness = CreateHarness();

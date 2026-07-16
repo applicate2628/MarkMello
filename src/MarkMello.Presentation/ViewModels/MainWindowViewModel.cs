@@ -58,7 +58,11 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly string _aboutForkAuthor;
     private readonly string _aboutRepositoryUrl;
     private AppUpdatePackage? _availableUpdatePackage;
-    private bool _isUpdateNotificationDismissed;
+    // WHICH release the user dismissed, not a bare "dismissed" bool: the periodic 5-min re-check
+    // re-enters UpdateAvailable/DownloadReady with the SAME release, and a bool got blindly
+    // recomputed there, resurrecting a banner the user had closed. A genuinely newer release has a
+    // different tag and therefore shows again on its own.
+    private string? _dismissedUpdateReleaseTag;
     private LightPaletteMode _selectedLightPalette = LightPaletteMode.White;
     private ReadingPreferences _lastNotifiedReadingPreferences = ReadingPreferences.Default;
     private const ThemeMode DefaultResetTheme = ThemeMode.Light;
@@ -67,11 +71,11 @@ public partial class MainWindowViewModel : ObservableObject
 
     /// <summary>
     /// Raised immediately BEFORE a document load mutates
-    /// <see cref="Document"/>. The Applicate document-switch reveal coordinator
+    /// <see cref="Document"/>. The Applicate airspace compositor
     /// subscribes to raise the active surface's transition cover FIRST, so the
     /// synchronous teardown that follows happens UNDER the cover instead of as
     /// a visible staged teardown. Presentation-layer event so the VM keeps no
-    /// dependency on the Applicate-side coordinator.
+    /// dependency on the Applicate-side compositor.
     /// </summary>
     public event EventHandler? DocumentTransitionStarting;
 
@@ -389,8 +393,15 @@ public partial class MainWindowViewModel : ObservableObject
 
     public bool IsUpdateNotificationVisible
         => CanShowTopLevelUpdateNotification
-           && !_isUpdateNotificationDismissed
-           && _updateStatus is UpdateStatusSnapshot.UpdateAvailableState or UpdateStatusSnapshot.DownloadReadyState;
+           && _updateStatus is UpdateStatusSnapshot.UpdateAvailableState or UpdateStatusSnapshot.DownloadReadyState
+           && !IsUpdateNotificationDismissedForCurrentRelease;
+
+    private bool IsUpdateNotificationDismissedForCurrentRelease
+        => _dismissedUpdateReleaseTag is not null
+           && string.Equals(
+               UpdateReleaseTagOf(_updateStatus),
+               _dismissedUpdateReleaseTag,
+               StringComparison.Ordinal);
 
     public bool IsAlwaysOnTopDisabled
     {
@@ -1213,9 +1224,27 @@ public partial class MainWindowViewModel : ObservableObject
                     break;
 
                 case UpdateCheckResult.Failed failed:
-                    _availableUpdatePackage = null;
-                    DownloadedUpdatePath = null;
-                    SetUpdateStatus(new UpdateStatusSnapshot.CheckFailedState(failed.Message));
+                    // Symmetric with the UpdateAvailable same-release preservation above: a
+                    // transient check failure (the periodic 5-min timer hitting a network blip)
+                    // must NOT discard an update already downloaded this session. Keep the ready
+                    // package + path when present; only clear when there is nothing to lose.
+                    if (_availableUpdatePackage is not null
+                        && !string.IsNullOrWhiteSpace(DownloadedUpdatePath))
+                    {
+                        // The failure is real but not user-actionable here (the ready package is
+                        // still installable); keep it diagnosable instead of dropping it silently.
+                        Console.Error.WriteLine(
+                            $"[updates] check failed, keeping the downloaded package: {failed.Message}");
+                        SetUpdateStatus(new UpdateStatusSnapshot.DownloadReadyState(
+                            _availableUpdatePackage,
+                            DownloadedUpdatePath!));
+                    }
+                    else
+                    {
+                        _availableUpdatePackage = null;
+                        DownloadedUpdatePath = null;
+                        SetUpdateStatus(new UpdateStatusSnapshot.CheckFailedState(failed.Message));
+                    }
                     break;
             }
         }
@@ -1253,7 +1282,8 @@ public partial class MainWindowViewModel : ObservableObject
     [RelayCommand]
     private void DismissUpdateNotification()
     {
-        _isUpdateNotificationDismissed = true;
+        // Record WHICH release was dismissed so a re-check returning the same one stays hidden.
+        _dismissedUpdateReleaseTag = UpdateReleaseTagOf(_updateStatus);
         OnPropertyChanged(nameof(IsUpdateNotificationVisible));
     }
 
@@ -1414,7 +1444,7 @@ public partial class MainWindowViewModel : ObservableObject
         // phase, so DocumentHeadings.Count never hits 0 and IsTocVisible never
         // drops to false: the TOC column repaints its rows in place instead of
         // collapsing+re-expanding. A renderer crash mid-render (Document stays
-        // non-null) is covered by the coordinator's OnRendererFailed clear.
+        // non-null) is covered by the airspace compositor's OnRendererFailed clear.
         if (value is null)
         {
             ClearDocumentHeadings();

@@ -21,7 +21,7 @@ public partial class MainWindowViewModel
 
     /// <summary>
     /// Raised right before the health fix reloads the repaired document, so the
-    /// host's document-switch reveal coordinator can suppress its cover for that
+    /// host's airspace compositor can suppress its cover for that
     /// one reload. The fix is a same-document content update (same path), so the
     /// switch cover would flash a "disappear/reappear" — the same flicker the
     /// live-edit path already avoids. A real tab switch / F5 is unaffected.

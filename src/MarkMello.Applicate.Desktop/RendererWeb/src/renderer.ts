@@ -95,7 +95,6 @@ type RendererMessage =
   | { type: "drop-file"; name: string; text: string }
   | { type: "host-shortcut"; combo: string }
   | { type: "debug-log"; text: string }
-  | { type: "debug-log"; message: string }
   // Round-2 perf-engineer plan item C, [renderer-perf] group. The renderer
   // posts a perf-mark whenever a startup-relevant pipeline milestone fires;
   // the host stamps elapsed-ms against its own process-anchored Stopwatch

@@ -511,12 +511,20 @@ public partial class MainWindowViewModel
         ErrorDetails = string.Empty;
     }
 
+    private static string? UpdateReleaseTagOf(UpdateStatusSnapshot status) => status switch
+    {
+        UpdateStatusSnapshot.UpdateAvailableState available => available.Package.ReleaseTag,
+        UpdateStatusSnapshot.DownloadReadyState ready => ready.Package.ReleaseTag,
+        _ => null,
+    };
+
     private void SetUpdateStatus(UpdateStatusSnapshot status)
     {
         var wasNotificationVisible = IsUpdateNotificationVisible;
         _updateStatus = status;
-        _isUpdateNotificationDismissed = status is not (
-            UpdateStatusSnapshot.UpdateAvailableState or UpdateStatusSnapshot.DownloadReadyState);
+        // Dismissal is per-RELEASE (see _dismissedUpdateReleaseTag), never recomputed from the
+        // status here: this method is re-entered by the periodic re-check with the SAME release,
+        // and blindly clearing the flag here is what resurrected a dismissed banner.
         RefreshUpdateStatusTexts();
         if (wasNotificationVisible != IsUpdateNotificationVisible)
         {

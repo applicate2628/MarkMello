@@ -9,6 +9,14 @@ public sealed class ApplicateSingleInstanceService : IDisposable
     private const string MutexName = "MarkMello.Applicate.SingleInstance";
     private const string PipeName = "MarkMello.Applicate.SingleInstance";
 
+    /// <summary>
+    /// How many consecutive listener faults (with no successful accept in between) are tolerated
+    /// before <see cref="ListenLoopAsync"/> gives up loudly. Bounds a persistent fault into a
+    /// finite, deterministic number of iterations instead of a hot spin; a successful accept
+    /// resets the count, so transient faults are unaffected.
+    /// </summary>
+    private const int MaxConsecutiveListenerFaults = 5;
+
     private readonly Mutex _mutex;
     private readonly object _gate = new();
     private readonly Queue<ApplicateActivationRequest> _pendingActivations = new();
@@ -120,6 +128,15 @@ public sealed class ApplicateSingleInstanceService : IDisposable
 
     private async Task ListenLoopAsync(CancellationToken cancellationToken)
     {
+        // Nothing awaits between a constructor fault and the next iteration, so an UNBOUNDED retry
+        // here is a hot spin (a burned core + an stderr flood), not just a wasted loop. It is
+        // reachable: the single-instance Mutex is per-session (Local\) while PipeName is
+        // machine-global, so a second interactive Windows session (RDP / another user) faults the
+        // constructor persistently, as does an AV/EDR pipe block. Bound it deterministically —
+        // a counter, NOT a timer/backoff (this repo forbids time-based logic): a successful accept
+        // proves the listener works and resets it, so only a fault that never lets a connection
+        // through can reach the cap, and it then dies LOUDLY instead of spinning or dying silently.
+        var consecutiveFaults = 0;
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -132,6 +149,7 @@ public sealed class ApplicateSingleInstanceService : IDisposable
                     PipeOptions.Asynchronous);
 
                 await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
+                consecutiveFaults = 0;
                 using var reader = new StreamReader(pipe, Encoding.UTF8);
                 var payload = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
                 if (ApplicateActivationArguments.TryParsePayload(payload, out var request))
@@ -143,13 +161,27 @@ public sealed class ApplicateSingleInstanceService : IDisposable
             {
                 return;
             }
-            catch (IOException)
-            {
-                // The sender may exit mid-write. Keep the primary listener alive.
-            }
             catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
             {
                 return;
+            }
+            catch (System.Exception ex)
+            {
+                // One owner for every non-cancellation fault: an IOException is the expected
+                // "sender exited mid-write" case (kept quiet, as before), anything else is
+                // unexpected and gets a full dump. Both are counted so neither class can spin.
+                if (++consecutiveFaults >= MaxConsecutiveListenerFaults)
+                {
+                    System.Console.Error.WriteLine(
+                        $"[single-instance] listener giving up after {consecutiveFaults} consecutive faults; "
+                        + $"further launches will not forward to this instance: {ex}");
+                    return;
+                }
+
+                if (ex is not IOException)
+                {
+                    System.Console.Error.WriteLine($"[single-instance] listener error, continuing: {ex}");
+                }
             }
         }
     }
