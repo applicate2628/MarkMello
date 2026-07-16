@@ -32,12 +32,12 @@ namespace MarkMello.Applicate.Desktop.Views;
 ///     during active drag we GATE the inbound mirror so it doesn't fight
 ///     the user's drag.
 ///
-/// Drag-gate state machine:
+/// Drag-gate state machine (Avalonia 12 defines exactly six ScrollEventType values; the switch
+/// below handles all six — there is no ThumbPosition/First/Last in this API):
 ///   - First ScrollEventType.ThumbTrack → enter drag mode, suppress mirror.
 ///   - Subsequent ThumbTrack events → forward ScrollToProgress, keep gate.
-///   - ThumbPosition → final commit, send ScrollToProgress, keep gate.
-///   - EndScroll → start 200ms grace timer that swallows trailing IPC echoes.
-///   - First/Last/SmallIncrement/LargeIncrement/SmallDecrement/LargeDecrement
+///   - EndScroll → final commit; start 200ms grace timer that swallows trailing IPC echoes.
+///   - SmallIncrement/LargeIncrement/SmallDecrement/LargeDecrement
 ///     → command-style events from track click / keyboard; forward
 ///     ScrollToProgress but DO NOT enter the drag gate.
 ///   - Fallback exits: PointerCaptureLost, lost focus, window deactivate,
