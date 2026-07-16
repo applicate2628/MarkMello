@@ -267,21 +267,14 @@ public interface IApplicateSharedWebViewHost : IApplicateModeTransactionHost
     /// re-reparent. The slot enters <c>SWITCHING</c> (or stays in
     /// <c>COMMITTED</c> if the next render request determines no work is
     /// needed); the host owns the slot's <c>IsVisible</c> transitions from
-    /// this point forward until <see cref="ReturnToWarmup"/>.
+    /// this point forward, for the lifetime of the mount: each host attaches its
+    /// WebView to its own slot once at startup and never reparents again.
     /// </summary>
     void AttachTo(Panel target, ApplicateWebMountIntent intent);
 
-    /// <summary>
-    /// Return the shared view to the warmup panel. The host transitions to
-    /// <c>PARKED</c>; any active consumer slot is released and its
-    /// <c>IsVisible</c> is restored to <c>true</c> so the parent panel can
-    /// continue laying out its own content. Safe to call when already
-    /// parked.
-    /// </summary>
     /// <summary>Returns true when the host's WebView is currently parented under the given target panel.</summary>
     bool IsAttachedTo(Panel target);
 
-    void ReturnToWarmup();
 
     /// <summary>
     /// Issue a new render generation against the currently-attached slot.

@@ -564,28 +564,6 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void ReturnToWarmupClearsConsumerSlotAndRestoresVisibility()
-    {
-        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
-        {
-            var sm = new ApplicateSharedWebViewHostStateMachine();
-            var warmup = new Panel();
-            var slot = new Panel { IsVisible = true };
-            sm.SetWarmupParent(warmup);
-            sm.AttachTo(slot);
-            var gen = sm.RequestRender();
-            sm.ApplyDocumentRendered(gen);
-
-            sm.ReturnToWarmup();
-
-            Assert.Equal(ApplicateSharedWebViewHostStateMachine.State.Parked, sm.CurrentState);
-            Assert.Same(warmup, sm.CurrentParent);
-            Assert.True(slot.IsVisible);
-        }, CancellationToken.None);
-    }
-
-    [Fact]
     public void CompositorOwnsRevealFadeAfterRendererSettle()
     {
         var source = File.ReadAllText(HostSourcePath);

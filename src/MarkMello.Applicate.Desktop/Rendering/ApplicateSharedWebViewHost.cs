@@ -249,34 +249,6 @@ public sealed class ApplicateSharedWebViewHost :
 
     public bool IsAttachedTo(Panel target) => ReferenceEquals(_currentParent, target);
 
-    public void ReturnToWarmup()
-    {
-        if (_warmupParent is null || ReferenceEquals(_currentParent, _warmupParent))
-        {
-            _state = HostState.Parked;
-            return;
-        }
-
-        var previousParent = _currentParent;
-        using (View.BeginIntentionalReparent())
-        {
-            previousParent?.Children.Remove(View);
-            _warmupParent.Children.Add(View);
-            _currentParent = _warmupParent;
-        }
-
-        if (previousParent is not null && !previousParent.IsVisible)
-        {
-            previousParent.IsVisible = true;
-        }
-        if (previousParent is not null && !ReferenceEquals(previousParent, _warmupParent))
-        {
-            previousParent.Opacity = 1.0;
-        }
-
-        _state = HostState.Parked;
-    }
-
     public void RequestRender(MarkdownSource? source, ApplicateWebRenderRequest request)
         => RequestRender(source, request, transactionGeneration: 0);
 
@@ -891,27 +863,6 @@ internal sealed class ApplicateSharedWebViewHostStateMachine
             previousParent.IsVisible = true;
             previousParent.Opacity = 1.0;
         }
-    }
-
-    public void ReturnToWarmup()
-    {
-        if (_warmupParent is null || ReferenceEquals(_currentParent, _warmupParent))
-        {
-            CurrentState = State.Parked;
-            return;
-        }
-
-        var previousParent = _currentParent;
-        _currentParent = _warmupParent;
-        if (previousParent is not null)
-        {
-            if (!previousParent.IsVisible)
-            {
-                previousParent.IsVisible = true;
-            }
-            previousParent.Opacity = 1.0;
-        }
-        CurrentState = State.Parked;
     }
 
     public long RequestRender()

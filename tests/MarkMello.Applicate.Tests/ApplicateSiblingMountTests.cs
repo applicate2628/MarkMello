@@ -734,10 +734,6 @@ public sealed class ApplicateSiblingMountTests
 
         public bool IsAttachedTo(Panel target) => false;
 
-        public void ReturnToWarmup()
-        {
-        }
-
         public void RequestRender(MarkdownSource? source, ApplicateWebRenderRequest request)
         {
         }
