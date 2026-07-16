@@ -307,6 +307,15 @@
   }
 
   // RendererWeb/src/performanceMarks.ts
+  var MAX_RETAINED_MARKS = 500;
+  var MAX_RETAINED_LONG_TASKS = 200;
+  var MAX_RETAINED_QUEUE_SLICES = 200;
+  function pushBounded(buffer, entry, cap) {
+    buffer.push(entry);
+    if (buffer.length > cap) {
+      buffer.splice(0, buffer.length - cap);
+    }
+  }
   var state = {
     marks: [],
     pendingStarts: /* @__PURE__ */ new Map(),
@@ -320,14 +329,14 @@
   function emitMark(name, detail) {
     if (!hasPerformanceApi) return;
     const mark = detail !== void 0 ? { name, startTime: performance.now(), duration: 0, detail } : { name, startTime: performance.now(), duration: 0 };
-    state.marks.push(mark);
+    pushBounded(state.marks, mark, MAX_RETAINED_MARKS);
   }
   function recordScrollIpc() {
     state.scrollIpcCount++;
     emitMark("mm-scroll-ipc");
   }
   function recordQueueSlice(name, durationMs, tasksCompleted) {
-    state.queueSlices.push({ name, durationMs, tasksCompleted });
+    pushBounded(state.queueSlices, { name, durationMs, tasksCompleted }, MAX_RETAINED_QUEUE_SLICES);
   }
   function getReport() {
     return {
@@ -345,7 +354,7 @@
     try {
       const observer = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
-          state.longTasks.push(entry);
+          pushBounded(state.longTasks, entry, MAX_RETAINED_LONG_TASKS);
         }
       });
       observer.observe({ entryTypes: ["longtask"] });

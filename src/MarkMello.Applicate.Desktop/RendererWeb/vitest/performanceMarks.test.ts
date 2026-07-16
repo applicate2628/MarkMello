@@ -175,3 +175,38 @@ describe("performanceMarks", () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe("performanceMarks retention caps", () => {
+  beforeEach(() => {
+    _resetForTests();
+  });
+
+  it("caps retained marks and keeps the NEWEST, while lifetime counters stay exact", () => {
+    // This telemetry is not release-gated and shell mode keeps one renderer page alive across every
+    // document swap, so an unbounded history grew for the whole process lifetime (one scroll = one
+    // retained mark). Retention is a ring buffer; the counters are not capped.
+    const total = 1200;
+    for (let index = 0; index < total; index++) {
+      emitMark(`mark-${index}`);
+    }
+
+    const report = getReport();
+    expect(report.marks.length).toBeLessThanOrEqual(500);
+    // Oldest dropped, newest kept.
+    expect(report.marks.at(-1)?.name).toBe(`mark-${total - 1}`);
+    expect(report.marks.some(mark => mark.name === "mark-0")).toBe(false);
+  });
+
+  it("does not cap the lifetime scroll-ipc counter", () => {
+    const total = 1200;
+    for (let index = 0; index < total; index++) {
+      recordScrollIpc();
+    }
+
+    const report = getReport();
+    // Each recordScrollIpc also emits a retained mark, so the history is capped...
+    expect(report.marks.length).toBeLessThanOrEqual(500);
+    // ...but the counter itself must remain exact.
+    expect(report.scrollIpcCount).toBe(total);
+  });
+});

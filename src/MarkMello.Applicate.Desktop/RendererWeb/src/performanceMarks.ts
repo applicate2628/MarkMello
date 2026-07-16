@@ -42,6 +42,25 @@ type State = {
   fpsSessions: Record<string, FpsSession>;
 };
 
+/**
+ * Retention caps for the diagnostic histories below. These are RING buffers, not budgets: this
+ * telemetry is not release-gated, shell mode keeps one renderer page alive across every document
+ * swap, and the WebView hosts are singletons — so an unbounded array here grows for the whole
+ * process lifetime (a single scroll publishes a retained mark). The only reset is test-only.
+ * Newest entries are what diagnostics actually read, so the oldest are dropped first. Lifetime
+ * COUNTERS (scrollIpcCount, mathRenderCount) are never capped — they stay exact.
+ */
+const MAX_RETAINED_MARKS = 500;
+const MAX_RETAINED_LONG_TASKS = 200;
+const MAX_RETAINED_QUEUE_SLICES = 200;
+
+function pushBounded<T>(buffer: T[], entry: T, cap: number): void {
+  buffer.push(entry);
+  if (buffer.length > cap) {
+    buffer.splice(0, buffer.length - cap);
+  }
+}
+
 const state: State = {
   marks: [],
   pendingStarts: new Map(),
@@ -90,7 +109,7 @@ export function markEnd(name: string, detail?: unknown): PerfMark | null {
         startTime: start.startTime,
         duration: endTime - start.startTime,
       };
-  state.marks.push(mark);
+  pushBounded(state.marks, mark, MAX_RETAINED_MARKS);
   return mark;
 }
 
@@ -100,7 +119,7 @@ export function emitMark(name: string, detail?: unknown): void {
     detail !== undefined
       ? { name, startTime: performance.now(), duration: 0, detail }
       : { name, startTime: performance.now(), duration: 0 };
-  state.marks.push(mark);
+  pushBounded(state.marks, mark, MAX_RETAINED_MARKS);
 }
 
 export function recordScrollIpc(): void {
@@ -117,7 +136,7 @@ export function recordQueueSlice(
   durationMs: number,
   tasksCompleted: number,
 ): void {
-  state.queueSlices.push({ name, durationMs, tasksCompleted });
+  pushBounded(state.queueSlices, { name, durationMs, tasksCompleted }, MAX_RETAINED_QUEUE_SLICES);
 }
 
 export function getReport(): PerfReport {
@@ -136,7 +155,7 @@ export function installLongTaskObserver(): () => void {
   try {
     const observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
-        state.longTasks.push(entry);
+        pushBounded(state.longTasks, entry, MAX_RETAINED_LONG_TASKS);
       }
     });
     observer.observe({ entryTypes: ["longtask"] });
