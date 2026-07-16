@@ -1516,6 +1516,9 @@ function postLayoutReady(renderId: number | null): void {
       ...scrollState,
       renderId
     });
+    // Layout the observer needs now exists — settle any cached-headings rebuild debt here, at the
+    // deterministic readiness point (NOT via flushPostLayoutReadyWork: that queue is timer-backed).
+    rebuildPendingCachedActiveHeadingObserver();
     postPerfMark("mm-layout-ready");
     flushPostLayoutReadyWork();
   } catch (error) {
@@ -1554,6 +1557,9 @@ function postCachedLayoutReady(): void {
     cached: true,
     renderId: currentDocumentRenderId
   });
+  // The SECOND readiness exit: a fully-rendered cache hit never reaches scheduleLayoutReady, so
+  // hooking only that one would leave this path's observer permanently disconnected.
+  rebuildPendingCachedActiveHeadingObserver();
   postPerfMark("mm-layout-ready", { cached: true });
   flushPostLayoutReadyWork();
   if (cachedLayoutState !== null) {
@@ -2408,6 +2414,11 @@ function restoreCachedMinimapContent(): boolean {
 // commit 4aee666; this is the host-side replacement that meets the
 // requirement to span the full content-area height with its own scroll.
 let activeHeadingObserver: IntersectionObserver | null = null;
+// A cached-headings restore disconnects the active-heading observer and must rebuild it once the
+// layout it observes actually exists. This flag carries that debt to the deterministic readiness
+// point instead of a delay: the old 750ms timer both violated the no-timers law AND lost the race
+// (see postCachedHeadings). Cleared on document swap, which is the sole invalidation owner.
+let pendingCachedActiveHeadingObserverRebuild = false;
 let lastPostedActiveHeadingId: string | null = null;
 
 function addHeadingSegment(
@@ -2494,6 +2505,7 @@ function postCachedHeadings(): void {
   restoredCachedHeadings = null;
 
   if (cachedHeadings === null || cachedHeadings.length === 0) {
+    pendingCachedActiveHeadingObserverRebuild = false;
     extractAndPostHeadings();
     return;
   }
@@ -2506,22 +2518,32 @@ function postCachedHeadings(): void {
     activeHeadingObserver = null;
   }
   lastPostedActiveHeadingId = null;
-  const rebuildGeneration = layoutReadyGeneration;
-  window.setTimeout(() => {
-    if (rebuildGeneration !== layoutReadyGeneration) {
-      return;
-    }
+  // Rebuild at the deterministic layout-ready point, NOT after a delay. The old code waited 750ms
+  // and then only rebuilt if layoutReadyGeneration had not moved — but that counter also increments
+  // on every scheduleLayoutReady, and a cached fragment holding unrendered math takes the fallback
+  // pipeline whose completion bumps it well inside the window. Runtime (heavy math doc, 3/3 returns):
+  // queued gen 9 -> fired at gen 10 -> aborted, so the observer stayed null and the TOC
+  // active-heading highlight was dead for that cache-restore. A light doc never raced (gen stable).
+  pendingCachedActiveHeadingObserverRebuild = true;
+}
 
-    const main = document.querySelector<HTMLElement>("main.mm-document");
-    if (!main) {
-      return;
-    }
+// Consumed by BOTH layout-ready emitters: the pipeline path (postLayoutReady) and the fully-rendered
+// cache-hit path (postCachedLayoutReady), which bypasses scheduleLayoutReady entirely.
+function rebuildPendingCachedActiveHeadingObserver(): void {
+  if (!pendingCachedActiveHeadingObserverRebuild) {
+    return;
+  }
 
-    const nodes = Array.from(
-      main.querySelectorAll<HTMLHeadingElement>("h1, h2, h3, h4, h5, h6")
-    );
-    rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
-  }, 750);
+  pendingCachedActiveHeadingObserverRebuild = false;
+  const main = document.querySelector<HTMLElement>("main.mm-document");
+  if (!main) {
+    return;
+  }
+
+  const nodes = Array.from(
+    main.querySelectorAll<HTMLHeadingElement>("h1, h2, h3, h4, h5, h6")
+  );
+  rebuildActiveHeadingObserver(nodes.filter((node) => !!node.id));
 }
 
 function rebuildActiveHeadingObserver(headingNodes: HTMLHeadingElement[]): void {
@@ -2543,8 +2565,21 @@ function rebuildActiveHeadingObserver(headingNodes: HTMLHeadingElement[]): void 
   // headings near the top edge fire intersections. This matches the
   // behaviour the deleted renderer-side tocPanel.ts had — using the same
   // sliver-at-top IntersectionObserver pattern.
+  // Every async continuation below closes over THIS document's headingNodes. A later document swap
+  // disconnects and nulls activeHeadingObserver but cannot un-queue an already-scheduled frame or a
+  // callback already in flight, and `active-heading-changed` carries no renderId — the host and the
+  // ViewModel apply any non-empty id unconditionally, so a stale post would highlight the OLD
+  // document's heading in the NEW document's TOC. The observer instance itself is the liveness
+  // token: if it is no longer the current one, this work belongs to a superseded document.
+  let observer: IntersectionObserver | null = null;
+  const isCurrent = (): boolean => observer !== null && activeHeadingObserver === observer;
+
   const inViewport = new Set<HTMLHeadingElement>();
   const callback: IntersectionObserverCallback = (entries) => {
+    if (!isCurrent()) {
+      return;
+    }
+
     for (const entry of entries) {
       const target = entry.target as HTMLHeadingElement;
       if (entry.isIntersecting) {
@@ -2581,17 +2616,22 @@ function rebuildActiveHeadingObserver(headingNodes: HTMLHeadingElement[]): void 
 
   // rootMargin: top=0 (count any heading whose top crossed the viewport
   // top); bottom = -(viewport-50) so observers only fire near the top.
-  activeHeadingObserver = new IntersectionObserver(callback, {
+  observer = new IntersectionObserver(callback, {
     rootMargin: "0px 0px -85% 0px",
     threshold: [0, 1],
   });
+  activeHeadingObserver = observer;
   for (const node of headingNodes) {
-    activeHeadingObserver.observe(node);
+    observer.observe(node);
   }
 
   // Emit an initial active-heading guess so the TOC highlights the right
   // row before the user scrolls.
   window.requestAnimationFrame(() => {
+    if (!isCurrent()) {
+      return;
+    }
+
     let active: HTMLHeadingElement | null = null;
     for (const node of headingNodes) {
       const rect = node.getBoundingClientRect();
@@ -3961,6 +4001,9 @@ function resetModuleGlobalsForLoadDocument(): void {
   warmupRunning = false;
   currentController?.cancel();
   currentController = null;
+  // A document swap is the SOLE invalidation owner of the cached-headings rebuild debt: the old
+  // document's observer must not be rebuilt against the new document's DOM.
+  pendingCachedActiveHeadingObserverRebuild = false;
   ++layoutReadyGeneration;
   if (layoutReadyTimer !== undefined) {
     window.clearTimeout(layoutReadyTimer);

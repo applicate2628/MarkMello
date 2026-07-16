@@ -2628,6 +2628,7 @@
         ...scrollState,
         renderId
       });
+      rebuildPendingCachedActiveHeadingObserver();
       postPerfMark("mm-layout-ready");
       flushPostLayoutReadyWork();
     } catch (error) {
@@ -2665,6 +2666,7 @@
       cached: true,
       renderId: currentDocumentRenderId
     });
+    rebuildPendingCachedActiveHeadingObserver();
     postPerfMark("mm-layout-ready", { cached: true });
     flushPostLayoutReadyWork();
     if (cachedLayoutState !== null) {
@@ -3322,6 +3324,7 @@
     return true;
   }
   var activeHeadingObserver = null;
+  var pendingCachedActiveHeadingObserverRebuild = false;
   var lastPostedActiveHeadingId = null;
   function addHeadingSegment(segments, kind, text) {
     if (!text) {
@@ -3386,6 +3389,7 @@
     const cachedHeadings = restoredCachedHeadings;
     restoredCachedHeadings = null;
     if (cachedHeadings === null || cachedHeadings.length === 0) {
+      pendingCachedActiveHeadingObserverRebuild = false;
       extractAndPostHeadings();
       return;
     }
@@ -3397,20 +3401,21 @@
       activeHeadingObserver = null;
     }
     lastPostedActiveHeadingId = null;
-    const rebuildGeneration = layoutReadyGeneration;
-    window.setTimeout(() => {
-      if (rebuildGeneration !== layoutReadyGeneration) {
-        return;
-      }
-      const main = document.querySelector("main.mm-document");
-      if (!main) {
-        return;
-      }
-      const nodes = Array.from(
-        main.querySelectorAll("h1, h2, h3, h4, h5, h6")
-      );
-      rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
-    }, 750);
+    pendingCachedActiveHeadingObserverRebuild = true;
+  }
+  function rebuildPendingCachedActiveHeadingObserver() {
+    if (!pendingCachedActiveHeadingObserverRebuild) {
+      return;
+    }
+    pendingCachedActiveHeadingObserverRebuild = false;
+    const main = document.querySelector("main.mm-document");
+    if (!main) {
+      return;
+    }
+    const nodes = Array.from(
+      main.querySelectorAll("h1, h2, h3, h4, h5, h6")
+    );
+    rebuildActiveHeadingObserver(nodes.filter((node) => !!node.id));
   }
   function rebuildActiveHeadingObserver(headingNodes) {
     if (activeHeadingObserver) {
@@ -3421,8 +3426,13 @@
     if (headingNodes.length === 0) {
       return;
     }
+    let observer = null;
+    const isCurrent = () => observer !== null && activeHeadingObserver === observer;
     const inViewport = /* @__PURE__ */ new Set();
     const callback = (entries) => {
+      if (!isCurrent()) {
+        return;
+      }
       for (const entry of entries) {
         const target = entry.target;
         if (entry.isIntersecting) {
@@ -3452,14 +3462,18 @@
         postHostMessage({ type: "active-heading-changed", id });
       }
     };
-    activeHeadingObserver = new IntersectionObserver(callback, {
+    observer = new IntersectionObserver(callback, {
       rootMargin: "0px 0px -85% 0px",
       threshold: [0, 1]
     });
+    activeHeadingObserver = observer;
     for (const node of headingNodes) {
-      activeHeadingObserver.observe(node);
+      observer.observe(node);
     }
     window.requestAnimationFrame(() => {
+      if (!isCurrent()) {
+        return;
+      }
       let active = null;
       for (const node of headingNodes) {
         const rect = node.getBoundingClientRect();
@@ -4425,6 +4439,7 @@
     warmupRunning = false;
     currentController?.cancel();
     currentController = null;
+    pendingCachedActiveHeadingObserverRebuild = false;
     ++layoutReadyGeneration;
     if (layoutReadyTimer !== void 0) {
       window.clearTimeout(layoutReadyTimer);
