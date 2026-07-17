@@ -30,7 +30,7 @@ public sealed class ApplicateWebAssetEmbedder
         var katexScript = await ReadTextAssetAsync("katex/katex.min.js", cancellationToken).ConfigureAwait(false);
 
         return new ApplicateWebAssetBundle(
-            rendererCss,
+            await InlineRendererFontsAsync(rendererCss, cancellationToken).ConfigureAwait(false),
             await InlineKatexFontsAsync(katexCss, cancellationToken).ConfigureAwait(false),
             katexScript,
             rendererScript);
@@ -44,7 +44,7 @@ public sealed class ApplicateWebAssetEmbedder
         var katexScript = await ReadTextAssetAsync("katex/katex.min.js", cancellationToken).ConfigureAwait(false);
 
         return new ApplicateWebBaseAssets(
-            rendererCss,
+            await InlineRendererFontsAsync(rendererCss, cancellationToken).ConfigureAwait(false),
             await InlineKatexFontsAsync(katexCss, cancellationToken).ConfigureAwait(false),
             katexScript,
             rendererScript);
@@ -97,7 +97,13 @@ public sealed class ApplicateWebAssetEmbedder
         return candidate;
     }
 
-    private async Task<string> InlineKatexFontsAsync(string css, CancellationToken cancellationToken)
+    private Task<string> InlineKatexFontsAsync(string css, CancellationToken cancellationToken)
+        => InlineFontUrlsAsync(css, "katex/", cancellationToken);
+
+    private Task<string> InlineRendererFontsAsync(string css, CancellationToken cancellationToken)
+        => InlineFontUrlsAsync(css, string.Empty, cancellationToken);
+
+    private async Task<string> InlineFontUrlsAsync(string css, string assetDirPrefix, CancellationToken cancellationToken)
     {
         var replacements = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (Match match in CssUrlRegex.Matches(css))
@@ -108,7 +114,7 @@ public sealed class ApplicateWebAssetEmbedder
                 continue;
             }
 
-            var bytes = await ReadBinaryAssetAsync($"katex/{path}", cancellationToken).ConfigureAwait(false);
+            var bytes = await ReadBinaryAssetAsync($"{assetDirPrefix}{path}", cancellationToken).ConfigureAwait(false);
             replacements[path] = $"data:{GetFontMimeType(path)};base64,{Convert.ToBase64String(bytes)}";
         }
 
