@@ -2649,13 +2649,16 @@ public sealed class ApplicateMainWindow : MainWindow
                         promoted.SourceText);
                     viewModel.State = MarkMello.Presentation.ViewModels.ViewState.Viewing;
 
-                    // OpenPathAsync calls LoadDocumentAsync with
-                    // preserveEditModeAfterLoad: false which sets
-                    // IsEditMode = false. When the user closes a tab while
-                    // in edit mode, that boots them into reader mode.
-                    // Snapshot and restore.
-                    var wasInEditMode = viewModel.IsEditMode;
-
+                    // No wasInEditMode snapshot/restore here: this block is
+                    // reachable only with EditorSession == null (guard above),
+                    // and the only path that nulls Document to get here is
+                    // CloseFileCore, which sets IsEditMode = false BEFORE it
+                    // nulls Document (pinned by
+                    // ClosingFromEditModeClearsIsEditModeBeforeNullingDocument).
+                    // So IsEditMode is already false; a restore would only
+                    // resurrect an intent CloseFileCore deliberately dropped
+                    // (close boots the user to reader mode by design). The old
+                    // snapshot/restore pair here was dead code fighting that.
                     inServiceLoad = true;
                     try
                     {
@@ -2669,11 +2672,6 @@ public sealed class ApplicateMainWindow : MainWindow
                     finally
                     {
                         inServiceLoad = false;
-                    }
-
-                    if (wasInEditMode && !viewModel.IsEditMode)
-                    {
-                        viewModel.IsEditMode = true;
                     }
                 });
                 return;

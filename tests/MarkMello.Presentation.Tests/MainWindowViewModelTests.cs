@@ -714,6 +714,42 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task ClosingFromEditModeClearsIsEditModeBeforeNullingDocument()
+    {
+        // Pins the ordering that makes the close-promote tail dead code
+        // (ApplicateMainWindow.cs:2657/:2674-2677). That tail snapshots
+        // wasInEditMode and force-restores edit mode after an await, but
+        // CloseFileCore sets IsEditMode=false BEFORE Document=null, so the
+        // posted mirror lambda always reads IsEditMode==false and the restore
+        // never fires. If a future edit reorders these two writes, the tail
+        // would resurrect a superseded intent -- this test fails first.
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "editclose.md");
+        harness.Loader.Sources[path] = CreateSource(path, "alpha beta");
+
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        Assert.True(harness.ViewModel.IsEditMode);
+
+        bool? isEditModeWhenDocumentCleared = null;
+        harness.ViewModel.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(MainWindowViewModel.Document)
+                && harness.ViewModel.Document is null
+                && isEditModeWhenDocumentCleared is null)
+            {
+                isEditModeWhenDocumentCleared = harness.ViewModel.IsEditMode;
+            }
+        };
+
+        await harness.ViewModel.CloseFileCommand.ExecuteAsync(null);
+
+        Assert.False(isEditModeWhenDocumentCleared);
+        Assert.False(harness.ViewModel.IsEditMode);
+        Assert.Null(harness.ViewModel.Document);
+    }
+
+    [Fact]
     public async Task CloseFileCommandReturnsViewingDocumentToWelcome()
     {
         var harness = CreateHarness();
