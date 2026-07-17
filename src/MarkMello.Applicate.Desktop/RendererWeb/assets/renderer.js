@@ -2507,7 +2507,9 @@
       const draggedScrollState = getScrollState();
       postHostMessage({
         type: "scroll",
-        ...draggedScrollState,
+        scrollTop: draggedScrollState.scrollTop,
+        scrollHeight: draggedScrollState.scrollHeight,
+        clientHeight: draggedScrollState.clientHeight,
         topBlockIndex: lastKnownLayoutState?.topBlockIndex ?? null
       });
       return null;
@@ -2522,7 +2524,10 @@
     recordScrollIpc();
     postHostMessage({
       type: "scroll",
-      ...layoutState
+      scrollTop: layoutState.scrollTop,
+      scrollHeight: layoutState.scrollHeight,
+      clientHeight: layoutState.clientHeight,
+      topBlockIndex: layoutState.topBlockIndex
     });
     if (minimapDragFinalFlushPending) {
       minimapDragFinalFlushPending = false;
@@ -2629,12 +2634,16 @@
       recordScrollIpc();
       postHostMessage({
         type: "scroll",
-        ...scrollState,
+        scrollTop: scrollState.scrollTop,
+        scrollHeight: scrollState.scrollHeight,
+        clientHeight: scrollState.clientHeight,
         topBlockIndex
       });
       postHostMessage({
         type: "layout-ready",
-        ...scrollState,
+        scrollTop: scrollState.scrollTop,
+        scrollHeight: scrollState.scrollHeight,
+        clientHeight: scrollState.clientHeight,
         renderId
       });
       rebuildPendingCachedActiveHeadingObserver();
@@ -3665,6 +3674,18 @@
     refreshTopVisibleBlockIndexCache();
     return docScrollTopForCloneY(root, y);
   }
+  function __testEmitScrollForTesting() {
+    postScroll(false);
+  }
+  function __testEmitLayoutReadyForTesting(renderId = null) {
+    postLayoutReady(renderId);
+  }
+  function __testEmitHeadingsUpdatedForTesting() {
+    extractAndPostHeadings();
+  }
+  function __testEmitPerfMarkForTesting(name, detail) {
+    postPerfMark(name, detail);
+  }
   function updateMinimapViewport(options = {}) {
     if (hostWindow.__mmMathObserverPerfEnabled !== true) {
       updateMinimapViewportCore(options);
@@ -4395,6 +4416,8 @@
       postTransactionMinimapSettled(message.transactionGeneration);
       return;
     }
+    const _exhaustiveHostMessage = message;
+    void _exhaustiveHostMessage;
   }
   function isModeSettleViewportReady(message) {
     const widthReady = typeof message.viewportWidth !== "number" || !Number.isFinite(message.viewportWidth) || message.viewportWidth <= 0 || Math.abs(window.innerWidth - message.viewportWidth) <= MODE_SETTLE_VIEWPORT_TOLERANCE;

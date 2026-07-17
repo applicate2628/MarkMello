@@ -56,3 +56,10 @@ docs/superpowers/
 # Skaro
 .skaro/
 /packaging/dist/
+
+# Test result artifacts (the --logger trx discipline makes these recurrent)
+TestResults/
+**/TestResults/
+
+# graphify knowledge-graph output (local tool artifact, never committed)
+graphify-out/

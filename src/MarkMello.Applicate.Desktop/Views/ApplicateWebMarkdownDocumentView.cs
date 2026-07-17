@@ -1754,15 +1754,23 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     }
 
     private void OnWebMessageReceived(object? sender, WebMessageReceivedEventArgs e)
+        => HandleWebMessageBody(e.Body);
+
+    // Internal seam for IpcContractTests. WebMessageReceivedEventArgs is a
+    // WebView2 type headless tests cannot synthesize, so the raw body-string
+    // dispatch is factored here and can be fed a synthesized renderer->host JSON
+    // fixture directly. Production behavior is unchanged: OnWebMessageReceived
+    // forwards e.Body verbatim.
+    internal void HandleWebMessageBody(string? body)
     {
-        if (string.IsNullOrWhiteSpace(e.Body))
+        if (string.IsNullOrWhiteSpace(body))
         {
             return;
         }
 
         try
         {
-            using var document = JsonDocument.Parse(e.Body);
+            using var document = JsonDocument.Parse(body);
             // A valid-JSON-but-non-object payload ([], null, "x", 0) parses fine,
             // but TryGetProperty below throws InvalidOperationException on a
             // non-object root (the narrow JsonException catch would not catch it).
@@ -3096,17 +3104,23 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         // updates (font size, width drag, chrome toggle) must not invalidate
         // readiness — otherwise the renderer is forced to re-emit layout-ready
         // and minimap-state on every drag delta, causing visible lag.
-        PostRendererMessage(BuildReadingPreferencesMessage("reading-preferences"));
+        PostRendererMessage(BuildReadingPreferencesMessage());
     }
 
-    private object BuildReadingPreferencesMessage(string type)
+    // DRIFT-1 (design H2): reading-preferences carries preference fields ONLY.
+    // The renderer self-measures the viewport (window.innerWidth/innerHeight) and
+    // the TS `reading-preferences` type never declared viewportWidth/Height, so
+    // they were dead payload on this message. The host-measured viewport belongs
+    // solely to mode-settle-probe (its viewport-ready gate consumes it) — see
+    // BuildModeSettleProbeMessage. Do NOT re-add viewport here.
+    internal object BuildReadingPreferencesMessage()
     {
         var maxWidth = double.IsFinite(AvailableContentWidth) && AvailableContentWidth > 0
             ? AvailableContentWidth
             : ReadingPreferences.ContentWidth;
         return new
         {
-            type,
+            type = "reading-preferences",
             fontFamily = ReadingPreferences.FontFamily.ToString().ToLowerInvariant(),
             fontSize = ReadingPreferences.FontSize,
             lineHeight = ReadingPreferences.LineHeight,
@@ -3124,28 +3138,45 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             viewerChromeEnabled = ViewerChromeEnabled,
             documentScrollEnabled = DocumentScrollEnabled,
             wheelProxyEnabled = WheelProxyEnabled,
-            widthResizerVisibility = ToRendererWidthResizerVisibility(ReadingPreferences.WidthResizerVisibility),
-            viewportWidth = _webView.Bounds.Width,
-            viewportHeight = _webView.Bounds.Height
+            widthResizerVisibility = ToRendererWidthResizerVisibility(ReadingPreferences.WidthResizerVisibility)
         };
     }
 
-    private object BuildReadingPreferencesMessage(
-        string type,
-        long transactionGeneration,
-        bool skipFrameWait = false)
+    // Mode-settle probe = reading preferences + host-measured viewport. This is
+    // the SINGLE owner of "the probe carries the viewport": the renderer's
+    // viewport-ready gate (isModeSettleViewportReady) fails OPEN when viewport is
+    // absent, so this message MUST keep viewportWidth/Height or the one-frame-
+    // wrong-width reveal flash returns. When transactional (generation > 0) it
+    // additionally carries the generation and the frame-wait skip. Both variants
+    // keep the viewport payload byte-identical to the pre-split shared builder.
+    internal object BuildModeSettleProbeMessage(long transactionGeneration = 0, bool skipFrameWait = false)
     {
-        if (transactionGeneration <= 0)
-        {
-            return BuildReadingPreferencesMessage(type);
-        }
-
         var maxWidth = double.IsFinite(AvailableContentWidth) && AvailableContentWidth > 0
             ? AvailableContentWidth
             : ReadingPreferences.ContentWidth;
+        if (transactionGeneration <= 0)
+        {
+            return new
+            {
+                type = "mode-settle-probe",
+                fontFamily = ReadingPreferences.FontFamily.ToString().ToLowerInvariant(),
+                fontSize = ReadingPreferences.FontSize,
+                lineHeight = ReadingPreferences.LineHeight,
+                maxWidth,
+                minMaxWidth = ApplicateDocumentLayout.MinManualContentWidth,
+                minimapMode = ReadingPreferences.DocumentMinimapMode.ToString().ToLowerInvariant(),
+                viewerChromeEnabled = ViewerChromeEnabled,
+                documentScrollEnabled = DocumentScrollEnabled,
+                wheelProxyEnabled = WheelProxyEnabled,
+                widthResizerVisibility = ToRendererWidthResizerVisibility(ReadingPreferences.WidthResizerVisibility),
+                viewportWidth = _webView.Bounds.Width,
+                viewportHeight = _webView.Bounds.Height
+            };
+        }
+
         return new
         {
-            type,
+            type = "mode-settle-probe",
             fontFamily = ReadingPreferences.FontFamily.ToString().ToLowerInvariant(),
             fontSize = ReadingPreferences.FontSize,
             lineHeight = ReadingPreferences.LineHeight,
@@ -3173,20 +3204,23 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     internal static string ToRendererWidthResizerVisibility(WidthResizerVisibility visibility)
         => visibility == WidthResizerVisibility.Always ? "always" : "on-hover";
 
-    private void SendMinimapPolicy()
-    {
-        PostRendererMessage(
-            new
+    private void SendMinimapPolicy() => PostRendererMessage(BuildMinimapPolicyMessage());
+
+    // Extracted so the nested minimapPolicy{} wire shape is independently
+    // serializable by IpcContractTests' recursive descriptor walk (terra
+    // revision 1 — a stray key inside minimapPolicy must go RED). Identical
+    // anonymous object as before.
+    internal object BuildMinimapPolicyMessage()
+        => new
+        {
+            type = "minimap-policy",
+            minimapPolicy = new
             {
-                type = "minimap-policy",
-                minimapPolicy = new
-                {
-                    minHostWidth = ApplicateDocumentMinimapBuildPolicy.MinHostWidth,
-                    minScrollableViewportRatio = ApplicateDocumentMinimapBuildPolicy.MinScrollableViewportRatio,
-                    maxDetailedDocumentHeight = ApplicateDocumentMinimapBuildPolicy.MaxDetailedDocumentHeight
-                }
-            });
-    }
+                minHostWidth = ApplicateDocumentMinimapBuildPolicy.MinHostWidth,
+                minScrollableViewportRatio = ApplicateDocumentMinimapBuildPolicy.MinScrollableViewportRatio,
+                maxDetailedDocumentHeight = ApplicateDocumentMinimapBuildPolicy.MaxDetailedDocumentHeight
+            }
+        };
 
     private void SendScrollTo(string anchor)
     {
@@ -3216,7 +3250,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         // the settle probe must be self-contained: even if the prior
         // reading-preferences message is still crossing that boundary, the
         // renderer applies these values synchronously before ACKing reveal.
-        PostRendererMessage(BuildReadingPreferencesMessage("mode-settle-probe"));
+        PostRendererMessage(BuildModeSettleProbeMessage());
     }
 
     internal void RequestModeToggleSettleProbe(long transactionGeneration, bool skipFrameWait = false)
@@ -3231,10 +3265,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             "pane-seq",
             "host-transaction-settle-probe-sent",
             $"transactionGeneration={transactionGeneration} skipFrameWait={skipFrameWait}");
-        PostRendererMessage(BuildReadingPreferencesMessage(
-            "mode-settle-probe",
-            transactionGeneration,
-            skipFrameWait));
+        PostRendererMessage(BuildModeSettleProbeMessage(transactionGeneration, skipFrameWait));
     }
 
     internal void RequestMinimapSettleProbe(long transactionGeneration)

@@ -59,6 +59,7 @@ jobs:
         run: |
           npm --prefix .\src\MarkMello.Applicate.Desktop install
           npm --prefix .\src\MarkMello.Applicate.Desktop run check:renderer
+          npm --prefix .\src\MarkMello.Applicate.Desktop run test:renderer
           npm --prefix .\src\MarkMello.Applicate.Desktop run build:renderer
 
       - name: Test domain layer

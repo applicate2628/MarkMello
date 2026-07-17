@@ -226,33 +226,36 @@ internal sealed class SharedWebViewHostRevealIntents(IApplicateModeTransactionHo
         => RequireEndpoint().CompleteNativeWebViewHiddenPaint();
 
     public void PrepareModeRendererReveal(TimeSpan duration)
-        => RequireEndpoint().PostRendererRevealMessage(new
-        {
-            type = "mode-reveal-prepare",
-            durationMs = ToRendererDurationMs(duration)
-        });
+        => RequireEndpoint().PostRendererRevealMessage(
+            BuildModeRevealPrepareMessage(ToRendererDurationMs(duration)));
 
     public void StartModeRendererReveal(TimeSpan duration)
-        => RequireEndpoint().PostRendererRevealMessage(new
-        {
-            type = "mode-reveal-start",
-            durationMs = ToRendererDurationMs(duration)
-        });
+        => RequireEndpoint().PostRendererRevealMessage(
+            BuildModeRevealStartMessage(ToRendererDurationMs(duration)));
 
     public void PrepareDocumentRendererReveal(TimeSpan duration)
-        => RequireEndpoint().PostRendererRevealMessage(new
-        {
-            type = "document-reveal-prepare",
-            durationMs = ToRendererDurationMs(duration),
-            theme = RequireEndpoint().RendererThemeName
-        });
+        => RequireEndpoint().PostRendererRevealMessage(
+            BuildDocumentRevealPrepareMessage(ToRendererDurationMs(duration), RequireEndpoint().RendererThemeName));
 
     public void StartDocumentRendererReveal(TimeSpan duration)
-        => RequireEndpoint().PostRendererRevealMessage(new
-        {
-            type = "document-reveal-start",
-            durationMs = ToRendererDurationMs(duration)
-        });
+        => RequireEndpoint().PostRendererRevealMessage(
+            BuildDocumentRevealStartMessage(ToRendererDurationMs(duration)));
+
+    // Extracted reveal-message builders (terra revision 2). The IpcContractTests
+    // producer manifest drives these host->renderer producers that live OUTSIDE
+    // the view; the emitted anonymous objects are byte-identical to the previous
+    // inline forms.
+    internal static object BuildModeRevealPrepareMessage(int durationMs)
+        => new { type = "mode-reveal-prepare", durationMs };
+
+    internal static object BuildModeRevealStartMessage(int durationMs)
+        => new { type = "mode-reveal-start", durationMs };
+
+    internal static object BuildDocumentRevealPrepareMessage(int durationMs, string theme)
+        => new { type = "document-reveal-prepare", durationMs, theme };
+
+    internal static object BuildDocumentRevealStartMessage(int durationMs)
+        => new { type = "document-reveal-start", durationMs };
 
     public void RequestRendererSettleProbe()
         => RequireEndpoint().RequestRendererSettleProbe();

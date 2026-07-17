@@ -133,24 +133,44 @@ public sealed class ApplicateWebMarkdownDocumentViewAirspaceTests
 
 
     [Fact]
-    public void ModeSettleProbeCarriesReadingPreferencesPayload()
+    public void ModeSettleProbeCarriesViewportButReadingPreferencesDoesNot()
     {
         var source = File.ReadAllText(ViewSourcePath);
+
         var requestMethodStart = source.IndexOf(
             "internal void RequestModeToggleSettleProbe()",
             StringComparison.Ordinal);
         var requestMethod = ExtractMethodBody(source, requestMethodStart);
-        var builderMethodStart = source.IndexOf(
-            "private object BuildReadingPreferencesMessage(string type)",
-            StringComparison.Ordinal);
-        var builderMethod = ExtractMethodBody(source, builderMethodStart);
 
-        Assert.Contains("BuildReadingPreferencesMessage(\"mode-settle-probe\")", requestMethod, StringComparison.Ordinal);
-        Assert.Contains("viewerChromeEnabled", builderMethod, StringComparison.Ordinal);
-        Assert.Contains("minimapMode", builderMethod, StringComparison.Ordinal);
-        Assert.Contains("maxWidth", builderMethod, StringComparison.Ordinal);
-        Assert.Contains("viewportWidth", builderMethod, StringComparison.Ordinal);
-        Assert.Contains("viewportHeight", builderMethod, StringComparison.Ordinal);
+        var probeBuilderStart = source.IndexOf(
+            "internal object BuildModeSettleProbeMessage(",
+            StringComparison.Ordinal);
+        var probeBuilder = ExtractMethodBody(source, probeBuilderStart);
+
+        var prefsBuilderStart = source.IndexOf(
+            "internal object BuildReadingPreferencesMessage()",
+            StringComparison.Ordinal);
+        var prefsBuilder = ExtractMethodBody(source, prefsBuilderStart);
+
+        // The probe request routes through the dedicated probe builder.
+        Assert.Contains("BuildModeSettleProbeMessage()", requestMethod, StringComparison.Ordinal);
+
+        // mode-settle-probe carries the reading preferences AND the host-measured
+        // viewport — its viewport-ready gate (isModeSettleViewportReady) fails
+        // OPEN when viewport is absent, so this payload MUST keep it.
+        Assert.Contains("viewerChromeEnabled", probeBuilder, StringComparison.Ordinal);
+        Assert.Contains("minimapMode", probeBuilder, StringComparison.Ordinal);
+        Assert.Contains("maxWidth", probeBuilder, StringComparison.Ordinal);
+        Assert.Contains("viewportWidth", probeBuilder, StringComparison.Ordinal);
+        Assert.Contains("viewportHeight", probeBuilder, StringComparison.Ordinal);
+
+        // DRIFT-1: reading-preferences carries the preferences but NOT the
+        // viewport (the renderer self-measures; the fields were dead payload).
+        Assert.Contains("viewerChromeEnabled", prefsBuilder, StringComparison.Ordinal);
+        Assert.Contains("minimapMode", prefsBuilder, StringComparison.Ordinal);
+        Assert.Contains("maxWidth", prefsBuilder, StringComparison.Ordinal);
+        Assert.DoesNotContain("viewportWidth", prefsBuilder, StringComparison.Ordinal);
+        Assert.DoesNotContain("viewportHeight", prefsBuilder, StringComparison.Ordinal);
     }
 
     private static string ExtractMethodBody(string source, int methodStart)

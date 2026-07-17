@@ -1,0 +1,721 @@
+{
+  "hostMessageShapes": {
+    "theme": {
+      "type": {
+        "kind": "string"
+      },
+      "theme": {
+        "kind": "string"
+      },
+      "requestId": {
+        "kind": "number",
+        "optional": true
+      }
+    },
+    "minimap-policy": {
+      "type": {
+        "kind": "string"
+      },
+      "minimapPolicy": {
+        "kind": "object",
+        "of": {
+          "minHostWidth": {
+            "kind": "number"
+          },
+          "minScrollableViewportRatio": {
+            "kind": "number"
+          },
+          "maxDetailedDocumentHeight": {
+            "kind": "number"
+          }
+        }
+      }
+    },
+    "reading-preferences": {
+      "type": {
+        "kind": "string"
+      },
+      "fontSize": {
+        "kind": "number"
+      },
+      "lineHeight": {
+        "kind": "number"
+      },
+      "maxWidth": {
+        "kind": "number"
+      },
+      "minMaxWidth": {
+        "kind": "number",
+        "optional": true
+      },
+      "minimapMode": {
+        "kind": "string",
+        "variants": [
+          "auto",
+          "on",
+          "off"
+        ]
+      },
+      "fontFamily": {
+        "kind": "string",
+        "optional": true,
+        "variants": [
+          "serif",
+          "sans",
+          "mono"
+        ]
+      },
+      "viewerChromeEnabled": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "documentScrollEnabled": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "wheelProxyEnabled": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "widthResizerVisibility": {
+        "kind": "string",
+        "optional": true
+      },
+      "skipFrameWait": {
+        "kind": "boolean",
+        "optional": true
+      }
+    },
+    "scroll-by": {
+      "type": {
+        "kind": "string"
+      },
+      "deltaY": {
+        "kind": "number"
+      }
+    },
+    "scroll-to-block": {
+      "type": {
+        "kind": "string"
+      },
+      "blockIndex": {
+        "kind": "number"
+      }
+    },
+    "scroll-to": {
+      "type": {
+        "kind": "string"
+      },
+      "anchor": {
+        "kind": "string"
+      }
+    },
+    "scroll-to-progress": {
+      "type": {
+        "kind": "string"
+      },
+      "progressPercent": {
+        "kind": "number"
+      }
+    },
+    "load-document": {
+      "type": {
+        "kind": "string"
+      },
+      "html": {
+        "kind": "string"
+      },
+      "documentName": {
+        "kind": "string",
+        "optional": true
+      },
+      "theme": {
+        "kind": "string",
+        "optional": true
+      },
+      "hasMermaid": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "hasHljs": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "renderId": {
+        "kind": "number",
+        "optional": true
+      },
+      "skipFrameWait": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "cacheKey": {
+        "kind": "string",
+        "optional": true,
+        "nullable": true
+      }
+    },
+    "append-document": {
+      "type": {
+        "kind": "string"
+      },
+      "html": {
+        "kind": "string"
+      },
+      "hasMermaid": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "hasHljs": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "renderId": {
+        "kind": "number",
+        "optional": true
+      },
+      "isFinal": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "cacheKey": {
+        "kind": "string",
+        "optional": true,
+        "nullable": true
+      }
+    },
+    "load-cached-document": {
+      "type": {
+        "kind": "string"
+      },
+      "cacheKey": {
+        "kind": "string"
+      },
+      "documentName": {
+        "kind": "string",
+        "optional": true
+      },
+      "theme": {
+        "kind": "string",
+        "optional": true
+      },
+      "hasMermaid": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "hasHljs": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "renderId": {
+        "kind": "number",
+        "optional": true
+      },
+      "skipFrameWait": {
+        "kind": "boolean",
+        "optional": true
+      }
+    },
+    "clear-document": {
+      "type": {
+        "kind": "string"
+      }
+    },
+    "invalidate-document-cache-key": {
+      "type": {
+        "kind": "string"
+      }
+    },
+    "set-task-checkbox": {
+      "type": {
+        "kind": "string"
+      },
+      "line": {
+        "kind": "number"
+      },
+      "checked": {
+        "kind": "boolean"
+      }
+    },
+    "scroll-to-heading": {
+      "type": {
+        "kind": "string"
+      },
+      "id": {
+        "kind": "string"
+      }
+    },
+    "scroll-to-source-line": {
+      "type": {
+        "kind": "string"
+      },
+      "sourceLine": {
+        "kind": "number"
+      }
+    },
+    "open-find-bar": {
+      "type": {
+        "kind": "string"
+      }
+    },
+    "host-scrollbar": {
+      "type": {
+        "kind": "string"
+      },
+      "active": {
+        "kind": "boolean"
+      }
+    },
+    "mode-settle-probe": {
+      "type": {
+        "kind": "string"
+      },
+      "fontSize": {
+        "kind": "number",
+        "optional": true
+      },
+      "lineHeight": {
+        "kind": "number",
+        "optional": true
+      },
+      "maxWidth": {
+        "kind": "number",
+        "optional": true
+      },
+      "minMaxWidth": {
+        "kind": "number",
+        "optional": true
+      },
+      "minimapMode": {
+        "kind": "string",
+        "optional": true,
+        "variants": [
+          "auto",
+          "on",
+          "off"
+        ]
+      },
+      "fontFamily": {
+        "kind": "string",
+        "optional": true,
+        "variants": [
+          "serif",
+          "sans",
+          "mono"
+        ]
+      },
+      "viewerChromeEnabled": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "documentScrollEnabled": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "wheelProxyEnabled": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "widthResizerVisibility": {
+        "kind": "string",
+        "optional": true
+      },
+      "viewportWidth": {
+        "kind": "number",
+        "optional": true
+      },
+      "viewportHeight": {
+        "kind": "number",
+        "optional": true
+      },
+      "transactionGeneration": {
+        "kind": "number",
+        "optional": true
+      },
+      "skipFrameWait": {
+        "kind": "boolean",
+        "optional": true
+      }
+    },
+    "minimap-settle-probe": {
+      "type": {
+        "kind": "string"
+      },
+      "transactionGeneration": {
+        "kind": "number"
+      }
+    },
+    "host-shortcuts-reset": {
+      "type": {
+        "kind": "string"
+      }
+    },
+    "mode-reveal-prepare": {
+      "type": {
+        "kind": "string"
+      },
+      "durationMs": {
+        "kind": "number",
+        "optional": true
+      }
+    },
+    "mode-reveal-start": {
+      "type": {
+        "kind": "string"
+      },
+      "durationMs": {
+        "kind": "number",
+        "optional": true
+      }
+    },
+    "document-reveal-prepare": {
+      "type": {
+        "kind": "string"
+      },
+      "durationMs": {
+        "kind": "number",
+        "optional": true
+      },
+      "theme": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    "document-reveal-start": {
+      "type": {
+        "kind": "string"
+      },
+      "durationMs": {
+        "kind": "number",
+        "optional": true
+      }
+    }
+  },
+  "rendererMessageShapes": {
+    "document-ready": {
+      "type": {
+        "kind": "string"
+      },
+      "mathCount": {
+        "kind": "number"
+      }
+    },
+    "layout-ready": {
+      "type": {
+        "kind": "string"
+      },
+      "scrollTop": {
+        "kind": "number"
+      },
+      "scrollHeight": {
+        "kind": "number"
+      },
+      "clientHeight": {
+        "kind": "number"
+      },
+      "cached": {
+        "kind": "boolean",
+        "optional": true
+      },
+      "renderId": {
+        "kind": "number",
+        "optional": true,
+        "nullable": true
+      }
+    },
+    "post-ready-enhancements-complete": {
+      "type": {
+        "kind": "string"
+      },
+      "renderId": {
+        "kind": "number",
+        "optional": true,
+        "nullable": true
+      },
+      "hasMermaid": {
+        "kind": "boolean"
+      },
+      "hasHljs": {
+        "kind": "boolean"
+      }
+    },
+    "theme-applied": {
+      "type": {
+        "kind": "string"
+      },
+      "theme": {
+        "kind": "string"
+      },
+      "requestId": {
+        "kind": "number"
+      }
+    },
+    "link-clicked": {
+      "type": {
+        "kind": "string"
+      },
+      "href": {
+        "kind": "string"
+      },
+      "button": {
+        "kind": "number"
+      },
+      "ctrlKey": {
+        "kind": "boolean"
+      },
+      "shiftKey": {
+        "kind": "boolean"
+      },
+      "altKey": {
+        "kind": "boolean"
+      },
+      "metaKey": {
+        "kind": "boolean"
+      }
+    },
+    "task-toggle": {
+      "type": {
+        "kind": "string"
+      },
+      "line": {
+        "kind": "number"
+      },
+      "checked": {
+        "kind": "boolean"
+      },
+      "key": {
+        "kind": "string",
+        "nullable": true
+      }
+    },
+    "minimap-state": {
+      "type": {
+        "kind": "string"
+      },
+      "visible": {
+        "kind": "boolean"
+      },
+      "reservedWidth": {
+        "kind": "number"
+      }
+    },
+    "minimap-settled": {
+      "type": {
+        "kind": "string"
+      },
+      "transactionGeneration": {
+        "kind": "number"
+      },
+      "visible": {
+        "kind": "boolean"
+      },
+      "reservedWidth": {
+        "kind": "number"
+      }
+    },
+    "scroll": {
+      "type": {
+        "kind": "string"
+      },
+      "scrollTop": {
+        "kind": "number"
+      },
+      "scrollHeight": {
+        "kind": "number"
+      },
+      "clientHeight": {
+        "kind": "number"
+      },
+      "topBlockIndex": {
+        "kind": "number",
+        "nullable": true
+      }
+    },
+    "viewer-interaction": {
+      "type": {
+        "kind": "string"
+      }
+    },
+    "wheel": {
+      "type": {
+        "kind": "string"
+      },
+      "deltaY": {
+        "kind": "number"
+      },
+      "deltaMode": {
+        "kind": "number"
+      }
+    },
+    "width-drag": {
+      "type": {
+        "kind": "string"
+      },
+      "phase": {
+        "kind": "string",
+        "variants": [
+          "start",
+          "move",
+          "end"
+        ]
+      },
+      "deltaX": {
+        "kind": "number"
+      }
+    },
+    "drag-hover": {
+      "type": {
+        "kind": "string"
+      },
+      "hovering": {
+        "kind": "boolean"
+      }
+    },
+    "drop-file": {
+      "type": {
+        "kind": "string"
+      },
+      "name": {
+        "kind": "string"
+      },
+      "text": {
+        "kind": "string"
+      }
+    },
+    "host-shortcut": {
+      "type": {
+        "kind": "string"
+      },
+      "combo": {
+        "kind": "string"
+      }
+    },
+    "debug-log": {
+      "type": {
+        "kind": "string"
+      },
+      "text": {
+        "kind": "string"
+      }
+    },
+    "perf-mark": {
+      "type": {
+        "kind": "string"
+      },
+      "name": {
+        "kind": "string"
+      },
+      "detail": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    "headings-updated": {
+      "type": {
+        "kind": "string"
+      },
+      "headings": {
+        "kind": "array",
+        "element": {
+          "kind": "object",
+          "of": {
+            "id": {
+              "kind": "string"
+            },
+            "level": {
+              "kind": "number"
+            },
+            "text": {
+              "kind": "string"
+            },
+            "segments": {
+              "kind": "array",
+              "element": {
+                "kind": "object",
+                "of": {
+                  "kind": {
+                    "kind": "string",
+                    "variants": [
+                      "text",
+                      "math"
+                    ]
+                  },
+                  "text": {
+                    "kind": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "active-heading-changed": {
+      "type": {
+        "kind": "string"
+      },
+      "id": {
+        "kind": "string"
+      }
+    },
+    "preview-source-line": {
+      "type": {
+        "kind": "string"
+      },
+      "sourceLine": {
+        "kind": "number"
+      }
+    },
+    "csp-violation": {
+      "type": {
+        "kind": "string"
+      },
+      "blockedURI": {
+        "kind": "string"
+      },
+      "violatedDirective": {
+        "kind": "string"
+      },
+      "sourceFile": {
+        "kind": "string"
+      },
+      "lineNumber": {
+        "kind": "number"
+      },
+      "columnNumber": {
+        "kind": "number"
+      }
+    },
+    "document-cache-miss": {
+      "type": {
+        "kind": "string"
+      },
+      "renderId": {
+        "kind": "number",
+        "optional": true,
+        "nullable": true
+      },
+      "cacheKey": {
+        "kind": "string",
+        "optional": true
+      }
+    },
+    "document-first-paint": {
+      "type": {
+        "kind": "string"
+      },
+      "renderId": {
+        "kind": "number"
+      }
+    },
+    "mode-toggle-settled": {
+      "type": {
+        "kind": "string"
+      },
+      "transactionGeneration": {
+        "kind": "number",
+        "optional": true
+      }
+    }
+  }
+}

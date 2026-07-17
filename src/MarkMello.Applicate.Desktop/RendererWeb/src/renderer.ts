@@ -12,6 +12,15 @@ import {
 import { isMermaidNodeNearViewport, renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
 import { normalizeHljsLanguage } from "./hljsLanguage";
 import { runInitialRenderPipeline, type MathReadinessController, type RendererTheme } from "./initialRenderPipeline";
+import type {
+  RendererMessage,
+  HostMessage,
+  MinimapMode,
+  MinimapPolicy,
+  FontFamilyMode,
+  HeadingPayload,
+  HeadingSegmentPayload,
+} from "./ipcContract";
 import { applyLoadDocument, clearDocumentState } from "./loadDocument";
 import { renderMath as renderMathInit } from "./mathRenderInit";
 import { schedulePhaseBRebuild } from "./schematicMinimap";
@@ -77,119 +86,6 @@ type RendererWindow = Window & {
   invokeCSharpAction?: (message: string) => void;
   __mmMathObserverPerfEnabled?: boolean;
 };
-
-type RendererMessage =
-  | { type: "document-ready"; mathCount: number }
-  | { type: "layout-ready"; scrollTop: number; scrollHeight: number; clientHeight: number; cached?: boolean; renderId?: number | null }
-  | { type: "post-ready-enhancements-complete"; renderId?: number; hasMermaid: boolean; hasHljs: boolean }
-  | { type: "theme-applied"; theme: RendererTheme; requestId: number }
-  | { type: "link-clicked"; href: string; button: number; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }
-  | { type: "task-toggle"; line: number; checked: boolean; key: string | null }
-  | { type: "minimap-state"; visible: boolean; reservedWidth: number }
-  | { type: "minimap-settled"; transactionGeneration: number; visible: boolean; reservedWidth: number }
-  | { type: "scroll"; scrollTop: number; scrollHeight: number; clientHeight: number; topBlockIndex: number | null }
-  | { type: "viewer-interaction" }
-  | { type: "wheel"; deltaY: number; deltaMode: number }
-  | { type: "width-drag"; phase: "start" | "move" | "end"; deltaX: number }
-  | { type: "drag-hover"; hovering: boolean }
-  | { type: "drop-file"; name: string; text: string }
-  | { type: "host-shortcut"; combo: string }
-  | { type: "debug-log"; text: string }
-  // Round-2 perf-engineer plan item C, [renderer-perf] group. The renderer
-  // posts a perf-mark whenever a startup-relevant pipeline milestone fires;
-  // the host stamps elapsed-ms against its own process-anchored Stopwatch
-  // (avoids clock-skew between renderer performance.now() and host wall clock)
-  // and re-emits as `[renderer-perf] <name> ms=<elapsed>` via ApplicateTrace.
-  | { type: "perf-mark"; name: string; detail?: string }
-  | { type: "headings-updated"; headings: ReadonlyArray<HeadingPayload> }
-  | { type: "active-heading-changed"; id: string }
-  | { type: "preview-source-line"; sourceLine: number }
-  | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number }
-  | { type: "document-cache-miss"; renderId?: number; cacheKey?: string }
-  | { type: "document-first-paint"; renderId: number }
-  // Mode-toggle reveal gate (2026-05-20). Posted in response to a host-sent
-  // `mode-settle-probe` message after the renderer has applied pending reading
-  // preferences and let layout chrome such as the minimap paint at the new slot
-  // bounds. The host uses this
-  // to defer `SetNativeWebViewVisibility(true)` on the Commit fast-path
-  // (Ctrl+E mode toggle within the same document), so the user never sees the
-  // HWND repainted at the old document width before the renderer catches up.
-  | { type: "mode-toggle-settled"; transactionGeneration?: number };
-
-type MinimapMode = "auto" | "on" | "off";
-
-type MinimapPolicy = {
-  minHostWidth: number;
-  minScrollableViewportRatio: number;
-  maxDetailedDocumentHeight: number;
-};
-
-type FontFamilyMode = "serif" | "sans" | "mono";
-
-type HostMessage =
-  | { type: "theme"; theme: RendererTheme; requestId?: number }
-  | { type: "minimap-policy"; minimapPolicy: MinimapPolicy }
-  | {
-      type: "reading-preferences";
-      fontSize: number;
-      lineHeight: number;
-      maxWidth: number;
-      minMaxWidth?: number;
-      minimapMode: MinimapMode;
-      fontFamily?: FontFamilyMode;
-      viewerChromeEnabled?: boolean;
-      documentScrollEnabled?: boolean;
-      wheelProxyEnabled?: boolean;
-      widthResizerVisibility?: WidthResizerVisibility;
-      skipFrameWait?: boolean;
-    }
-  | { type: "scroll-by"; deltaY: number }
-  | { type: "scroll-to-block"; blockIndex: number }
-  | { type: "scroll-to"; anchor: string }
-  | { type: "scroll-to-progress"; progressPercent: number }
-  | { type: "load-document"; html: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; skipFrameWait?: boolean; cacheKey?: string | null }
-  | { type: "append-document"; html: string; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; isFinal?: boolean; cacheKey?: string | null }
-  | { type: "load-cached-document"; cacheKey: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; skipFrameWait?: boolean }
-  | { type: "clear-document" }
-  | { type: "invalidate-document-cache-key" }
-  | { type: "set-task-checkbox"; line: number; checked: boolean }
-  | { type: "scroll-to-heading"; id: string }
-  | { type: "scroll-to-source-line"; sourceLine: number }
-  | { type: "open-find-bar" }
-  | { type: "host-scrollbar"; active: boolean }
-  // Host-sent probe (2026-05-20). The host sends this after Avalonia
-  // UpdateLayout has settled the slot bounds but BEFORE making the WebView2
-  // HWND visible on the Commit fast-path (Ctrl+E same-document reparent).
-  // The renderer applies any pending reading preferences, schedules at least
-  // two requestAnimationFrame ticks so CSS reflow has propagated and one paint
-  // has happened, then posts `mode-toggle-settled` back after layout-dependent
-  // chrome has been refreshed. If chrome visibility changes during that
-  // refresh, the ack waits one more paint. This keeps the host reveal behind
-  // the final minimap/width-handle geometry instead of exposing one frame at
-  // the previous text width.
-  | {
-      type: "mode-settle-probe";
-      fontSize?: number;
-      lineHeight?: number;
-      maxWidth?: number;
-      minMaxWidth?: number;
-      minimapMode?: MinimapMode;
-      fontFamily?: FontFamilyMode;
-      viewerChromeEnabled?: boolean;
-      documentScrollEnabled?: boolean;
-      wheelProxyEnabled?: boolean;
-      widthResizerVisibility?: WidthResizerVisibility;
-      viewportWidth?: number;
-      viewportHeight?: number;
-      transactionGeneration?: number;
-      skipFrameWait?: boolean;
-    }
-  | { type: "minimap-settle-probe"; transactionGeneration: number }
-  | { type: "host-shortcuts-reset" }
-  | { type: "mode-reveal-prepare"; durationMs?: number }
-  | { type: "mode-reveal-start"; durationMs?: number }
-  | { type: "document-reveal-prepare"; durationMs?: number; theme?: RendererTheme }
-  | { type: "document-reveal-start"; durationMs?: number };
 
 const hostWindow = window as RendererWindow;
 const MINIMAP_CLASS = "mm-minimap";
@@ -348,18 +244,6 @@ type ProcessedDocumentCacheEntry = {
   layoutState: CachedLayoutState;
   headings: HeadingPayload[];
   minimapSnapshot: CachedMinimapSnapshot | null;
-};
-
-type HeadingPayload = {
-  id: string;
-  level: number;
-  text: string;
-  segments: HeadingSegmentPayload[];
-};
-
-type HeadingSegmentPayload = {
-  kind: "text" | "math";
-  text: string;
 };
 
 function cloneHeadingPayload(heading: HeadingPayload): HeadingPayload {
@@ -1350,7 +1234,9 @@ function postScroll(suppressed = false): CachedLayoutState | null {
     const draggedScrollState = getScrollState();
     postHostMessage({
       type: "scroll",
-      ...draggedScrollState,
+      scrollTop: draggedScrollState.scrollTop,
+      scrollHeight: draggedScrollState.scrollHeight,
+      clientHeight: draggedScrollState.clientHeight,
       topBlockIndex: lastKnownLayoutState?.topBlockIndex ?? null,
     });
     return null;
@@ -1364,9 +1250,17 @@ function postScroll(suppressed = false): CachedLayoutState | null {
   const layoutState = { ...scrollState, topBlockIndex, topBlockOffsetPx };
   lastKnownLayoutState = layoutState;
   recordScrollIpc();
+  // Explicit field list (no spread of layoutState): layoutState is a
+  // CachedLayoutState carrying `topBlockOffsetPx`, which is renderer-internal
+  // cached-restore state and NOT a declared key of the `scroll` wire message.
+  // Spreading it leaked topBlockOffsetPx onto the wire (DRIFT-2). List the four
+  // declared fields explicitly — the same shape the other scroll post sites use.
   postHostMessage({
     type: "scroll",
-    ...layoutState
+    scrollTop: layoutState.scrollTop,
+    scrollHeight: layoutState.scrollHeight,
+    clientHeight: layoutState.clientHeight,
+    topBlockIndex: layoutState.topBlockIndex,
   });
   if (minimapDragFinalFlushPending) {
     minimapDragFinalFlushPending = false;
@@ -1508,12 +1402,16 @@ function postLayoutReady(renderId: number | null): void {
     recordScrollIpc();
     postHostMessage({
       type: "scroll",
-      ...scrollState,
+      scrollTop: scrollState.scrollTop,
+      scrollHeight: scrollState.scrollHeight,
+      clientHeight: scrollState.clientHeight,
       topBlockIndex
     });
     postHostMessage({
       type: "layout-ready",
-      ...scrollState,
+      scrollTop: scrollState.scrollTop,
+      scrollHeight: scrollState.scrollHeight,
+      clientHeight: scrollState.clientHeight,
       renderId
     });
     // Layout the observer needs now exists — settle any cached-headings rebuild debt here, at the
@@ -2907,6 +2805,27 @@ export function __testDocScrollTopForCloneYForTesting(root: Element, y: number):
   return docScrollTopForCloneY(root, y);
 }
 
+// Producer-capture test seams (design H2). These invoke the real,
+// non-literal `postHostMessage` producers so the vitest IPC-contract test can
+// assert the captured wire shape stays a subset of RENDERER_MESSAGE_KEYS. A
+// stray object spread onto one of these messages (as in DRIFT-2) is then RED at
+// the source. They only forward to the production functions — no test-only wire.
+export function __testEmitScrollForTesting(): void {
+  postScroll(false);
+}
+
+export function __testEmitLayoutReadyForTesting(renderId: number | null = null): void {
+  postLayoutReady(renderId);
+}
+
+export function __testEmitHeadingsUpdatedForTesting(): void {
+  extractAndPostHeadings();
+}
+
+export function __testEmitPerfMarkForTesting(name: string, detail?: Record<string, unknown>): void {
+  postPerfMark(name, detail);
+}
+
 function updateMinimapViewport(options: MinimapViewportUpdateOptions = {}): void {
   if (hostWindow.__mmMathObserverPerfEnabled !== true) {
     updateMinimapViewportCore(options);
@@ -3945,6 +3864,14 @@ function handleHostMessage(raw: unknown): void {
     postTransactionMinimapSettled(message.transactionGeneration);
     return;
   }
+
+  // Exhaustiveness guard (compile-time only). Every HostMessage member is
+  // handled above and returns, so `message` narrows to `never` here. Adding a
+  // new HostMessage type without a dispatch branch makes this assignment fail
+  // `npm run check:renderer`. Runtime is unaffected: an unknown wire type simply
+  // reaches here and falls through (forward-compatible with newer hosts).
+  const _exhaustiveHostMessage: never = message;
+  void _exhaustiveHostMessage;
 }
 
 function isModeSettleViewportReady(message: Extract<HostMessage, { type: "mode-settle-probe" }>): boolean {

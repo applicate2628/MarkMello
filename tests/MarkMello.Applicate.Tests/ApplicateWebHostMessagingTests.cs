@@ -32,6 +32,15 @@ public sealed class ApplicateWebHostMessagingTests
         "src",
         "renderer.ts");
 
+    private static readonly string IpcContractSourcePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "..", "..", "..", "..", "..",
+        "src",
+        "MarkMello.Applicate.Desktop",
+        "RendererWeb",
+        "src",
+        "ipcContract.ts");
+
     private static readonly string AirspaceCompositorSourcePath = Path.Combine(
         AppContext.BaseDirectory,
         "..", "..", "..", "..", "..",
@@ -494,7 +503,11 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.Contains("var requestId = ++_themeRequestSequence;", viewSource, StringComparison.Ordinal);
         Assert.Contains("PostRendererMessage(new { type = \"theme\", theme, requestId });", viewSource, StringComparison.Ordinal);
 
-        Assert.Contains("| { type: \"theme-applied\"; theme: RendererTheme; requestId: number }", rendererSource, StringComparison.Ordinal);
+        // The message-type unions moved to the single-source ipcContract.ts
+        // (design H2); the theme-applied wire shape is asserted there. renderer.ts
+        // still owns the paint-ack behavior (posts theme-applied after two rAFs).
+        var ipcContractSource = File.ReadAllText(IpcContractSourcePath);
+        Assert.Contains("| { type: \"theme-applied\"; theme: RendererTheme; requestId: number }", ipcContractSource, StringComparison.Ordinal);
         Assert.Contains("window.requestAnimationFrame(() => window.requestAnimationFrame(postAck));", rendererSource, StringComparison.Ordinal);
         Assert.Contains("postHostMessage({ type: \"theme-applied\", theme, requestId });", rendererSource, StringComparison.Ordinal);
         Assert.Contains("themeAppliedAckGeneration", rendererSource, StringComparison.Ordinal);
