@@ -32,23 +32,27 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
         }
 
         var document = MarkdigMarkdown.Parse(markdown, Pipeline);
-        var blocks = ConvertBlocks(document);
+        var blocks = ConvertBlocks(document, markdown);
         return new RenderedMarkdownDocument(blocks);
     }
 
-    private static List<MarkdownBlock> ConvertBlocks(ContainerBlock container)
+    // `source` is the exact string Markdig parsed (used to capture each table
+    // cell's own raw span for its identity key). It is threaded through the
+    // whole conversion so nested tables — a table inside a blockquote or list —
+    // capture their cell spans too. Every non-table path simply forwards it.
+    private static List<MarkdownBlock> ConvertBlocks(ContainerBlock container, string source)
     {
         var result = new List<MarkdownBlock>(container.Count);
 
         foreach (var block in container)
         {
-            AddConvertedBlock(block, result);
+            AddConvertedBlock(block, result, source);
         }
 
         return result;
     }
 
-    private static void AddConvertedBlock(Block block, List<MarkdownBlock> target)
+    private static void AddConvertedBlock(Block block, List<MarkdownBlock> target, string source)
     {
         switch (block)
         {
@@ -76,12 +80,12 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
 
             case QuoteBlock quote:
                 target.Add(WithSourceSpan(
-                    new MarkdownQuoteBlock(ConvertBlocks(quote)),
+                    new MarkdownQuoteBlock(ConvertBlocks(quote, source)),
                     quote));
                 return;
 
             case ListBlock list:
-                target.Add(WithSourceSpan(ConvertList(list), list));
+                target.Add(WithSourceSpan(ConvertList(list, source), list));
                 return;
 
             case ThematicBreakBlock thematicBreak:
@@ -103,7 +107,7 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
                 return;
 
             case Table table:
-                target.Add(WithSourceSpan(ConvertTable(table), table));
+                target.Add(WithSourceSpan(ConvertTable(table, source), table));
                 return;
 
             case HtmlBlock htmlBlock:
@@ -116,7 +120,7 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
                 return;
 
             case ContainerBlock nested:
-                foreach (var nestedBlock in ConvertBlocks(nested))
+                foreach (var nestedBlock in ConvertBlocks(nested, source))
                 {
                     target.Add(nestedBlock);
                 }
@@ -136,7 +140,7 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
         }
     }
 
-    private static MarkdownListBlock ConvertList(ListBlock list)
+    private static MarkdownListBlock ConvertList(ListBlock list, string source)
     {
         var items = new List<MarkdownListItem>(list.Count);
 
@@ -148,7 +152,7 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
             }
 
             var (taskChecked, taskLine) = TryReadTaskState(item);
-            items.Add(new MarkdownListItem(ConvertBlocks(item), taskChecked, taskLine));
+            items.Add(new MarkdownListItem(ConvertBlocks(item, source), taskChecked, taskLine));
         }
 
         return new MarkdownListBlock(list.IsOrdered, items);
@@ -171,7 +175,7 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
         return (null, null);
     }
 
-    private static MarkdownTableBlock ConvertTable(Table table)
+    private static MarkdownTableBlock ConvertTable(Table table, string source)
     {
         var header = new List<MarkdownTableCell>();
         var rows = new List<IReadOnlyList<MarkdownTableCell>>();
@@ -184,6 +188,7 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
             }
 
             var cells = new List<MarkdownTableCell>(row.Count);
+            var cellIndex = 0;
             foreach (var rowChild in row)
             {
                 if (rowChild is not TableCell cell)
@@ -191,7 +196,18 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
                     continue;
                 }
 
-                cells.Add(new MarkdownTableCell(ConvertBlocksToInlines(cell)));
+                // Capture the write-back coordinate: the cell's line (segment-
+                // relative here; made document-absolute later by OffsetSourceSpan),
+                // its ordinal in the row, and its OWN raw source bytes (the padded
+                // cell.Span substring). For a PLAIN cell those bytes equal the
+                // original file bytes even when a sibling cell's inline-math token
+                // shifted the row, so the emit-time key matches the write-back key.
+                var cellSource = new MarkdownTableCellSource(
+                    cell.Line,
+                    cellIndex,
+                    ExtractRawCellText(source, cell.Span));
+                cells.Add(new MarkdownTableCell(ConvertBlocksToInlines(cell, source), cellSource));
+                cellIndex++;
             }
 
             if (row.IsHeader)
@@ -207,9 +223,23 @@ public sealed class MarkdigMarkdownDocumentRenderer : IMarkdownDocumentRenderer
         return new MarkdownTableBlock(header, rows);
     }
 
-    private static IReadOnlyList<MarkdownInline> ConvertBlocksToInlines(ContainerBlock container)
+    // The cell's raw bytes as Markdig parsed them, from the inclusive cell.Span
+    // (Start..End). Guards a degenerate/empty span so an empty cell yields "" and
+    // never throws.
+    private static string ExtractRawCellText(string source, SourceSpan span)
     {
-        var blocks = ConvertBlocks(container);
+        var length = span.End - span.Start + 1;
+        if (length <= 0 || span.Start < 0 || span.Start + length > source.Length)
+        {
+            return string.Empty;
+        }
+
+        return source.Substring(span.Start, length);
+    }
+
+    private static IReadOnlyList<MarkdownInline> ConvertBlocksToInlines(ContainerBlock container, string source)
+    {
+        var blocks = ConvertBlocks(container, source);
         if (blocks.Count == 0)
         {
             return Array.Empty<MarkdownInline>();

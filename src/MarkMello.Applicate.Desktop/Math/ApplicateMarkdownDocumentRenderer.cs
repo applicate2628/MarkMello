@@ -107,9 +107,29 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
                     })
                     .ToList()
             },
+            MarkdownTableBlock table => table with
+            {
+                SourceSpan = sourceSpan,
+                // Each cell's Source.SourceLine is segment-relative for the same
+                // reason as TaskSourceLine above; offset it so an editable table
+                // after display math carries the DOCUMENT-absolute cell line that
+                // the write-back's raw whole-document parse expects. CellIndex and
+                // RawText are position-independent and stay verbatim.
+                Header = OffsetTableCells(table.Header, lineOffset),
+                Rows = table.Rows.Select(row => OffsetTableCells(row, lineOffset)).ToList()
+            },
             _ => block with { SourceSpan = sourceSpan }
         };
     }
+
+    private static IReadOnlyList<MarkdownTableCell> OffsetTableCells(
+        IReadOnlyList<MarkdownTableCell> cells,
+        int lineOffset)
+        => cells
+            .Select(cell => cell.Source is { } cellSource
+                ? cell with { Source = cellSource with { SourceLine = cellSource.SourceLine + lineOffset } }
+                : cell)
+            .ToList();
 
     private static MarkdownSourceSpan? OffsetSourceSpan(MarkdownSourceSpan? sourceSpan, int lineOffset)
         => sourceSpan is { } span

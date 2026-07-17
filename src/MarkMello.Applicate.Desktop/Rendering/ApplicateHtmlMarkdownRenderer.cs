@@ -305,7 +305,9 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             context.Html.AppendLine("<thead><tr>");
             foreach (var cell in table.Header)
             {
-                context.Html.Append("<th>");
+                context.Html.Append("<th");
+                AppendEditableCellAttributes(context.Html, cell);
+                context.Html.Append('>');
                 await RenderInlinesAsync(context, cell.Inlines).ConfigureAwait(false);
                 context.Html.AppendLine("</th>");
             }
@@ -319,7 +321,9 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             context.Html.AppendLine("<tr>");
             foreach (var cell in row)
             {
-                context.Html.Append("<td>");
+                context.Html.Append("<td");
+                AppendEditableCellAttributes(context.Html, cell);
+                context.Html.Append('>');
                 await RenderInlinesAsync(context, cell.Inlines).ConfigureAwait(false);
                 context.Html.AppendLine("</td>");
             }
@@ -329,6 +333,42 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
 
         context.Html.AppendLine("</tbody></table>");
         context.Html.AppendLine("</div>");
+    }
+
+    // A PLAIN table cell (all-text inlines) carries dormant write-back handles: the
+    // DOCUMENT-absolute source line, the ordinal cell index, and an identity key of
+    // its RAW cell source via the shared TableCellIdentity routine — the same routine
+    // the write-back verify side uses, so the two cannot diverge. Rich cells (any
+    // non-text inline: math, bold, links, code, <br>) and cells with no captured
+    // Source emit nothing and stay non-editable. Mirrors the data-task-* shape; the
+    // raw text is NOT emitted (only its 8-hex key), keeping tables + minimap small.
+    private static void AppendEditableCellAttributes(StringBuilder html, MarkdownTableCell cell)
+    {
+        if (cell.Source is not { } source || !IsPlainTextCell(cell.Inlines))
+        {
+            return;
+        }
+
+        html.Append(" class=\"mm-editable-cell\" data-mm-cell-line=\"")
+            .Append(source.SourceLine.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .Append("\" data-mm-cell-index=\"")
+            .Append(source.CellIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .Append("\" data-mm-cell-key=\"")
+            .Append(TableCellIdentity.ComputeKey(source.RawText))
+            .Append('"');
+    }
+
+    private static bool IsPlainTextCell(IReadOnlyList<MarkdownInline> inlines)
+    {
+        foreach (var inline in inlines)
+        {
+            if (inline is not MarkdownTextInline)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static async Task RenderImageBlockAsync(

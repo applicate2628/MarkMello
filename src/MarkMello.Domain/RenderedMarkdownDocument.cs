@@ -91,7 +91,37 @@ public sealed record MarkdownTableBlock(
     IReadOnlyList<MarkdownTableCell> Header,
     IReadOnlyList<IReadOnlyList<MarkdownTableCell>> Rows) : MarkdownBlock;
 
-public sealed record MarkdownTableCell(IReadOnlyList<MarkdownInline> Inlines);
+/// <param name="Inlines">The cell's rendered content.</param>
+/// <param name="Source">
+/// Optional write-back coordinate for an editable table cell, captured during
+/// parse. <c>null</c> when the cell was produced without span capture (e.g. the
+/// plain-text fallback or a hand-built test document).
+/// </param>
+public sealed record MarkdownTableCell(
+    IReadOnlyList<MarkdownInline> Inlines,
+    MarkdownTableCellSource? Source = null);
+
+/// <summary>
+/// Write-back coordinate of a table cell, captured at parse time.
+/// </summary>
+/// <param name="SourceLine">
+/// 0-based DOCUMENT-absolute source line of the cell's row. Captured
+/// segment-relative by the parser and made document-absolute by
+/// <c>ApplicateMarkdownDocumentRenderer.OffsetSourceSpan</c> (mirrors
+/// <see cref="MarkdownListItem.TaskSourceLine"/>).
+/// </param>
+/// <param name="CellIndex">0-based ordinal of the cell within its row.</param>
+/// <param name="RawText">
+/// The cell's OWN raw source bytes — the padded <c>cell.Span</c> substring, e.g.
+/// <c>' A '</c> or <c>' a\|b '</c>. For a PLAIN cell this equals the original file
+/// bytes even when a sibling cell's inline-math token shifted the row, so
+/// <c>TableCellIdentity.ComputeKey(RawText)</c> at emit matches the key the
+/// write-back re-derives from a fresh raw parse of the same cell. Carried
+/// in-memory only; never serialized to HTML (the emitted attributes are
+/// line/index/key — the raw text is NOT emitted, to keep tables and the minimap
+/// clone small).
+/// </param>
+public sealed record MarkdownTableCellSource(int SourceLine, int CellIndex, string RawText);
 
 /// <summary>
 /// Block-level image. Emitted when a markdown source paragraph contains
