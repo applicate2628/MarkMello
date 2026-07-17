@@ -129,6 +129,41 @@ public class DocumentLoadCurrencyTests
         Assert.Equal("NEW", vm.Document?.Content);
     }
 
+    // ---- FALSIFICATION PROBES: the two angles SPLIT on whether close/create must bump the epoch.
+    // fable said exclude (those instances are runtime-unproven); sol said include (they mutate
+    // current-document identity). Neither is evidence. These decide it with data: if a load in
+    // flight republishes over a close/create, the gap is REAL.
+
+    [Fact]
+    public async Task ClosingWhileALoadIsInFlightDoesNotResurrectTheDocument()
+    {
+        var (vm, loader) = Create();
+        loader.Sources["doomed.md"] = Source("doomed.md", "DOOMED");
+        loader.GatedPaths.Add("doomed.md");
+
+        var load = vm.OpenPathAsync("doomed.md");
+        await vm.CloseFileCommand.ExecuteAsync(null);     // user closes while the read is in flight
+        loader.Release("doomed.md");
+        await load;
+
+        Assert.Null(vm.Document);                          // the closed document must NOT come back
+    }
+
+    [Fact]
+    public async Task CreatingANewDocumentWhileALoadIsInFlightIsNotClobbered()
+    {
+        var (vm, loader) = Create();
+        loader.Sources["old.md"] = Source("old.md", "OLD");
+        loader.GatedPaths.Add("old.md");
+
+        var load = vm.OpenPathAsync("old.md");
+        await vm.CreateNewDocumentCommand.ExecuteAsync(null);
+        loader.Release("old.md");
+        await load;
+
+        Assert.Null(vm.Document);                          // the new blank document must survive
+    }
+
     private static MarkdownSource Source(string path, string content) => new(path, path, content);
 
     private static (MainWindowViewModel Vm, GatedDocumentLoader Loader) Create()

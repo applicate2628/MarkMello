@@ -1657,6 +1657,11 @@ public partial class MainWindowViewModel : ObservableObject
 
     private void CreateNewDocumentCore()
     {
+        // Creating a blank document is a publish of current-document identity, so it invalidates
+        // in-flight loads. Runtime-proven (unit, deterministic gate): without this a load still in
+        // flight resumes and clobbers the new blank document.
+        _documentLoadEpoch++;
+
         _pendingDeferredRenderedDocument = null;
         Document = null;
         RenderedDocument = RenderedMarkdownDocument.Empty;
@@ -1694,6 +1699,11 @@ public partial class MainWindowViewModel : ObservableObject
 
     private void CloseFileCore()
     {
+        // Same as CreateNewDocumentCore: closing publishes current-document identity (to "none").
+        // Runtime-proven (unit, deterministic gate): without this a load still in flight resumes
+        // and RESURRECTS the document the user just closed.
+        _documentLoadEpoch++;
+
         CloseOverlayCore();
         IsEditMode = false;
         EditorSession = null;
