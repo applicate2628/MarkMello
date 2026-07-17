@@ -2530,13 +2530,21 @@ public sealed class ApplicateMainWindow : MainWindow
 
             if (args.PropertyName == nameof(MainWindowViewModel.IsDirty))
             {
-                // Mirror the active document's dirty state onto its tab so the
-                // strip can paint a dirty marker (OpenDocument.IsModified was
-                // otherwise never set true).
-                var active = openDocs.ActiveDocument;
-                if (active is not null)
+                // Mirror the dirty state onto the tab of the document the editor
+                // session actually owns, NOT blindly onto ActiveDocument. VM.IsDirty
+                // describes the doc at EditorSession.CurrentPath, which can differ from
+                // ActiveDocument while a dirty-switch prompt is open (the service commits
+                // the click to the target tab before the prompt resolves). Mirroring onto
+                // ActiveDocument then clears/sets the marker on the WRONG tab: after a
+                // Save/Discard-resolved switch, the previous tab's ● would never clear
+                // because SetModified(newActive, false) no-ops. Resolve by the session's
+                // path and fall back to ActiveDocument only when there is no session.
+                var target = viewModel.EditorSession?.CurrentPath is { } sessionPath
+                    ? FindOpenDocumentByPath(openDocs, sessionPath) ?? openDocs.ActiveDocument
+                    : openDocs.ActiveDocument;
+                if (target is not null)
                 {
-                    openDocs.SetModified(active, viewModel.IsDirty);
+                    openDocs.SetModified(target, viewModel.IsDirty);
                 }
                 return;
             }
