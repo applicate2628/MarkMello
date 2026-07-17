@@ -823,13 +823,9 @@ internal sealed class ApplicateTabsView : UserControl
     {
         // Snapshot before mutating; the collection changes underneath as
         // each Close fires CollectionChanged → Rebuild → menu rebuild.
-        var toClose = _openDocsService.OpenDocuments
+        CloseSet(_openDocsService.OpenDocuments
             .Where(d => !ReferenceEquals(d, keep))
-            .ToList();
-        foreach (var doc in toClose)
-        {
-            _openDocsService.Close(doc);
-        }
+            .ToList());
     }
 
     private void CloseToRight(OpenDocument anchor)
@@ -839,13 +835,9 @@ internal sealed class ApplicateTabsView : UserControl
         {
             return;
         }
-        var toClose = _openDocsService.OpenDocuments
+        CloseSet(_openDocsService.OpenDocuments
             .Skip(anchorIndex + 1)
-            .ToList();
-        foreach (var doc in toClose)
-        {
-            _openDocsService.Close(doc);
-        }
+            .ToList());
     }
 
     private void CloseToLeft(OpenDocument anchor)
@@ -855,22 +847,57 @@ internal sealed class ApplicateTabsView : UserControl
         {
             return;
         }
-        var toClose = _openDocsService.OpenDocuments
+        CloseSet(_openDocsService.OpenDocuments
             .Take(anchorIndex)
-            .ToList();
-        foreach (var doc in toClose)
-        {
-            _openDocsService.Close(doc);
-        }
+            .ToList());
     }
 
     private void CloseAll()
     {
-        var toClose = _openDocsService.OpenDocuments.ToList();
-        foreach (var doc in toClose)
+        CloseSet(_openDocsService.OpenDocuments.ToList());
+    }
+
+    // Close a bulk set, routing through the VM's unsaved-changes prompt when the ACTIVE document is
+    // in the set (only the active doc can be dirty — its editor session owns the buffer). Without
+    // this, the four bulk closes called the service directly: the active dirty doc was removed with
+    // no prompt, the session was persisted empty via OpenDocuments.CollectionChanged BEFORE the
+    // downstream prompt appeared, and Cancel restored nothing (CloseFileAsync passes no onCancel).
+    // Putting the removal INSIDE the gated closure means Cancel removes nothing and no empty session
+    // is persisted. Closing docs other than the active one carries no dirty risk and runs directly.
+    // See BulkCloseDirtyBypassTests. The Contains guard tolerates the prompt-delay window in which a
+    // snapshot doc may already have been closed (Close throws on an absent doc).
+    private void CloseSet(System.Collections.Generic.IReadOnlyList<MarkMello.Applicate.Desktop.Editing.OpenDocument> toClose)
+    {
+        if (toClose.Count == 0)
         {
-            _openDocsService.Close(doc);
+            return;
         }
+
+        void CloseDirect()
+        {
+            foreach (var doc in toClose)
+            {
+                if (_openDocsService.OpenDocuments.Contains(doc))
+                {
+                    _openDocsService.Close(doc);
+                }
+            }
+        }
+
+        var closingActive = toClose.Any(d => ReferenceEquals(d, _openDocsService.ActiveDocument));
+        if (closingActive
+            && TopLevel.GetTopLevel(this)?.DataContext
+                is MarkMello.Presentation.ViewModels.MainWindowViewModel vm)
+        {
+            _ = vm.RequestBulkCloseWithDirtyCheckAsync(() =>
+            {
+                CloseDirect();
+                return System.Threading.Tasks.Task.CompletedTask;
+            });
+            return;
+        }
+
+        CloseDirect();
     }
 
     private async System.Threading.Tasks.Task CopyPathAsync(OpenDocument doc)

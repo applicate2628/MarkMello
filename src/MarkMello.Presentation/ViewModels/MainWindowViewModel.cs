@@ -1011,6 +1011,20 @@ public partial class MainWindowViewModel : ObservableObject
     public Task RequestDocumentSwitchWithDirtyCheckAsync(Func<Task> switchAction, Action onCancel)
         => RunWithDirtyCheckAsync(PendingDirtyActionKind.OpenFile, switchAction, onCancel);
 
+    /// <summary>
+    /// Route a bulk tab close (Close All / Others / To-Right / To-Left) through the same
+    /// unsaved-changes prompt used by single close. The dirty document in a bulk set is always the
+    /// active one (its editor session owns the buffer), so a clean active tab runs
+    /// <paramref name="closeAction"/> immediately (unchanged behavior). A dirty active tab queues the
+    /// whole close behind Save / Discard / Cancel — and because the removal lives INSIDE
+    /// <paramref name="closeAction"/>, Cancel removes nothing and the session is never persisted empty
+    /// before the prompt resolves. Without this, the bulk closes called the service directly, so the
+    /// documents were gone (and the session persisted empty via OpenDocuments.CollectionChanged)
+    /// before the prompt appeared, and Cancel restored nothing. See BulkCloseDirtyBypassTests.
+    /// </summary>
+    public Task RequestBulkCloseWithDirtyCheckAsync(Func<Task> closeAction)
+        => RunWithDirtyCheckAsync(PendingDirtyActionKind.CloseFile, closeAction);
+
     [RelayCommand]
     private void CycleTheme()
     {

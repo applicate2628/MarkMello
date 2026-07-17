@@ -750,6 +750,72 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task BulkCloseWhenActiveDirtyQueuesBehindPromptAndCancelClosesNothing()
+    {
+        // A0-bis: the removal must live INSIDE the gated closure so Cancel closes nothing. Without
+        // the fix the four bulk closes removed the active dirty doc directly, before any prompt.
+        var harness = CreateHarness();
+        await harness.ViewModel.CreateNewDocumentCommand.ExecuteAsync(null);
+        harness.ViewModel.EditorSession!.SourceText = "# unsaved bulk";
+
+        var closed = false;
+        await harness.ViewModel.RequestBulkCloseWithDirtyCheckAsync(() =>
+        {
+            closed = true;
+            return Task.CompletedTask;
+        });
+
+        // Dirty active -> queued behind the prompt; the close closure has NOT run yet.
+        Assert.True(harness.ViewModel.IsDirtyPromptOpen);
+        Assert.False(closed);
+
+        harness.ViewModel.CancelDirtyPromptCommand.Execute(null);
+
+        Assert.False(harness.ViewModel.IsDirtyPromptOpen);
+        Assert.False(closed); // Cancel closed nothing
+    }
+
+    [Fact]
+    public async Task BulkCloseWhenActiveDirtyRunsTheCloseOnDiscard()
+    {
+        var harness = CreateHarness();
+        await harness.ViewModel.CreateNewDocumentCommand.ExecuteAsync(null);
+        harness.ViewModel.EditorSession!.SourceText = "# unsaved bulk";
+
+        var closed = false;
+        await harness.ViewModel.RequestBulkCloseWithDirtyCheckAsync(() =>
+        {
+            closed = true;
+            return Task.CompletedTask;
+        });
+        Assert.False(closed);
+
+        await harness.ViewModel.ConfirmDirtyDiscardCommand.ExecuteAsync(null);
+
+        Assert.False(harness.ViewModel.IsDirtyPromptOpen);
+        Assert.True(closed); // Discard proceeded with the bulk close
+    }
+
+    [Fact]
+    public async Task BulkCloseWhenNotDirtyRunsImmediatelyWithNoPrompt()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "clean.md");
+        harness.Loader.Sources[path] = CreateSource(path, "clean body");
+        await harness.ViewModel.OpenPathAsync(path); // viewer, not dirty
+
+        var closed = false;
+        await harness.ViewModel.RequestBulkCloseWithDirtyCheckAsync(() =>
+        {
+            closed = true;
+            return Task.CompletedTask;
+        });
+
+        Assert.False(harness.ViewModel.IsDirtyPromptOpen);
+        Assert.True(closed); // clean -> ran immediately
+    }
+
+    [Fact]
     public async Task CloseFileCommandReturnsViewingDocumentToWelcome()
     {
         var harness = CreateHarness();
