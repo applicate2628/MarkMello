@@ -51,6 +51,7 @@ public sealed partial class JsonApplicateSessionStore : IApplicateSessionStore
             {
                 OpenPaths = model.OpenPaths ?? new List<string>(),
                 ActivePath = string.IsNullOrWhiteSpace(model.ActivePath) ? null : model.ActivePath,
+                RecentPaths = model.RecentPaths ?? new List<string>(),
             };
             return ValueTask.FromResult(session);
         }
@@ -79,6 +80,7 @@ public sealed partial class JsonApplicateSessionStore : IApplicateSessionStore
             {
                 OpenPaths = session.OpenPaths,
                 ActivePath = session.ActivePath,
+                RecentPaths = session.RecentPaths,
             };
             var json = JsonSerializer.Serialize(model, SessionJsonContext.Default.SessionFileModel);
 
@@ -115,6 +117,8 @@ public sealed partial class JsonApplicateSessionStore : IApplicateSessionStore
         public List<string>? OpenPaths { get; set; }
 
         public string? ActivePath { get; set; }
+
+        public List<string>? RecentPaths { get; set; }
     }
 
     [JsonSerializable(typeof(SessionFileModel))]

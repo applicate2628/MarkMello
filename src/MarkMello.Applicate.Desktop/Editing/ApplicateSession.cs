@@ -14,7 +14,46 @@ public sealed class ApplicateSession
 
     public string? ActivePath { get; init; }
 
+    /// <summary>
+    /// Recently opened document paths, most-recent-first, deduplicated, capped. Distinct from
+    /// OpenPaths (which are the CURRENTLY-open tabs): a path stays here after its tab is closed, so
+    /// the welcome screen can offer it for re-opening.
+    /// </summary>
+    public List<string> RecentPaths { get; init; } = new();
+
+    public const int MaxRecentPaths = 10;
+
     public static ApplicateSession Empty { get; } = new();
+
+    /// <summary>
+    /// Fold a just-opened path into a recent list: move-to-front, case-insensitive dedup, cap. Pure
+    /// so the maintenance logic is unit-testable independent of the store or the UI.
+    /// </summary>
+    public static List<string> BuildRecentPaths(IEnumerable<string> existing, string openedPath)
+    {
+        var result = new List<string>();
+        if (!string.IsNullOrWhiteSpace(openedPath))
+        {
+            result.Add(openedPath);
+        }
+
+        foreach (var path in existing)
+        {
+            if (string.IsNullOrWhiteSpace(path)
+                || result.Exists(p => string.Equals(p, path, System.StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            result.Add(path);
+            if (result.Count >= MaxRecentPaths)
+            {
+                break;
+            }
+        }
+
+        return result;
+    }
 
     public string? GetStartupDocumentPath()
     {

@@ -69,6 +69,44 @@
                    VerticalAlignment="Center" />
       </StackPanel>
 
+      <!-- D11 Recent files: shown only when the persisted recent list is non-empty. -->
+      <StackPanel Spacing="2"
+                  Margin="0,30,0,0"
+                  IsVisible="{Binding HasRecentFiles}">
+        <TextBlock Text="{Binding RecentFilesHeader}"
+                   FontFamily="{DynamicResource MmDocumentSansFontFamily}"
+                   FontSize="11"
+                   FontWeight="SemiBold"
+                   Foreground="{DynamicResource MmTextFaintBrush}"
+                   Margin="10,0,0,4" />
+        <ItemsControl ItemsSource="{Binding RecentFiles}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:RecentFileItem">
+              <Button Classes="welcome-recent"
+                      HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Left"
+                      Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).OpenRecentFileCommand}"
+                      CommandParameter="{Binding Path}"
+                      ToolTip.Tip="{Binding Path}">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Text="{Binding FileName}"
+                             FontFamily="{DynamicResource MmDocumentSerifFontFamily}"
+                             FontSize="13"
+                             Foreground="{DynamicResource MmTextBrush}"
+                             TextTrimming="CharacterEllipsis" />
+                  <TextBlock Text="{Binding DirectoryLabel}"
+                             FontFamily="{DynamicResource MmDocumentSansFontFamily}"
+                             FontSize="11"
+                             Foreground="{DynamicResource MmTextFaintBrush}"
+                             TextTrimming="CharacterEllipsis"
+                             VerticalAlignment="Center" />
+                </StackPanel>
+              </Button>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </StackPanel>
+
     </StackPanel>
   </Grid>
 

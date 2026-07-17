@@ -2772,6 +2772,11 @@ public sealed class ApplicateMainWindow : MainWindow
         var sessionStore = App.Services?.GetService<IApplicateSessionStore>();
         var isRestoring = sessionStore is not null;
 
+        // D11 Recent files: accumulate opened document paths (most-recent-first, dedup, capped)
+        // across sessions. Seeded from the restored session below, folded on each doc open, persisted
+        // by SaveSession, and mirrored to the VM so the welcome screen can offer them for re-opening.
+        var recentPaths = new List<string>();
+
         void SaveSession()
         {
             if (isRestoring || sessionStore is null)
@@ -2798,11 +2803,38 @@ public sealed class ApplicateMainWindow : MainWindow
                 OpenPaths = openPaths,
                 ActivePath = PathIfStillOpen(openDocs.ActiveDocument?.FilePath)
                     ?? PathIfStillOpen(lastActivePath),
+                RecentPaths = recentPaths,
             };
             _ = sessionStore.SaveAsync(snapshot).AsTask();
         }
 
-        ((INotifyCollectionChanged)openDocs.OpenDocuments).CollectionChanged += (_, _) => SaveSession();
+        // Fold a just-opened document into the recent list and mirror it to the VM. Called on every
+        // document add (below) and once per restored open path.
+        void NoteRecentDocument(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            var updated = ApplicateSession.BuildRecentPaths(recentPaths, path);
+            recentPaths.Clear();
+            recentPaths.AddRange(updated);
+            viewModel.SetRecentFiles(recentPaths);
+        }
+
+        ((INotifyCollectionChanged)openDocs.OpenDocuments).CollectionChanged += (_, e) =>
+        {
+            if (e.NewItems is not null)
+            {
+                foreach (var added in e.NewItems.OfType<OpenDocument>())
+                {
+                    NoteRecentDocument(added.FilePath);
+                }
+            }
+
+            SaveSession();
+        };
         openDocs.ActiveDocumentChanged += (_, _) =>
         {
             if (openDocs.ActiveDocument is not null)
@@ -2826,6 +2858,19 @@ public sealed class ApplicateMainWindow : MainWindow
                     saved = ApplicateSession.Empty;
                 }
             }
+
+            // Seed the recent list from the persisted history (most-recent-first already), then mirror
+            // to the VM so the welcome screen shows it immediately on a cold start.
+            recentPaths.Clear();
+            foreach (var recent in saved.RecentPaths)
+            {
+                if (!string.IsNullOrWhiteSpace(recent)
+                    && !recentPaths.Exists(p => string.Equals(p, recent, System.StringComparison.OrdinalIgnoreCase)))
+                {
+                    recentPaths.Add(recent);
+                }
+            }
+            viewModel.SetRecentFiles(recentPaths);
 
             var argvPath = App.Services?.GetService<ICommandLineActivation>()?.GetActivationFilePath();
             if (string.IsNullOrWhiteSpace(argvPath))

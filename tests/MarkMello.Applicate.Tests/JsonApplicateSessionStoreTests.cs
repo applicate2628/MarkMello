@@ -60,6 +60,27 @@ public sealed class JsonApplicateSessionStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task RecentPathsRoundtrip()
+    {
+        // D11: the persisted recent list must survive save/load. A legacy session file with no
+        // RecentPaths key loads as an empty list (back-compat), covered by the null-tolerant read.
+        var store = new JsonApplicateSessionStore(_tempRoot);
+        var session = new ApplicateSession
+        {
+            OpenPaths = new List<string> { @"C:\a\one.md" },
+            ActivePath = @"C:\a\one.md",
+            RecentPaths = new List<string> { @"C:\a\one.md", @"C:\a\old.md" },
+        };
+
+        await store.SaveAsync(session);
+        var loaded = await store.LoadAsync();
+
+        Assert.Equal(2, loaded.RecentPaths.Count);
+        Assert.Equal(@"C:\a\one.md", loaded.RecentPaths[0]);
+        Assert.Equal(@"C:\a\old.md", loaded.RecentPaths[1]);
+    }
+
+    [Fact]
     public void StartupDocumentPathPrefersActivePathThenFirstOpenPath()
     {
         var session = new ApplicateSession

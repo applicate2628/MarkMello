@@ -10,6 +10,7 @@ public sealed class LocalizationService : ObservableObject, ILocalizationService
     {
         ["WelcomeTagline"] = "A quiet place to read Markdown.",
         ["WelcomeCreateMd"] = "Create MD",
+        ["WelcomeRecentHeader"] = "Recent",
         ["WelcomeOpenFile"] = "Open file...",
         ["WelcomeDropHint"] = "or drop a .md file anywhere",
         ["TitleBarMinimize"] = "Minimize",
@@ -218,6 +219,7 @@ public sealed class LocalizationService : ObservableObject, ILocalizationService
     {
         ["WelcomeTagline"] = "Тихое место для чтения Markdown.",
         ["WelcomeCreateMd"] = "Создать MD",
+        ["WelcomeRecentHeader"] = "Недавние",
         ["WelcomeOpenFile"] = "Открыть файл...",
         ["WelcomeDropHint"] = "или перетащите сюда .md файл",
         ["TitleBarMinimize"] = "Свернуть",

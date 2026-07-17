@@ -207,6 +207,18 @@
     <Setter Property="Stroke" Value="{DynamicResource MmTextBrush}" />
   </Style>
 
+  <!-- Recent-file row (welcome screen): quiet by default, accent-soft on hover -->
+  <Style Selector="Button.welcome-recent">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="CornerRadius" Value="5" />
+    <Setter Property="Padding" Value="10,5" />
+    <Setter Property="Cursor" Value="Hand" />
+  </Style>
+  <Style Selector="Button.welcome-recent:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource MmSurfaceHoverBrush}" />
+  </Style>
+
   <!-- Keyboard hint pill -->
   <Style Selector="Border.kbd">
     <Setter Property="Background" Value="{DynamicResource MmSurfaceBrush}" />
