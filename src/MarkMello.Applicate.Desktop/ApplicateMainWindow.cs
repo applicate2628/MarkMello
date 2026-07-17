@@ -928,7 +928,7 @@ public sealed class ApplicateMainWindow : MainWindow
             BorderThickness = new Thickness(1),
             Child = summaryRow,
         };
-        border.Bind(Border.BackgroundProperty, border.GetResourceObservable("MmSurfaceElevatedBrush"));
+        border.Bind(Border.BackgroundProperty, border.GetResourceObservable("MmElevatedBackgroundBrush"));
         border.Bind(Border.BorderBrushProperty, border.GetResourceObservable("MmAccentSoftBrush"));
         return border;
     }

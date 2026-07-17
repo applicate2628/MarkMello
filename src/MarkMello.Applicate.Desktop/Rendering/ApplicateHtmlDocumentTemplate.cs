@@ -107,6 +107,11 @@ public static class ApplicateHtmlDocumentTemplate
             // Cleaner than per-selector regex prefixing and handles all hljs CSS shapes uniformly.
             style.Append("\n[data-theme=\"light\"] { ").Append(hljsAssets.LightCss).Append(" }");
             style.Append("\n[data-theme=\"dark\"] { ").Append(hljsAssets.DarkCss).Append(" }");
+            // classic-white writes data-theme="classic-white" (renderer.ts applyTheme), a value the
+            // light/dark wrappers above do not match — so without this every code block rendered
+            // under the classic-white theme had NO syntax highlighting. classic-white is a
+            // white-background theme, so the light hljs palette is the correct fit.
+            style.Append("\n[data-theme=\"classic-white\"] { ").Append(hljsAssets.LightCss).Append(" }");
         }
 
         var script = new StringBuilder();
