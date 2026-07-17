@@ -320,6 +320,24 @@ a:hover {
   border-radius: 2px;
 }
 
+/* D12 reduced-motion policy. The document surface carries only two motions —
+   the reading-width handle's 160ms width/opacity transition and the TOC-click
+   smooth scroll — but a policy is future-proof: it neutralises any current or
+   later transition/animation and forces instant scrolling for a reader who has
+   asked the OS for reduced motion. The JS smooth-scroll (scrollIntoView with an
+   explicit behavior:"smooth") overrides scroll-behavior, so it is gated
+   separately at its call site in renderer.ts; this block covers the CSS side. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* Document heading scale (editorial). Headings carried no explicit rules, so UA
    defaults made h5 (0.83em) and h6 (0.67em) SMALLER than body text — a heading
    smaller than the prose it heads. This sets an explicit editorial scale where

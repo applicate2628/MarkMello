@@ -3658,7 +3658,8 @@ function handleHostMessage(raw: unknown): void {
       if (message.id === lastPostedActiveHeadingId) {
         postHostMessage({ type: "active-heading-changed", id: message.id });
       }
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView({ behavior: reduceMotion ? ("instant" as ScrollBehavior) : "smooth", block: "start" });
     }
     return;
   }

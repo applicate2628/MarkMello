@@ -4163,7 +4163,8 @@
         if (message.id === lastPostedActiveHeadingId) {
           postHostMessage({ type: "active-heading-changed", id: message.id });
         }
-        target.scrollIntoView({ behavior: "smooth", block: "start" });
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        target.scrollIntoView({ behavior: reduceMotion ? "instant" : "smooth", block: "start" });
       }
       return;
     }
