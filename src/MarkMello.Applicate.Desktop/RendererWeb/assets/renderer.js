@@ -4160,6 +4160,9 @@
     if (message.type === "scroll-to-heading") {
       const target = document.getElementById(message.id);
       if (target) {
+        if (message.id === lastPostedActiveHeadingId) {
+          postHostMessage({ type: "active-heading-changed", id: message.id });
+        }
         target.scrollIntoView({ behavior: "smooth", block: "start" });
       }
       return;

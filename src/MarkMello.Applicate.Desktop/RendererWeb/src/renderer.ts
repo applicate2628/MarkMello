@@ -3637,6 +3637,27 @@ function handleHostMessage(raw: unknown): void {
     // exact heading the user clicked in the host-side TOC panel.
     const target = document.getElementById(message.id);
     if (target) {
+      // The host arms a one-shot latch on the clicked id and swallows every
+      // active-heading update until that id comes back (MainWindowViewModel
+      // .TableOfContents.cs:115 / :133-139) -- that is how it avoids flickering
+      // the TOC through the headings the smooth scroll passes over.
+      //
+      // But when the clicked heading is ALREADY the active one, scrollIntoView
+      // moves nothing, so no intersection changes, so the observer below never
+      // runs and nobody ever posts that id back. The latch then stays armed for
+      // good and the TOC highlight stops following the reader.
+      //
+      // Runtime-proven: clicking the already-active heading produced 0 observer
+      // callbacks and 0 posts, while clicking any other heading produced 4 of
+      // each (.scratch/bug9/toc_probe.py). Note this is NOT the dedup at the
+      // observer suppressing a post -- the observer is never invoked at all, so
+      // clearing lastPostedActiveHeadingId would fix nothing.
+      //
+      // So answer directly for exactly that edge: the request IS the current
+      // state, and only this handler can say so.
+      if (message.id === lastPostedActiveHeadingId) {
+        postHostMessage({ type: "active-heading-changed", id: message.id });
+      }
       target.scrollIntoView({ behavior: "smooth", block: "start" });
     }
     return;
