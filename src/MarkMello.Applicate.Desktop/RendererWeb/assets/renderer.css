@@ -243,9 +243,83 @@ body > main.mm-document > .mm-warmed {
 }
 
 a {
-  color: inherit;
-  text-decoration-color: color-mix(in srgb, currentColor 42%, transparent);
+  color: var(--mm-accent);
+  text-decoration-color: color-mix(in srgb, var(--mm-accent) 42%, transparent);
   text-underline-offset: 0.18em;
+}
+
+a:hover {
+  text-decoration-color: currentColor;
+}
+
+::selection {
+  background: var(--mm-accent-soft);
+  color: var(--mm-document-text);
+}
+
+:focus-visible {
+  outline: 2px solid var(--mm-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Document heading scale (editorial). Headings carried no explicit rules, so UA
+   defaults made h5 (0.83em) and h6 (0.67em) SMALLER than body text — a heading
+   smaller than the prose it heads. This sets an explicit editorial scale where
+   every level is >= body: sizes are em-relative to --mm-document-font-size so
+   they track the reader's chosen size, and h5/h6 differ by weight and case
+   rather than shrinking below the body. */
+.mm-document h1,
+.mm-document h2,
+.mm-document h3,
+.mm-document h4,
+.mm-document h5,
+.mm-document h6 {
+  font-family: var(--mm-document-font-family);
+  line-height: 1.25;
+  text-wrap: balance;
+  margin: 1.5em 0 0.5em;
+  font-weight: 600;
+}
+
+.mm-document h1 {
+  font-size: 2.1em;
+  font-weight: 700;
+  letter-spacing: -0.012em;
+  margin-top: 1.2em;
+}
+
+.mm-document h2 {
+  font-size: 1.65em;
+  font-weight: 700;
+  letter-spacing: -0.008em;
+  margin-top: 1.6em;
+}
+
+.mm-document h3 {
+  font-size: 1.33em;
+}
+
+.mm-document h4 {
+  font-size: 1.1em;
+}
+
+.mm-document h5 {
+  font-size: 1em;
+  font-weight: 700;
+}
+
+.mm-document h6 {
+  font-size: 1em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--mm-accent);
+}
+
+/* The first block in the document must not push down from the top edge. */
+.mm-document > :first-child {
+  margin-top: 0;
 }
 
 code {
