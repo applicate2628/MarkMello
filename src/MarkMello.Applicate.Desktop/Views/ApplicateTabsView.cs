@@ -669,9 +669,7 @@ internal sealed class ApplicateTabsView : UserControl
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(10, 0, 4, 0),
             FontWeight = isActive ? FontWeight.SemiBold : FontWeight.Normal,
-            Foreground = isActive
-                ? ResolveBrush("MmTextBrush")
-                : ResolveBrush("MmTextBrush")
+            Foreground = ResolveBrush("MmTextBrush")
         };
 
         var closeButton = new Button
@@ -701,9 +699,16 @@ internal sealed class ApplicateTabsView : UserControl
         // invisible always-SemiBold sizer behind the live label, so selecting a
         // tab no longer widens it and shifts the whole strip. The live label
         // keeps its Normal/SemiBold weight for the visual accent.
+        //
+        // The sizer must also reserve the DIRTY-MARKER width: the live label
+        // prepends "●  " when the document is modified, so a sizer holding only
+        // DisplayName was narrower than a dirty label — becoming dirty then
+        // widened the tab and shifted the whole strip. Reserve the widest form
+        // (marker + name) unconditionally so toggling the dirty dot never
+        // re-lays-out the strip.
         var labelSizer = new TextBlock
         {
-            Text = doc.DisplayName,
+            Text = "●  " + doc.DisplayName,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(10, 0, 4, 0),
             FontWeight = FontWeight.SemiBold,

@@ -2,6 +2,8 @@ using System.Reflection;
 using System.Threading;
 using Avalonia.Controls;
 using Avalonia.Headless;
+using System.Linq;
+using Avalonia.VisualTree;
 using MarkMello.Applicate.Desktop.Editing;
 using MarkMello.Applicate.Desktop.Views;
 using Xunit;
@@ -89,6 +91,36 @@ public sealed class ApplicateTabsViewTests : IDisposable
     {
         var menu = InvokePrivate<ContextMenu>(view, "BuildTabContextMenu", doc);
         return menu.Items.OfType<MenuItem>().ToList();
+    }
+
+    [Fact]
+    public async Task TabLabelSizerReservesTheDirtyMarkerWidthSoTheStripDoesNotShift()
+    {
+        // D5: the invisible label sizer reserves the tab's label width so weight/dirty changes do
+        // not re-lay-out the strip. It must include the "25CF  " dirty marker the live label
+        // prepends when modified; otherwise becoming dirty widens the tab past the sizer and shifts
+        // the whole strip. Pin: the sizer text carries the marker regardless of IsModified.
+        var service = new OpenDocumentsService();
+        var doc = await OpenTempAsync(service, "sizer.md");
+
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        string? sizerText = null;
+        await session.Dispatch(() =>
+        {
+            var view = new ApplicateTabsView(service);
+            var buildTab = typeof(ApplicateTabsView).GetMethod(
+                "BuildTab", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(buildTab);
+            var tab = (Control)buildTab!.Invoke(view, new object?[] { doc })!;
+            var sizer = tab.GetVisualDescendants()
+                .OfType<TextBlock>()
+                .FirstOrDefault(t => t.Opacity == 0);
+            sizerText = sizer?.Text;
+        }, CancellationToken.None);
+
+        Assert.NotNull(sizerText);
+        Assert.StartsWith("●", sizerText); // the "●" dirty marker
+        Assert.Contains("sizer.md", sizerText);
     }
 
     private static void InvokePrivate(object target, string methodName, params object?[] args)
