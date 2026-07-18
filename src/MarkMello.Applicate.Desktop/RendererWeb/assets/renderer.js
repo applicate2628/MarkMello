@@ -2024,6 +2024,21 @@
     }
     hostWindow.invokeCSharpAction?.(serialized);
   }
+  function getShellInitFailureMessage(reason) {
+    if (typeof reason === "string") {
+      return reason.substring(0, 200) || void 0;
+    }
+    if (reason instanceof Error) {
+      return reason.message.substring(0, 200) || void 0;
+    }
+    if (reason !== null && typeof reason === "object" && "message" in reason) {
+      const message = reason.message;
+      if (typeof message === "string") {
+        return message.substring(0, 200) || void 0;
+      }
+    }
+    return void 0;
+  }
   function postDebugLog(text) {
     postHostMessage({ type: "debug-log", text });
   }
@@ -5151,6 +5166,26 @@
     });
   });
   document.addEventListener("DOMContentLoaded", () => {
+    let shellReadyPosted = false;
+    const reportShellInitFailure = (reason) => {
+      if (shellReadyPosted) {
+        return;
+      }
+      const message = getShellInitFailureMessage(reason);
+      const failure = {
+        type: "shell-init-failed"
+      };
+      if (message !== void 0) {
+        failure.message = message;
+      }
+      postHostMessage(failure);
+    };
+    window.addEventListener("error", (event) => {
+      reportShellInitFailure(event.message);
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      reportShellInitFailure(event.reason);
+    });
     emitMark("mm-doc-loaded");
     postPerfMark("mm-doc-loaded");
     requestAnimationFrame(() => {
@@ -5173,6 +5208,7 @@
       type: "document-ready",
       mathCount: document.querySelectorAll("[data-tex]").length
     });
+    shellReadyPosted = true;
     postScroll();
     const documentElement = document.querySelector(".mm-document");
     if (documentElement) {

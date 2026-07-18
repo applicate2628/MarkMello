@@ -57,6 +57,7 @@ export type HeadingPayload = {
 
 export type RendererMessage =
   | { type: "document-ready"; mathCount: number }
+  | { type: "shell-init-failed"; message?: string }
   | { type: "layout-ready"; scrollTop: number; scrollHeight: number; clientHeight: number; cached?: boolean; renderId?: number | null }
   | { type: "post-ready-enhancements-complete"; renderId?: number; hasMermaid: boolean; hasHljs: boolean }
   | { type: "theme-applied"; theme: RendererTheme; requestId: number }
@@ -207,6 +208,7 @@ const STR_OPT_NULLABLE: IpcFieldDescriptor = { kind: "string", optional: true, n
 
 export const RENDERER_MESSAGE_SHAPES = {
   "document-ready": { type: STR, mathCount: NUM },
+  "shell-init-failed": { type: STR, message: STR_OPT },
   "layout-ready": { type: STR, scrollTop: NUM, scrollHeight: NUM, clientHeight: NUM, cached: BOOL_OPT, renderId: NUM_OPT_NULLABLE },
   "post-ready-enhancements-complete": { type: STR, renderId: NUM_OPT_NULLABLE, hasMermaid: BOOL, hasHljs: BOOL },
   "theme-applied": { type: STR, theme: STR, requestId: NUM },

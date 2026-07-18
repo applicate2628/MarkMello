@@ -584,6 +584,25 @@ function postHostMessage(message: RendererMessage): void {
   hostWindow.invokeCSharpAction?.(serialized);
 }
 
+function getShellInitFailureMessage(reason: unknown): string | undefined {
+  if (typeof reason === "string") {
+    return reason.substring(0, 200) || undefined;
+  }
+
+  if (reason instanceof Error) {
+    return reason.message.substring(0, 200) || undefined;
+  }
+
+  if (reason !== null && typeof reason === "object" && "message" in reason) {
+    const message = (reason as { message?: unknown }).message;
+    if (typeof message === "string") {
+      return message.substring(0, 200) || undefined;
+    }
+  }
+
+  return undefined;
+}
+
 function postDebugLog(text: string): void {
   postHostMessage({ type: "debug-log", text });
 }
@@ -4871,6 +4890,29 @@ document.addEventListener("securitypolicyviolation", (e) => {
 });
 
 document.addEventListener("DOMContentLoaded", () => {
+  let shellReadyPosted = false;
+  const reportShellInitFailure = (reason: unknown): void => {
+    if (shellReadyPosted) {
+      return;
+    }
+
+    const message = getShellInitFailureMessage(reason);
+    const failure: Extract<RendererMessage, { type: "shell-init-failed" }> = {
+      type: "shell-init-failed",
+    };
+    if (message !== undefined) {
+      failure.message = message;
+    }
+    postHostMessage(failure);
+  };
+
+  window.addEventListener("error", (event) => {
+    reportShellInitFailure(event.message);
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    reportShellInitFailure(event.reason);
+  });
+
   emitMark("mm-doc-loaded");
   postPerfMark("mm-doc-loaded");
   requestAnimationFrame(() => {
@@ -4898,6 +4940,7 @@ document.addEventListener("DOMContentLoaded", () => {
     type: "document-ready",
     mathCount: document.querySelectorAll("[data-tex]").length
   });
+  shellReadyPosted = true;
   postScroll();
 
   // Background observer for handle + minimap repositioning. Observes:

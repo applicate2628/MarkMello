@@ -65,7 +65,7 @@ public sealed class IpcContractTests
         "link-clicked", "task-toggle", "table-cell-edit", "minimap-state", "minimap-settled", "scroll", "viewer-interaction",
         "wheel", "width-drag", "drag-hover", "drop-file", "host-shortcut", "debug-log", "perf-mark",
         "headings-updated", "active-heading-changed", "preview-source-line", "csp-violation",
-        "document-cache-miss", "document-first-paint", "mode-toggle-settled",
+        "document-cache-miss", "document-first-paint", "mode-toggle-settled", "shell-init-failed",
     ];
 
     // ---- outbound: producer manifest serialized through the recursive walk -----
@@ -269,6 +269,53 @@ public sealed class IpcContractTests
             AssertInbound(view, "table-cell-edit", renderer,
                 new() { ["type"] = "table-cell-edit", ["line"] = 12, ["cellIndex"] = 3, ["text"] = "plain", ["key"] = null, ["renderId"] = null },
                 handler => view.TableCellEditRequested += (_, _) => handler());
+        });
+    }
+
+    [Fact]
+    public void ShellInitFailedIngressFaultsPendingShellReadyAndRaisesFallback()
+    {
+        RunOnView(view =>
+        {
+            var shellReady = InstallShellReadyLatch(view, completed: false);
+            var fallbackCount = 0;
+            view.FallbackRequested += (_, _) => fallbackCount++;
+
+            view.HandleWebMessageBody(@"{""type"":""shell-init-failed"",""message"":""bootstrap error""}");
+
+            Assert.True(shellReady.Task.IsCompleted);
+            Assert.False(shellReady.Task.GetAwaiter().GetResult());
+            Assert.Equal(1, fallbackCount);
+        });
+    }
+
+    [Fact]
+    public void ShellInitFailedIngressLeavesCompletedShellReadyAndFallbackInert()
+    {
+        RunOnView(view =>
+        {
+            var shellReady = InstallShellReadyLatch(view, completed: true);
+            var fallbackCount = 0;
+            view.FallbackRequested += (_, _) => fallbackCount++;
+
+            view.HandleWebMessageBody(@"{""type"":""shell-init-failed""}");
+
+            Assert.True(shellReady.Task.GetAwaiter().GetResult());
+            Assert.Equal(0, fallbackCount);
+        });
+    }
+
+    [Fact]
+    public void ShellInitFailedIngressLeavesAbsentShellReadyAndFallbackInert()
+    {
+        RunOnView(view =>
+        {
+            var fallbackCount = 0;
+            view.FallbackRequested += (_, _) => fallbackCount++;
+
+            view.HandleWebMessageBody(@"{""type"":""shell-init-failed""}");
+
+            Assert.Equal(0, fallbackCount);
         });
     }
 
@@ -579,6 +626,24 @@ public sealed class IpcContractTests
             var view = new ApplicateWebMarkdownDocumentView(new NoopRenderer());
             body(view);
         }, CancellationToken.None).GetAwaiter().GetResult();
+    }
+
+    private static TaskCompletionSource<bool> InstallShellReadyLatch(
+        ApplicateWebMarkdownDocumentView view,
+        bool completed)
+    {
+        var shellReady = new TaskCompletionSource<bool>();
+        if (completed)
+        {
+            shellReady.SetResult(true);
+        }
+
+        var shellReadyField = typeof(ApplicateWebMarkdownDocumentView).GetField(
+            "_shellReady",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(shellReadyField);
+        shellReadyField!.SetValue(view, shellReady);
+        return shellReady;
     }
 
     // ---- descriptor model + JSON parse ----------------------------------------

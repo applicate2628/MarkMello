@@ -426,6 +426,15 @@
         "kind": "number"
       }
     },
+    "shell-init-failed": {
+      "type": {
+        "kind": "string"
+      },
+      "message": {
+        "kind": "string",
+        "optional": true
+      }
+    },
     "layout-ready": {
       "type": {
         "kind": "string"

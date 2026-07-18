@@ -1747,10 +1747,29 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         if (shellReady is not null
             && ShouldFaultShellReadyOnNavigationFailure(e.IsSuccess, shellReadyPending: !shellReady.Task.IsCompleted))
         {
-            _shellNavigated = false;
-            shellReady.TrySetResult(false);
-            FallbackRequested?.Invoke(this, EventArgs.Empty);
+            TryFaultPendingShellReady();
         }
+    }
+
+    // Single owner for failures before the shell's first
+    // document-ready. A completed or absent latch means the message is stale or
+    // irrelevant, so it must not request fallback after the shell is alive.
+    private bool TryFaultPendingShellReady()
+    {
+        var shellReady = _shellReady;
+        if (shellReady is null || shellReady.Task.IsCompleted)
+        {
+            return false;
+        }
+
+        _shellNavigated = false;
+        if (!shellReady.TrySetResult(false))
+        {
+            return false;
+        }
+
+        FallbackRequested?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
     // Bug #7 decision seam (unit-tested via ShouldFaultShellReadyOnNavigationFailureForTesting):
@@ -1838,6 +1857,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (type == "document-first-paint")
             {
                 HandleDocumentFirstPaintMessage(document.RootElement);
+                return;
+            }
+
+            if (type == "shell-init-failed")
+            {
+                TryFaultPendingShellReady();
                 return;
             }
 
