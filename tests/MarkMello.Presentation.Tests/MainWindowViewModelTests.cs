@@ -244,11 +244,10 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public async Task EditPreviewToggleCommitsBufferBeforePublishWithoutDiskWrite()
+    public async Task EditPreviewTogglePublishesDirectedSourceEditWithoutMutatingSession()
     {
-        // Edit leg rides the in-place channel: the commit event fires BEFORE
-        // the buffer publish (so the host swaps Source before the debounced
-        // render runs) and the disk is never written - the user owns the save.
+        // The edit-preview strategy validates and publishes a directed source
+        // replacement, but the edit workspace owns the actual buffer write.
         var harness = CreateHarness();
         var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
         harness.Loader.Sources[path] = CreateSource(path, "- [ ] alpha\n");
@@ -269,9 +268,12 @@ public sealed class MainWindowViewModelTests
         Assert.Empty(harness.DocumentSaver.Saves);
         Assert.NotNull(committed);
         Assert.Equal("- [x] alpha\n", committed!.Source.Content);
-        Assert.Equal("- [ ] alpha\n", bufferAtCommitTime); // commit precedes publish
-        Assert.Equal("- [x] alpha\n", session.SourceText);
-        Assert.True(session.IsDirty); // unsaved buffer flip
+        Assert.Equal("- [ ] alpha\n", bufferAtCommitTime);
+        Assert.Equal("- [ ] alpha\n", session.SourceText);
+        Assert.False(session.IsDirty);
+        Assert.Equal(3, committed.Start);
+        Assert.Equal(1, committed.Length);
+        Assert.Equal("x", committed.Replacement);
     }
 
     [Fact]
@@ -322,11 +324,11 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public async Task EditPreviewOriginToggleAfterExitStillFlipsDormantBuffer()
+    public async Task EditPreviewOriginToggleAfterExitPublishesDirectedEditWithoutMutatingDormantBuffer()
     {
-        // Mirror race: an edit-preview click processed after the exit to
-        // reading runs the edit leg against the dormant buffer - no disk
-        // write, truthfully dirty until the user saves.
+        // A late edit-preview click still validates against the dormant buffer,
+        // but the source editor remains the only writer. The desktop bridge
+        // receives this directed span only while the edit workspace exists.
         var harness = CreateHarness();
         var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "tasks.md");
         harness.Loader.Sources[path] = CreateSource(path, "- [ ] alpha\n");
@@ -335,13 +337,20 @@ public sealed class MainWindowViewModelTests
         await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null); // dormant
         Assert.False(harness.ViewModel.IsEditMode);
         var session = harness.ViewModel.EditorSession!;
+        TaskToggleCommit? committed = null;
+        harness.ViewModel.EditPreviewTaskToggleCommitted += (_, value) => committed = value;
 
         await harness.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.EditPreview);
 
         Assert.Empty(harness.DocumentSaver.Saves);
-        Assert.Equal("- [x] alpha\n", session.SourceText);
-        Assert.True(session.IsDirty);
+        Assert.Equal("- [ ] alpha\n", session.SourceText);
+        Assert.False(session.IsDirty);
         Assert.Equal("- [ ] alpha\n", harness.ViewModel.Document!.Content); // viewer snapshot untouched
+        Assert.NotNull(committed);
+        Assert.Equal("- [x] alpha\n", committed!.Source.Content);
+        Assert.Equal(3, committed.Start);
+        Assert.Equal(1, committed.Length);
+        Assert.Equal("x", committed.Replacement);
     }
 
     [Fact]

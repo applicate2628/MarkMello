@@ -25,7 +25,17 @@ public sealed record TaskToggleRevertRequest(int Line, bool Checked, string Path
 /// BEFORE the silent source swap, so the swap's premise ("the DOM already
 /// shows this content") holds on every surface.
 /// </summary>
-public sealed record TaskToggleCommit(MarkdownSource Source, int Line, bool Checked);
+public sealed record TaskToggleCommit(MarkdownSource Source, int Line, bool Checked)
+{
+    // Edit-preview commits carry the one-character source replacement that the
+    // source editor applies. Reading-mode commits retain the positional payload
+    // and leave this invalid sentinel untouched.
+    public int Start { get; init; } = -1;
+
+    public int Length { get; init; } = -1;
+
+    public string Replacement { get; init; } = string.Empty;
+}
 
 /// <summary>
 /// The surface whose DOM received the task-checkbox click. The channel's leg
@@ -74,9 +84,9 @@ public partial class MainWindowViewModel
 
     /// <summary>
     /// Edit-mode counterpart of <see cref="TaskToggleCommitted"/>: the click
-    /// happened in the edit-preview DOM (already optimistically flipped) and
-    /// the flip landed in the editor buffer as an unsaved edit. The host moves
-    /// the edit-preview surface's Source to the flipped buffer BEFORE the
+    /// happened in the edit-preview DOM (already optimistically flipped). The
+    /// host applies its directed source edit through the native source editor,
+    /// then moves the edit-preview surface's Source to the flipped buffer BEFORE the
     /// debounced live-edit re-render runs, so that render dedups to a
     /// value-equal no-op — zero repaint, zero scroll motion, exactly like
     /// reading mode. Disk, viewer snapshot, and the open-docs mirror are NOT

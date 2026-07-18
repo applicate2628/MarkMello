@@ -65,7 +65,9 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
                         _key,
                         out var editedBuffer,
                         out var editCanonicalText,
-                        out var editCanonicalKey))
+                        out var editCanonicalKey,
+                        out var editSpan,
+                        out var editReplacement))
                 {
                     _host.RefuseTableCellEdit(
                         _line,
@@ -84,8 +86,12 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
                     _line,
                     _cellIndex,
                     editCanonicalText,
-                    editCanonicalKey));
-                session.SourceText = editedBuffer;
+                    editCanonicalKey)
+                {
+                    Start = editSpan.Start,
+                    Length = editSpan.Length,
+                    Replacement = editReplacement,
+                });
                 return Task.CompletedTask;
             }
 
@@ -142,10 +148,37 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
         out string newContent,
         out string canonicalText,
         out string canonicalKey)
+        => TryPrepareTableCellRewrite(
+            tableCellSourceEditor,
+            source,
+            line,
+            cellIndex,
+            text,
+            expectedKey,
+            out newContent,
+            out canonicalText,
+            out canonicalKey,
+            out _,
+            out _);
+
+    internal static bool TryPrepareTableCellRewrite(
+        ITableCellSourceEditor tableCellSourceEditor,
+        string source,
+        int line,
+        int cellIndex,
+        string text,
+        string? expectedKey,
+        out string newContent,
+        out string canonicalText,
+        out string canonicalKey,
+        out TableCellSpan sourceSpan,
+        out string replacement)
     {
         newContent = source;
         canonicalText = string.Empty;
         canonicalKey = string.Empty;
+        sourceSpan = default;
+        replacement = string.Empty;
 
         var located = tableCellSourceEditor.Locate(source, line, cellIndex);
         if (located is not { } span
@@ -186,6 +219,8 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
         newContent = candidate;
         canonicalText = after.Text;
         canonicalKey = TableCellIdentity.ComputeKey(committedRaw.Trim());
+        sourceSpan = span;
+        replacement = escaped;
         return true;
     }
 

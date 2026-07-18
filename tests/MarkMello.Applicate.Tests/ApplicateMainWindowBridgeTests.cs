@@ -283,6 +283,29 @@ public sealed class ApplicateMainWindowBridgeTests
     }
 
     [Fact]
+    public void EditPreviewCommitsEnterTheEditorBeforeTheirSilentSourceSwap()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var taskHandler = ExtractFromMarker(bridge, "viewModel.EditPreviewTaskToggleCommitted");
+        var tableHandler = ExtractFromMarker(bridge, "viewModel.EditPreviewTableCellCommitted");
+
+        // Fail closed: the silent Source swap is gated on ApplyEditModeSourceEdit
+        // succeeding, so the preview never advances ahead of the editor buffer; on
+        // failure the optimistic DOM flip is reverted instead.
+        Assert.Contains("_editWorkspaceView?.ApplyEditModeSourceEdit(commit.Start, commit.Length, commit.Replacement) == true", taskHandler, StringComparison.Ordinal);
+        Assert.Contains("_editWorkspaceView?.ApplyEditModeSourceEdit(commit.Start, commit.Length, commit.Replacement) == true", tableHandler, StringComparison.Ordinal);
+        Assert.Contains("SetTaskCheckboxState(commit.Line, !commit.Checked", taskHandler, StringComparison.Ordinal);
+        Assert.Contains("RejectTableCellEdit(commit.Line, commit.CellIndex", tableHandler, StringComparison.Ordinal);
+        Assert.True(
+            taskHandler.IndexOf("_editWorkspaceView?.ApplyEditModeSourceEdit", StringComparison.Ordinal)
+            < taskHandler.IndexOf("channelEditHost?.CommitInPlaceSourceSwap", StringComparison.Ordinal));
+        Assert.True(
+            tableHandler.IndexOf("_editWorkspaceView?.ApplyEditModeSourceEdit", StringComparison.Ordinal)
+            < tableHandler.IndexOf("channelEditHost?.CommitInPlaceSourceSwap", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void DocumentMirrorSuppressesForeignActivationDuringPendingDirtySwitch()
     {
         // fable review blocker A: while a dirty-prompted switch is pending, a

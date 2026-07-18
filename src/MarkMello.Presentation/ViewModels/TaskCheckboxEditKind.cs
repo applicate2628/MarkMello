@@ -52,13 +52,23 @@ internal sealed class TaskCheckboxEditKind : IInDocumentEditKind
                     return Task.CompletedTask;
                 }
 
-                if (TryFlipMarker(session.SourceText, _line, _isChecked, _expectedKey, out var editedBuffer))
+                if (TryFlipMarker(
+                    session.SourceText,
+                    _line,
+                    _isChecked,
+                    _expectedKey,
+                    out var editedBuffer,
+                    out var markerOffset))
                 {
                     _host.PublishEditPreviewTaskToggleCommit(new TaskToggleCommit(
                         new MarkdownSource(session.CurrentPath ?? string.Empty, session.FileName, editedBuffer),
                         _line,
-                        _isChecked));
-                    session.SourceText = editedBuffer;
+                        _isChecked)
+                    {
+                        Start = markerOffset,
+                        Length = 1,
+                        Replacement = _isChecked ? "x" : " ",
+                    });
                     return Task.CompletedTask;
                 }
 
@@ -109,8 +119,18 @@ internal sealed class TaskCheckboxEditKind : IInDocumentEditKind
         bool isChecked,
         string? expectedKey,
         out string newContent)
+        => TryFlipMarker(content, line, isChecked, expectedKey, out newContent, out _);
+
+    internal static bool TryFlipMarker(
+        string content,
+        int line,
+        bool isChecked,
+        string? expectedKey,
+        out string newContent,
+        out int markerOffset)
     {
         newContent = content;
+        markerOffset = -1;
         if (string.IsNullOrEmpty(content) || line < 0 || string.IsNullOrEmpty(expectedKey))
         {
             return false;
@@ -139,8 +159,14 @@ internal sealed class TaskCheckboxEditKind : IInDocumentEditKind
             return false;
         }
 
-        lines[line] = match.Groups[1].Value + (isChecked ? "x" : " ") + match.Groups[3].Value;
-        newContent = string.Join("\n", lines);
+        var lineStart = 0;
+        for (var index = 0; index < line; index++)
+        {
+            lineStart += lines[index].Length + 1;
+        }
+
+        markerOffset = lineStart + match.Groups[2].Index;
+        newContent = content.Remove(markerOffset, 1).Insert(markerOffset, isChecked ? "x" : " ");
         return true;
     }
 

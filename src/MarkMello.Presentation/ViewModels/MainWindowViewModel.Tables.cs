@@ -11,7 +11,17 @@ public sealed record TableCellCommit(
     int Line,
     int CellIndex,
     string Text,
-    string Key);
+    string Key)
+{
+    // Edit-preview commits carry the raw-source splice that the source editor
+    // applies. Reading-mode commits retain the positional payload and leave
+    // this invalid sentinel untouched.
+    public int Start { get; init; } = -1;
+
+    public int Length { get; init; } = -1;
+
+    public string Replacement { get; init; } = string.Empty;
+}
 
 public enum TableCellEditOrigin
 {

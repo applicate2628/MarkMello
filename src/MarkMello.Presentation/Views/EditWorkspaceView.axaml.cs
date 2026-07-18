@@ -162,6 +162,69 @@ public partial class EditWorkspaceView : UserControl
         ApplySourceTextToEditor(_boundSession.SourceText);
     }
 
+    /// <summary>
+    /// Undo the source editor's last text change. The desktop host routes an
+    /// edit-mode Ctrl+Z that arrived from the preview WebView here: the preview
+    /// holds keyboard focus, so AvaloniaEdit's own key handling never fires and
+    /// the editor's undo stack is otherwise unreachable. No-op when nothing to undo.
+    /// </summary>
+    public bool TryUndo()
+    {
+        var editor = _editorTextEditor ?? this.FindControl<TextEditor>("EditorTextEditor");
+        if (editor is { CanUndo: true })
+        {
+            editor.Undo();
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Redo the source editor's last undone text change (host-routed Ctrl+Y). No-op when nothing to redo.</summary>
+    public bool TryRedo()
+    {
+        var editor = _editorTextEditor ?? this.FindControl<TextEditor>("EditorTextEditor");
+        if (editor is { CanRedo: true })
+        {
+            editor.Redo();
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Applies a validated edit-preview source replacement through the native
+    /// source editor. The editor's normal text-change event remains the sole
+    /// path that mirrors the document into the bound session and its undo stack.
+    /// </summary>
+    public bool ApplyEditModeSourceEdit(int start, int length, string replacement)
+    {
+        var editor = _editorTextEditor ?? this.FindControl<TextEditor>("EditorTextEditor");
+        if (editor?.Document is not { } document)
+        {
+            StartupDiag.DiagMs("edit-mode-source-edit", "editor-missing");
+            return false;
+        }
+
+        if (replacement is null
+            || start < 0
+            || length < 0
+            || start > document.TextLength
+            || length > document.TextLength - start)
+        {
+            StartupDiag.DiagMs(
+                "edit-mode-source-edit",
+                "invalid-source-span",
+                $"start={start} length={length} textLength={document.TextLength} replacementNull={replacement is null}");
+            return false;
+        }
+
+        EnsureEditorWriteBack(editor);
+        document.Replace(start, length, replacement);
+        return true;
+    }
+
     private void ApplySourceTextToEditor(string? text)
     {
         var editor = _editorTextEditor ?? this.FindControl<TextEditor>("EditorTextEditor");

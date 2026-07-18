@@ -275,7 +275,7 @@ public sealed class MainWindowViewModelTableCellTests
     }
 
     [Fact]
-    public async Task EditPreviewEditChangesOnlyBufferMarksDirtyAndPublishesPreviewCommit()
+    public async Task EditPreviewEditPublishesDirectedSourceEditWithoutMutatingSession()
     {
         const string source = "| A | B |\n|---|---|\n| plain | right |\n";
         const string expected = "| A | B |\n|---|---|\n| changed | right |\n";
@@ -294,8 +294,8 @@ public sealed class MainWindowViewModelTableCellTests
             origin: TableCellEditOrigin.EditPreview);
 
         Assert.NotNull(harness.ViewModel.EditorSession);
-        Assert.Equal(expected, harness.ViewModel.EditorSession.SourceText);
-        Assert.True(harness.ViewModel.EditorSession.IsDirty);
+        Assert.Equal(source, harness.ViewModel.EditorSession.SourceText);
+        Assert.False(harness.ViewModel.EditorSession.IsDirty);
         Assert.Equal(source, harness.ViewModel.Document?.Content);
         Assert.Empty(harness.Saver.Saves);
         Assert.Equal(1, harness.Loader.LoadCount);
@@ -304,6 +304,9 @@ public sealed class MainWindowViewModelTableCellTests
         Assert.Equal(expected, previewCommit.Source.Content);
         Assert.Equal("changed", previewCommit.Text);
         Assert.Equal(TableCellIdentity.ComputeKey("changed"), previewCommit.Key);
+        Assert.Equal(source.IndexOf(" plain ", StringComparison.Ordinal), previewCommit.Start);
+        Assert.Equal(" plain ".Length, previewCommit.Length);
+        Assert.Equal(" changed ", previewCommit.Replacement);
     }
 
     [Fact]

@@ -77,6 +77,7 @@ public sealed class ApplicateMainWindow : MainWindow
     private ApplicateSiblingMountBridge? _siblingMountBridge;
     private ApplicateModeTransactionHostRouter? _modeTransactionHostRouter;
     private ApplicateAirspaceCompositor? _airspaceCompositor;
+    private MarkMello.Presentation.Views.EditWorkspaceView? _editWorkspaceView;
     private readonly ApplicateMountPoints _mountPoints;
     private bool _editModeHotkeyDown;
 
@@ -1243,6 +1244,7 @@ public sealed class ApplicateMainWindow : MainWindow
         {
             DataContext = null
         };
+        _editWorkspaceView = editWorkspace;
         ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-workspace-end");
         ApplicateTrace.DiagMs("startup-synthetic-mount", "replace-preview-start");
         var editPreviewMountPoints = _mountPoints.ResolveEditPreviewMountPoints(editWorkspace, editPreview);
@@ -1951,6 +1953,29 @@ public sealed class ApplicateMainWindow : MainWindow
                 return;
             }
 
+            if (viewModel.IsEditMode && combo is "ctrl+z" or "ctrl+y")
+            {
+                // Edit mode: the preview WebView holds keyboard focus, so
+                // AvaloniaEdit's own Ctrl+Z/Y never fires and the source editor's
+                // undo stack is otherwise unreachable. Route the forwarded shortcut
+                // to the editor so undo/redo works from the preview half too (the
+                // text half still undoes natively, and does not forward here). No-op
+                // when the editor has nothing to undo/redo.
+                var undoEdit = combo == "ctrl+z";
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    if (undoEdit)
+                    {
+                        _editWorkspaceView?.TryUndo();
+                    }
+                    else
+                    {
+                        _editWorkspaceView?.TryRedo();
+                    }
+                });
+                return;
+            }
+
             var command = combo switch
             {
                 "ctrl+e" => viewModel.ToggleEditModeCommand,
@@ -1977,6 +2002,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 });
             }
         };
+
     }
 
     private void InstallSingleInstanceActivationBridge(
@@ -2154,7 +2180,21 @@ public sealed class ApplicateMainWindow : MainWindow
         // UNSAVED buffer edit — the viewer snapshot and the open-docs mirror
         // stay at disk content (the dirty/save flow owns them).
         viewModel.EditPreviewTaskToggleCommitted += (_, commit) =>
-            channelEditHost?.CommitInPlaceSourceSwap(commit.Source);
+        {
+            // Fail closed: only advance the edit-preview Source once the directed
+            // edit actually reached the source editor. If it did not (missing
+            // editor / invalid span), the buffer is unchanged, so swapping Source
+            // would leave the preview ahead of the buffer and silently drop the
+            // edit on the next save — revert the optimistic DOM flip instead.
+            if (_editWorkspaceView?.ApplyEditModeSourceEdit(commit.Start, commit.Length, commit.Replacement) == true)
+            {
+                channelEditHost?.CommitInPlaceSourceSwap(commit.Source);
+            }
+            else
+            {
+                channelEditHost?.View.SetTaskCheckboxState(commit.Line, !commit.Checked, commit.Source.Path);
+            }
+        };
         viewModel.EditPreviewTaskToggleRevertRequested += (_, revert) =>
             channelEditHost?.View.SetTaskCheckboxState(revert.Line, revert.Checked, revert.Path);
 
@@ -2174,8 +2214,17 @@ public sealed class ApplicateMainWindow : MainWindow
 
         viewModel.EditPreviewTableCellCommitted += (_, commit) =>
         {
-            channelEditHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);
-            channelEditHost?.CommitInPlaceSourceSwap(commit.Source);
+            // Fail closed (mirror of the checkbox channel): only patch + swap the
+            // edit-preview when the directed edit reached the source editor.
+            if (_editWorkspaceView?.ApplyEditModeSourceEdit(commit.Start, commit.Length, commit.Replacement) == true)
+            {
+                channelEditHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);
+                channelEditHost?.CommitInPlaceSourceSwap(commit.Source);
+            }
+            else
+            {
+                channelEditHost?.View.RejectTableCellEdit(commit.Line, commit.CellIndex, commit.Source.Path);
+            }
         };
         viewModel.EditPreviewTableCellEditRefused += (_, refusal) =>
             channelEditHost?.View.RejectTableCellEdit(refusal.Line, refusal.CellIndex, refusal.Path, refusal.Busy);
