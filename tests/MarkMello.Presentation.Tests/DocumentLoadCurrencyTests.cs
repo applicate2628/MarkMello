@@ -1,5 +1,6 @@
 using MarkMello.Application.UseCases;
 using MarkMello.Domain;
+using MarkMello.Infrastructure.Markdown;
 using MarkMello.Presentation.Localization;
 using MarkMello.Presentation.ViewModels;
 
@@ -179,7 +180,8 @@ public class DocumentLoadCurrencyTests
             new RecordingThemeService(),
             new RecordingStartupMetrics(),
             new RenderMarkdownDocumentUseCase(new TestMarkdownRenderer()),
-            new StubUpdateService());
+            new StubUpdateService(),
+            new MarkdigTableCellSourceEditor());
         return (vm, loader);
     }
 }

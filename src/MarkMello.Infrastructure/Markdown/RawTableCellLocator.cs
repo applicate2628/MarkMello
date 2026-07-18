@@ -1,20 +1,10 @@
 using Markdig;
 using Markdig.Extensions.Tables;
 using Markdig.Syntax;
+using MarkMello.Domain;
 using MarkdigMarkdown = Markdig.Markdown;
 
 namespace MarkMello.Infrastructure.Markdown;
-
-/// <summary>
-/// Inclusive character span of a table cell in a raw markdown source.
-/// </summary>
-/// <param name="Start">0-based index of the first character (inclusive).</param>
-/// <param name="End">0-based index of the last character (inclusive).</param>
-public readonly record struct RawTableCellSpan(int Start, int End)
-{
-    /// <summary>Number of characters in the span (<c>End - Start + 1</c>).</summary>
-    public int Length => End - Start + 1;
-}
 
 /// <summary>
 /// Write-back span owner for editable table cells. Given the ORIGINAL disk source
@@ -38,7 +28,14 @@ public static class RawTableCellLocator
     /// its inclusive span, or <c>null</c> when no such cell exists. Walks
     /// <c>Descendants&lt;Table&gt;</c> so nested tables are reachable.
     /// </summary>
-    public static RawTableCellSpan? Locate(string source, int line, int cellIndex)
+    public static TableCellSpan? Locate(string source, int line, int cellIndex)
+        => Find(source, line, cellIndex)?.Span;
+
+    /// <summary>
+    /// Runs the single raw-Markdig coordinate walk used by both the public span locator and
+    /// the Application adapter. Parser details remain internal to Infrastructure.
+    /// </summary>
+    internal static RawTableCellMatch? Find(string source, int line, int cellIndex)
     {
         ArgumentNullException.ThrowIfNull(source);
         if (line < 0 || cellIndex < 0)
@@ -47,15 +44,13 @@ public static class RawTableCellLocator
         }
 
         var document = MarkdigMarkdown.Parse(source, RawPipeline);
+        var tableIndex = 0;
         foreach (var table in document.Descendants<Table>())
         {
-            foreach (var child in table)
+            var rows = table.OfType<TableRow>().ToArray();
+            for (var rowIndex = 0; rowIndex < rows.Length; rowIndex++)
             {
-                if (child is not TableRow row)
-                {
-                    continue;
-                }
-
+                var row = rows[rowIndex];
                 var ordinal = 0;
                 foreach (var rowChild in row)
                 {
@@ -66,14 +61,36 @@ public static class RawTableCellLocator
 
                     if (cell.Line == line && ordinal == cellIndex)
                     {
-                        return new RawTableCellSpan(cell.Span.Start, cell.Span.End);
+                        return new RawTableCellMatch(
+                            new TableCellSpan(cell.Span.Start, cell.Span.End),
+                            cell,
+                            tableIndex,
+                            table.Line,
+                            rows[^1].Line,
+                            rowIndex,
+                            ordinal,
+                            rows.Length,
+                            table.ColumnDefinitions.Count);
                     }
 
                     ordinal++;
                 }
             }
+
+            tableIndex++;
         }
 
         return null;
     }
 }
+
+internal readonly record struct RawTableCellMatch(
+    TableCellSpan Span,
+    TableCell Cell,
+    int TableIndex,
+    int TableStartLine,
+    int TableEndLine,
+    int RowIndex,
+    int ColumnIndex,
+    int RowCount,
+    int ColumnCount);

@@ -109,6 +109,7 @@ public partial class MainWindowViewModel : ObservableObject
         IStartupMetrics startupMetrics,
         RenderMarkdownDocumentUseCase renderMarkdown,
         IUpdateService updateService,
+        ITableCellSourceEditor tableCellSourceEditor,
         IImageSourceResolver? imageSourceResolver = null,
         IRendererReadinessService? rendererReadiness = null)
     {
@@ -122,6 +123,7 @@ public partial class MainWindowViewModel : ObservableObject
         _startupMetrics = startupMetrics;
         _renderMarkdown = renderMarkdown;
         _updateService = updateService;
+        _tableCellSourceEditor = tableCellSourceEditor;
         _imageSourceResolver = imageSourceResolver;
         _rendererReadiness = rendererReadiness;
         _aboutVersion = GetProductVersion();

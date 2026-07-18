@@ -1221,6 +1221,20 @@ public sealed class ApplicateMainWindow : MainWindow
                 => _ = viewModel.ToggleTaskLineAsync(e.Line, e.Checked, e.Key, TaskToggleOrigin.EditPreview);
         }
 
+        // Editable table cells use a parallel channel. Stamp the origin from
+        // the WebView that actually received the edit; current mode is not a
+        // safe discriminator while Ctrl+E transitions are in flight.
+        if (viewerHostForMode is not null)
+        {
+            viewerHostForMode.View.TableCellEditRequested += (_, e)
+                => _ = viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.Viewer);
+        }
+        if (editHost is not null && !ReferenceEquals(editHost, viewerHostForMode))
+        {
+            editHost.View.TableCellEditRequested += (_, e)
+                => _ = viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.EditPreview);
+        }
+
         ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-preview-start");
         var editPreview = new ApplicateEditPreviewView(editHost);
         ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-preview-end");
@@ -2095,6 +2109,38 @@ public sealed class ApplicateMainWindow : MainWindow
             channelEditHost?.CommitInPlaceSourceSwap(commit.Source);
         viewModel.EditPreviewTaskToggleRevertRequested += (_, revert) =>
             channelEditHost?.View.SetTaskCheckboxState(revert.Line, revert.Checked, revert.Path);
+
+        // Table-cell channel. Successful acknowledgements always carry the
+        // canonical decoded text/key. Patch every involved DOM before its
+        // silent source swap; the distinct primed edit host never saw a viewer
+        // edit and would otherwise claim source it did not render.
+        viewModel.TableCellCommitted += (_, commit) =>
+        {
+            channelViewerHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);
+            channelViewerHost?.CommitInPlaceSourceSwap(commit.Source);
+            if (channelEditHost is not null && !ReferenceEquals(channelEditHost, channelViewerHost))
+            {
+                channelEditHost.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);
+                channelEditHost.CommitInPlaceSourceSwap(commit.Source);
+            }
+
+            var mirrored = FindOpenDocumentByPath(openDocs, commit.Source.Path);
+            if (mirrored is not null
+                && !string.Equals(mirrored.SourceText, commit.Source.Content, System.StringComparison.Ordinal))
+            {
+                openDocs.UpdateSourceText(mirrored, commit.Source.Content);
+            }
+        };
+        viewModel.TableCellEditRefused += (_, refusal) =>
+            channelViewerHost?.View.RejectTableCellEdit(refusal.Line, refusal.CellIndex, refusal.Path, refusal.Busy);
+
+        viewModel.EditPreviewTableCellCommitted += (_, commit) =>
+        {
+            channelEditHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);
+            channelEditHost?.CommitInPlaceSourceSwap(commit.Source);
+        };
+        viewModel.EditPreviewTableCellEditRefused += (_, refusal) =>
+            channelEditHost?.View.RejectTableCellEdit(refusal.Line, refusal.CellIndex, refusal.Path, refusal.Busy);
 
         // Bidirectional sync between IOpenDocumentsService (tabs strip source
         // of truth) and the upstream `MainWindowViewModel.Document` value

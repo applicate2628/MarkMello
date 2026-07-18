@@ -30,6 +30,7 @@ public static class DependencyInjection
         services.AddSingleton<IDocumentLoader, FileDocumentLoader>();
         services.AddSingleton<IDocumentSaver, FileDocumentSaver>();
         services.AddSingleton<IMarkdownDocumentRenderer, MarkdigMarkdownDocumentRenderer>();
+        services.AddSingleton<ITableCellSourceEditor, MarkdigTableCellSourceEditor>();
         services.AddSingleton<IImageSourceResolver, DefaultImageSourceResolver>();
         services.AddSingleton<ISettingsStore, JsonSettingsStore>();
         services.AddSingleton<IPlatformServices, DefaultPlatformServices>();

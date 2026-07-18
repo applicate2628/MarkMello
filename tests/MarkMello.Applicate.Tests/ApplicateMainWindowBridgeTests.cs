@@ -103,6 +103,70 @@ public sealed class ApplicateMainWindowBridgeTests
     }
 
     [Fact]
+    public void TableCellIngressStampsOriginFromTheEditedSurface()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var siblingViews = ExtractMethodBody(codeBehind, "private void InstallSiblingMountedViews(");
+
+        Assert.Contains(
+            "viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.Viewer)",
+            siblingViews,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.EditPreview)",
+            siblingViews,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TableCellReadingCommitPatchesNonOriginEditHostBeforeSilentSwap()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var viewerPatch = bridge.IndexOf(
+            "channelViewerHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);",
+            StringComparison.Ordinal);
+        var viewerSwap = viewerPatch < 0
+            ? -1
+            : bridge.IndexOf("channelViewerHost?.CommitInPlaceSourceSwap(commit.Source);", viewerPatch, StringComparison.Ordinal);
+        var editPatch = bridge.IndexOf(
+            "channelEditHost.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);",
+            StringComparison.Ordinal);
+        var editSwap = editPatch < 0
+            ? -1
+            : bridge.IndexOf("channelEditHost.CommitInPlaceSourceSwap(commit.Source);", editPatch, StringComparison.Ordinal);
+
+        Assert.True(viewerPatch >= 0, "The origin viewer must receive its canonical acknowledgement.");
+        Assert.True(viewerSwap > viewerPatch, "The viewer source swap must follow its canonical acknowledgement.");
+        Assert.True(editPatch >= 0, "The distinct primed edit host must receive the canonical cell patch.");
+        Assert.True(editSwap > editPatch, "The non-origin silent swap may run only after its DOM patch.");
+    }
+
+    [Fact]
+    public void TableCellFailuresAndEditPreviewCommitsRouteOnlyToTheirOriginHost()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+
+        Assert.Contains(
+            "channelViewerHost?.View.RejectTableCellEdit(refusal.Line, refusal.CellIndex, refusal.Path, refusal.Busy);",
+            bridge,
+            StringComparison.Ordinal);
+        var previewPatch = bridge.IndexOf(
+            "channelEditHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);",
+            StringComparison.Ordinal);
+        var previewSwap = previewPatch < 0
+            ? -1
+            : bridge.IndexOf("channelEditHost?.CommitInPlaceSourceSwap(commit.Source);", previewPatch, StringComparison.Ordinal);
+        Assert.True(previewPatch >= 0, "The edit-preview origin must receive its canonical acknowledgement.");
+        Assert.True(previewSwap > previewPatch, "The edit-preview swap must follow its canonical acknowledgement.");
+        Assert.Contains(
+            "channelEditHost?.View.RejectTableCellEdit(refusal.Line, refusal.CellIndex, refusal.Path, refusal.Busy);",
+            bridge,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DocumentMirrorSuppressesForeignActivationDuringPendingDirtySwitch()
     {
         // fable review blocker A: while a dirty-prompted switch is pending, a

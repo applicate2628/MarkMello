@@ -53,7 +53,7 @@ public sealed class IpcContractTests
     [
         "theme", "minimap-policy", "reading-preferences", "scroll-by", "scroll-to-block",
         "scroll-to", "scroll-to-progress", "load-document", "append-document", "load-cached-document",
-        "clear-document", "invalidate-document-cache-key", "set-task-checkbox", "scroll-to-heading",
+        "clear-document", "invalidate-document-cache-key", "set-task-checkbox", "table-cell-updated", "scroll-to-heading",
         "scroll-to-source-line", "open-find-bar", "host-scrollbar", "mode-settle-probe",
         "minimap-settle-probe", "host-shortcuts-reset", "mode-reveal-prepare", "mode-reveal-start",
         "document-reveal-prepare", "document-reveal-start",
@@ -62,7 +62,7 @@ public sealed class IpcContractTests
     private static readonly string[] KnownRendererMessageTypes =
     [
         "document-ready", "layout-ready", "post-ready-enhancements-complete", "theme-applied",
-        "link-clicked", "task-toggle", "minimap-state", "minimap-settled", "scroll", "viewer-interaction",
+        "link-clicked", "task-toggle", "table-cell-edit", "minimap-state", "minimap-settled", "scroll", "viewer-interaction",
         "wheel", "width-drag", "drag-hover", "drop-file", "host-shortcut", "debug-log", "perf-mark",
         "headings-updated", "active-heading-changed", "preview-source-line", "csp-violation",
         "document-cache-miss", "document-first-paint", "mode-toggle-settled",
@@ -152,6 +152,75 @@ public sealed class IpcContractTests
         Check(SharedWebViewHostRevealIntents.BuildDocumentRevealStartMessage(120), "document-reveal-start");
     }
 
+    [Fact]
+    public void TableCellUpdatedHostSenderMatchesExactProducerShapes()
+    {
+        var contract = LoadContract();
+
+        var success = Serialize(ApplicateWebMarkdownDocumentView.BuildTableCellUpdatedSuccessMessage(
+            line: 12,
+            cellIndex: 3,
+            text: "Canonical plain text",
+            key: "f00dcafe"));
+        Assert.Equal("table-cell-updated", TypeValue(success));
+        Assert.True(success.GetProperty("ok").GetBoolean());
+        Assert.Equal("Canonical plain text", success.GetProperty("text").GetString());
+        Assert.Equal("f00dcafe", success.GetProperty("key").GetString());
+        Assert.Equal(
+            new SortedSet<string>(StringComparer.Ordinal) { "type", "line", "cellIndex", "ok", "text", "key" },
+            new SortedSet<string>(ObjectKeys(success), StringComparer.Ordinal));
+        Assert.Empty(CollectViolations(success, contract.Host["table-cell-updated"], "table-cell-updated.success"));
+
+        var failure = Serialize(ApplicateWebMarkdownDocumentView.BuildTableCellUpdatedFailureMessage(
+            line: 12,
+            cellIndex: 3));
+        Assert.Equal("table-cell-updated", TypeValue(failure));
+        Assert.False(failure.GetProperty("ok").GetBoolean());
+        Assert.Equal(
+            new SortedSet<string>(StringComparer.Ordinal) { "type", "line", "cellIndex", "ok" },
+            new SortedSet<string>(ObjectKeys(failure), StringComparer.Ordinal));
+        Assert.False(failure.TryGetProperty("text", out _));
+        Assert.False(failure.TryGetProperty("key", out _));
+        Assert.False(failure.TryGetProperty("reason", out _));
+        Assert.Empty(CollectViolations(failure, contract.Host["table-cell-updated"], "table-cell-updated.failure"));
+
+        // BUSY failure carries reason="busy" (and still omits text/key) so the
+        // renderer keeps the user's typed text instead of restoring the stash.
+        var busyFailure = Serialize(ApplicateWebMarkdownDocumentView.BuildTableCellUpdatedFailureMessage(
+            line: 12,
+            cellIndex: 3,
+            busy: true));
+        Assert.False(busyFailure.GetProperty("ok").GetBoolean());
+        Assert.Equal("busy", busyFailure.GetProperty("reason").GetString());
+        Assert.Equal(
+            new SortedSet<string>(StringComparer.Ordinal) { "type", "line", "cellIndex", "ok", "reason" },
+            new SortedSet<string>(ObjectKeys(busyFailure), StringComparer.Ordinal));
+        Assert.False(busyFailure.TryGetProperty("text", out _));
+        Assert.False(busyFailure.TryGetProperty("key", out _));
+        Assert.Empty(CollectViolations(busyFailure, contract.Host["table-cell-updated"], "table-cell-updated.busy-failure"));
+    }
+
+    [Fact]
+    public void TableCellUpdatedFailureDescriptorRejectsNullOptionalFields()
+    {
+        var shape = LoadContract().Host["table-cell-updated"];
+        var invalidFailure = Serialize(new
+        {
+            type = "table-cell-updated",
+            line = 12,
+            cellIndex = 3,
+            ok = false,
+            text = (string?)null,
+            key = (string?)null,
+            reason = (string?)null,
+        });
+
+        var violations = CollectViolations(invalidFailure, shape, "table-cell-updated.failure");
+        Assert.Contains("table-cell-updated.failure.text: unexpected null", violations);
+        Assert.Contains("table-cell-updated.failure.key: unexpected null", violations);
+        Assert.Contains("table-cell-updated.failure.reason: unexpected null", violations);
+    }
+
     // ---- inbound: registry-shaped fixtures drive the real dispatch -------------
 
     [Fact]
@@ -196,6 +265,10 @@ public sealed class IpcContractTests
             AssertInbound(view, "task-toggle", renderer,
                 new() { ["type"] = "task-toggle", ["line"] = 3, ["checked"] = true, ["key"] = "k" },
                 handler => view.TaskToggleRequested += (_, _) => handler());
+
+            AssertInbound(view, "table-cell-edit", renderer,
+                new() { ["type"] = "table-cell-edit", ["line"] = 12, ["cellIndex"] = 3, ["text"] = "plain", ["key"] = null, ["renderId"] = null },
+                handler => view.TableCellEditRequested += (_, _) => handler());
         });
     }
 

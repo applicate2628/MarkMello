@@ -264,6 +264,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     /// <summary>Raised when a task-list checkbox is toggled (source line + new checked state).</summary>
     public event EventHandler<ApplicateWebTaskToggleEventArgs>? TaskToggleRequested;
 
+    /// <summary>Raised when an editable plain table cell requests a source commit.</summary>
+    public event EventHandler<ApplicateWebTableCellEditEventArgs>? TableCellEditRequested;
+
     public event EventHandler<ApplicateWebWheelEventArgs>? WheelRequested;
 
     public event EventHandler? ViewerInteractionRequested;
@@ -2003,6 +2006,47 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 return;
             }
 
+            if (type == "table-cell-edit")
+            {
+                if (document.RootElement.TryGetProperty("line", out var cellLineProperty)
+                    && cellLineProperty.ValueKind == JsonValueKind.Number
+                    && cellLineProperty.TryGetInt32(out var cellLine)
+                    && document.RootElement.TryGetProperty("cellIndex", out var cellIndexProperty)
+                    && cellIndexProperty.ValueKind == JsonValueKind.Number
+                    && cellIndexProperty.TryGetInt32(out var cellIndex)
+                    && document.RootElement.TryGetProperty("text", out var cellTextProperty)
+                    && cellTextProperty.ValueKind == JsonValueKind.String
+                    && document.RootElement.TryGetProperty("key", out var cellKeyProperty)
+                    && cellKeyProperty.ValueKind is JsonValueKind.String or JsonValueKind.Null)
+                {
+                    // Currency gate (cross-document write guard, precedes every VM
+                    // write gate): the renderer stamps the render generation it
+                    // currently holds. If this host has since revealed a different
+                    // document (a newer reveal render id), a delayed edit's
+                    // (line, index, key) can collide with an unrelated cell in the
+                    // now-active document, so drop it before the write path. A
+                    // null/absent renderId carries no currency information; the
+                    // disk/key/round-trip gates downstream still apply.
+                    if (document.RootElement.TryGetProperty("renderId", out var cellRenderIdProperty)
+                        && cellRenderIdProperty.ValueKind == JsonValueKind.Number
+                        && cellRenderIdProperty.TryGetInt64(out var cellRenderId)
+                        && cellRenderId != _activeRevealRenderId)
+                    {
+                        return;
+                    }
+
+                    TableCellEditRequested?.Invoke(
+                        this,
+                        new ApplicateWebTableCellEditEventArgs(
+                            cellLine,
+                            cellIndex,
+                            cellTextProperty.GetString() ?? string.Empty,
+                            cellKeyProperty.ValueKind == JsonValueKind.String ? cellKeyProperty.GetString() : null));
+                }
+
+                return;
+            }
+
             if (type == "drag-hover")
             {
                 HandleDragHoverMessage(document.RootElement);
@@ -3347,6 +3391,75 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         PostRendererMessage(new { type = "set-task-checkbox", line, @checked = isChecked });
     }
+
+    internal void SetTableCellText(int line, int cellIndex, string text, string key)
+        => SetTableCellText(line, cellIndex, text, key, Source?.Path ?? string.Empty);
+
+    internal void SetTableCellText(int line, int cellIndex, string text, string key, string expectedPath)
+    {
+        if (!_hasLoadedDocument
+            || _awaitingLayoutReady
+            || line < 0
+            || cellIndex < 0
+            || text is null
+            || string.IsNullOrEmpty(key)
+            || !string.Equals(Source?.Path ?? string.Empty, expectedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        PostRendererMessage(BuildTableCellUpdatedSuccessMessage(line, cellIndex, text, key));
+    }
+
+    internal void RejectTableCellEdit(int line, int cellIndex, string expectedPath, bool busy = false)
+    {
+        if (!_hasLoadedDocument
+            || _awaitingLayoutReady
+            || line < 0
+            || cellIndex < 0
+            || !string.Equals(Source?.Path ?? string.Empty, expectedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        PostRendererMessage(BuildTableCellUpdatedFailureMessage(line, cellIndex, busy));
+    }
+
+    internal static object BuildTableCellUpdatedSuccessMessage(
+        int line,
+        int cellIndex,
+        string text,
+        string key)
+        => new
+        {
+            type = "table-cell-updated",
+            line,
+            cellIndex,
+            ok = true,
+            text,
+            key,
+        };
+
+    internal static object BuildTableCellUpdatedFailureMessage(int line, int cellIndex, bool busy = false)
+        => busy
+            ? new
+            {
+                type = "table-cell-updated",
+                line,
+                cellIndex,
+                ok = false,
+                // BUSY (serializer mid-commit): tells the renderer to KEEP the
+                // user's typed text so a re-blur retries, instead of restoring
+                // the pre-edit stash (which would silently drop the edit).
+                reason = "busy",
+            }
+            : new
+            {
+                type = "table-cell-updated",
+                line,
+                cellIndex,
+                ok = false,
+            };
 
     private void PostRendererMessage(object message)
     {

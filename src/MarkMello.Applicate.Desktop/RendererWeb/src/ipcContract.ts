@@ -62,6 +62,7 @@ export type RendererMessage =
   | { type: "theme-applied"; theme: RendererTheme; requestId: number }
   | { type: "link-clicked"; href: string; button: number; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }
   | { type: "task-toggle"; line: number; checked: boolean; key: string | null }
+  | { type: "table-cell-edit"; line: number; cellIndex: number; text: string; key: string | null; renderId: number | null }
   | { type: "minimap-state"; visible: boolean; reservedWidth: number }
   | { type: "minimap-settled"; transactionGeneration: number; visible: boolean; reservedWidth: number }
   | { type: "scroll"; scrollTop: number; scrollHeight: number; clientHeight: number; topBlockIndex: number | null }
@@ -120,6 +121,7 @@ export type HostMessage =
   | { type: "clear-document" }
   | { type: "invalidate-document-cache-key" }
   | { type: "set-task-checkbox"; line: number; checked: boolean }
+  | { type: "table-cell-updated"; line: number; cellIndex: number; ok: boolean; text?: string; key?: string; reason?: string }
   | { type: "scroll-to-heading"; id: string }
   | { type: "scroll-to-source-line"; sourceLine: number }
   | { type: "open-find-bar" }
@@ -210,6 +212,11 @@ export const RENDERER_MESSAGE_SHAPES = {
   "theme-applied": { type: STR, theme: STR, requestId: NUM },
   "link-clicked": { type: STR, href: STR, button: NUM, ctrlKey: BOOL, shiftKey: BOOL, altKey: BOOL, metaKey: BOOL },
   "task-toggle": { type: STR, line: NUM, checked: BOOL, key: { kind: "string", nullable: true } },
+  // renderId here is the currency stamp (the render generation the renderer holds),
+  // ALWAYS present but nullable: a null carries no currency info and the host falls
+  // back to its disk/key/round-trip gates rather than dropping. This differs from the
+  // optional renderId on layout-ready etc., which the host DROPS when absent.
+  "table-cell-edit": { type: STR, line: NUM, cellIndex: NUM, text: STR, key: { kind: "string", nullable: true }, renderId: { kind: "number", nullable: true } },
   "minimap-state": { type: STR, visible: BOOL, reservedWidth: NUM },
   "minimap-settled": { type: STR, transactionGeneration: NUM, visible: BOOL, reservedWidth: NUM },
   "scroll": { type: STR, scrollTop: NUM, scrollHeight: NUM, clientHeight: NUM, topBlockIndex: { kind: "number", nullable: true } },
@@ -291,6 +298,10 @@ export const HOST_MESSAGE_SHAPES = {
   "clear-document": { type: STR },
   "invalidate-document-cache-key": { type: STR },
   "set-task-checkbox": { type: STR, line: NUM, checked: BOOL },
+  // reason is present ONLY on a BUSY failure (serializer mid-commit); success and
+  // validation-failure both OMIT it (never null). It tells the renderer to KEEP the
+  // user's typed text on a busy refusal instead of restoring the pre-edit stash.
+  "table-cell-updated": { type: STR, line: NUM, cellIndex: NUM, ok: BOOL, text: STR_OPT, key: STR_OPT, reason: STR_OPT },
   "scroll-to-heading": { type: STR, id: STR },
   "scroll-to-source-line": { type: STR, sourceLine: NUM },
   "open-find-bar": { type: STR },

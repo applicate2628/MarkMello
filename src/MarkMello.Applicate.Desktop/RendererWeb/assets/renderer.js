@@ -3192,6 +3192,18 @@
       const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
       if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
       const tag = node.tagName;
+      if (tag === "TH" || tag === "TD") {
+        node.removeAttribute("contenteditable");
+        for (const attribute of Array.from(node.attributes)) {
+          if (attribute.name.startsWith("data-mm-cell-")) {
+            node.removeAttribute(attribute.name);
+          }
+        }
+        node.classList.remove("mm-editable-cell");
+        if (node.classList.length === 0) {
+          node.removeAttribute("class");
+        }
+      }
       if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
         node.setAttribute("tabindex", "-1");
         node.removeAttribute("href");
@@ -3673,6 +3685,9 @@
   function __testDocScrollTopForCloneYForTesting(root, y) {
     refreshTopVisibleBlockIndexCache();
     return docScrollTopForCloneY(root, y);
+  }
+  function __testCloneDocumentForMinimapForTesting() {
+    return cloneDocumentForMinimap();
   }
   function __testEmitScrollForTesting() {
     postScroll(false);
@@ -4301,6 +4316,10 @@
       }
       return;
     }
+    if (message.type === "table-cell-updated") {
+      handleTableCellUpdatedMessage(message);
+      return;
+    }
     if (message.type === "mode-settle-probe") {
       postPerfMark("mm-mode-settle-probe-received");
       applyModeSettleProbePreferences(message);
@@ -4639,6 +4658,232 @@
       }
     };
   }
+  var tableCellEditStates = /* @__PURE__ */ new WeakMap();
+  var composingTableCells = /* @__PURE__ */ new WeakSet();
+  var tableCellDiscoveryObserver = new MutationObserver((records) => {
+    for (const record of records) {
+      for (const addedNode of record.addedNodes) {
+        if (addedNode instanceof Element) {
+          prepareEditableTableCells(addedNode);
+        }
+      }
+    }
+  });
+  var tableCellEditingWired = false;
+  function editableTableCellFromEventTarget(target) {
+    if (!(target instanceof Element) || target.closest(".mm-minimap-content") !== null) {
+      return null;
+    }
+    const cell = target.closest("th.mm-editable-cell, td.mm-editable-cell");
+    if (!(cell instanceof HTMLTableCellElement)) {
+      return null;
+    }
+    return cell;
+  }
+  function prepareEditableTableCell(cell) {
+    if (cell.closest(".mm-minimap-content") !== null) {
+      return;
+    }
+    cell.contentEditable = "plaintext-only";
+    if (cell.contentEditable === "plaintext-only") {
+      delete cell.dataset.mmCellPlaintextFallback;
+      return;
+    }
+    cell.contentEditable = "true";
+    cell.dataset.mmCellPlaintextFallback = "true";
+  }
+  function prepareEditableTableCells(root = document) {
+    if (root instanceof HTMLTableCellElement && root.matches("th.mm-editable-cell, td.mm-editable-cell")) {
+      prepareEditableTableCell(root);
+    }
+    root.querySelectorAll("th.mm-editable-cell, td.mm-editable-cell").forEach(prepareEditableTableCell);
+  }
+  function readTableCellCoordinate(cell, attributeName) {
+    const raw = cell.getAttribute(attributeName);
+    if (raw === null || raw.trim().length === 0) {
+      return null;
+    }
+    const value = Number(raw);
+    return Number.isInteger(value) && value >= 0 ? value : null;
+  }
+  function readEditableTableCellText(cell) {
+    return cell.dataset.mmCellPlaintextFallback === "true" ? cell.innerText : cell.textContent ?? "";
+  }
+  function getOrCreateTableCellEditState(cell) {
+    const existing = tableCellEditStates.get(cell);
+    if (existing) {
+      return existing;
+    }
+    const state2 = {
+      stashedInnerHtml: cell.innerHTML,
+      lastSubmittedText: null
+    };
+    tableCellEditStates.set(cell, state2);
+    return state2;
+  }
+  function postTableCellEdit(cell) {
+    const line = readTableCellCoordinate(cell, "data-mm-cell-line");
+    const cellIndex = readTableCellCoordinate(cell, "data-mm-cell-index");
+    if (line === null || cellIndex === null) {
+      return false;
+    }
+    const text = readEditableTableCellText(cell);
+    const state2 = getOrCreateTableCellEditState(cell);
+    if (state2.lastSubmittedText === text) {
+      return false;
+    }
+    postHostMessage({
+      type: "table-cell-edit",
+      line,
+      cellIndex,
+      text,
+      key: cell.getAttribute("data-mm-cell-key"),
+      // Currency stamp: the render generation this renderer currently holds. The
+      // host refuses the write if a different document has since become active
+      // (the addressed line/index/key can collide with an unrelated cell there).
+      renderId: currentDocumentRenderId
+    });
+    state2.lastSubmittedText = text;
+    return true;
+  }
+  function sanitizePastedTableCellText(text) {
+    return text.replace(/(?:\r\n?|\n)+/g, " ");
+  }
+  function insertPlainTextAtTableCellSelection(cell, text) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      cell.append(document.createTextNode(text));
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    if (!cell.contains(range.commonAncestorContainer)) {
+      cell.append(document.createTextNode(text));
+      return;
+    }
+    range.deleteContents();
+    const textNode = document.createTextNode(text);
+    range.insertNode(textNode);
+    range.setStartAfter(textNode);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  function findLiveEditableTableCell(line, cellIndex) {
+    const cells = document.querySelectorAll("th.mm-editable-cell, td.mm-editable-cell");
+    for (const cell of cells) {
+      if (cell.closest(".mm-minimap-content") === null && readTableCellCoordinate(cell, "data-mm-cell-line") === line && readTableCellCoordinate(cell, "data-mm-cell-index") === cellIndex) {
+        return cell;
+      }
+    }
+    return null;
+  }
+  function handleTableCellUpdatedMessage(raw) {
+    if (typeof raw !== "object" || raw === null) {
+      return;
+    }
+    const message = raw;
+    const { line, cellIndex, ok } = message;
+    if (!Number.isInteger(line) || line < 0 || !Number.isInteger(cellIndex) || cellIndex < 0 || typeof ok !== "boolean") {
+      return;
+    }
+    const cell = findLiveEditableTableCell(line, cellIndex);
+    if (!cell) {
+      return;
+    }
+    const state2 = getOrCreateTableCellEditState(cell);
+    if (ok) {
+      if (typeof message.text !== "string" || typeof message.key !== "string") {
+        return;
+      }
+      cell.textContent = message.text;
+      cell.dataset.mmCellKey = message.key;
+      state2.stashedInnerHtml = cell.innerHTML;
+      state2.lastSubmittedText = readEditableTableCellText(cell);
+      return;
+    }
+    if (message.reason === "busy") {
+      state2.lastSubmittedText = null;
+      return;
+    }
+    cell.innerHTML = state2.stashedInnerHtml;
+    state2.lastSubmittedText = readEditableTableCellText(cell);
+  }
+  function wireTableCellEditing() {
+    if (tableCellEditingWired) {
+      return;
+    }
+    tableCellEditingWired = true;
+    tableCellDiscoveryObserver.observe(document, { childList: true, subtree: true });
+    prepareEditableTableCells();
+    document.addEventListener("focusin", (event) => {
+      const cell = editableTableCellFromEventTarget(event.target);
+      if (!cell) {
+        return;
+      }
+      tableCellEditStates.set(cell, {
+        stashedInnerHtml: cell.innerHTML,
+        // Seed the submit latch with the cell's CURRENT text so an unmodified
+        // blur posts nothing: a no-op write would rewrite the file on read-only
+        // interaction and re-pad the source, destroying hand-aligned cell padding.
+        lastSubmittedText: readEditableTableCellText(cell)
+      });
+    });
+    document.addEventListener("compositionstart", (event) => {
+      const cell = editableTableCellFromEventTarget(event.target);
+      if (cell) composingTableCells.add(cell);
+    });
+    document.addEventListener("compositionend", (event) => {
+      const cell = editableTableCellFromEventTarget(event.target);
+      if (cell) composingTableCells.delete(cell);
+    });
+    document.addEventListener("keydown", (event) => {
+      const cell = editableTableCellFromEventTarget(event.target);
+      if (!cell) {
+        return;
+      }
+      if (event.key === "Escape") {
+        const state2 = getOrCreateTableCellEditState(cell);
+        cell.innerHTML = state2.stashedInnerHtml;
+        state2.lastSubmittedText = readEditableTableCellText(cell);
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (event.key !== "Enter" || event.isComposing || composingTableCells.has(cell)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      postTableCellEdit(cell);
+    });
+    document.addEventListener("blur", (event) => {
+      const cell = editableTableCellFromEventTarget(event.target);
+      if (cell) postTableCellEdit(cell);
+    }, true);
+    document.addEventListener("beforeinput", (event) => {
+      const cell = editableTableCellFromEventTarget(event.target);
+      if (!cell || cell.dataset.mmCellPlaintextFallback !== "true") {
+        return;
+      }
+      const blockedInput = event.inputType.startsWith("format") || event.inputType === "insertParagraph" || event.inputType === "insertLineBreak" || event.inputType === "insertHTML" || event.inputType === "insertFromPaste" || event.inputType === "insertFromDrop" || event.inputType === "insertOrderedList" || event.inputType === "insertUnorderedList";
+      if (blockedInput) event.preventDefault();
+    });
+    document.addEventListener("paste", (event) => {
+      const cell = editableTableCellFromEventTarget(event.target);
+      if (!cell || cell.dataset.mmCellPlaintextFallback !== "true") {
+        return;
+      }
+      event.preventDefault();
+      const text = sanitizePastedTableCellText(event.clipboardData?.getData("text/plain") ?? "");
+      insertPlainTextAtTableCellSelection(cell, text);
+    });
+  }
+  function __testPrepareEditableTableCellsForTesting(root = document) {
+    prepareEditableTableCells(root);
+  }
+  function __testWireTableCellEditingForTesting() {
+    wireTableCellEditing();
+  }
   function wireLinks() {
     document.addEventListener("click", (event) => {
       const target = event.target instanceof Element ? event.target.closest("a[href]") : null;
@@ -4780,6 +5025,9 @@
       "keydown",
       (event) => {
         const key = event.key.toLowerCase();
+        if (key === "escape" && editableTableCellFromEventTarget(event.target)) {
+          return;
+        }
         const combo = (event.ctrlKey || event.metaKey ? "ctrl+" : "") + (event.shiftKey ? "shift+" : "") + (event.altKey ? "alt+" : "") + key;
         if (!hostShortcuts.has(combo)) {
           return;
@@ -4914,6 +5162,7 @@
     applyDocumentScrollState();
     wireLinks();
     wireTaskCheckboxes();
+    wireTableCellEditing();
     wireViewerInteraction();
     wireWheelProxy();
     wireFileDrop();

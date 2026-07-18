@@ -4,6 +4,7 @@ using MarkMello.Application.UseCases;
 using MarkMello.Application.Updates;
 using MarkMello.Domain;
 using MarkMello.Domain.Diagnostics;
+using MarkMello.Infrastructure.Markdown;
 using MarkMello.Presentation.Localization;
 using MarkMello.Presentation.ViewModels;
 using System.Globalization;
@@ -1788,6 +1789,7 @@ public sealed class MainWindowViewModelTests
             startupMetrics,
             new RenderMarkdownDocumentUseCase(markdownRenderer ?? new TestMarkdownRenderer()),
             updateService,
+            new MarkdigTableCellSourceEditor(),
             rendererReadiness: rendererReadiness);
 
         return new TestHarness(loader, saver, picker, commandLine, settings, startupMetrics, updateService, viewModel);

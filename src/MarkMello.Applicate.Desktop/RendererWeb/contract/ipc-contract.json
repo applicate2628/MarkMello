@@ -237,6 +237,32 @@
         "kind": "boolean"
       }
     },
+    "table-cell-updated": {
+      "type": {
+        "kind": "string"
+      },
+      "line": {
+        "kind": "number"
+      },
+      "cellIndex": {
+        "kind": "number"
+      },
+      "ok": {
+        "kind": "boolean"
+      },
+      "text": {
+        "kind": "string",
+        "optional": true
+      },
+      "key": {
+        "kind": "string",
+        "optional": true
+      },
+      "reason": {
+        "kind": "string",
+        "optional": true
+      }
+    },
     "scroll-to-heading": {
       "type": {
         "kind": "string"
@@ -485,6 +511,28 @@
       },
       "key": {
         "kind": "string",
+        "nullable": true
+      }
+    },
+    "table-cell-edit": {
+      "type": {
+        "kind": "string"
+      },
+      "line": {
+        "kind": "number"
+      },
+      "cellIndex": {
+        "kind": "number"
+      },
+      "text": {
+        "kind": "string"
+      },
+      "key": {
+        "kind": "string",
+        "nullable": true
+      },
+      "renderId": {
+        "kind": "number",
         "nullable": true
       }
     },

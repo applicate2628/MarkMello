@@ -100,6 +100,27 @@ public sealed class EditorSessionViewModelTests
         Assert.Equal(string.Empty, session.StatusMessage);
     }
 
+    [Fact]
+    public void ApplyPersistedTableCellEditUpdatesBufferAndDiscardBaselineWithoutPreviewRender()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "table.md");
+        var session = CreateSession(path, "| A |\n|---|\n| old |\n");
+        var previewBefore = session.RenderedPreview;
+        const string persisted = "| A |\n|---|\n| new |\n";
+
+        session.ApplyPersistedTableCellEdit(persisted, persisted);
+
+        Assert.Equal(persisted, session.SourceText);
+        Assert.Equal(persisted, session.LastPersistedSource);
+        Assert.False(session.IsDirty);
+        Assert.Same(previewBefore, session.RenderedPreview);
+
+        session.DiscardChanges();
+
+        Assert.Equal(persisted, session.SourceText);
+        Assert.False(session.IsDirty);
+    }
+
     private static EditorSessionViewModel CreateSession(string path, string content)
         => new(
             new MarkdownSource(path, Path.GetFileName(path), content),

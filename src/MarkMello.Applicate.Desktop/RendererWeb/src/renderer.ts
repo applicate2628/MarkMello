@@ -2124,6 +2124,18 @@ function sanitizeMinimapCloneTree(root: ParentNode): void {
     const isHtml = node.namespaceURI === "http://www.w3.org/1999/xhtml" || node.namespaceURI === null;
     if (isHtml && node.hasAttribute("id")) node.removeAttribute("id");
     const tag = node.tagName;
+    if (tag === "TH" || tag === "TD") {
+      node.removeAttribute("contenteditable");
+      for (const attribute of Array.from(node.attributes)) {
+        if (attribute.name.startsWith("data-mm-cell-")) {
+          node.removeAttribute(attribute.name);
+        }
+      }
+      node.classList.remove("mm-editable-cell");
+      if (node.classList.length === 0) {
+        node.removeAttribute("class");
+      }
+    }
     if (tag === "A" || tag === "BUTTON" || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
       node.setAttribute("tabindex", "-1");
       node.removeAttribute("href");
@@ -2803,6 +2815,10 @@ export function __testInvalidateMinimapCloneGeometryForTesting(): void {
 export function __testDocScrollTopForCloneYForTesting(root: Element, y: number): number | null {
   refreshTopVisibleBlockIndexCache();
   return docScrollTopForCloneY(root, y);
+}
+
+export function __testCloneDocumentForMinimapForTesting(): HTMLElement | null {
+  return cloneDocumentForMinimap();
 }
 
 // Producer-capture test seams (design H2). These invoke the real,
@@ -3725,6 +3741,11 @@ function handleHostMessage(raw: unknown): void {
     return;
   }
 
+  if (message.type === "table-cell-updated") {
+    handleTableCellUpdatedMessage(message);
+    return;
+  }
+
   if (message.type === "mode-settle-probe") {
     postPerfMark("mm-mode-settle-probe-received");
     applyModeSettleProbePreferences(message);
@@ -4171,6 +4192,312 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
   };
 }
 
+// BEGIN TABLE CELL EDIT MODULE
+// This is the single renderer owner for editable-table state. It stashes the
+// focus-time DOM, emits only event-driven edits, and observes the host's
+// canonical acknowledgement before replacing or restoring cell content.
+type TableCellEditState = {
+  stashedInnerHtml: string;
+  lastSubmittedText: string | null;
+};
+
+const tableCellEditStates = new WeakMap<HTMLTableCellElement, TableCellEditState>();
+const composingTableCells = new WeakSet<HTMLTableCellElement>();
+const tableCellDiscoveryObserver = new MutationObserver((records) => {
+  for (const record of records) {
+    for (const addedNode of record.addedNodes) {
+      if (addedNode instanceof Element) {
+        prepareEditableTableCells(addedNode);
+      }
+    }
+  }
+});
+let tableCellEditingWired = false;
+
+function editableTableCellFromEventTarget(target: EventTarget | null): HTMLTableCellElement | null {
+  if (!(target instanceof Element) || target.closest(".mm-minimap-content") !== null) {
+    return null;
+  }
+
+  const cell = target.closest<HTMLTableCellElement>("th.mm-editable-cell, td.mm-editable-cell");
+  if (!(cell instanceof HTMLTableCellElement)) {
+    return null;
+  }
+
+  return cell;
+}
+
+function prepareEditableTableCell(cell: HTMLTableCellElement): void {
+  if (cell.closest(".mm-minimap-content") !== null) {
+    return;
+  }
+
+  cell.contentEditable = "plaintext-only";
+  if (cell.contentEditable === "plaintext-only") {
+    delete cell.dataset.mmCellPlaintextFallback;
+    return;
+  }
+
+  cell.contentEditable = "true";
+  cell.dataset.mmCellPlaintextFallback = "true";
+}
+
+function prepareEditableTableCells(root: ParentNode = document): void {
+  if (root instanceof HTMLTableCellElement && root.matches("th.mm-editable-cell, td.mm-editable-cell")) {
+    prepareEditableTableCell(root);
+  }
+  root.querySelectorAll<HTMLTableCellElement>("th.mm-editable-cell, td.mm-editable-cell")
+    .forEach(prepareEditableTableCell);
+}
+
+function readTableCellCoordinate(cell: HTMLTableCellElement, attributeName: string): number | null {
+  const raw = cell.getAttribute(attributeName);
+  if (raw === null || raw.trim().length === 0) {
+    return null;
+  }
+
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function readEditableTableCellText(cell: HTMLTableCellElement): string {
+  return cell.dataset.mmCellPlaintextFallback === "true"
+    ? cell.innerText
+    : (cell.textContent ?? "");
+}
+
+function getOrCreateTableCellEditState(cell: HTMLTableCellElement): TableCellEditState {
+  const existing = tableCellEditStates.get(cell);
+  if (existing) {
+    return existing;
+  }
+
+  const state: TableCellEditState = {
+    stashedInnerHtml: cell.innerHTML,
+    lastSubmittedText: null,
+  };
+  tableCellEditStates.set(cell, state);
+  return state;
+}
+
+function postTableCellEdit(cell: HTMLTableCellElement): boolean {
+  const line = readTableCellCoordinate(cell, "data-mm-cell-line");
+  const cellIndex = readTableCellCoordinate(cell, "data-mm-cell-index");
+  if (line === null || cellIndex === null) {
+    return false;
+  }
+
+  const text = readEditableTableCellText(cell);
+  const state = getOrCreateTableCellEditState(cell);
+  if (state.lastSubmittedText === text) {
+    return false;
+  }
+
+  postHostMessage({
+    type: "table-cell-edit",
+    line,
+    cellIndex,
+    text,
+    key: cell.getAttribute("data-mm-cell-key"),
+    // Currency stamp: the render generation this renderer currently holds. The
+    // host refuses the write if a different document has since become active
+    // (the addressed line/index/key can collide with an unrelated cell there).
+    renderId: currentDocumentRenderId,
+  });
+  state.lastSubmittedText = text;
+  return true;
+}
+
+function sanitizePastedTableCellText(text: string): string {
+  return text.replace(/(?:\r\n?|\n)+/g, " ");
+}
+
+function insertPlainTextAtTableCellSelection(cell: HTMLTableCellElement, text: string): void {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    cell.append(document.createTextNode(text));
+    return;
+  }
+
+  const range = selection.getRangeAt(0);
+  if (!cell.contains(range.commonAncestorContainer)) {
+    cell.append(document.createTextNode(text));
+    return;
+  }
+
+  range.deleteContents();
+  const textNode = document.createTextNode(text);
+  range.insertNode(textNode);
+  range.setStartAfter(textNode);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function findLiveEditableTableCell(line: number, cellIndex: number): HTMLTableCellElement | null {
+  const cells = document.querySelectorAll<HTMLTableCellElement>("th.mm-editable-cell, td.mm-editable-cell");
+  for (const cell of cells) {
+    if (
+      cell.closest(".mm-minimap-content") === null
+      && readTableCellCoordinate(cell, "data-mm-cell-line") === line
+      && readTableCellCoordinate(cell, "data-mm-cell-index") === cellIndex
+    ) {
+      return cell;
+    }
+  }
+
+  return null;
+}
+
+function handleTableCellUpdatedMessage(raw: unknown): void {
+  if (typeof raw !== "object" || raw === null) {
+    return;
+  }
+
+  const message = raw as Record<string, unknown>;
+  const { line, cellIndex, ok } = message;
+  if (
+    !Number.isInteger(line)
+    || (line as number) < 0
+    || !Number.isInteger(cellIndex)
+    || (cellIndex as number) < 0
+    || typeof ok !== "boolean"
+  ) {
+    return;
+  }
+
+  const cell = findLiveEditableTableCell(line as number, cellIndex as number);
+  if (!cell) {
+    return;
+  }
+
+  const state = getOrCreateTableCellEditState(cell);
+  if (ok) {
+    if (typeof message.text !== "string" || typeof message.key !== "string") {
+      return;
+    }
+
+    cell.textContent = message.text;
+    cell.dataset.mmCellKey = message.key;
+    state.stashedInnerHtml = cell.innerHTML;
+    state.lastSubmittedText = readEditableTableCellText(cell);
+    return;
+  }
+
+  // A BUSY refusal (the host serializer was mid-commit) must NOT discard the
+  // user's typed text: restoring the pre-focus stash here would silently drop a
+  // second cell's edit made during the first commit's IO window. Keep the typed
+  // text and clear the submit latch so a re-blur re-posts once the in-flight
+  // commit settles. Only a VALIDATION refusal (no reason) restores the stash.
+  if (message.reason === "busy") {
+    state.lastSubmittedText = null;
+    return;
+  }
+
+  cell.innerHTML = state.stashedInnerHtml;
+  state.lastSubmittedText = readEditableTableCellText(cell);
+}
+
+function wireTableCellEditing(): void {
+  if (tableCellEditingWired) {
+    return;
+  }
+  tableCellEditingWired = true;
+  tableCellDiscoveryObserver.observe(document, { childList: true, subtree: true });
+  prepareEditableTableCells();
+
+  document.addEventListener("focusin", (event) => {
+    const cell = editableTableCellFromEventTarget(event.target);
+    if (!cell) {
+      return;
+    }
+
+    tableCellEditStates.set(cell, {
+      stashedInnerHtml: cell.innerHTML,
+      // Seed the submit latch with the cell's CURRENT text so an unmodified
+      // blur posts nothing: a no-op write would rewrite the file on read-only
+      // interaction and re-pad the source, destroying hand-aligned cell padding.
+      lastSubmittedText: readEditableTableCellText(cell),
+    });
+  });
+
+  document.addEventListener("compositionstart", (event) => {
+    const cell = editableTableCellFromEventTarget(event.target);
+    if (cell) composingTableCells.add(cell);
+  });
+
+  document.addEventListener("compositionend", (event) => {
+    const cell = editableTableCellFromEventTarget(event.target);
+    if (cell) composingTableCells.delete(cell);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    const cell = editableTableCellFromEventTarget(event.target);
+    if (!cell) {
+      return;
+    }
+
+    if (event.key === "Escape") {
+      const state = getOrCreateTableCellEditState(cell);
+      cell.innerHTML = state.stashedInnerHtml;
+      state.lastSubmittedText = readEditableTableCellText(cell);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    if (event.key !== "Enter" || event.isComposing || composingTableCells.has(cell)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    postTableCellEdit(cell);
+  });
+
+  document.addEventListener("blur", (event) => {
+    const cell = editableTableCellFromEventTarget(event.target);
+    if (cell) postTableCellEdit(cell);
+  }, true);
+
+  document.addEventListener("beforeinput", (event) => {
+    const cell = editableTableCellFromEventTarget(event.target);
+    if (!cell || cell.dataset.mmCellPlaintextFallback !== "true") {
+      return;
+    }
+
+    const blockedInput = event.inputType.startsWith("format")
+      || event.inputType === "insertParagraph"
+      || event.inputType === "insertLineBreak"
+      || event.inputType === "insertHTML"
+      || event.inputType === "insertFromPaste"
+      || event.inputType === "insertFromDrop"
+      || event.inputType === "insertOrderedList"
+      || event.inputType === "insertUnorderedList";
+    if (blockedInput) event.preventDefault();
+  });
+
+  document.addEventListener("paste", (event) => {
+    const cell = editableTableCellFromEventTarget(event.target);
+    if (!cell || cell.dataset.mmCellPlaintextFallback !== "true") {
+      return;
+    }
+
+    event.preventDefault();
+    const text = sanitizePastedTableCellText(event.clipboardData?.getData("text/plain") ?? "");
+    insertPlainTextAtTableCellSelection(cell, text);
+  });
+}
+
+export function __testPrepareEditableTableCellsForTesting(root: ParentNode = document): void {
+  prepareEditableTableCells(root);
+}
+
+export function __testWireTableCellEditingForTesting(): void {
+  wireTableCellEditing();
+}
+// END TABLE CELL EDIT MODULE
+
 function wireLinks(): void {
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element
@@ -4365,6 +4692,9 @@ function wireHostShortcuts(): void {
     "keydown",
     (event) => {
       const key = event.key.toLowerCase();
+      if (key === "escape" && editableTableCellFromEventTarget(event.target)) {
+        return;
+      }
       const combo =
         (event.ctrlKey || event.metaKey ? "ctrl+" : "") +
         (event.shiftKey ? "shift+" : "") +
@@ -4554,6 +4884,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // which is triggered by the first reading-preferences message from the host.
   wireLinks();
   wireTaskCheckboxes();
+  wireTableCellEditing();
   wireViewerInteraction();
   wireWheelProxy();
   wireFileDrop();

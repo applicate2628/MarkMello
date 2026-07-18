@@ -11,6 +11,8 @@ import {
   __testEmitLayoutReadyForTesting,
   __testEmitPerfMarkForTesting,
   __testEmitScrollForTesting,
+  __testPrepareEditableTableCellsForTesting,
+  __testWireTableCellEditingForTesting,
 } from "../src/renderer";
 
 type CapturedMessage = { type?: unknown } & Record<string, unknown>;
@@ -147,5 +149,30 @@ describe("renderer->host producer capture", () => {
 
   it("perf-mark producer emits only declared fields", () => {
     assertNoViolations(capture(() => __testEmitPerfMarkForTesting("mm-test", { a: 1 })));
+  });
+
+  it("table-cell-edit producer emits exactly the registered fields", () => {
+    document.body.innerHTML = `
+      <main class="mm-document"><table><tbody><tr>
+        <td class="mm-editable-cell" data-mm-cell-line="12"
+            data-mm-cell-index="3" data-mm-cell-key="abc123">Changed</td>
+      </tr></tbody></table></main>`;
+    __testWireTableCellEditingForTesting();
+    __testPrepareEditableTableCellsForTesting();
+    const cell = document.querySelector<HTMLTableCellElement>("td.mm-editable-cell")!;
+
+    const messages = capture(() => {
+      cell.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      // Modify the text so the (post-fix) no-op-blur suppression does not stop
+      // the producer from emitting — an unmodified blur now posts nothing.
+      cell.textContent = "Edited";
+      cell.dispatchEvent(new FocusEvent("blur"));
+    });
+    const edit = messages.find((message) => message.type === "table-cell-edit");
+
+    expect(Object.keys(edit as CapturedMessage).sort()).toEqual(
+      ["cellIndex", "key", "line", "renderId", "text", "type"],
+    );
+    assertNoViolations(messages);
   });
 });

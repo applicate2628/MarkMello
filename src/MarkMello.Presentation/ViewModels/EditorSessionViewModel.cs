@@ -265,6 +265,25 @@ public sealed class EditorSessionViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// In-place table-cell entry: the document on disk moved to
+    /// <paramref name="persistedContent"/> while this session holds the
+    /// (possibly dormant) buffer. The persisted baseline follows the real disk
+    /// state so Discard/Save cannot restore the pre-edit cell. Deliberately
+    /// skips the synchronous whole-document preview rebuild used by the normal
+    /// <see cref="SourceText"/> setter.
+    /// </summary>
+    public void ApplyPersistedTableCellEdit(string sourceText, string persistedContent)
+    {
+        var textChanged = SetProperty(ref _sourceText, sourceText ?? string.Empty, nameof(SourceText));
+        LastPersistedSource = persistedContent;
+        if (textChanged)
+        {
+            RaiseDocumentMetricsChanged();
+            OnPropertyChanged(nameof(IsDirty));
+        }
+    }
+
     public void DiscardChanges()
     {
         SourceText = LastPersistedSource;

@@ -485,6 +485,20 @@ img {
   color: color-mix(in srgb, var(--mm-document-text) 88%, var(--mm-document-muted));
 }
 
+.mm-document .mm-editable-cell {
+  cursor: text;
+  transition: background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.mm-document .mm-editable-cell:hover {
+  background: color-mix(in srgb, var(--mm-accent) 5%, transparent);
+}
+
+.mm-document .mm-editable-cell:focus-visible {
+  background: color-mix(in srgb, var(--mm-accent) 8%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mm-accent) 38%, transparent);
+}
+
 .mm-document table code {
   white-space: nowrap;
 }

@@ -27,6 +27,7 @@ type MutableGeometry = {
 type RendererTestModule = typeof rendererModule & {
   __testDocScrollTopForCloneYForTesting?: (root: Element, y: number) => number | null;
   __testInvalidateMinimapCloneGeometryForTesting?: () => void;
+  __testCloneDocumentForMinimapForTesting?: () => HTMLElement | null;
 };
 
 const rendererForTesting = rendererModule as RendererTestModule;
@@ -36,6 +37,36 @@ afterEach(() => {
 });
 
 describe("minimap clone-space lookup", () => {
+  it("keeps the clone inert while stripping table-cell edit capabilities only from clone cells", () => {
+    const source = document.createElement("main");
+    source.className = "mm-document";
+    source.innerHTML = `
+      <table><tbody><tr>
+        <td class="mm-editable-cell keep" contenteditable="plaintext-only"
+            data-mm-cell-line="2" data-mm-cell-index="1" data-mm-cell-key="abc"
+            data-mm-cell-extra="fallback">Cell</td>
+      </tr></tbody></table>
+      <p class="mm-editable-cell" contenteditable="true" data-mm-cell-key="outside">Outside</p>`;
+    document.body.append(source);
+
+    const cloneDocument = rendererForTesting.__testCloneDocumentForMinimapForTesting;
+    expect(typeof cloneDocument).toBe("function");
+    const clone = cloneDocument?.();
+    const cloneCell = clone?.querySelector<HTMLTableCellElement>("td");
+    const cloneParagraph = clone?.querySelector<HTMLParagraphElement>("p");
+
+    expect(clone).not.toBeNull();
+    expect(clone?.inert).toBe(true);
+    expect(cloneCell?.classList.contains("mm-editable-cell")).toBe(false);
+    expect(cloneCell?.classList.contains("keep")).toBe(true);
+    expect(cloneCell?.getAttribute("contenteditable")).toBeNull();
+    expect(Array.from(cloneCell?.attributes ?? []).some((attr) => attr.name.startsWith("data-mm-cell-"))).toBe(false);
+    expect(cloneParagraph?.classList.contains("mm-editable-cell")).toBe(true);
+    expect(cloneParagraph?.getAttribute("contenteditable")).toBe("true");
+    expect(source.querySelector("td")?.classList.contains("mm-editable-cell")).toBe(true);
+    expect(source.querySelector("td")?.getAttribute("data-mm-cell-key")).toBe("abc");
+  });
+
   it("matches the reference linear scan across boundaries, gaps, hidden twins, zero height, and tail", () => {
     const emptyClone = document.createElement("main");
     __testSetMinimapCloneBlockElementsForTesting(emptyClone, []);
