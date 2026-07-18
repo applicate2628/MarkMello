@@ -485,18 +485,28 @@ img {
   color: color-mix(in srgb, var(--mm-document-text) 88%, var(--mm-document-muted));
 }
 
+/* Editable table cells. Persistent-but-subtle affordance so the table reads as
+   editable at a glance (a faint accent wash + text cursor); a clearer hover; and
+   a crisp accent focus outline drawn INSIDE the cell via outline-offset: -2px —
+   a default (positive-offset) outline sits OUTSIDE the cell and is clipped by the
+   table's outer border / the .mm-table-scroll overflow on edge cells, so the
+   negative offset keeps the full contour within the cell. */
 .mm-document .mm-editable-cell {
   cursor: text;
+  background: color-mix(in srgb, var(--mm-accent) 3.5%, transparent);
   transition: background-color 120ms ease, box-shadow 120ms ease;
 }
 
 .mm-document .mm-editable-cell:hover {
-  background: color-mix(in srgb, var(--mm-accent) 5%, transparent);
+  background: color-mix(in srgb, var(--mm-accent) 11%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mm-accent) 26%, transparent);
 }
 
+.mm-document .mm-editable-cell:focus,
 .mm-document .mm-editable-cell:focus-visible {
+  outline: 2px solid var(--mm-accent);
+  outline-offset: -2px;
   background: color-mix(in srgb, var(--mm-accent) 8%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mm-accent) 38%, transparent);
 }
 
 .mm-document table code {
