@@ -127,11 +127,57 @@ public sealed class ApplicateMainWindowBridgeTests
         // patch its checkbox surgically BEFORE the swap.
         var codeBehind = ReadMainWindowCodeBehind();
         var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var taskHandler = ExtractFromMarker(bridge, "viewModel.TaskToggleCommitted");
+        var mirror = ExtractMethodBody(bridge, "void MirrorReadingInPlaceEdit(");
 
-        var editPatchIndex = bridge.IndexOf("channelEditHost.View.SetTaskCheckboxState(commit.Line, commit.Checked, commit.Source.Path);", StringComparison.Ordinal);
-        var editSwapIndex = bridge.IndexOf("channelEditHost.CommitInPlaceSourceSwap(commit.Source);", StringComparison.Ordinal);
-        Assert.True(editPatchIndex >= 0, "Edit host must receive the surgical checkbox patch.");
+        Assert.Contains("host => host.View.SetTaskCheckboxState(commit.Line, commit.Checked, commit.Source.Path)", taskHandler, StringComparison.Ordinal);
+        Assert.Contains("applyViewerDomPatch: false", taskHandler, StringComparison.Ordinal);
+        var editPatchIndex = mirror.IndexOf("patchHost(channelEditHost);", StringComparison.Ordinal);
+        var editSwapIndex = mirror.IndexOf("channelEditHost.CommitInPlaceSourceSwap(source);", StringComparison.Ordinal);
+        Assert.True(editPatchIndex >= 0, "The edit host must receive the surgical checkbox patch.");
         Assert.True(editSwapIndex > editPatchIndex, "The silent swap may run only AFTER the edit host's DOM was patched.");
+    }
+
+    [Fact]
+    public void HistoryUndoPatchesBothHostsBeforeSourceSwap()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var historyHandler = ExtractFromMarker(bridge, "viewModel.InPlaceEditHistoryTransitioned");
+
+        Assert.Contains("MirrorReadingInPlaceEdit(", historyHandler, StringComparison.Ordinal);
+        Assert.Contains("transition.Source,", historyHandler, StringComparison.Ordinal);
+        Assert.Contains("applyViewerDomPatch: true", historyHandler, StringComparison.Ordinal);
+
+        var mirror = ExtractMethodBody(bridge, "void MirrorReadingInPlaceEdit(");
+        var viewerPatchIndex = mirror.IndexOf("patchHost(channelViewerHost);", StringComparison.Ordinal);
+        var viewerSwapIndex = mirror.IndexOf("channelViewerHost?.CommitInPlaceSourceSwap(source);", StringComparison.Ordinal);
+        var editPatchIndex = mirror.IndexOf("patchHost(channelEditHost);", StringComparison.Ordinal);
+        var editSwapIndex = mirror.IndexOf("channelEditHost.CommitInPlaceSourceSwap(source);", StringComparison.Ordinal);
+
+        Assert.True(viewerPatchIndex >= 0, "History must patch the viewer before its silent source swap.");
+        Assert.True(viewerSwapIndex > viewerPatchIndex, "The viewer source swap must follow its history DOM patch.");
+        Assert.True(editPatchIndex >= 0, "History must patch the distinct edit-preview host before its silent source swap.");
+        Assert.True(viewerSwapIndex > editPatchIndex, "Both history DOM patches must complete before either host silently swaps source.");
+        Assert.True(editSwapIndex > editPatchIndex, "The edit-preview source swap must follow its history DOM patch.");
+        Assert.Contains("openDocs.UpdateSourceText(mirrored, source.Content, preserveModified: true);", mirror, StringComparison.Ordinal);
+
+        var historyPatch = ExtractMethodBody(bridge, "void ApplyHistoryDomPatch(");
+        Assert.Contains("RealtimeInDocumentEditDomPatchKind.TaskCheckbox", historyPatch, StringComparison.Ordinal);
+        Assert.Contains("RealtimeInDocumentEditDomPatchKind.TableCell", historyPatch, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReadingUndoRedoHotkeysAreModeGatedAndKeepEditModeNative()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var hostBridge = ExtractMethodBody(codeBehind, "private void InstallHostShortcutBridge(MainWindowViewModel viewModel)");
+        var markup = ReadMainWindowMarkup();
+
+        Assert.Contains("\"ctrl+z\" when !viewModel.IsEditMode => viewModel.UndoRealtimeInDocumentEditCommand", hostBridge, StringComparison.Ordinal);
+        Assert.Contains("\"ctrl+y\" when !viewModel.IsEditMode => viewModel.RedoRealtimeInDocumentEditCommand", hostBridge, StringComparison.Ordinal);
+        Assert.Contains("Gesture=\"Ctrl+Z\" Command=\"{Binding UndoRealtimeInDocumentEditCommand}\"", markup, StringComparison.Ordinal);
+        Assert.Contains("Gesture=\"Ctrl+Y\" Command=\"{Binding RedoRealtimeInDocumentEditCommand}\"", markup, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -143,14 +189,15 @@ public sealed class ApplicateMainWindowBridgeTests
         // preserveModified: true, and the bare (dirty-clearing) form must be gone.
         var codeBehind = ReadMainWindowCodeBehind();
         var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var mirror = ExtractMethodBody(bridge, "void MirrorReadingInPlaceEdit(");
 
         var preserving = System.Text.RegularExpressions.Regex.Matches(
-            bridge,
-            @"openDocs\.UpdateSourceText\(mirrored, commit\.Source\.Content, preserveModified: true\);");
-        Assert.Equal(2, preserving.Count); // task-toggle + table-cell reading commits
+            mirror,
+            @"openDocs\.UpdateSourceText\(mirrored, source\.Content, preserveModified: true\);");
+        Assert.Single(preserving); // shared reading-mode mirror helper
         Assert.DoesNotContain(
-            "openDocs.UpdateSourceText(mirrored, commit.Source.Content);",
-            bridge,
+            "openDocs.UpdateSourceText(mirrored, source.Content);",
+            mirror,
             StringComparison.Ordinal);
     }
 
@@ -196,19 +243,15 @@ public sealed class ApplicateMainWindowBridgeTests
     {
         var codeBehind = ReadMainWindowCodeBehind();
         var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
-        var viewerPatch = bridge.IndexOf(
-            "channelViewerHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);",
-            StringComparison.Ordinal);
-        var viewerSwap = viewerPatch < 0
-            ? -1
-            : bridge.IndexOf("channelViewerHost?.CommitInPlaceSourceSwap(commit.Source);", viewerPatch, StringComparison.Ordinal);
-        var editPatch = bridge.IndexOf(
-            "channelEditHost.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);",
-            StringComparison.Ordinal);
-        var editSwap = editPatch < 0
-            ? -1
-            : bridge.IndexOf("channelEditHost.CommitInPlaceSourceSwap(commit.Source);", editPatch, StringComparison.Ordinal);
+        var tableHandler = ExtractFromMarker(bridge, "viewModel.TableCellCommitted");
+        var mirror = ExtractMethodBody(bridge, "void MirrorReadingInPlaceEdit(");
 
+        Assert.Contains("host => host.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path)", tableHandler, StringComparison.Ordinal);
+        Assert.Contains("applyViewerDomPatch: true", tableHandler, StringComparison.Ordinal);
+        var viewerPatch = mirror.IndexOf("patchHost(channelViewerHost);", StringComparison.Ordinal);
+        var viewerSwap = mirror.IndexOf("channelViewerHost?.CommitInPlaceSourceSwap(source);", StringComparison.Ordinal);
+        var editPatch = mirror.IndexOf("patchHost(channelEditHost);", StringComparison.Ordinal);
+        var editSwap = mirror.IndexOf("channelEditHost.CommitInPlaceSourceSwap(source);", StringComparison.Ordinal);
         Assert.True(viewerPatch >= 0, "The origin viewer must receive its canonical acknowledgement.");
         Assert.True(viewerSwap > viewerPatch, "The viewer source swap must follow its canonical acknowledgement.");
         Assert.True(editPatch >= 0, "The distinct primed edit host must receive the canonical cell patch.");
@@ -574,6 +617,19 @@ public sealed class ApplicateMainWindowBridgeTests
             "RendererWeb",
             "src",
             "renderer.ts"));
+
+    private static string ReadMainWindowMarkup()
+        => File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "MainWindow.axaml"));
 
     private static string ReadAirspaceCompositorSource()
         => File.ReadAllText(Path.Combine(

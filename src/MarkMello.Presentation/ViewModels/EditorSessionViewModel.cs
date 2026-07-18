@@ -12,6 +12,8 @@ namespace MarkMello.Presentation.ViewModels;
 /// </summary>
 public sealed class EditorSessionViewModel : ObservableObject
 {
+    private const int MaxRetainedRealtimeHistoryDepth = 20;
+
     private readonly RenderMarkdownDocumentUseCase _renderMarkdown;
     private readonly ILocalizationService _localization;
     private string _sourceText;
@@ -22,6 +24,8 @@ public sealed class EditorSessionViewModel : ObservableObject
     private ReadingPreferences _readingPreferences;
     private RenderedMarkdownDocument _renderedPreview;
     private string _statusMessage;
+    private readonly Stack<RealtimeInDocumentEditHistoryEntry> _realtimeUndoHistory = new();
+    private readonly Stack<RealtimeInDocumentEditHistoryEntry> _realtimeRedoHistory = new();
     // True while RenderedPreview is intentionally out of step with SourceText:
     // a preview-deferred materialization (a reading-mode in-place edit lazily
     // creates the session with an Empty preview) or an ApplyInPlaceEditToBuffer
@@ -241,6 +245,10 @@ public sealed class EditorSessionViewModel : ObservableObject
 
     public bool IsDirty => !string.Equals(SourceText, LastPersistedSource, StringComparison.Ordinal);
 
+    internal bool CanUndoRealtimeEdits => _realtimeUndoHistory.Count > 0;
+
+    internal bool CanRedoRealtimeEdits => _realtimeRedoHistory.Count > 0;
+
     public int WordCount => CountWords(SourceText);
 
     public int ReadTimeMinutes => Math.Max(1, (int)Math.Round(WordCount / 220.0));
@@ -303,6 +311,52 @@ public sealed class EditorSessionViewModel : ObservableObject
             RaiseDocumentMetricsChanged();
             OnPropertyChanged(nameof(IsDirty));
         }
+    }
+
+    internal bool ApplyRealtimeInDocumentEdit(string newBuffer, RealtimeInDocumentEditDomPatch domPatch)
+    {
+        ArgumentNullException.ThrowIfNull(domPatch);
+
+        newBuffer ??= string.Empty;
+        if (string.Equals(SourceText, newBuffer, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        _realtimeUndoHistory.Push(new RealtimeInDocumentEditHistoryEntry(SourceText, newBuffer, domPatch));
+        _realtimeRedoHistory.Clear();
+        TrimRealtimeUndoHistory();
+        ApplyInPlaceEditToBuffer(newBuffer);
+        RaiseRealtimeHistoryAvailabilityChanged();
+        return true;
+    }
+
+    internal RealtimeInDocumentEditHistoryTransition UndoRealtimeInDocumentEdit()
+        => ApplyRealtimeHistoryTransition(
+            _realtimeUndoHistory,
+            _realtimeRedoHistory,
+            expectedSource: static entry => entry.AfterSource,
+            targetSource: static entry => entry.BeforeSource,
+            useAfterPatchValues: false);
+
+    internal RealtimeInDocumentEditHistoryTransition RedoRealtimeInDocumentEdit()
+        => ApplyRealtimeHistoryTransition(
+            _realtimeRedoHistory,
+            _realtimeUndoHistory,
+            expectedSource: static entry => entry.BeforeSource,
+            targetSource: static entry => entry.AfterSource,
+            useAfterPatchValues: true);
+
+    internal void ClearRealtimeInDocumentEditHistory()
+    {
+        if (_realtimeUndoHistory.Count == 0 && _realtimeRedoHistory.Count == 0)
+        {
+            return;
+        }
+
+        _realtimeUndoHistory.Clear();
+        _realtimeRedoHistory.Clear();
+        RaiseRealtimeHistoryAvailabilityChanged();
     }
 
     /// <summary>
@@ -401,4 +455,207 @@ public sealed class EditorSessionViewModel : ObservableObject
         OnPropertyChanged(nameof(WordCount));
         OnPropertyChanged(nameof(ReadTimeMinutes));
     }
+
+    private RealtimeInDocumentEditHistoryTransition ApplyRealtimeHistoryTransition(
+        Stack<RealtimeInDocumentEditHistoryEntry> sourceHistory,
+        Stack<RealtimeInDocumentEditHistoryEntry> destinationHistory,
+        Func<RealtimeInDocumentEditHistoryEntry, string> expectedSource,
+        Func<RealtimeInDocumentEditHistoryEntry, string> targetSource,
+        bool useAfterPatchValues)
+    {
+        if (sourceHistory.Count == 0)
+        {
+            return RealtimeInDocumentEditHistoryTransition.Empty;
+        }
+
+        var entry = sourceHistory.Peek();
+        if (!string.Equals(SourceText, expectedSource(entry), StringComparison.Ordinal))
+        {
+            ClearRealtimeInDocumentEditHistory();
+            return RealtimeInDocumentEditHistoryTransition.Invalidated;
+        }
+
+        sourceHistory.Pop();
+        destinationHistory.Push(entry);
+        var nextSource = targetSource(entry);
+        ApplyInPlaceEditToBuffer(nextSource);
+        RaiseRealtimeHistoryAvailabilityChanged();
+        return RealtimeInDocumentEditHistoryTransition.Applied(
+            nextSource,
+            entry.DomPatch.CreateDirectedPatch(useAfterPatchValues));
+    }
+
+    private void TrimRealtimeUndoHistory()
+    {
+        if (_realtimeUndoHistory.Count <= MaxRetainedRealtimeHistoryDepth)
+        {
+            return;
+        }
+
+        var newestEntries = _realtimeUndoHistory.ToArray();
+        _realtimeUndoHistory.Clear();
+        for (var index = MaxRetainedRealtimeHistoryDepth - 1; index >= 0; index--)
+        {
+            _realtimeUndoHistory.Push(newestEntries[index]);
+        }
+    }
+
+    private void RaiseRealtimeHistoryAvailabilityChanged()
+    {
+        OnPropertyChanged(nameof(CanUndoRealtimeEdits));
+        OnPropertyChanged(nameof(CanRedoRealtimeEdits));
+    }
+}
+
+public enum RealtimeInDocumentEditDomPatchKind
+{
+    TaskCheckbox,
+    TableCell,
+}
+
+internal sealed record RealtimeInDocumentEditDomPatch
+{
+    private RealtimeInDocumentEditDomPatch(
+        RealtimeInDocumentEditDomPatchKind kind,
+        int line,
+        int cellIndex,
+        bool beforeChecked,
+        bool afterChecked,
+        string? beforeText,
+        string? beforeKey,
+        string? afterText,
+        string? afterKey)
+    {
+        Kind = kind;
+        Line = line;
+        CellIndex = cellIndex;
+        BeforeChecked = beforeChecked;
+        AfterChecked = afterChecked;
+        BeforeText = beforeText;
+        BeforeKey = beforeKey;
+        AfterText = afterText;
+        AfterKey = afterKey;
+    }
+
+    public RealtimeInDocumentEditDomPatchKind Kind { get; }
+
+    public int Line { get; }
+
+    public int CellIndex { get; }
+
+    public bool BeforeChecked { get; }
+
+    public bool AfterChecked { get; }
+
+    public string? BeforeText { get; }
+
+    public string? BeforeKey { get; }
+
+    public string? AfterText { get; }
+
+    public string? AfterKey { get; }
+
+    internal static RealtimeInDocumentEditDomPatch ForTaskCheckbox(int line, bool beforeChecked, bool afterChecked)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(line);
+        return new RealtimeInDocumentEditDomPatch(
+            RealtimeInDocumentEditDomPatchKind.TaskCheckbox,
+            line,
+            cellIndex: -1,
+            beforeChecked,
+            afterChecked,
+            beforeText: null,
+            beforeKey: null,
+            afterText: null,
+            afterKey: null);
+    }
+
+    internal static RealtimeInDocumentEditDomPatch ForTableCell(
+        int line,
+        int cellIndex,
+        string beforeText,
+        string beforeKey,
+        string afterText,
+        string afterKey)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(line);
+        ArgumentOutOfRangeException.ThrowIfNegative(cellIndex);
+        ArgumentNullException.ThrowIfNull(beforeText);
+        ArgumentNullException.ThrowIfNull(beforeKey);
+        ArgumentNullException.ThrowIfNull(afterText);
+        ArgumentNullException.ThrowIfNull(afterKey);
+
+        return new RealtimeInDocumentEditDomPatch(
+            RealtimeInDocumentEditDomPatchKind.TableCell,
+            line,
+            cellIndex,
+            beforeChecked: false,
+            afterChecked: false,
+            beforeText,
+            beforeKey,
+            afterText,
+            afterKey);
+    }
+
+    internal RealtimeInDocumentEditDirectedDomPatch CreateDirectedPatch(bool useAfterValues)
+        => Kind switch
+        {
+            RealtimeInDocumentEditDomPatchKind.TaskCheckbox => RealtimeInDocumentEditDirectedDomPatch.ForTaskCheckbox(
+                Line,
+                useAfterValues ? AfterChecked : BeforeChecked),
+            RealtimeInDocumentEditDomPatchKind.TableCell => RealtimeInDocumentEditDirectedDomPatch.ForTableCell(
+                Line,
+                CellIndex,
+                useAfterValues ? AfterText! : BeforeText!,
+                useAfterValues ? AfterKey! : BeforeKey!),
+            _ => throw new InvalidOperationException($"Unsupported realtime edit DOM patch kind '{Kind}'."),
+        };
+}
+
+public sealed record RealtimeInDocumentEditDirectedDomPatch(
+    RealtimeInDocumentEditDomPatchKind Kind,
+    int Line,
+    int CellIndex,
+    bool Checked,
+    string? Text,
+    string? Key)
+{
+    internal static RealtimeInDocumentEditDirectedDomPatch ForTaskCheckbox(int line, bool checkedValue)
+        => new(RealtimeInDocumentEditDomPatchKind.TaskCheckbox, line, -1, checkedValue, null, null);
+
+    internal static RealtimeInDocumentEditDirectedDomPatch ForTableCell(int line, int cellIndex, string text, string key)
+        => new(RealtimeInDocumentEditDomPatchKind.TableCell, line, cellIndex, false, text, key);
+}
+
+internal sealed record RealtimeInDocumentEditHistoryEntry(
+    string BeforeSource,
+    string AfterSource,
+    RealtimeInDocumentEditDomPatch DomPatch);
+
+internal enum RealtimeInDocumentEditHistoryTransitionStatus
+{
+    Empty,
+    Applied,
+    Invalidated,
+}
+
+internal sealed record RealtimeInDocumentEditHistoryTransition(
+    RealtimeInDocumentEditHistoryTransitionStatus Status,
+    string? TargetSource,
+    RealtimeInDocumentEditDirectedDomPatch? DomPatch)
+{
+    public static readonly RealtimeInDocumentEditHistoryTransition Empty = new(
+        RealtimeInDocumentEditHistoryTransitionStatus.Empty,
+        null,
+        null);
+
+    public static readonly RealtimeInDocumentEditHistoryTransition Invalidated = new(
+        RealtimeInDocumentEditHistoryTransitionStatus.Invalidated,
+        null,
+        null);
+
+    internal static RealtimeInDocumentEditHistoryTransition Applied(
+        string targetSource,
+        RealtimeInDocumentEditDirectedDomPatch domPatch)
+        => new(RealtimeInDocumentEditHistoryTransitionStatus.Applied, targetSource, domPatch);
 }

@@ -1968,6 +1968,190 @@ public sealed class MainWindowViewModelTests
         Assert.False(closed);                              // close deferred behind the prompt
     }
 
+    [Fact]
+    public async Task ReadingModeTaskUndoRestoresDocumentSessionAndBaselineDirtyState()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-task.md");
+        const string source = "- [ ] alpha\n";
+        harness.Loader.Sources[path] = CreateSource(path, source);
+        await harness.ViewModel.OpenPathAsync(path);
+        InPlaceEditHistoryTransition? transition = null;
+        var documentNotifications = 0;
+        harness.ViewModel.InPlaceEditHistoryTransitioned += (_, value) => transition = value;
+        harness.ViewModel.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(MainWindowViewModel.Document))
+            {
+                documentNotifications++;
+            }
+        };
+
+        await harness.ViewModel.ToggleTaskLineAsync(
+            0,
+            true,
+            TaskListIdentity.ComputeKey("- [ ] alpha"),
+            TaskToggleOrigin.Viewer);
+        Assert.True(harness.ViewModel.IsDirty);
+        Assert.True(harness.ViewModel.UndoRealtimeInDocumentEditCommand.CanExecute(null));
+
+        harness.ViewModel.UndoRealtimeInDocumentEditCommand.Execute(null);
+
+        var applied = Assert.IsType<InPlaceEditHistoryTransition>(transition);
+        Assert.Equal(source, applied.Source.Content);
+        Assert.Equal(RealtimeInDocumentEditDomPatchKind.TaskCheckbox, applied.DomPatch.Kind);
+        Assert.False(applied.DomPatch.Checked);
+        Assert.Equal(source, harness.ViewModel.Document!.Content);
+        Assert.Equal(source, harness.ViewModel.EditorSession!.SourceText);
+        Assert.False(harness.ViewModel.IsDirty);
+        Assert.Equal(0, documentNotifications);
+        Assert.Empty(harness.DocumentSaver.Saves);
+    }
+
+    [Fact]
+    public async Task ReadingModeTaskHistoryTraversesTwoEditsAndClearsRedoAfterNewEdit()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-two-tasks.md");
+        const string source = "- [ ] alpha\n- [ ] beta\n";
+        const string firstEdit = "- [x] alpha\n- [ ] beta\n";
+        const string secondEdit = "- [x] alpha\n- [x] beta\n";
+        const string replacementEdit = "- [ ] alpha\n- [x] beta\n";
+        harness.Loader.Sources[path] = CreateSource(path, source);
+        await harness.ViewModel.OpenPathAsync(path);
+
+        await harness.ViewModel.ToggleTaskLineAsync(
+            0,
+            true,
+            TaskListIdentity.ComputeKey("- [ ] alpha"),
+            TaskToggleOrigin.Viewer);
+        await harness.ViewModel.ToggleTaskLineAsync(
+            1,
+            true,
+            TaskListIdentity.ComputeKey("- [ ] beta"),
+            TaskToggleOrigin.Viewer);
+        Assert.Equal(secondEdit, harness.ViewModel.Document!.Content);
+
+        harness.ViewModel.UndoRealtimeInDocumentEditCommand.Execute(null);
+        Assert.Equal(firstEdit, harness.ViewModel.Document!.Content);
+        harness.ViewModel.UndoRealtimeInDocumentEditCommand.Execute(null);
+        Assert.Equal(source, harness.ViewModel.Document!.Content);
+        harness.ViewModel.RedoRealtimeInDocumentEditCommand.Execute(null);
+        Assert.Equal(firstEdit, harness.ViewModel.Document!.Content);
+
+        harness.ViewModel.UndoRealtimeInDocumentEditCommand.Execute(null);
+        Assert.True(harness.ViewModel.RedoRealtimeInDocumentEditCommand.CanExecute(null));
+        await harness.ViewModel.ToggleTaskLineAsync(
+            1,
+            true,
+            TaskListIdentity.ComputeKey("- [ ] beta"),
+            TaskToggleOrigin.Viewer);
+
+        Assert.Equal(replacementEdit, harness.ViewModel.Document!.Content);
+        Assert.False(harness.ViewModel.RedoRealtimeInDocumentEditCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task ReadingModeHistorySurvivesSaveAndUndoUsesTheNewPersistedBaseline()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-save.md");
+        const string source = "- [ ] alpha\n";
+        const string edited = "- [x] alpha\n";
+        harness.Loader.Sources[path] = CreateSource(path, source);
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleTaskLineAsync(
+            0,
+            true,
+            TaskListIdentity.ComputeKey("- [ ] alpha"),
+            TaskToggleOrigin.Viewer);
+
+        await harness.ViewModel.SaveCommand.ExecuteAsync(null);
+
+        Assert.Equal(edited, harness.ViewModel.EditorSession!.LastPersistedSource);
+        Assert.True(harness.ViewModel.UndoRealtimeInDocumentEditCommand.CanExecute(null));
+        Assert.False(harness.ViewModel.IsDirty);
+
+        harness.ViewModel.UndoRealtimeInDocumentEditCommand.Execute(null);
+
+        Assert.Equal(source, harness.ViewModel.Document!.Content);
+        Assert.True(harness.ViewModel.IsDirty);
+
+        harness.ViewModel.RedoRealtimeInDocumentEditCommand.Execute(null);
+
+        Assert.Equal(edited, harness.ViewModel.Document!.Content);
+        Assert.False(harness.ViewModel.IsDirty);
+    }
+
+    [Fact]
+    public async Task EnteringEditModeClearsRealtimeHistoryAndEditModeCannotExecuteIt()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-edit-mode.md");
+        const string source = "- [ ] alpha\n";
+        harness.Loader.Sources[path] = CreateSource(path, source);
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleTaskLineAsync(
+            0,
+            true,
+            TaskListIdentity.ComputeKey("- [ ] alpha"),
+            TaskToggleOrigin.Viewer);
+        Assert.True(harness.ViewModel.UndoRealtimeInDocumentEditCommand.CanExecute(null));
+        var transitionCount = 0;
+        harness.ViewModel.InPlaceEditHistoryTransitioned += (_, _) => transitionCount++;
+
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        Assert.True(harness.ViewModel.IsEditMode);
+        Assert.False(harness.ViewModel.UndoRealtimeInDocumentEditCommand.CanExecute(null));
+
+        harness.ViewModel.UndoRealtimeInDocumentEditCommand.Execute(null);
+
+        Assert.Equal(0, transitionCount);
+        Assert.Equal("- [x] alpha\n", harness.ViewModel.EditorSession!.SourceText);
+    }
+
+    [Fact]
+    public async Task ReplacementReloadDiscardAndCloseClearRealtimeHistory()
+    {
+        var replacement = CreateHarness();
+        var replacementPath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-replace.md");
+        replacement.Loader.Sources[replacementPath] = CreateSource(replacementPath, "- [ ] alpha\n");
+        await replacement.ViewModel.OpenPathAsync(replacementPath);
+        await replacement.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.Viewer);
+        replacement.ViewModel.ApplyOpenedDocumentInPlace(new MarkdownSource(replacementPath, "replacement.md", "replacement"));
+        Assert.Null(replacement.ViewModel.EditorSession);
+        Assert.False(replacement.ViewModel.UndoRealtimeInDocumentEditCommand.CanExecute(null));
+
+        var reload = CreateHarness();
+        var reloadPath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-reload.md");
+        reload.Loader.Sources[reloadPath] = CreateSource(reloadPath, "- [ ] alpha\n");
+        await reload.ViewModel.OpenPathAsync(reloadPath);
+        await reload.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.Viewer);
+        await reload.ViewModel.SaveCommand.ExecuteAsync(null);
+        await reload.ViewModel.ReloadCommand.ExecuteAsync(null);
+        Assert.Null(reload.ViewModel.EditorSession);
+        Assert.False(reload.ViewModel.UndoRealtimeInDocumentEditCommand.CanExecute(null));
+
+        var discard = CreateHarness();
+        var discardPath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-discard.md");
+        discard.Loader.Sources[discardPath] = CreateSource(discardPath, "- [ ] alpha\n");
+        await discard.ViewModel.OpenPathAsync(discardPath);
+        await discard.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.Viewer);
+        await discard.ViewModel.RequestDocumentSwitchWithDirtyCheckAsync(() => Task.CompletedTask, () => { });
+        await discard.ViewModel.ConfirmDirtyDiscardCommand.ExecuteAsync(null);
+        Assert.False(discard.ViewModel.UndoRealtimeInDocumentEditCommand.CanExecute(null));
+
+        var close = CreateHarness();
+        var closePath = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-close.md");
+        close.Loader.Sources[closePath] = CreateSource(closePath, "- [ ] alpha\n");
+        await close.ViewModel.OpenPathAsync(closePath);
+        await close.ViewModel.ToggleTaskLineAsync(0, true, TaskListIdentity.ComputeKey("- [ ] alpha"), TaskToggleOrigin.Viewer);
+        await close.ViewModel.CloseFileCommand.ExecuteAsync(null);
+        await close.ViewModel.ConfirmDirtyDiscardCommand.ExecuteAsync(null);
+        Assert.Null(close.ViewModel.EditorSession);
+        Assert.False(close.ViewModel.UndoRealtimeInDocumentEditCommand.CanExecute(null));
+    }
+
     private static TestHarness CreateHarness(
         IRendererReadinessService? rendererReadiness = null,
         IMarkdownDocumentRenderer? markdownRenderer = null)

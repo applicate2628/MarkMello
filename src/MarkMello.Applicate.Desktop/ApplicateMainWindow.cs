@@ -1954,6 +1954,8 @@ public sealed class ApplicateMainWindow : MainWindow
             var command = combo switch
             {
                 "ctrl+e" => viewModel.ToggleEditModeCommand,
+                "ctrl+z" when !viewModel.IsEditMode => viewModel.UndoRealtimeInDocumentEditCommand,
+                "ctrl+y" when !viewModel.IsEditMode => viewModel.RedoRealtimeInDocumentEditCommand,
                 "ctrl+o" => viewModel.OpenFileCommand,
                 "ctrl+s" => viewModel.SaveCommand,
                 "ctrl+shift+s" => viewModel.SaveAsCommand,
@@ -2075,31 +2077,74 @@ public sealed class ApplicateMainWindow : MainWindow
         var channelViewerHost = channelHostProvider?.ViewerHost
             ?? App.Services?.GetService<IApplicateSharedWebViewHost>();
         var channelEditHost = channelHostProvider?.EditPreviewHost;
+
+        void MirrorReadingInPlaceEdit(
+            MarkdownSource source,
+            Action<IApplicateSharedWebViewHost> patchHost,
+            bool applyViewerDomPatch)
+        {
+            if (applyViewerDomPatch && channelViewerHost is not null)
+            {
+                patchHost(channelViewerHost);
+            }
+
+            if (channelEditHost is not null && !ReferenceEquals(channelEditHost, channelViewerHost))
+            {
+                patchHost(channelEditHost);
+            }
+
+            channelViewerHost?.CommitInPlaceSourceSwap(source);
+            if (channelEditHost is not null && !ReferenceEquals(channelEditHost, channelViewerHost))
+            {
+                channelEditHost.CommitInPlaceSourceSwap(source);
+            }
+
+            var mirrored = FindOpenDocumentByPath(openDocs, source.Path);
+            if (mirrored is not null
+                && !string.Equals(mirrored.SourceText, source.Content, System.StringComparison.Ordinal))
+            {
+                // Reading-mode realtime content is unsaved. The session remains
+                // the dirty owner, so this mirror must not clear its tab marker.
+                openDocs.UpdateSourceText(mirrored, source.Content, preserveModified: true);
+            }
+        }
+
+        void ApplyHistoryDomPatch(
+            IApplicateSharedWebViewHost host,
+            InPlaceEditHistoryTransition transition)
+        {
+            switch (transition.DomPatch.Kind)
+            {
+                case RealtimeInDocumentEditDomPatchKind.TaskCheckbox:
+                    host.View.SetTaskCheckboxState(
+                        transition.DomPatch.Line,
+                        transition.DomPatch.Checked,
+                        transition.Source.Path);
+                    return;
+                case RealtimeInDocumentEditDomPatchKind.TableCell
+                    when transition.DomPatch.Text is { } text && transition.DomPatch.Key is { } key:
+                    host.View.SetTableCellText(
+                        transition.DomPatch.Line,
+                        transition.DomPatch.CellIndex,
+                        text,
+                        key,
+                        transition.Source.Path);
+                    return;
+                case RealtimeInDocumentEditDomPatchKind.TableCell:
+                    throw new InvalidOperationException("Realtime table-cell history patch requires canonical text and key.");
+                default:
+                    throw new InvalidOperationException($"Unsupported realtime history patch kind '{transition.DomPatch.Kind}'.");
+            }
+        }
+
         viewModel.TaskToggleCommitted += (_, commit) =>
         {
             // Viewer surface: its DOM received the user's click, so the silent
             // swap's premise already holds.
-            channelViewerHost?.CommitInPlaceSourceSwap(commit.Source);
-            if (channelEditHost is not null && !ReferenceEquals(channelEditHost, channelViewerHost))
-            {
-                // Edit-preview surface: a DISTINCT WebView whose primed DOM
-                // never saw the click — patch its one checkbox surgically
-                // FIRST so the swap's premise ("DOM already shows this
-                // content") becomes true, THEN swap. Keeps the prime warm
-                // (zero re-render on the next Ctrl+E) and truthful.
-                channelEditHost.View.SetTaskCheckboxState(commit.Line, commit.Checked, commit.Source.Path);
-                channelEditHost.CommitInPlaceSourceSwap(commit.Source);
-            }
-
-            var mirrored = FindOpenDocumentByPath(openDocs, commit.Source.Path);
-            if (mirrored is not null
-                && !string.Equals(mirrored.SourceText, commit.Source.Content, System.StringComparison.Ordinal))
-            {
-                // R1: the reading-mode flip carries UNSAVED content, so the tab
-                // dirty marker (already lit from VM.IsDirty) must stay lit —
-                // preserveModified keeps this text sync from clearing it.
-                openDocs.UpdateSourceText(mirrored, commit.Source.Content, preserveModified: true);
-            }
+            MirrorReadingInPlaceEdit(
+                commit.Source,
+                host => host.View.SetTaskCheckboxState(commit.Line, commit.Checked, commit.Source.Path),
+                applyViewerDomPatch: false);
         };
         viewModel.TaskToggleDomRevertRequested += (_, revert) =>
             channelViewerHost?.View.SetTaskCheckboxState(revert.Line, revert.Checked, revert.Path);
@@ -2119,22 +2164,10 @@ public sealed class ApplicateMainWindow : MainWindow
         // edit and would otherwise claim source it did not render.
         viewModel.TableCellCommitted += (_, commit) =>
         {
-            channelViewerHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);
-            channelViewerHost?.CommitInPlaceSourceSwap(commit.Source);
-            if (channelEditHost is not null && !ReferenceEquals(channelEditHost, channelViewerHost))
-            {
-                channelEditHost.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);
-                channelEditHost.CommitInPlaceSourceSwap(commit.Source);
-            }
-
-            var mirrored = FindOpenDocumentByPath(openDocs, commit.Source.Path);
-            if (mirrored is not null
-                && !string.Equals(mirrored.SourceText, commit.Source.Content, System.StringComparison.Ordinal))
-            {
-                // R1: reading-mode cell edit carries UNSAVED content — keep the
-                // tab dirty marker lit (see the task-toggle mirror above).
-                openDocs.UpdateSourceText(mirrored, commit.Source.Content, preserveModified: true);
-            }
+            MirrorReadingInPlaceEdit(
+                commit.Source,
+                host => host.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path),
+                applyViewerDomPatch: true);
         };
         viewModel.TableCellEditRefused += (_, refusal) =>
             channelViewerHost?.View.RejectTableCellEdit(refusal.Line, refusal.CellIndex, refusal.Path, refusal.Busy);
@@ -2146,6 +2179,12 @@ public sealed class ApplicateMainWindow : MainWindow
         };
         viewModel.EditPreviewTableCellEditRefused += (_, refusal) =>
             channelEditHost?.View.RejectTableCellEdit(refusal.Line, refusal.CellIndex, refusal.Path, refusal.Busy);
+
+        viewModel.InPlaceEditHistoryTransitioned += (_, transition) =>
+            MirrorReadingInPlaceEdit(
+                transition.Source,
+                host => ApplyHistoryDomPatch(host, transition),
+                applyViewerDomPatch: true);
 
         viewModel.InPlaceEditDiscarded += (_, source) =>
         {

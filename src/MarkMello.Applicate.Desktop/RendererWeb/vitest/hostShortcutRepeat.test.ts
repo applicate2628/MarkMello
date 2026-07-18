@@ -129,4 +129,54 @@ describe("host shortcut repeat handling", () => {
       expect(shortcuts).toContainEqual({ type: "host-shortcut", combo: `ctrl+${ordinal}` });
     }
   });
+
+  it("forwards ctrl+z and ctrl+y as unchanged-shape host shortcuts", () => {
+    const undo = new KeyboardEvent("keydown", {
+      key: "z",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const redo = new KeyboardEvent("keydown", {
+      key: "y",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    window.dispatchEvent(undo);
+    window.dispatchEvent(redo);
+
+    expect(messages).toContainEqual({ type: "host-shortcut", combo: "ctrl+z" });
+    expect(messages).toContainEqual({ type: "host-shortcut", combo: "ctrl+y" });
+    expect(undo.defaultPrevented).toBe(true);
+    expect(redo.defaultPrevented).toBe(true);
+  });
+
+  it("preserves native ctrl+z and ctrl+y inside an editable table cell", () => {
+    const cell = document.createElement("td");
+    cell.className = "mm-editable-cell";
+    cell.contentEditable = "true";
+    document.querySelector("main")?.append(cell);
+    const undo = new KeyboardEvent("keydown", {
+      key: "z",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const redo = new KeyboardEvent("keydown", {
+      key: "y",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    cell.dispatchEvent(undo);
+    cell.dispatchEvent(redo);
+
+    expect(undo.defaultPrevented).toBe(false);
+    expect(redo.defaultPrevented).toBe(false);
+    expect(messages).not.toContainEqual({ type: "host-shortcut", combo: "ctrl+z" });
+    expect(messages).not.toContainEqual({ type: "host-shortcut", combo: "ctrl+y" });
+  });
 });

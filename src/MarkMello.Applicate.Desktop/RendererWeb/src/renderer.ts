@@ -3749,6 +3749,9 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "set-task-checkbox") {
+    if (!isHostPatchForCurrentRender(message)) {
+      return;
+    }
     // Surgical single-checkbox revert: programmatic .checked fires no change
     // event, so this cannot loop back into a task-toggle post.
     const box = document.querySelector<HTMLInputElement>(
@@ -3761,6 +3764,9 @@ function handleHostMessage(raw: unknown): void {
   }
 
   if (message.type === "table-cell-updated") {
+    if (!isHostPatchForCurrentRender(message)) {
+      return;
+    }
     handleTableCellUpdatedMessage(message);
     return;
   }
@@ -3912,6 +3918,14 @@ function handleHostMessage(raw: unknown): void {
   // reaches here and falls through (forward-compatible with newer hosts).
   const _exhaustiveHostMessage: never = message;
   void _exhaustiveHostMessage;
+}
+
+function isHostPatchForCurrentRender(message: { renderId?: unknown }): boolean {
+  return !(
+    typeof message.renderId === "number"
+    && currentDocumentRenderId !== null
+    && message.renderId !== currentDocumentRenderId
+  );
 }
 
 function isModeSettleViewportReady(message: Extract<HostMessage, { type: "mode-settle-probe" }>): boolean {
@@ -4705,6 +4719,8 @@ function wireHostShortcuts(): void {
     "ctrl+8",
     "ctrl+9",
     "ctrl+e",
+    "ctrl+z",
+    "ctrl+y",
     "ctrl+o",
     "ctrl+s",
     "ctrl+shift+s",
@@ -4719,14 +4735,17 @@ function wireHostShortcuts(): void {
     "keydown",
     (event) => {
       const key = event.key.toLowerCase();
-      if (key === "escape" && editableTableCellFromEventTarget(event.target)) {
-        return;
-      }
       const combo =
         (event.ctrlKey || event.metaKey ? "ctrl+" : "") +
         (event.shiftKey ? "shift+" : "") +
         (event.altKey ? "alt+" : "") +
         key;
+      if (
+        editableTableCellFromEventTarget(event.target)
+        && (key === "escape" || combo === "ctrl+z" || combo === "ctrl+y")
+      ) {
+        return;
+      }
       if (!hostShortcuts.has(combo)) {
         return;
       }

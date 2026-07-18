@@ -201,6 +201,71 @@ public sealed class IpcContractTests
     }
 
     [Fact]
+    public void HostPatchBuildersStampPositiveRenderIdsAndPreserveLegacyShapes()
+    {
+        var taskBuilder = RequirePatchBuilder(
+            "BuildTaskCheckboxStateMessage",
+            typeof(int),
+            typeof(bool),
+            typeof(long?));
+        var tableSuccessBuilder = RequirePatchBuilder(
+            "BuildTableCellUpdatedSuccessMessage",
+            typeof(int),
+            typeof(int),
+            typeof(string),
+            typeof(string),
+            typeof(long?));
+        var tableFailureBuilder = RequirePatchBuilder(
+            "BuildTableCellUpdatedFailureMessage",
+            typeof(int),
+            typeof(int),
+            typeof(bool),
+            typeof(long?));
+
+        AssertOptionalRenderId(taskBuilder);
+        AssertOptionalRenderId(tableSuccessBuilder);
+        AssertOptionalRenderId(tableFailureBuilder);
+
+        var legacyTask = Serialize(taskBuilder.Invoke(null, [12, true, null])!);
+        Assert.Equal(
+            new SortedSet<string>(StringComparer.Ordinal) { "type", "line", "checked" },
+            new SortedSet<string>(ObjectKeys(legacyTask), StringComparer.Ordinal));
+
+        var currentTask = Serialize(taskBuilder.Invoke(null, [12, true, 42L])!);
+        Assert.Equal(42L, currentTask.GetProperty("renderId").GetInt64());
+
+        var legacySuccess = Serialize(tableSuccessBuilder.Invoke(
+            null,
+            [12, 3, "Canonical plain text", "f00dcafe", null])!);
+        Assert.Equal(
+            new SortedSet<string>(StringComparer.Ordinal) { "type", "line", "cellIndex", "ok", "text", "key" },
+            new SortedSet<string>(ObjectKeys(legacySuccess), StringComparer.Ordinal));
+
+        var currentSuccess = Serialize(tableSuccessBuilder.Invoke(
+            null,
+            [12, 3, "Canonical plain text", "f00dcafe", 42L])!);
+        Assert.Equal(42L, currentSuccess.GetProperty("renderId").GetInt64());
+
+        var legacyFailure = Serialize(tableFailureBuilder.Invoke(null, [12, 3, false, null])!);
+        Assert.Equal(
+            new SortedSet<string>(StringComparer.Ordinal) { "type", "line", "cellIndex", "ok" },
+            new SortedSet<string>(ObjectKeys(legacyFailure), StringComparer.Ordinal));
+
+        var currentFailure = Serialize(tableFailureBuilder.Invoke(null, [12, 3, false, 42L])!);
+        Assert.Equal(42L, currentFailure.GetProperty("renderId").GetInt64());
+        Assert.False(currentFailure.TryGetProperty("reason", out _));
+
+        var legacyBusy = Serialize(tableFailureBuilder.Invoke(null, [12, 3, true, null])!);
+        Assert.Equal(
+            new SortedSet<string>(StringComparer.Ordinal) { "type", "line", "cellIndex", "ok", "reason" },
+            new SortedSet<string>(ObjectKeys(legacyBusy), StringComparer.Ordinal));
+
+        var currentBusy = Serialize(tableFailureBuilder.Invoke(null, [12, 3, true, 42L])!);
+        Assert.Equal(42L, currentBusy.GetProperty("renderId").GetInt64());
+        Assert.Equal("busy", currentBusy.GetProperty("reason").GetString());
+    }
+
+    [Fact]
     public void TableCellUpdatedFailureDescriptorRejectsNullOptionalFields()
     {
         var shape = LoadContract().Host["table-cell-updated"];
@@ -498,6 +563,27 @@ public sealed class IpcContractTests
         // `object` root uses the runtime (anonymous) type, default options.
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(message));
         return document.RootElement.Clone();
+    }
+
+    private static MethodInfo RequirePatchBuilder(string name, params Type[] parameterTypes)
+    {
+        var method = typeof(ApplicateWebMarkdownDocumentView).GetMethod(
+            name,
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            types: parameterTypes,
+            modifiers: null);
+        Assert.NotNull(method);
+        return method!;
+    }
+
+    private static void AssertOptionalRenderId(MethodInfo method)
+    {
+        var parameter = method.GetParameters()[^1];
+        Assert.Equal("renderId", parameter.Name);
+        Assert.Equal(typeof(long?), parameter.ParameterType);
+        Assert.True(parameter.IsOptional);
+        Assert.Null(parameter.DefaultValue);
     }
 
     private static string? TypeValue(JsonElement value)

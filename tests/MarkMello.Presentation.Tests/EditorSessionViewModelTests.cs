@@ -127,6 +127,156 @@ public sealed class EditorSessionViewModelTests
     }
 
     [Fact]
+    public void RealtimeUndoRestoresPreEditSourceAndBaselineDirtyState()
+    {
+        const string original = "| Done |\n| --- |\n| [ ] task |\n";
+        const string edited = "| Done |\n| --- |\n| [x] task |\n";
+        var session = CreateSession(Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo.md"), original);
+
+        session.ApplyRealtimeInDocumentEdit(
+            edited,
+            RealtimeInDocumentEditDomPatch.ForTaskCheckbox(line: 3, beforeChecked: false, afterChecked: true));
+
+        Assert.True(session.IsDirty);
+
+        var transition = session.UndoRealtimeInDocumentEdit();
+
+        Assert.Equal(RealtimeInDocumentEditHistoryTransitionStatus.Applied, transition.Status);
+        Assert.Equal(original, session.SourceText);
+        Assert.False(session.IsDirty);
+    }
+
+    [Fact]
+    public void RealtimeHistoryFollowsUndoRedoOrderAndDirectsThePatch()
+    {
+        var session = CreateSession(Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-order.md"), "one");
+        var firstPatch = RealtimeInDocumentEditDomPatch.ForTaskCheckbox(line: 1, beforeChecked: false, afterChecked: true);
+        var secondPatch = RealtimeInDocumentEditDomPatch.ForTaskCheckbox(line: 2, beforeChecked: true, afterChecked: false);
+
+        Assert.True(session.ApplyRealtimeInDocumentEdit("two", firstPatch));
+        Assert.True(session.ApplyRealtimeInDocumentEdit("three", secondPatch));
+
+        var undoSecond = session.UndoRealtimeInDocumentEdit();
+
+        Assert.Equal(RealtimeInDocumentEditHistoryTransitionStatus.Applied, undoSecond.Status);
+        Assert.Equal("two", undoSecond.TargetSource);
+        Assert.Equal(RealtimeInDocumentEditDomPatchKind.TaskCheckbox, undoSecond.DomPatch!.Kind);
+        Assert.Equal(2, undoSecond.DomPatch.Line);
+        Assert.True(undoSecond.DomPatch.Checked);
+        Assert.Equal("two", session.SourceText);
+        Assert.True(session.CanUndoRealtimeEdits);
+        Assert.True(session.CanRedoRealtimeEdits);
+
+        var undoFirst = session.UndoRealtimeInDocumentEdit();
+
+        Assert.Equal(RealtimeInDocumentEditHistoryTransitionStatus.Applied, undoFirst.Status);
+        Assert.Equal("one", session.SourceText);
+        Assert.False(session.CanUndoRealtimeEdits);
+        Assert.True(session.CanRedoRealtimeEdits);
+
+        var redoFirst = session.RedoRealtimeInDocumentEdit();
+
+        Assert.Equal(RealtimeInDocumentEditHistoryTransitionStatus.Applied, redoFirst.Status);
+        Assert.Equal("two", redoFirst.TargetSource);
+        Assert.True(redoFirst.DomPatch!.Checked);
+        Assert.Equal("two", session.SourceText);
+    }
+
+    [Fact]
+    public void RealtimeHistoryDropsOldestEntryPastTwentyWithoutChangingRecentLifoOrder()
+    {
+        var session = CreateSession(Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-cap.md"), "state-0");
+
+        for (var state = 1; state <= 21; state++)
+        {
+            Assert.True(session.ApplyRealtimeInDocumentEdit(
+                $"state-{state}",
+                RealtimeInDocumentEditDomPatch.ForTaskCheckbox(
+                    line: state,
+                    beforeChecked: state % 2 == 0,
+                    afterChecked: state % 2 != 0)));
+        }
+
+        for (var expectedState = 20; expectedState >= 1; expectedState--)
+        {
+            var transition = session.UndoRealtimeInDocumentEdit();
+
+            Assert.Equal(RealtimeInDocumentEditHistoryTransitionStatus.Applied, transition.Status);
+            Assert.Equal($"state-{expectedState}", transition.TargetSource);
+            Assert.Equal($"state-{expectedState}", session.SourceText);
+        }
+
+        Assert.False(session.CanUndoRealtimeEdits);
+
+        var emptyUndo = session.UndoRealtimeInDocumentEdit();
+
+        Assert.Equal(RealtimeInDocumentEditHistoryTransitionStatus.Empty, emptyUndo.Status);
+        Assert.Equal("state-1", session.SourceText);
+
+        for (var expectedState = 2; expectedState <= 21; expectedState++)
+        {
+            var transition = session.RedoRealtimeInDocumentEdit();
+
+            Assert.Equal(RealtimeInDocumentEditHistoryTransitionStatus.Applied, transition.Status);
+            Assert.Equal($"state-{expectedState}", transition.TargetSource);
+            Assert.Equal($"state-{expectedState}", session.SourceText);
+        }
+
+        Assert.False(session.CanRedoRealtimeEdits);
+    }
+
+    [Fact]
+    public void NewRealtimeEditAfterUndoClearsRedoButEqualSourceSettlementDoesNot()
+    {
+        var session = CreateSession(Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-redo.md"), "one");
+        var firstPatch = RealtimeInDocumentEditDomPatch.ForTaskCheckbox(line: 1, beforeChecked: false, afterChecked: true);
+
+        Assert.True(session.ApplyRealtimeInDocumentEdit("two", firstPatch));
+        Assert.Equal(RealtimeInDocumentEditHistoryTransitionStatus.Applied, session.UndoRealtimeInDocumentEdit().Status);
+        Assert.True(session.CanRedoRealtimeEdits);
+
+        Assert.False(session.ApplyRealtimeInDocumentEdit("one", firstPatch));
+        Assert.True(session.CanRedoRealtimeEdits);
+
+        Assert.True(session.ApplyRealtimeInDocumentEdit(
+            "three",
+            RealtimeInDocumentEditDomPatch.ForTaskCheckbox(line: 2, beforeChecked: false, afterChecked: true)));
+        Assert.False(session.CanRedoRealtimeEdits);
+        Assert.Equal("three", session.SourceText);
+    }
+
+    [Fact]
+    public void RealtimeHistoryFailsClosedWhenSourceNoLongerMatchesThePendingTransition()
+    {
+        var session = CreateSession(Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-invalidated.md"), "one");
+        Assert.True(session.ApplyRealtimeInDocumentEdit(
+            "two",
+            RealtimeInDocumentEditDomPatch.ForTaskCheckbox(line: 1, beforeChecked: false, afterChecked: true)));
+
+        session.SourceText = "outside-history";
+
+        var transition = session.UndoRealtimeInDocumentEdit();
+
+        Assert.Equal(RealtimeInDocumentEditHistoryTransitionStatus.Invalidated, transition.Status);
+        Assert.Equal("outside-history", session.SourceText);
+        Assert.False(session.CanUndoRealtimeEdits);
+        Assert.False(session.CanRedoRealtimeEdits);
+    }
+
+    [Fact]
+    public void EmptyRealtimeHistoryReturnsEmptyWithoutChangingSource()
+    {
+        var session = CreateSession(Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "undo-empty.md"), "one");
+
+        var transition = session.UndoRealtimeInDocumentEdit();
+
+        Assert.Equal(RealtimeInDocumentEditHistoryTransitionStatus.Empty, transition.Status);
+        Assert.Equal("one", session.SourceText);
+        Assert.False(session.CanUndoRealtimeEdits);
+        Assert.False(session.CanRedoRealtimeEdits);
+    }
+
+    [Fact]
     public void CreatePreviewDeferredStartsWithEmptyPreviewThenReconcilesOnDemand()
     {
         // A reading-mode in-place edit lazily materializes the session

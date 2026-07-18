@@ -241,7 +241,7 @@ public sealed class MainWindowViewModelTableCellTests
         Assert.Equal("a & b | c", commit.Text);
         Assert.Equal(TableCellIdentity.ComputeKey("a & b \\| c"), commit.Key);
         Assert.Equal(1, harness.SourceEditor.LocateCount);
-        Assert.Equal(3, harness.SourceEditor.ParseCount);
+        Assert.Equal(4, harness.SourceEditor.ParseCount); // validation plus the pre-edit history patch snapshot
     }
 
     [Fact]
@@ -399,6 +399,39 @@ public sealed class MainWindowViewModelTableCellTests
         Assert.Equal(source, dormantSession.LastPersistedSource); // baseline never advanced (no save)
         Assert.Empty(refusals);
         Assert.Null(secondException);
+    }
+
+    [Fact]
+    public async Task ReadingCellUndoRestoresCanonicalValueDocumentAndBaselineDirtyState()
+    {
+        const string source = "| A | B |\n|---|---|\n| plain | right |\n";
+        const string edited = "| A | B |\n|---|---|\n| changed | right |\n";
+        var harness = await CreateOpenHarnessAsync(source);
+        InPlaceEditHistoryTransition? transition = null;
+        harness.ViewModel.InPlaceEditHistoryTransitioned += (_, value) => transition = value;
+
+        await harness.ViewModel.SetTableCellAsync(
+            line: 2,
+            cellIndex: 0,
+            text: "changed",
+            key: TableCellIdentity.ComputeKey("plain"),
+            origin: TableCellEditOrigin.Viewer);
+        Assert.Equal(edited, harness.ViewModel.Document!.Content);
+        Assert.True(harness.ViewModel.IsDirty);
+
+        harness.ViewModel.UndoRealtimeInDocumentEditCommand.Execute(null);
+
+        var applied = Assert.IsType<InPlaceEditHistoryTransition>(transition);
+        Assert.Equal(source, applied.Source.Content);
+        Assert.Equal(RealtimeInDocumentEditDomPatchKind.TableCell, applied.DomPatch.Kind);
+        Assert.Equal(2, applied.DomPatch.Line);
+        Assert.Equal(0, applied.DomPatch.CellIndex);
+        Assert.Equal("plain", applied.DomPatch.Text);
+        Assert.Equal(TableCellIdentity.ComputeKey("plain"), applied.DomPatch.Key);
+        Assert.Equal(source, harness.ViewModel.Document!.Content);
+        Assert.Equal(source, harness.ViewModel.EditorSession!.SourceText);
+        Assert.False(harness.ViewModel.IsDirty);
+        Assert.Empty(harness.Saver.Saves);
     }
 
     private static async Task<Harness> CreateOpenHarnessAsync(string content)

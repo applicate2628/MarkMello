@@ -93,13 +93,20 @@ public partial class MainWindowViewModel
             return;
         }
 
+        var currentBuffer = EditorSession?.SourceText ?? current.Content;
         MarkdownSource committed;
-        if (!string.Equals(current.Content, newBuffer, StringComparison.Ordinal))
+        if (!string.Equals(currentBuffer, newBuffer, StringComparison.Ordinal))
         {
+            var domPatch = CreateTableCellDomPatch(
+                currentBuffer,
+                line,
+                cellIndex,
+                canonicalText,
+                canonicalKey);
             EnsureInPlaceEditorSession(current);
             committed = new MarkdownSource(current.Path, current.FileName, newBuffer);
             _document = committed;
-            EditorSession!.ApplyInPlaceEditToBuffer(newBuffer);
+            EditorSession!.ApplyRealtimeInDocumentEdit(newBuffer, domPatch);
 
             OnPropertyChanged(nameof(WordCount));
             OnPropertyChanged(nameof(WordCountStatusLabel));
@@ -120,6 +127,32 @@ public partial class MainWindowViewModel
             cellIndex,
             canonicalText,
             canonicalKey));
+    }
+
+    private RealtimeInDocumentEditDomPatch CreateTableCellDomPatch(
+        string source,
+        int line,
+        int cellIndex,
+        string canonicalText,
+        string canonicalKey)
+    {
+        var before = _tableCellSourceEditor.ParsePlainCell(source, line, cellIndex);
+        if (before is not { } snapshot
+            || snapshot.Span.Start < 0
+            || snapshot.Span.End < snapshot.Span.Start
+            || snapshot.Span.End >= source.Length)
+        {
+            throw new InvalidOperationException("Validated table cell is missing from the source buffer.");
+        }
+
+        var beforeRaw = source.Substring(snapshot.Span.Start, snapshot.Span.Length);
+        return RealtimeInDocumentEditDomPatch.ForTableCell(
+            line,
+            cellIndex,
+            snapshot.Text,
+            TableCellIdentity.ComputeKey(beforeRaw.Trim()),
+            canonicalText,
+            canonicalKey);
     }
 
 }

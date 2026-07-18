@@ -1,7 +1,18 @@
+using CommunityToolkit.Mvvm.Input;
 using MarkMello.Domain;
 using MarkMello.Domain.Diagnostics;
 
 namespace MarkMello.Presentation.ViewModels;
+
+/// <summary>
+/// Payload of <see cref="MainWindowViewModel.InPlaceEditHistoryTransitioned"/>:
+/// the session-owned source transition and its directed, already-validated DOM
+/// patch. The desktop bridge applies the patch before silently swapping source
+/// on each host, so an undo or redo does not require a cold document render.
+/// </summary>
+public sealed record InPlaceEditHistoryTransition(
+    MarkdownSource Source,
+    RealtimeInDocumentEditDirectedDomPatch DomPatch);
 
 public partial class MainWindowViewModel
 {
@@ -40,6 +51,71 @@ public partial class MainWindowViewModel
 
         EditorSession.UpdateReadingPreferences(ReadingPreferences);
     }
+
+    /// <summary>
+    /// Raised after a reading-mode realtime history transition has moved the
+    /// session buffer and the ViewModel's silent document backing field. The
+    /// desktop bridge owns applying the directed patch and source swap to both
+    /// WebView hosts plus the open-document mirror.
+    /// </summary>
+    public event EventHandler<InPlaceEditHistoryTransition>? InPlaceEditHistoryTransitioned;
+
+    [RelayCommand(CanExecute = nameof(CanUndoRealtimeInDocumentEdit))]
+    private void UndoRealtimeInDocumentEdit()
+    {
+        if (IsEditMode)
+        {
+            return;
+        }
+
+        ApplyRealtimeInDocumentEditHistoryTransition(undo: true);
+    }
+
+    private bool CanUndoRealtimeInDocumentEdit()
+        => !IsEditMode && EditorSession?.CanUndoRealtimeEdits == true;
+
+    [RelayCommand(CanExecute = nameof(CanRedoRealtimeInDocumentEdit))]
+    private void RedoRealtimeInDocumentEdit()
+    {
+        if (IsEditMode)
+        {
+            return;
+        }
+
+        ApplyRealtimeInDocumentEditHistoryTransition(undo: false);
+    }
+
+    private bool CanRedoRealtimeInDocumentEdit()
+        => !IsEditMode && EditorSession?.CanRedoRealtimeEdits == true;
+
+    private void ApplyRealtimeInDocumentEditHistoryTransition(bool undo)
+    {
+        if (EditorSession is not { } session || _document is not { } current)
+        {
+            return;
+        }
+
+        var transition = undo
+            ? session.UndoRealtimeInDocumentEdit()
+            : session.RedoRealtimeInDocumentEdit();
+        if (transition.Status != RealtimeInDocumentEditHistoryTransitionStatus.Applied
+            || transition.TargetSource is null
+            || transition.DomPatch is null)
+        {
+            return;
+        }
+
+        var source = new MarkdownSource(current.Path, current.FileName, transition.TargetSource);
+        _document = source;
+        OnPropertyChanged(nameof(WordCount));
+        OnPropertyChanged(nameof(WordCountStatusLabel));
+        QueueDeferredRenderedDocument(source);
+        PublishInPlaceEditHistoryTransitioned(
+            new InPlaceEditHistoryTransition(source, transition.DomPatch));
+    }
+
+    private void PublishInPlaceEditHistoryTransitioned(InPlaceEditHistoryTransition transition)
+        => InPlaceEditHistoryTransitioned?.Invoke(this, transition);
 
     private sealed class InDocumentEditHost(MainWindowViewModel owner) : IRealtimeInDocumentEditHost
     {

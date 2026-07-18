@@ -3475,6 +3475,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         Source = source;
     }
 
+    private long? ActiveRendererPatchRenderId
+        => _activeRevealRenderId > 0 ? _activeRevealRenderId : null;
+
     /// <summary>
     /// Surgical single-checkbox revert (task-toggle refusal with unchanged
     /// disk): set the addressed checkbox back without any render or scroll
@@ -3493,8 +3496,13 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
-        PostRendererMessage(new { type = "set-task-checkbox", line, @checked = isChecked });
+        PostRendererMessage(BuildTaskCheckboxStateMessage(line, isChecked, ActiveRendererPatchRenderId));
     }
+
+    internal static object BuildTaskCheckboxStateMessage(int line, bool isChecked, long? renderId = null)
+        => renderId is > 0
+            ? new { type = "set-task-checkbox", line, @checked = isChecked, renderId = renderId.Value }
+            : new { type = "set-task-checkbox", line, @checked = isChecked };
 
     internal void SetTableCellText(int line, int cellIndex, string text, string key)
         => SetTableCellText(line, cellIndex, text, key, Source?.Path ?? string.Empty);
@@ -3512,7 +3520,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
-        PostRendererMessage(BuildTableCellUpdatedSuccessMessage(line, cellIndex, text, key));
+        PostRendererMessage(BuildTableCellUpdatedSuccessMessage(
+            line,
+            cellIndex,
+            text,
+            key,
+            ActiveRendererPatchRenderId));
     }
 
     internal void RejectTableCellEdit(int line, int cellIndex, string expectedPath, bool busy = false)
@@ -3526,36 +3539,79 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
-        PostRendererMessage(BuildTableCellUpdatedFailureMessage(line, cellIndex, busy));
+        PostRendererMessage(BuildTableCellUpdatedFailureMessage(
+            line,
+            cellIndex,
+            busy,
+            ActiveRendererPatchRenderId));
     }
 
     internal static object BuildTableCellUpdatedSuccessMessage(
         int line,
         int cellIndex,
         string text,
-        string key)
-        => new
-        {
-            type = "table-cell-updated",
-            line,
-            cellIndex,
-            ok = true,
-            text,
-            key,
-        };
+        string key,
+        long? renderId = null)
+        => renderId is > 0
+            ? new
+            {
+                type = "table-cell-updated",
+                line,
+                cellIndex,
+                ok = true,
+                text,
+                key,
+                renderId = renderId.Value,
+            }
+            : new
+            {
+                type = "table-cell-updated",
+                line,
+                cellIndex,
+                ok = true,
+                text,
+                key,
+            };
 
-    internal static object BuildTableCellUpdatedFailureMessage(int line, int cellIndex, bool busy = false)
-        => busy
+    internal static object BuildTableCellUpdatedFailureMessage(
+        int line,
+        int cellIndex,
+        bool busy = false,
+        long? renderId = null)
+    {
+        if (busy)
+        {
+            return renderId is > 0
+                ? new
+                {
+                    type = "table-cell-updated",
+                    line,
+                    cellIndex,
+                    ok = false,
+                    // BUSY (serializer mid-commit): tells the renderer to KEEP the
+                    // user's typed text so a re-blur retries, instead of restoring
+                    // the pre-edit stash (which would silently drop the edit).
+                    reason = "busy",
+                    renderId = renderId.Value,
+                }
+                : new
+                {
+                    type = "table-cell-updated",
+                    line,
+                    cellIndex,
+                    ok = false,
+                    reason = "busy",
+                };
+        }
+
+        return renderId is > 0
             ? new
             {
                 type = "table-cell-updated",
                 line,
                 cellIndex,
                 ok = false,
-                // BUSY (serializer mid-commit): tells the renderer to KEEP the
-                // user's typed text so a re-blur retries, instead of restoring
-                // the pre-edit stash (which would silently drop the edit).
-                reason = "busy",
+                renderId = renderId.Value,
             }
             : new
             {
@@ -3564,6 +3620,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 cellIndex,
                 ok = false,
             };
+    }
 
     private void PostRendererMessage(object message)
     {

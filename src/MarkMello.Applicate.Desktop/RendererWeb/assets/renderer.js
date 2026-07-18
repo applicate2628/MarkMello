@@ -4323,6 +4323,9 @@
       return;
     }
     if (message.type === "set-task-checkbox") {
+      if (!isHostPatchForCurrentRender(message)) {
+        return;
+      }
       const box = document.querySelector(
         `input.mm-task-checkbox[data-task-line="${message.line}"]`
       );
@@ -4332,6 +4335,9 @@
       return;
     }
     if (message.type === "table-cell-updated") {
+      if (!isHostPatchForCurrentRender(message)) {
+        return;
+      }
       handleTableCellUpdatedMessage(message);
       return;
     }
@@ -4452,6 +4458,9 @@
     }
     const _exhaustiveHostMessage = message;
     void _exhaustiveHostMessage;
+  }
+  function isHostPatchForCurrentRender(message) {
+    return !(typeof message.renderId === "number" && currentDocumentRenderId !== null && message.renderId !== currentDocumentRenderId);
   }
   function isModeSettleViewportReady(message) {
     const widthReady = typeof message.viewportWidth !== "number" || !Number.isFinite(message.viewportWidth) || message.viewportWidth <= 0 || Math.abs(window.innerWidth - message.viewportWidth) <= MODE_SETTLE_VIEWPORT_TOLERANCE;
@@ -5035,6 +5044,8 @@
       "ctrl+8",
       "ctrl+9",
       "ctrl+e",
+      "ctrl+z",
+      "ctrl+y",
       "ctrl+o",
       "ctrl+s",
       "ctrl+shift+s",
@@ -5048,10 +5059,10 @@
       "keydown",
       (event) => {
         const key = event.key.toLowerCase();
-        if (key === "escape" && editableTableCellFromEventTarget(event.target)) {
+        const combo = (event.ctrlKey || event.metaKey ? "ctrl+" : "") + (event.shiftKey ? "shift+" : "") + (event.altKey ? "alt+" : "") + key;
+        if (editableTableCellFromEventTarget(event.target) && (key === "escape" || combo === "ctrl+z" || combo === "ctrl+y")) {
           return;
         }
-        const combo = (event.ctrlKey || event.metaKey ? "ctrl+" : "") + (event.shiftKey ? "shift+" : "") + (event.altKey ? "alt+" : "") + key;
         if (!hostShortcuts.has(combo)) {
           return;
         }

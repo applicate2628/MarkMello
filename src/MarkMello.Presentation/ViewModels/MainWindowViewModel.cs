@@ -1773,6 +1773,10 @@ public partial class MainWindowViewModel : ObservableObject
         }
         else
         {
+            // Realtime reading history is deliberately separate from native
+            // AvaloniaEdit history. Clear it before preview reconciliation so a
+            // subsequent Ctrl+Z in edit mode cannot replay a viewer patch.
+            EditorSession.ClearRealtimeInDocumentEditHistory();
             // A reading-mode in-place edit may have materialized the session
             // preview-deferred (Empty preview) or moved its buffer without a
             // parse. The reading surface never binds the preview, but the editor
@@ -2040,6 +2044,7 @@ public partial class MainWindowViewModel : ObservableObject
         // Safe for the load path itself: its own guard runs BEFORE this, so the bump lands after
         // the check it would otherwise invalidate.
         _documentLoadEpoch++;
+        EditorSession?.ClearRealtimeInDocumentEditHistory();
 
         // PE r2 E1: publish State BEFORE Document so the sibling-mount bridge
         // sees a single Reconcile with viewerVis=true on the Document write,
@@ -2362,6 +2367,7 @@ public partial class MainWindowViewModel : ObservableObject
         // SourceText back to it; LastPersistedSource itself is unchanged).
         var persisted = EditorSession.LastPersistedSource;
 
+        EditorSession.ClearRealtimeInDocumentEditHistory();
         EditorSession.DiscardChanges();
 
         // R2 (data-loss): a reading-mode in-place edit patched _document, both
@@ -2502,6 +2508,11 @@ public partial class MainWindowViewModel : ObservableObject
             RefreshWindowTitle();
             UpdateCommandStates();
         }
+        else if (e.PropertyName is nameof(EditorSessionViewModel.CanUndoRealtimeEdits)
+            or nameof(EditorSessionViewModel.CanRedoRealtimeEdits))
+        {
+            UpdateCommandStates();
+        }
     }
 
     private void RefreshDocumentSummary()
@@ -2537,6 +2548,8 @@ public partial class MainWindowViewModel : ObservableObject
         ToggleEditModeCommand.NotifyCanExecuteChanged();
         SaveCommand.NotifyCanExecuteChanged();
         SaveAsCommand.NotifyCanExecuteChanged();
+        UndoRealtimeInDocumentEditCommand.NotifyCanExecuteChanged();
+        RedoRealtimeInDocumentEditCommand.NotifyCanExecuteChanged();
         CheckForUpdatesCommand.NotifyCanExecuteChanged();
         DownloadUpdateCommand.NotifyCanExecuteChanged();
         OpenDownloadedUpdateCommand.NotifyCanExecuteChanged();

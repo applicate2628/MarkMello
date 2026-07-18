@@ -30,6 +30,10 @@
     <KeyBinding Gesture="Cmd+O" Command="{Binding OpenFileCommand}" />
     <KeyBinding Gesture="Ctrl+E" Command="{Binding ToggleEditModeCommand}" />
     <KeyBinding Gesture="Cmd+E" Command="{Binding ToggleEditModeCommand}" />
+    <KeyBinding Gesture="Ctrl+Z" Command="{Binding UndoRealtimeInDocumentEditCommand}" />
+    <KeyBinding Gesture="Cmd+Z" Command="{Binding UndoRealtimeInDocumentEditCommand}" />
+    <KeyBinding Gesture="Ctrl+Y" Command="{Binding RedoRealtimeInDocumentEditCommand}" />
+    <KeyBinding Gesture="Cmd+Y" Command="{Binding RedoRealtimeInDocumentEditCommand}" />
     <KeyBinding Gesture="Ctrl+S" Command="{Binding SaveCommand}" />
     <KeyBinding Gesture="Cmd+S" Command="{Binding SaveCommand}" />
     <KeyBinding Gesture="Ctrl+Shift+S" Command="{Binding SaveAsCommand}" />

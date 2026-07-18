@@ -138,6 +138,13 @@ public partial class MainWindowViewModel
             return;
         }
 
+        // The strategy has already validated and rewritten this exact in-memory
+        // source. Read the pre-edit checkbox state from that source rather than
+        // inferring it as the inverse of the requested value, so a history entry
+        // always carries the DOM value that was actually replaced.
+        var previousSource = EditorSession?.SourceText ?? current.Content;
+        var beforeChecked = ReadTaskCheckboxState(previousSource, line);
+
         // Materialize/reuse the single dirty+buffer owner. When no session exists
         // the baseline is the current in-memory content (== the last disk load,
         // since a reading-mode edit never wrote disk), so the flip reads as dirty;
@@ -146,11 +153,30 @@ public partial class MainWindowViewModel
         EnsureInPlaceEditorSession(current);
 
         _document = new MarkdownSource(current.Path, current.FileName, newBuffer);
-        EditorSession!.ApplyInPlaceEditToBuffer(newBuffer);
+        EditorSession!.ApplyRealtimeInDocumentEdit(
+            newBuffer,
+            RealtimeInDocumentEditDomPatch.ForTaskCheckbox(line, beforeChecked, isChecked));
 
         OnPropertyChanged(nameof(WordCount));
         OnPropertyChanged(nameof(WordCountStatusLabel));
         QueueDeferredRenderedDocument(_document);
         PublishTaskToggleCommitted(new TaskToggleCommit(_document, line, isChecked));
+    }
+
+    private static bool ReadTaskCheckboxState(string source, int line)
+    {
+        var lines = source.Split('\n');
+        if (line < 0 || line >= lines.Length)
+        {
+            throw new InvalidOperationException("Validated task checkbox line is outside the source buffer.");
+        }
+
+        var match = TaskListIdentity.TaskMarkerPattern.Match(lines[line]);
+        if (!match.Success)
+        {
+            throw new InvalidOperationException("Validated task checkbox marker is missing from the source buffer.");
+        }
+
+        return !string.Equals(match.Groups[2].Value, " ", StringComparison.Ordinal);
     }
 }

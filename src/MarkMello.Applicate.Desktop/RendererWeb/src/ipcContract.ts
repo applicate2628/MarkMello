@@ -121,8 +121,8 @@ export type HostMessage =
   | { type: "load-cached-document"; cacheKey: string; documentName?: string; theme?: RendererTheme; hasMermaid?: boolean; hasHljs?: boolean; renderId?: number; skipFrameWait?: boolean }
   | { type: "clear-document" }
   | { type: "invalidate-document-cache-key" }
-  | { type: "set-task-checkbox"; line: number; checked: boolean }
-  | { type: "table-cell-updated"; line: number; cellIndex: number; ok: boolean; text?: string; key?: string; reason?: string }
+  | { type: "set-task-checkbox"; line: number; checked: boolean; renderId?: number }
+  | { type: "table-cell-updated"; line: number; cellIndex: number; ok: boolean; text?: string; key?: string; reason?: string; renderId?: number }
   | { type: "scroll-to-heading"; id: string }
   | { type: "scroll-to-source-line"; sourceLine: number }
   | { type: "open-find-bar" }
@@ -299,11 +299,11 @@ export const HOST_MESSAGE_SHAPES = {
   },
   "clear-document": { type: STR },
   "invalidate-document-cache-key": { type: STR },
-  "set-task-checkbox": { type: STR, line: NUM, checked: BOOL },
+  "set-task-checkbox": { type: STR, line: NUM, checked: BOOL, renderId: NUM_OPT },
   // reason is present ONLY on a BUSY failure (serializer mid-commit); success and
   // validation-failure both OMIT it (never null). It tells the renderer to KEEP the
   // user's typed text on a busy refusal instead of restoring the pre-edit stash.
-  "table-cell-updated": { type: STR, line: NUM, cellIndex: NUM, ok: BOOL, text: STR_OPT, key: STR_OPT, reason: STR_OPT },
+  "table-cell-updated": { type: STR, line: NUM, cellIndex: NUM, ok: BOOL, text: STR_OPT, key: STR_OPT, reason: STR_OPT, renderId: NUM_OPT },
   "scroll-to-heading": { type: STR, id: STR },
   "scroll-to-source-line": { type: STR, sourceLine: NUM },
   "open-find-bar": { type: STR },

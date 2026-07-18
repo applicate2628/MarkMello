@@ -235,6 +235,10 @@
       },
       "checked": {
         "kind": "boolean"
+      },
+      "renderId": {
+        "kind": "number",
+        "optional": true
       }
     },
     "table-cell-updated": {
@@ -260,6 +264,10 @@
       },
       "reason": {
         "kind": "string",
+        "optional": true
+      },
+      "renderId": {
+        "kind": "number",
         "optional": true
       }
     },
