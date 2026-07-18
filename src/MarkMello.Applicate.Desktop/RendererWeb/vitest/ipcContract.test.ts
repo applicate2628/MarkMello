@@ -175,4 +175,31 @@ describe("renderer->host producer capture", () => {
     );
     assertNoViolations(messages);
   });
+
+  it("task-toggle producer stamps the current render generation", () => {
+    const messages = capture(() => {
+      document.dispatchEvent(new Event("DOMContentLoaded"));
+      const load = (window as typeof window & {
+        __mmRendererLoad?: (message: unknown) => void;
+      }).__mmRendererLoad;
+      expect(typeof load).toBe("function");
+      load?.({ type: "load-document", html: "", renderId: 73 });
+
+      document.body.innerHTML =
+        '<main class="mm-document"><input class="mm-task-checkbox" data-task-line="12" data-task-key="abc123" type="checkbox"></main>';
+      const checkbox = document.querySelector<HTMLInputElement>(".mm-task-checkbox")!;
+      checkbox.checked = true;
+      checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    const toggle = messages.find((message) => message.type === "task-toggle");
+    expect(toggle).toEqual({
+      type: "task-toggle",
+      line: 12,
+      checked: true,
+      key: "abc123",
+      renderId: 73,
+    });
+    assertNoViolations(messages);
+  });
 });

@@ -229,6 +229,33 @@ public sealed class OpenDocumentsServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateSourceTextClearsModifiedByDefaultButPreserveModifiedKeepsTheDirtyMarker()
+    {
+        // R1: the reading-mode in-place-edit mirror syncs UNSAVED text while the
+        // view model owns the dirty flag. The default overload clears IsModified
+        // (disk-backed sync == persisted); preserveModified: true leaves the tab
+        // dirty marker lit that a dirty in-memory edit just set. Neutralizing the
+        // preserveModified path (forcing IsModified false) turns the third
+        // assertion RED — proving the seam.
+        var path = WriteTemp("a.md", "old");
+        var service = new OpenDocumentsService();
+        var doc = await service.OpenAsync(path);
+
+        service.SetModified(doc, true);
+        Assert.True(doc.IsModified);
+
+        // preserveModified: true syncs the text but keeps the dirty marker.
+        service.UpdateSourceText(doc, "unsaved edit", preserveModified: true);
+        Assert.Equal("unsaved edit", doc.SourceText);
+        Assert.True(doc.IsModified);
+
+        // The default overload keeps the historical persisted-sync contract.
+        service.UpdateSourceText(doc, "reloaded");
+        Assert.Equal("reloaded", doc.SourceText);
+        Assert.False(doc.IsModified);
+    }
+
+    [Fact]
     public async Task OpenAsyncNonExistentPathThrows()
     {
         var service = new OpenDocumentsService();

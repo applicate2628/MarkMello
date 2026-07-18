@@ -101,24 +101,52 @@ public sealed class EditorSessionViewModelTests
     }
 
     [Fact]
-    public void ApplyPersistedTableCellEditUpdatesBufferAndDiscardBaselineWithoutPreviewRender()
+    public void ApplyInPlaceEditToBufferMovesBufferDirtyWithoutBaselineOrPreviewRender()
     {
+        // The single semantic flip: an in-place edit moves the buffer WITHOUT
+        // advancing the persisted baseline, so it reads as unsaved (dirty) and
+        // Discard reverts it (self-inverse — nothing was persisted). The preview
+        // is deferred, so the whole-document parse never runs on this path.
         var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "table.md");
-        var session = CreateSession(path, "| A |\n|---|\n| old |\n");
+        const string original = "| A |\n|---|\n| old |\n";
+        var session = CreateSession(path, original);
         var previewBefore = session.RenderedPreview;
-        const string persisted = "| A |\n|---|\n| new |\n";
+        const string edited = "| A |\n|---|\n| new |\n";
 
-        session.ApplyPersistedTableCellEdit(persisted, persisted);
+        session.ApplyInPlaceEditToBuffer(edited);
 
-        Assert.Equal(persisted, session.SourceText);
-        Assert.Equal(persisted, session.LastPersistedSource);
-        Assert.False(session.IsDirty);
-        Assert.Same(previewBefore, session.RenderedPreview);
+        Assert.Equal(edited, session.SourceText);
+        Assert.Equal(original, session.LastPersistedSource); // baseline UNCHANGED
+        Assert.True(session.IsDirty);
+        Assert.Same(previewBefore, session.RenderedPreview); // no preview rebuild
 
         session.DiscardChanges();
 
-        Assert.Equal(persisted, session.SourceText);
+        Assert.Equal(original, session.SourceText);
         Assert.False(session.IsDirty);
+    }
+
+    [Fact]
+    public void CreatePreviewDeferredStartsWithEmptyPreviewThenReconcilesOnDemand()
+    {
+        // A reading-mode in-place edit lazily materializes the session
+        // preview-deferred so the click path never pays a whole-document parse;
+        // EnsurePreviewReconciled (called on the next Ctrl+E) rebuilds it.
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "deferred.md");
+        var session = EditorSessionViewModel.CreatePreviewDeferred(
+            new MarkdownSource(path, Path.GetFileName(path), "alpha beta"),
+            ReadingPreferences.Default,
+            new RenderMarkdownDocumentUseCase(new TestMarkdownRenderer()),
+            imageSourceResolver: null);
+
+        Assert.Equal("alpha beta", session.SourceText);
+        Assert.False(session.IsDirty);
+        Assert.Empty(session.RenderedPreview.Blocks); // preview deferred (Empty)
+
+        session.EnsurePreviewReconciled();
+
+        Assert.Equal("alpha beta", ExtractPlainText(session.RenderedPreview));
+        Assert.Equal(Path.GetDirectoryName(path), session.RenderedPreview.BaseDirectory);
     }
 
     private static EditorSessionViewModel CreateSession(string path, string content)

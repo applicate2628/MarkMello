@@ -8,17 +8,20 @@ using Xunit;
 namespace MarkMello.Applicate.Tests;
 
 /// <summary>
-/// A0-bis / bug #22, reopened 2026-07-17 by the split-ownership sweep.
+/// A0-bis / bug #22. The dirty-gate bypass was FIXED in 80994f2: ApplicateTabsView.CloseSet now
+/// resolves the owning MainWindowViewModel via `TopLevel.GetTopLevel(this)?.DataContext` and routes
+/// any bulk close containing the ACTIVE document through RequestBulkCloseWithDirtyCheckAsync ->
+/// RunWithDirtyCheckAsync -> RequiresDirtyResolution. Because RequiresDirtyResolution was widened to
+/// be mode-independent (EditorSession?.IsDirty == true), that routing AUTOMATICALLY extends bulk-close
+/// protection to reading-mode dirty (a lone checkbox/cell edit) — no separate fix is needed, and a
+/// non-active tab cannot itself be dirty (there is a single editor session). The mode-independent
+/// prompt is covered by the VM-level test in MainWindowViewModelTests
+/// (ReadingModeDirtyBulkCloseQueuesBehindPrompt).
 ///
-/// The dirty gate is owned by MainWindowViewModel.RunWithDirtyCheckAsync, which already gates SEVEN
-/// sibling buffer-losing transitions. The four bulk closes in ApplicateTabsView call
-/// OpenDocumentsService.Close directly instead — and structurally CANNOT do otherwise: the view is
-/// constructed as `new ApplicateTabsView(service)` and holds no reference to the ViewModel at all.
-/// The owner is unreachable from the call site.
-///
-/// These pin what is provable headlessly. The end-to-end symptom (Cancel fails to cancel; the session
-/// on disk is already OpenPaths=[] because ApplicateMainWindow.cs:2799 persists on EVERY collection
-/// change) needs the bridge, which is not headless-constructible until the deferred A2 extraction.
+/// These headless tests pin the STRUCTURAL FALLBACK: when the view is constructed bare
+/// (`new ApplicateTabsView(service)`, no attached TopLevel to carry the VM DataContext), CloseSet
+/// cannot resolve the owner and degrades to a direct OpenDocumentsService.Close — so a bulk close is an
+/// unconditional removal and re-activating a closed document throws.
 /// </summary>
 public sealed class BulkCloseDirtyBypassTests : IDisposable
 {

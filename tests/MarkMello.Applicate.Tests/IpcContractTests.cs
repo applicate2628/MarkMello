@@ -263,7 +263,7 @@ public sealed class IpcContractTests
                 handler => view.ActiveHeadingChanged += (_, _) => handler());
 
             AssertInbound(view, "task-toggle", renderer,
-                new() { ["type"] = "task-toggle", ["line"] = 3, ["checked"] = true, ["key"] = "k" },
+                new() { ["type"] = "task-toggle", ["line"] = 3, ["checked"] = true, ["key"] = "k", ["renderId"] = null },
                 handler => view.TaskToggleRequested += (_, _) => handler());
 
             AssertInbound(view, "table-cell-edit", renderer,

@@ -68,6 +68,38 @@ public sealed class ApplicateMainWindowBridgeTests
     }
 
     [Fact]
+    public void ReaderDirtyTabSwitchUsesVmOwnedRoutingAcrossTabAndHotkeyEntryPoints()
+    {
+        // R1 (data-loss): tab-strip clicks, tab-list selection, and Ctrl+1..9 all
+        // call IOpenDocumentsService.Activate directly. The bridge must decide
+        // whether the existing dirty-switch transaction applies; duplicating the
+        // old edit-only formula here left a dirty reader session unprotected.
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var tabs = ReadApplicateTabsViewSource();
+        var tabList = ExtractMethodBody(tabs, "private void OpenTabList()");
+        var hotkey = ExtractMethodBody(codeBehind, "private static bool TryActivateTabOrdinal(int ordinal)");
+
+        Assert.Contains("private void ActivateIfClickOnly(OpenDocument doc)", tabs, StringComparison.Ordinal);
+        Assert.Contains("_openDocsService.Activate(doc);", tabs, StringComparison.Ordinal);
+        Assert.Contains("_openDocsService.Activate(target);", tabList, StringComparison.Ordinal);
+        Assert.Contains("openDocs.Activate(target);", hotkey, StringComparison.Ordinal);
+        Assert.Contains("if (viewModel.NeedsDirtySwitchRouting)", bridge, StringComparison.Ordinal);
+        var readerRoute = bridge.IndexOf("if (viewModel.NeedsDirtySwitchRouting)", StringComparison.Ordinal);
+        var transaction = bridge.IndexOf("RequestDocumentSwitchWithDirtyCheckAsync", readerRoute, StringComparison.Ordinal);
+        Assert.True(transaction > readerRoute, "A dirty reader must enter the existing dirty-switch transaction.");
+        Assert.Contains("onCancel:", bridge[readerRoute..], StringComparison.Ordinal);
+        Assert.Contains("openDocs.Activate(previous);", bridge[readerRoute..], StringComparison.Ordinal);
+        Assert.Contains("openDocs.Activate(target);", bridge[readerRoute..], StringComparison.Ordinal);
+        Assert.Contains("pendingDirtySwitchTarget", bridge[readerRoute..], StringComparison.Ordinal);
+        Assert.Contains("!ReferenceEquals(args.ActiveDocument, openDocs.ActiveDocument)", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "if (viewModel.IsEditMode && viewModel.EditorSession is not null)",
+            bridge,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void EditModeFailedStubLoadBailsWithoutOverwritingDraft()
     {
         // Audit H2: a failed stub load must NOT publish an empty buffer into the
@@ -100,6 +132,47 @@ public sealed class ApplicateMainWindowBridgeTests
         var editSwapIndex = bridge.IndexOf("channelEditHost.CommitInPlaceSourceSwap(commit.Source);", StringComparison.Ordinal);
         Assert.True(editPatchIndex >= 0, "Edit host must receive the surgical checkbox patch.");
         Assert.True(editSwapIndex > editPatchIndex, "The silent swap may run only AFTER the edit host's DOM was patched.");
+    }
+
+    [Fact]
+    public void ReadingModeCommitMirrorsPreserveTheTabDirtyMarker()
+    {
+        // R1: the reading-mode toggle/cell commit carries UNSAVED content, so the
+        // open-docs text sync must NOT clear the tab dirty marker (which VM.IsDirty
+        // just lit). Both reading-commit mirror handlers must pass
+        // preserveModified: true, and the bare (dirty-clearing) form must be gone.
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+
+        var preserving = System.Text.RegularExpressions.Regex.Matches(
+            bridge,
+            @"openDocs\.UpdateSourceText\(mirrored, commit\.Source\.Content, preserveModified: true\);");
+        Assert.Equal(2, preserving.Count); // task-toggle + table-cell reading commits
+        Assert.DoesNotContain(
+            "openDocs.UpdateSourceText(mirrored, commit.Source.Content);",
+            bridge,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReadingModeDiscardRepairsTheDistinctPrimedEditHost()
+    {
+        // R2 (data-loss): reading commits patch then silently swap the DISTINCT
+        // primed edit host. Discard must inverse that convergence from the
+        // persisted source; otherwise its stale DOM can be served on Ctrl+E.
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(codeBehind, "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+        var webView = ReadApplicateWebMarkdownDocumentViewSource();
+
+        Assert.Contains("viewModel.InPlaceEditDiscarded", bridge, StringComparison.Ordinal);
+        Assert.Contains("!ReferenceEquals(channelEditHost, channelViewerHost)", bridge, StringComparison.Ordinal);
+        Assert.Contains("channelEditHost.View.RefreshInPlaceSource(source);", bridge, StringComparison.Ordinal);
+
+        var refresh = ExtractMethodBody(
+            webView,
+            "internal void RefreshInPlaceSource(MarkdownSource source)");
+        Assert.Contains("_hasLoadedDocument", refresh, StringComparison.Ordinal);
+        Assert.Contains("Source = source;", refresh, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -461,6 +534,32 @@ public sealed class ApplicateMainWindowBridgeTests
             "src",
             "MarkMello.Applicate.Desktop",
             "ApplicateMainWindow.cs"));
+
+    private static string ReadApplicateTabsViewSource()
+        => File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Views",
+            "ApplicateTabsView.cs"));
+
+    private static string ReadApplicateWebMarkdownDocumentViewSource()
+        => File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Views",
+            "ApplicateWebMarkdownDocumentView.cs"));
 
     private static string ReadRendererSource()
         => File.ReadAllText(Path.Combine(

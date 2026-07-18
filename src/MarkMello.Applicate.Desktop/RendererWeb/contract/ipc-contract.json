@@ -521,6 +521,11 @@
       "key": {
         "kind": "string",
         "nullable": true
+      },
+      "renderId": {
+        "kind": "number",
+        "optional": true,
+        "nullable": true
       }
     },
     "table-cell-edit": {

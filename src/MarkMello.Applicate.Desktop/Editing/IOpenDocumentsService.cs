@@ -83,6 +83,17 @@ public interface IOpenDocumentsService
     void UpdateSourceText(OpenDocument document, string sourceText);
 
     /// <summary>
+    /// Sync <paramref name="document"/>'s in-memory text to
+    /// <paramref name="sourceText"/> while, when <paramref name="preserveModified"/>
+    /// is true, leaving <see cref="OpenDocument.IsModified"/> untouched — the
+    /// caller owns the dirty flag. Used by the reading-mode in-place-edit mirror,
+    /// which lights the tab dirty marker from the view model's unsaved state; the
+    /// default overload keeps the historical "synced text == persisted, not
+    /// modified" contract for disk-backed syncs.
+    /// </summary>
+    void UpdateSourceText(OpenDocument document, string sourceText, bool preserveModified);
+
+    /// <summary>
     /// Set the per-document modified (dirty) flag and notify observers (the tabs
     /// strip, which paints a dirty marker). No-op and no event when unchanged.
     /// </summary>

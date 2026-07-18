@@ -62,7 +62,7 @@ export type RendererMessage =
   | { type: "post-ready-enhancements-complete"; renderId?: number; hasMermaid: boolean; hasHljs: boolean }
   | { type: "theme-applied"; theme: RendererTheme; requestId: number }
   | { type: "link-clicked"; href: string; button: number; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean }
-  | { type: "task-toggle"; line: number; checked: boolean; key: string | null }
+  | { type: "task-toggle"; line: number; checked: boolean; key: string | null; renderId?: number | null }
   | { type: "table-cell-edit"; line: number; cellIndex: number; text: string; key: string | null; renderId: number | null }
   | { type: "minimap-state"; visible: boolean; reservedWidth: number }
   | { type: "minimap-settled"; transactionGeneration: number; visible: boolean; reservedWidth: number }
@@ -213,7 +213,7 @@ export const RENDERER_MESSAGE_SHAPES = {
   "post-ready-enhancements-complete": { type: STR, renderId: NUM_OPT_NULLABLE, hasMermaid: BOOL, hasHljs: BOOL },
   "theme-applied": { type: STR, theme: STR, requestId: NUM },
   "link-clicked": { type: STR, href: STR, button: NUM, ctrlKey: BOOL, shiftKey: BOOL, altKey: BOOL, metaKey: BOOL },
-  "task-toggle": { type: STR, line: NUM, checked: BOOL, key: { kind: "string", nullable: true } },
+  "task-toggle": { type: STR, line: NUM, checked: BOOL, key: { kind: "string", nullable: true }, renderId: NUM_OPT_NULLABLE },
   // renderId here is the currency stamp (the render generation the renderer holds),
   // ALWAYS present but nullable: a null carries no currency info and the host falls
   // back to its disk/key/round-trip gates rather than dropping. This differs from the

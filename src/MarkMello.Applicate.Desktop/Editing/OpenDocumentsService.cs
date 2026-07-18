@@ -215,6 +215,9 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
     }
 
     public void UpdateSourceText(OpenDocument document, string sourceText)
+        => UpdateSourceText(document, sourceText, preserveModified: false);
+
+    public void UpdateSourceText(OpenDocument document, string sourceText, bool preserveModified)
     {
         ArgumentNullException.ThrowIfNull(document);
         if (!_openDocuments.Contains(document))
@@ -224,13 +227,22 @@ public sealed class OpenDocumentsService : IOpenDocumentsService, IDisposable
 
         var wasModified = document.IsModified;
         document.SourceText = sourceText ?? throw new ArgumentNullException(nameof(sourceText));
-        document.IsModified = false;
         // Receiving externally-sourced text counts as loaded — any stub
         // that reaches here (e.g. the bridge mirror noticing VM.Document
         // content differs) becomes a regular loaded document so later
         // tab switches do not re-read from disk.
         document.IsLoaded = true;
-        if (wasModified)
+        // preserveModified: the caller owns the dirty flag elsewhere (the
+        // reading-mode in-place-edit mirror sets it from VM.IsDirty). Forcing it
+        // false here would clear the tab dirty marker a dirty in-memory edit just
+        // lit. Default (false) keeps the historical "synced text == persisted"
+        // contract for disk-backed syncs (save/reload/open).
+        if (!preserveModified && document.IsModified)
+        {
+            document.IsModified = false;
+        }
+
+        if (wasModified != document.IsModified)
         {
             DocumentModifiedChanged?.Invoke(this, EventArgs.Empty);
         }

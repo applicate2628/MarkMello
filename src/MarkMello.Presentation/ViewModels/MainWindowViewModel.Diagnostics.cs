@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MarkMello.Application.UseCases;
+using MarkMello.Domain;
 using MarkMello.Domain.Diagnostics;
 
 namespace MarkMello.Presentation.ViewModels;
@@ -83,11 +84,15 @@ public partial class MainWindowViewModel
             return;
         }
 
-        // Re-analyze the LIVE text at fix-time so an edit-mode buffer (or a doc
+        // Re-analyze the LIVE text at fix-time so an edited buffer (or a doc
         // changed since the banner appeared) is repaired correctly, never a
-        // stale snapshot.
-        var editing = IsEditMode && EditorSession is not null;
-        var liveText = editing ? EditorSession!.SourceText : Document?.Content;
+        // stale snapshot. R3: branch on SESSION existence, not IsEditMode. Post
+        // the reading-mode dirty flip a session can exist while reading; its
+        // buffer (not disk) is the live text, and the repair must dirty the
+        // buffer instead of disk-writing + reloading — the widened dirty gate
+        // would otherwise fire a Save/Discard prompt in the middle of the fix.
+        var hasSession = EditorSession is not null;
+        var liveText = hasSession ? EditorSession!.SourceText : Document?.Content;
         if (string.IsNullOrEmpty(liveText))
         {
             return;
@@ -105,9 +110,10 @@ public partial class MainWindowViewModel
         IsApplyingDocumentHealthFix = true;
         try
         {
-            if (editing)
+            if (hasSession)
             {
-                // In edit mode push the repaired text into the editor buffer; the
+                // A session owns the buffer (edit mode, or a reading-mode dirty
+                // doc): push the repaired text into it as an unsaved edit; the
                 // user keeps control of saving (the dirty flow owns the write).
                 EditorSession!.SourceText = result.RepairedText;
             }
@@ -141,8 +147,24 @@ public partial class MainWindowViewModel
             IsDocumentHealthDismissed = true;
             RaiseDocumentHealthBindings();
 
+            // A reading-mode session owns the repaired buffer, but the
+            // viewer is bound to Document rather than that buffer. Republish the
+            // same source there so the visible document reflects the repair; an
+            // edit-mode session's preview already observes its buffer directly.
+            if (hasSession && !IsEditMode && _document is { } current)
+            {
+                _pendingDeferredRenderedDocument = null;
+                SuppressNextDocumentReveal?.Invoke(this, EventArgs.Empty);
+                Document = new MarkdownSource(current.Path, current.FileName, result.RepairedText);
+                RenderedDocument = _renderMarkdown.Execute(
+                    result.RepairedText,
+                    baseDirectory: TryGetDirectory(current.Path));
+            }
+
             // Reload from disk so the repaired document renders (viewer path).
-            if (!editing && CanReload())
+            // Only when no session owns the buffer — otherwise the buffer push
+            // owns the repair and a reload would fight it.
+            if (!hasSession && CanReload())
             {
                 // Same-path content update: suppress the document-switch cover for
                 // this one reload so the repair lands without a reveal flicker.

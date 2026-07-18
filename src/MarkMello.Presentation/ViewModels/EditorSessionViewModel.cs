@@ -22,6 +22,13 @@ public sealed class EditorSessionViewModel : ObservableObject
     private ReadingPreferences _readingPreferences;
     private RenderedMarkdownDocument _renderedPreview;
     private string _statusMessage;
+    // True while RenderedPreview is intentionally out of step with SourceText:
+    // a preview-deferred materialization (a reading-mode in-place edit lazily
+    // creates the session with an Empty preview) or an ApplyInPlaceEditToBuffer
+    // that moved the buffer without paying the whole-document parse. Reconciled
+    // by EnsurePreviewReconciled (next Ctrl+E) or cleared by the SourceText
+    // setter (any real preview rebuild).
+    private bool _previewDeferred;
 
     public EditorSessionViewModel(
         MarkdownSource source,
@@ -66,7 +73,8 @@ public sealed class EditorSessionViewModel : ObservableObject
         ReadingPreferences readingPreferences,
         RenderMarkdownDocumentUseCase renderMarkdown,
         IImageSourceResolver? imageSourceResolver,
-        ILocalizationService? localization)
+        ILocalizationService? localization,
+        bool deferPreview = false)
     {
         ArgumentNullException.ThrowIfNull(renderMarkdown);
         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
@@ -79,9 +87,41 @@ public sealed class EditorSessionViewModel : ObservableObject
         _readingPreferences = readingPreferences;
         _lastPersistedSource = initialContent ?? string.Empty;
         _sourceText = initialContent ?? string.Empty;
-        _renderedPreview = RenderPreview(_sourceText, _currentPath);
+        // A preview-deferred session skips the synchronous whole-document parse
+        // on construction (heavy-doc hazard on the zero-cost reading-edit click
+        // path); the preview reconciles on the next SourceText change or Ctrl+E.
+        _renderedPreview = deferPreview
+            ? RenderedMarkdownDocument.Empty
+            : RenderPreview(_sourceText, _currentPath);
+        _previewDeferred = deferPreview;
         _statusMessage = string.Empty;
         _splitRatio = 0.5;
+    }
+
+    /// <summary>
+    /// Materialize a session for a reading-mode in-place edit WITHOUT rendering
+    /// the preview. The first in-place edit of a never-edited document would
+    /// otherwise pay a synchronous whole-document parse on the click path; the
+    /// preview is Empty until <see cref="EnsurePreviewReconciled"/> (next Ctrl+E)
+    /// or the next real <see cref="SourceText"/> change rebuilds it.
+    /// </summary>
+    public static EditorSessionViewModel CreatePreviewDeferred(
+        MarkdownSource source,
+        ReadingPreferences readingPreferences,
+        RenderMarkdownDocumentUseCase renderMarkdown,
+        IImageSourceResolver? imageSourceResolver,
+        ILocalizationService? localization = null)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        return new EditorSessionViewModel(
+            source.Path,
+            source.FileName,
+            source.Content,
+            readingPreferences,
+            renderMarkdown,
+            imageSourceResolver,
+            localization,
+            deferPreview: true);
     }
 
     public IImageSourceResolver? ImageSourceResolver { get; }
@@ -121,6 +161,7 @@ public sealed class EditorSessionViewModel : ObservableObject
             if (SetProperty(ref _sourceText, value ?? string.Empty))
             {
                 RenderedPreview = RenderPreview(_sourceText, _currentPath);
+                _previewDeferred = false;
                 StatusMessage = string.Empty;
                 RaiseDocumentMetricsChanged();
                 OnPropertyChanged(nameof(IsDirty));
@@ -242,46 +283,44 @@ public sealed class EditorSessionViewModel : ObservableObject
     }
 
     /// <summary>
-    /// In-place task-toggle entry: the document on disk moved to
-    /// <paramref name="persistedContent"/> while this session holds the
-    /// (possibly dormant) buffer. The persisted baseline follows the disk so
-    /// <see cref="IsDirty"/> stays truthful and <see cref="DiscardChanges"/>
-    /// targets the REAL disk state instead of silently reverting a persisted
-    /// toggle; the buffer becomes <paramref name="sourceText"/> (the same flip
-    /// applied when the line was still intact, or the unchanged buffer when
-    /// the flip was refused). Deliberately skips the synchronous
-    /// <see cref="RenderedPreview"/> rebuild — a whole-document parse does not
-    /// belong on the zero-cost click path; the native-fallback preview
-    /// reconciles on the next SourceText change or document load.
+    /// In-place edit entry shared by the task-checkbox and table-cell channels:
+    /// move the buffer to <paramref name="newBuffer"/> WITHOUT touching
+    /// <see cref="LastPersistedSource"/>, so the edit reads as unsaved
+    /// (<see cref="IsDirty"/> true) and Ctrl+S / Discard own the write. This is
+    /// the single semantic difference from the old auto-persist model, where the
+    /// baseline advanced to a just-written disk snapshot. Deliberately skips the
+    /// synchronous <see cref="RenderedPreview"/> rebuild — a whole-document parse
+    /// does not belong on the zero-cost click path — and marks the preview
+    /// deferred so <see cref="EnsurePreviewReconciled"/> rebuilds it on the next
+    /// Ctrl+E (the reading surface never binds the preview, so it stays invisible
+    /// until then).
     /// </summary>
-    public void ApplyPersistedTaskFlip(string sourceText, string persistedContent)
+    public void ApplyInPlaceEditToBuffer(string newBuffer)
     {
-        var textChanged = SetProperty(ref _sourceText, sourceText ?? string.Empty, nameof(SourceText));
-        LastPersistedSource = persistedContent;
-        if (textChanged)
+        if (SetProperty(ref _sourceText, newBuffer ?? string.Empty, nameof(SourceText)))
         {
+            _previewDeferred = true;
             RaiseDocumentMetricsChanged();
             OnPropertyChanged(nameof(IsDirty));
         }
     }
 
     /// <summary>
-    /// In-place table-cell entry: the document on disk moved to
-    /// <paramref name="persistedContent"/> while this session holds the
-    /// (possibly dormant) buffer. The persisted baseline follows the real disk
-    /// state so Discard/Save cannot restore the pre-edit cell. Deliberately
-    /// skips the synchronous whole-document preview rebuild used by the normal
-    /// <see cref="SourceText"/> setter.
+    /// Rebuild <see cref="RenderedPreview"/> from the current buffer when it was
+    /// left deferred (preview-deferred materialization or an
+    /// <see cref="ApplyInPlaceEditToBuffer"/> that skipped the parse). Called on
+    /// entering edit mode so the preview surface shows the live buffer instead of
+    /// an empty or stale render; a no-op when the preview is already current.
     /// </summary>
-    public void ApplyPersistedTableCellEdit(string sourceText, string persistedContent)
+    public void EnsurePreviewReconciled()
     {
-        var textChanged = SetProperty(ref _sourceText, sourceText ?? string.Empty, nameof(SourceText));
-        LastPersistedSource = persistedContent;
-        if (textChanged)
+        if (!_previewDeferred)
         {
-            RaiseDocumentMetricsChanged();
-            OnPropertyChanged(nameof(IsDirty));
+            return;
         }
+
+        _previewDeferred = false;
+        RenderedPreview = RenderPreview(SourceText, _currentPath);
     }
 
     public void DiscardChanges()

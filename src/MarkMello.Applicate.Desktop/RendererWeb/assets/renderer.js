@@ -4939,7 +4939,15 @@
         return;
       }
       const key = target.getAttribute("data-task-key");
-      postHostMessage({ type: "task-toggle", line, checked: target.checked, key });
+      postHostMessage({
+        type: "task-toggle",
+        line,
+        checked: target.checked,
+        key,
+        // Currency stamp: reject a delayed task write when this host has since
+        // revealed a different document with a colliding line/key.
+        renderId: currentDocumentRenderId
+      });
     });
   }
   function wireViewerInteraction() {

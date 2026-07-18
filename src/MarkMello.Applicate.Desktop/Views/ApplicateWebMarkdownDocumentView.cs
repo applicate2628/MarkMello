@@ -2071,6 +2071,19 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                         && taskKeyProp.ValueKind == System.Text.Json.JsonValueKind.String
                         ? taskKeyProp.GetString()
                         : null;
+                    // Currency gate (cross-document write guard, precedes every VM
+                    // write gate): a delayed checkbox message can carry a line/key
+                    // pair that collides with the document this host now reveals.
+                    // A numeric renderId from an older reveal is therefore dropped;
+                    // null/absent preserves compatibility with unstamped renderers.
+                    if (document.RootElement.TryGetProperty("renderId", out var taskRenderIdProperty)
+                        && taskRenderIdProperty.ValueKind == JsonValueKind.Number
+                        && taskRenderIdProperty.TryGetInt64(out var taskRenderId)
+                        && taskRenderId != _activeRevealRenderId)
+                    {
+                        return;
+                    }
+
                     TaskToggleRequested?.Invoke(this, new ApplicateWebTaskToggleEventArgs(taskLine, taskCheckedProp.GetBoolean(), taskKey));
                 }
 
@@ -3440,6 +3453,26 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         PostRendererMessage(new { type = "invalidate-document-cache-key" });
+    }
+
+    /// <summary>
+    /// Re-render a loaded document from a replacement in-memory source without
+    /// changing document identity. Unlike <see cref="CommitInPlaceSourceSwap"/>,
+    /// this is used when discard restores the persisted baseline and the DOM was
+    /// never patched to that content; assigning <see cref="Source"/> therefore
+    /// intentionally queues a full renderer update.
+    /// </summary>
+    internal void RefreshInPlaceSource(MarkdownSource source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (!_hasLoadedDocument
+            || Source is null
+            || !string.Equals(Source.Path, source.Path, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        Source = source;
     }
 
     /// <summary>

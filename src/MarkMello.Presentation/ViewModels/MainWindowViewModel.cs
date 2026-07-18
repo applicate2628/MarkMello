@@ -98,6 +98,14 @@ public partial class MainWindowViewModel : ObservableObject
     /// </summary>
     public event EventHandler<ThemeTransitionStartingEventArgs>? ThemeTransitionStarting;
 
+    /// <summary>
+    /// Raised only when a reading-mode in-place edit is discarded after its
+    /// persisted baseline has been republished. The desktop bridge uses this to
+    /// re-render the distinct primed edit-preview host, whose DOM intentionally
+    /// does not observe inactive editor-session changes.
+    /// </summary>
+    public event EventHandler<MarkdownSource>? InPlaceEditDiscarded;
+
     public MainWindowViewModel(
         OpenDocumentUseCase openDocument,
         SaveDocumentUseCase saveDocument,
@@ -126,6 +134,8 @@ public partial class MainWindowViewModel : ObservableObject
         _tableCellSourceEditor = tableCellSourceEditor;
         _imageSourceResolver = imageSourceResolver;
         _rendererReadiness = rendererReadiness;
+        _inDocumentEditCoordinator = new RealtimeInDocumentEditCoordinator();
+        _inDocumentEditHost = new InDocumentEditHost(this);
         _aboutVersion = GetProductVersion();
         _aboutForkAuthor = GetAssemblyMetadata("MarkMelloForkAuthor") ?? string.Empty;
         _aboutRepositoryUrl = GetRepositoryUrl();
@@ -290,6 +300,14 @@ public partial class MainWindowViewModel : ObservableObject
     public bool IsError => State == ViewState.LoadError;
 
     public bool IsDirty => EditorSession?.IsDirty == true;
+
+    /// <summary>
+    /// The bridge route for service-driven tab activation. A clean reader uses
+    /// the reader fast path; an edit session or a dirty reader session must use
+    /// the existing dirty-switch transaction.
+    /// </summary>
+    public bool NeedsDirtySwitchRouting
+        => EditorSession is { } editorSession && (IsEditMode || editorSession.IsDirty);
 
     public bool ShowsDirtySaveButton => IsEditMode && IsDirty;
 
@@ -940,7 +958,10 @@ public partial class MainWindowViewModel : ObservableObject
         ApplySavedDocument(success.Source);
     }
 
-    private bool CanSave() => IsEditMode && EditorSession is not null;
+    // Mode-independent so a reading-mode in-place edit (dirty session, IsEditMode
+    // false) can Ctrl+S. Requiring IsDirty also disables the previously-allowed
+    // edit-mode save on a clean buffer (nothing to persist) — an accepted change.
+    private bool CanSave() => EditorSession is not null && IsDirty;
 
     [RelayCommand(CanExecute = nameof(CanSaveAs))]
     private async Task SaveAsAsync()
@@ -1750,6 +1771,15 @@ public partial class MainWindowViewModel : ObservableObject
                 _imageSourceResolver,
                 _localization);
         }
+        else
+        {
+            // A reading-mode in-place edit may have materialized the session
+            // preview-deferred (Empty preview) or moved its buffer without a
+            // parse. The reading surface never binds the preview, but the editor
+            // does — rebuild it now so Ctrl+E shows the live buffer, not an empty
+            // or stale render. A no-op when the preview is already current.
+            EditorSession.EnsurePreviewReconciled();
+        }
 
         if (!_editorActivationMarked)
         {
@@ -2187,10 +2217,26 @@ public partial class MainWindowViewModel : ObservableObject
     private void ApplySavedDocument(MarkdownSource source)
     {
         _pendingDeferredRenderedDocument = null;
-        Document = source;
-        RenderedDocument = _renderMarkdown.Execute(
-            source.Content,
-            baseDirectory: TryGetDirectory(source.Path));
+
+        // P2 scroll-preservation: a reading-mode Ctrl+S persists content the
+        // viewer ALREADY shows (the in-place edit patched _document to the buffer),
+        // so re-publishing Document (reference identity -> cold re-render) and
+        // re-running _renderMarkdown.Execute (a synchronous whole-document parse)
+        // would reset the scroll for no visible change. Skip both when the saved
+        // bytes and path already match the live document; the baseline advance
+        // below still clears the dirty marker. Edit-mode saves keep _document at
+        // disk content, so they never match here and re-publish as before.
+        var alreadyRendered = _document is { } current
+            && string.Equals(current.Content, source.Content, StringComparison.Ordinal)
+            && string.Equals(current.Path, source.Path, StringComparison.Ordinal);
+        if (!alreadyRendered)
+        {
+            Document = source;
+            RenderedDocument = _renderMarkdown.Execute(
+                source.Content,
+                baseDirectory: TryGetDirectory(source.Path));
+        }
+
         _currentPath = source.Path;
 
         if (EditorSession is null)
@@ -2238,7 +2284,12 @@ public partial class MainWindowViewModel : ObservableObject
         QueueDirtyAction(kind, action, onCancel);
     }
 
-    private bool RequiresDirtyResolution => IsEditMode && EditorSession?.IsDirty == true;
+    // Mode-independent: a reading-mode in-place edit now dirties the session, so
+    // close / reload / open / bulk-close must prompt for it too (not only edit
+    // mode). Widening this one predicate automatically extends the existing
+    // dirty-resolution machinery (RunWithDirtyCheckAsync, TryQueueCloseRequest,
+    // RequestBulkCloseWithDirtyCheckAsync) to reading-mode dirty.
+    private bool RequiresDirtyResolution => EditorSession?.IsDirty == true;
 
     private void QueueDirtyAction(PendingDirtyActionKind kind, Func<Task> action, Action? onCancel = null)
     {
@@ -2307,7 +2358,36 @@ public partial class MainWindowViewModel : ObservableObject
             return;
         }
 
+        // Capture the persisted baseline BEFORE the revert (DiscardChanges moves
+        // SourceText back to it; LastPersistedSource itself is unchanged).
+        var persisted = EditorSession.LastPersistedSource;
+
         EditorSession.DiscardChanges();
+
+        // R2 (data-loss): a reading-mode in-place edit patched _document, both
+        // shared WebView hosts, and openDocs.SourceText to UNSAVED content (dirty,
+        // never written to disk). Reverting only the session buffer would leave the
+        // discarded edit on those surfaces, and a tab switch-back (IsLoaded skips
+        // the disk re-read) would then render it as truth. When _document still
+        // holds the divergent content, republish from the persisted baseline: the
+        // Document setter drives a full viewer re-render and the Document->openDocs
+        // mirror re-syncs the tab text + clears its dirty marker (a full re-render
+        // is fine — discard is rare). Suppress the one-shot reveal cover so the
+        // in-place revert does not flash a document-switch cover. Edit-mode discard
+        // leaves _document at disk content, so this branch is skipped there.
+        if (_document is { } current
+            && !string.Equals(current.Content, persisted, StringComparison.Ordinal))
+        {
+            _pendingDeferredRenderedDocument = null;
+            SuppressNextDocumentReveal?.Invoke(this, EventArgs.Empty);
+            var restoredSource = new MarkdownSource(current.Path, current.FileName, persisted);
+            Document = restoredSource;
+            RenderedDocument = _renderMarkdown.Execute(
+                persisted,
+                baseDirectory: TryGetDirectory(current.Path));
+            InPlaceEditDiscarded?.Invoke(this, restoredSource);
+        }
+
         RefreshDocumentSummary();
         RefreshWindowTitle();
         UpdateCommandStates();

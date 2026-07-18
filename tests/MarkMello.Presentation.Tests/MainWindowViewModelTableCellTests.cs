@@ -11,19 +11,21 @@ namespace MarkMello.Presentation.Tests;
 public sealed class MainWindowViewModelTableCellTests
 {
     [Fact]
-    public async Task StaleDiskRefusesBeforeRawLocateReloadsAndDoesNotWrite()
+    public async Task ReadingCellEditFlipsInMemoryBufferWithoutDiskReadOrReload()
     {
+        // P1: the reading-mode cell edit resolves the IN-MEMORY buffer and never
+        // re-reads disk, so an external edit on disk is NOT detected here
+        // (last-writer-wins; the save-time disk-divergence check is the scheduled
+        // follow-up). The rewrite lands as an unsaved edit — no reload branch.
         const string rendered = "| A | B |\n|---|---|\n| left | right |\n";
         const string fresh = "# external edit\n\n| A | B |\n|---|---|\n| left | right |\n";
+        const string expected = "| A | B |\n|---|---|\n| changed | right |\n";
         var harness = await CreateOpenHarnessAsync(rendered);
-        harness.Loader.Content = fresh;
-        TableCellRefusal? refusal = null;
-        string? contentAtRefusal = null;
-        harness.ViewModel.TableCellEditRefused += (_, value) =>
-        {
-            refusal = value;
-            contentAtRefusal = harness.ViewModel.Document?.Content;
-        };
+        harness.Loader.Content = fresh; // external edit — invisible to the in-memory flip
+        TableCellCommit? commit = null;
+        var refusalCount = 0;
+        harness.ViewModel.TableCellCommitted += (_, value) => commit = value;
+        harness.ViewModel.TableCellEditRefused += (_, _) => refusalCount++;
 
         await harness.ViewModel.SetTableCellAsync(
             line: 2,
@@ -32,18 +34,21 @@ public sealed class MainWindowViewModelTableCellTests
             key: TableCellIdentity.ComputeKey("left"),
             origin: TableCellEditOrigin.Viewer);
 
-        Assert.Equal(new TableCellRefusal(2, 0, harness.Path), refusal);
-        Assert.Equal(rendered, contentAtRefusal);
-        Assert.Equal(fresh, harness.ViewModel.Document?.Content);
-        Assert.Equal(3, harness.Loader.LoadCount); // initial open, fresh gate read, reload
-        Assert.Equal(0, harness.SourceEditor.LocateCount);
-        Assert.Equal(0, harness.SourceEditor.ParseCount);
+        Assert.Equal(0, refusalCount);
+        Assert.NotNull(commit);
+        Assert.Equal("changed", commit.Text);
+        Assert.Equal(expected, harness.ViewModel.Document?.Content);
+        Assert.True(harness.ViewModel.IsDirty);
+        Assert.Equal(1, harness.Loader.LoadCount); // only the initial open — no disk re-read
         Assert.Empty(harness.Saver.Saves);
     }
 
     [Fact]
-    public async Task DuplicateValueRowShiftRefusesBeforeKeyCanSelectWrongRow()
+    public async Task ReadingCellEditAddressesTheInMemoryLineNotAShiftedDiskRow()
     {
+        // P1: the edit is addressed by LINE against the in-memory buffer, so a
+        // disk row-shift (external edit) cannot select the wrong row here — there
+        // is no disk read. Line 2's cell is rewritten as an unsaved edit.
         const string rendered =
             "| Value |\n"
             + "|---|\n"
@@ -55,10 +60,17 @@ public sealed class MainWindowViewModelTableCellTests
             + "|---|\n"
             + "| yes |\n"
             + "| yes |\n";
+        const string expected =
+            "| Value |\n"
+            + "|---|\n"
+            + "| no |\n"
+            + "| yes |\n";
         var harness = await CreateOpenHarnessAsync(rendered);
         harness.Loader.Content = shifted;
         var refusalCount = 0;
+        TableCellCommit? commit = null;
         harness.ViewModel.TableCellEditRefused += (_, _) => refusalCount++;
+        harness.ViewModel.TableCellCommitted += (_, value) => commit = value;
 
         await harness.ViewModel.SetTableCellAsync(
             line: 2,
@@ -67,9 +79,10 @@ public sealed class MainWindowViewModelTableCellTests
             key: TableCellIdentity.ComputeKey("yes"),
             origin: TableCellEditOrigin.Viewer);
 
-        Assert.Equal(1, refusalCount);
-        Assert.Equal(shifted, harness.ViewModel.Document?.Content);
-        Assert.Equal(0, harness.SourceEditor.LocateCount);
+        Assert.Equal(0, refusalCount);
+        Assert.NotNull(commit);
+        Assert.Equal(expected, harness.ViewModel.Document?.Content);
+        Assert.Equal(1, harness.Loader.LoadCount); // no disk re-read
         Assert.Empty(harness.Saver.Saves);
     }
 
@@ -190,8 +203,12 @@ public sealed class MainWindowViewModelTableCellTests
     }
 
     [Fact]
-    public async Task ValidReadingEditWritesCanonicalDecodedTextAndSilentlyCommitsSnapshot()
+    public async Task ValidReadingEditWritesCanonicalDecodedTextIntoTheDirtyBufferSilently()
     {
+        // P1: a validated reading-mode cell edit rewrites the in-memory buffer to
+        // the canonical decoded text as an UNSAVED edit \u2014 no disk write, no
+        // Document re-render (silent backing-field patch), and the canonical
+        // text/key are published so the renderer settles the cell.
         const string source = "| A | B |\n|---|---|\n| plain | right |\n";
         const string expected = "| A | B |\n|---|---|\n| a & b \\| c | right |\n";
         var harness = await CreateOpenHarnessAsync(source);
@@ -213,10 +230,9 @@ public sealed class MainWindowViewModelTableCellTests
             key: TableCellIdentity.ComputeKey("plain"),
             origin: TableCellEditOrigin.Viewer);
 
-        var save = Assert.Single(harness.Saver.Saves);
-        Assert.Equal(harness.Path, save.Path);
-        Assert.Equal(expected, save.Content);
+        Assert.Empty(harness.Saver.Saves); // no auto-persist
         Assert.Equal(expected, harness.ViewModel.Document?.Content);
+        Assert.True(harness.ViewModel.IsDirty);
         Assert.Equal(0, documentNotifications);
         Assert.NotNull(commit);
         Assert.Equal(expected, commit.Source.Content);
@@ -255,6 +271,7 @@ public sealed class MainWindowViewModelTableCellTests
         Assert.Equal("plain", commit.Text);
         Assert.Equal(TableCellIdentity.ComputeKey("plain"), commit.Key);
         Assert.Equal(source, harness.ViewModel.Document?.Content);
+        Assert.False(harness.ViewModel.IsDirty); // a no-net-change settle never dirties
     }
 
     [Fact]
@@ -290,15 +307,19 @@ public sealed class MainWindowViewModelTableCellTests
     }
 
     [Fact]
-    public async Task DormantSessionNextCtrlEDiscardAndSaveCannotRevertPersistedCell()
+    public async Task DormantSessionReadingCellEditIsUnsavedAndSavePersists()
     {
+        // P1 inversion: a reading-mode cell edit on a dormant session is UNSAVED —
+        // the buffer moves, the baseline does not (no disk write). The next Ctrl+E
+        // surfaces the unsaved buffer; Ctrl+S persists it and clears the dirty
+        // state (Discard would revert it — see the R2 discard-revert test).
         const string source = "| A | B |\n|---|---|\n| old | right |\n";
-        const string persisted = "| A | B |\n|---|---|\n| new | right |\n";
+        const string edited = "| A | B |\n|---|---|\n| new | right |\n";
         var harness = await CreateOpenHarnessAsync(source);
         await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
         await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
         Assert.False(harness.ViewModel.IsEditMode);
-        Assert.NotNull(harness.ViewModel.EditorSession);
+        var session = Assert.IsType<EditorSessionViewModel>(harness.ViewModel.EditorSession);
 
         await harness.ViewModel.SetTableCellAsync(
             line: 2,
@@ -307,26 +328,32 @@ public sealed class MainWindowViewModelTableCellTests
             key: TableCellIdentity.ComputeKey("old"),
             origin: TableCellEditOrigin.Viewer);
 
-        Assert.Equal(persisted, harness.ViewModel.Document?.Content);
+        Assert.Empty(harness.Saver.Saves);
+        Assert.Equal(edited, harness.ViewModel.Document?.Content);
+        Assert.Equal(edited, session.SourceText);
+        Assert.Equal(source, session.LastPersistedSource); // baseline UNCHANGED
+        Assert.True(session.IsDirty);
+
         await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null); // next Ctrl+E
-        Assert.Equal(persisted, harness.ViewModel.EditorSession?.SourceText);
-        Assert.Equal(persisted, harness.ViewModel.EditorSession?.LastPersistedSource);
+        Assert.Equal(edited, session.SourceText);
 
-        harness.ViewModel.EditorSession?.DiscardChanges();
-        Assert.Equal(persisted, harness.ViewModel.EditorSession?.SourceText);
-
-        harness.Saver.Saves.Clear();
         await harness.ViewModel.SaveCommand.ExecuteAsync(null);
         var saved = Assert.Single(harness.Saver.Saves);
-        Assert.Equal(persisted, saved.Content);
+        Assert.Equal(edited, saved.Content);
+        Assert.False(session.IsDirty);
+        Assert.Equal(edited, session.LastPersistedSource);
     }
 
     [Fact]
-    public async Task PersistedEditDoesNotBecomeRefusalWhenCommittedSubscriberThrows()
+    public async Task ReadingCellEditDoesNotBecomeRefusalWhenCommittedSubscriberThrows()
     {
+        // The two-phase contract survives P1: the buffer + _document settle BEFORE
+        // the (throwing) commit publish, so a failing subscriber propagates its
+        // exception and is NOT swallowed into a refusal, and the serializer is
+        // released (coordinator finally) so a later edit still runs.
         const string source = "| A | B |\n|---|---|\n| old | right |\n";
-        const string persisted = "| A | B |\n|---|---|\n| new | right |\n";
-        const string persistedAgain = "| A | B |\n|---|---|\n| again | right |\n";
+        const string edited = "| A | B |\n|---|---|\n| new | right |\n";
+        const string editedAgain = "| A | B |\n|---|---|\n| again | right |\n";
         var harness = await CreateOpenHarnessAsync(source);
         await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
         await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
@@ -344,18 +371,17 @@ public sealed class MainWindowViewModelTableCellTests
             key: TableCellIdentity.ComputeKey("old"),
             origin: TableCellEditOrigin.Viewer));
 
-        var save = Assert.Single(harness.Saver.Saves);
-        Assert.Equal(persisted, save.Content);
-        Assert.Equal(persisted, harness.ViewModel.Document?.Content);
-        Assert.Equal(persisted, dormantSession.SourceText);
-        Assert.Equal(persisted, dormantSession.LastPersistedSource);
+        Assert.Empty(harness.Saver.Saves); // no auto-persist
+        Assert.Equal(edited, harness.ViewModel.Document?.Content);
+        Assert.Equal(edited, dormantSession.SourceText);
+        Assert.Equal(source, dormantSession.LastPersistedSource); // baseline unchanged
+        Assert.True(dormantSession.IsDirty);
         Assert.Empty(refusals);
         Assert.IsType<InvalidOperationException>(exception);
 
         harness.ViewModel.TableCellCommitted -= throwingHandler;
         TableCellCommit? secondCommit = null;
         harness.ViewModel.TableCellCommitted += (_, value) => secondCommit = value;
-        harness.Loader.Content = persisted;
 
         var secondException = await Record.ExceptionAsync(() => harness.ViewModel.SetTableCellAsync(
             line: 2,
@@ -364,113 +390,15 @@ public sealed class MainWindowViewModelTableCellTests
             key: TableCellIdentity.ComputeKey("new"),
             origin: TableCellEditOrigin.Viewer));
 
-        Assert.Equal(2, harness.Saver.Saves.Count);
-        Assert.Equal(persistedAgain, harness.Saver.Saves[1].Content);
+        Assert.Empty(harness.Saver.Saves);
         Assert.NotNull(secondCommit);
-        Assert.Equal(persistedAgain, secondCommit.Source.Content);
+        Assert.Equal(editedAgain, secondCommit.Source.Content);
         Assert.Equal("again", secondCommit.Text);
-        Assert.Equal(persistedAgain, harness.ViewModel.Document?.Content);
-        Assert.Equal(persistedAgain, dormantSession.SourceText);
-        Assert.Equal(persistedAgain, dormantSession.LastPersistedSource);
+        Assert.Equal(editedAgain, harness.ViewModel.Document?.Content);
+        Assert.Equal(editedAgain, dormantSession.SourceText);
+        Assert.Equal(source, dormantSession.LastPersistedSource); // baseline never advanced (no save)
         Assert.Empty(refusals);
         Assert.Null(secondException);
-    }
-
-    [Fact]
-    public async Task PersistedEditSettlesForOriginalPathWhenAnotherDocumentBecomesActive()
-    {
-        const string sourceA = "| A | B |\n|---|---|\n| old | right |\n";
-        const string persistedA = "| A | B |\n|---|---|\n| new | right |\n";
-        const string sourceB = "# Document B\n";
-        var pathA = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "table-cell-a.md");
-        var pathB = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "table-cell-b.md");
-        var loader = new RecordingLoader(pathA, sourceA);
-        var saver = new PersistThenGateDocumentSaver();
-        var sourceEditor = new TrackingTableCellSourceEditor(new MarkdigTableCellSourceEditor());
-        var viewModel = new MainWindowViewModel(
-            new OpenDocumentUseCase(loader),
-            new SaveDocumentUseCase(saver),
-            new StubFilePicker(),
-            new StubCommandLineActivation(),
-            new LocalizationService(AppLanguage.English),
-            new InMemorySettingsStore(),
-            new RecordingThemeService(),
-            new RecordingStartupMetrics(),
-            new RenderMarkdownDocumentUseCase(new TestMarkdownRenderer()),
-            new StubUpdateService(),
-            sourceEditor);
-        await viewModel.OpenPathAsync(pathA);
-        await viewModel.ToggleEditModeCommand.ExecuteAsync(null);
-        await viewModel.ToggleEditModeCommand.ExecuteAsync(null);
-        var dormantSessionA = Assert.IsType<EditorSessionViewModel>(viewModel.EditorSession);
-        var commits = new List<TableCellCommit>();
-        var refusals = new List<TableCellRefusal>();
-        viewModel.TableCellCommitted += (_, value) => commits.Add(value);
-        viewModel.TableCellEditRefused += (_, value) => refusals.Add(value);
-
-        var edit = viewModel.SetTableCellAsync(
-            line: 2,
-            cellIndex: 0,
-            text: "new",
-            key: TableCellIdentity.ComputeKey("old"),
-            origin: TableCellEditOrigin.Viewer);
-        await saver.WaitForPersistedWriteAsync();
-
-        viewModel.ApplyOpenedDocumentInPlace(new MarkdownSource(pathB, Path.GetFileName(pathB), sourceB));
-        viewModel.EditorSession = dormantSessionA;
-        saver.ReleaseCompletion();
-        await edit;
-
-        var save = Assert.Single(saver.Saves);
-        Assert.Equal(pathA, save.Path);
-        Assert.Equal(persistedA, save.Content);
-        var commit = Assert.Single(commits);
-        Assert.Empty(refusals);
-        Assert.Equal(pathA, commit.Source.Path);
-        Assert.Equal(persistedA, commit.Source.Content);
-        Assert.Equal("new", commit.Text);
-        Assert.Equal(pathB, viewModel.Document?.Path);
-        Assert.Equal(sourceB, viewModel.Document?.Content);
-        Assert.Equal(pathA, dormantSessionA.CurrentPath);
-        Assert.Equal(persistedA, dormantSessionA.SourceText);
-        Assert.Equal(persistedA, dormantSessionA.LastPersistedSource);
-    }
-
-    [Fact]
-    public async Task OverlappingEditIsRefusedWhileFirstFreshReadOwnsTheSerializer()
-    {
-        const string source = "| A | B |\n|---|---|\n| old | right |\n";
-        var harness = await CreateOpenHarnessAsync(source);
-        harness.Loader.GateNextLoad = true;
-        var refusals = new List<TableCellRefusal>();
-        var commits = 0;
-        harness.ViewModel.TableCellEditRefused += (_, value) => refusals.Add(value);
-        harness.ViewModel.TableCellCommitted += (_, _) => commits++;
-
-        var first = harness.ViewModel.SetTableCellAsync(
-            line: 2,
-            cellIndex: 0,
-            text: "first",
-            key: TableCellIdentity.ComputeKey("old"),
-            origin: TableCellEditOrigin.Viewer);
-        await harness.Loader.WaitForGatedLoadAsync();
-
-        await harness.ViewModel.SetTableCellAsync(
-            line: 2,
-            cellIndex: 0,
-            text: "second",
-            key: TableCellIdentity.ComputeKey("old"),
-            origin: TableCellEditOrigin.Viewer);
-
-        var refusal = Assert.Single(refusals);
-        // The serializer-busy refusal is flagged busy so the renderer keeps the
-        // user's typed text (a validation refusal restores; busy does not).
-        Assert.Equal(new TableCellRefusal(2, 0, harness.Path, Busy: true), refusal);
-        Assert.Equal(2, harness.Loader.LoadCount); // initial open plus first request only
-        harness.Loader.ReleaseGatedLoad();
-        await first;
-        Assert.Single(harness.Saver.Saves);
-        Assert.Equal(1, commits);
     }
 
     private static async Task<Harness> CreateOpenHarnessAsync(string content)
@@ -505,20 +433,11 @@ public sealed class MainWindowViewModelTableCellTests
 
     private sealed class RecordingLoader(string path, string content) : IDocumentLoader
     {
-        private readonly TaskCompletionSource _gatedLoadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly TaskCompletionSource _releaseGatedLoad = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
         public string Content { get; set; } = content;
 
         public int LoadCount { get; private set; }
 
-        public bool GateNextLoad { get; set; }
-
-        public Task WaitForGatedLoadAsync() => _gatedLoadStarted.Task;
-
-        public void ReleaseGatedLoad() => _releaseGatedLoad.TrySetResult();
-
-        public async Task<MarkdownSource> LoadAsync(string requestedPath, CancellationToken cancellationToken = default)
+        public Task<MarkdownSource> LoadAsync(string requestedPath, CancellationToken cancellationToken = default)
         {
             LoadCount++;
             if (!string.Equals(requestedPath, path, StringComparison.OrdinalIgnoreCase))
@@ -526,38 +445,7 @@ public sealed class MainWindowViewModelTableCellTests
                 throw new FileNotFoundException("Document was not found.", requestedPath);
             }
 
-            if (GateNextLoad)
-            {
-                GateNextLoad = false;
-                _gatedLoadStarted.TrySetResult();
-                await _releaseGatedLoad.Task.WaitAsync(cancellationToken);
-            }
-
-            return new MarkdownSource(path, Path.GetFileName(path), Content);
-        }
-    }
-
-    private sealed class PersistThenGateDocumentSaver : IDocumentSaver
-    {
-        private readonly TaskCompletionSource _persistedWrite =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly TaskCompletionSource _releaseCompletion =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public List<(string Path, string Content)> Saves { get; } = [];
-
-        public Task WaitForPersistedWriteAsync() => _persistedWrite.Task;
-
-        public void ReleaseCompletion() => _releaseCompletion.TrySetResult();
-
-        public async Task SaveAsync(
-            string path,
-            string content,
-            CancellationToken cancellationToken = default)
-        {
-            Saves.Add((path, content));
-            _persistedWrite.TrySetResult();
-            await _releaseCompletion.Task.WaitAsync(cancellationToken);
+            return Task.FromResult(new MarkdownSource(path, Path.GetFileName(path), Content));
         }
     }
 

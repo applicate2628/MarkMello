@@ -2095,7 +2095,10 @@ public sealed class ApplicateMainWindow : MainWindow
             if (mirrored is not null
                 && !string.Equals(mirrored.SourceText, commit.Source.Content, System.StringComparison.Ordinal))
             {
-                openDocs.UpdateSourceText(mirrored, commit.Source.Content);
+                // R1: the reading-mode flip carries UNSAVED content, so the tab
+                // dirty marker (already lit from VM.IsDirty) must stay lit —
+                // preserveModified keeps this text sync from clearing it.
+                openDocs.UpdateSourceText(mirrored, commit.Source.Content, preserveModified: true);
             }
         };
         viewModel.TaskToggleDomRevertRequested += (_, revert) =>
@@ -2128,7 +2131,9 @@ public sealed class ApplicateMainWindow : MainWindow
             if (mirrored is not null
                 && !string.Equals(mirrored.SourceText, commit.Source.Content, System.StringComparison.Ordinal))
             {
-                openDocs.UpdateSourceText(mirrored, commit.Source.Content);
+                // R1: reading-mode cell edit carries UNSAVED content — keep the
+                // tab dirty marker lit (see the task-toggle mirror above).
+                openDocs.UpdateSourceText(mirrored, commit.Source.Content, preserveModified: true);
             }
         };
         viewModel.TableCellEditRefused += (_, refusal) =>
@@ -2141,6 +2146,17 @@ public sealed class ApplicateMainWindow : MainWindow
         };
         viewModel.EditPreviewTableCellEditRefused += (_, refusal) =>
             channelEditHost?.View.RejectTableCellEdit(refusal.Line, refusal.CellIndex, refusal.Path, refusal.Busy);
+
+        viewModel.InPlaceEditDiscarded += (_, source) =>
+        {
+            if (channelEditHost is not null && !ReferenceEquals(channelEditHost, channelViewerHost))
+            {
+                // Reading-mode commits patch then silently swap the distinct
+                // primed edit host. Discard has no one-element inverse patch,
+                // so re-render that non-origin host from the persisted source.
+                channelEditHost.View.RefreshInPlaceSource(source);
+            }
+        };
 
         // Bidirectional sync between IOpenDocumentsService (tabs strip source
         // of truth) and the upstream `MainWindowViewModel.Document` value
@@ -2316,7 +2332,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 // would show the viewer at the new tab's title but with
                 // the OLD tab's RenderedDocument painted — visible as
                 // "tabs and file don't match" desync (user-reported).
-                if (viewModel.IsEditMode && viewModel.EditorSession is not null)
+                if (viewModel.NeedsDirtySwitchRouting)
                 {
                     // Stale-activation guard — the edit-branch counterpart of the
                     // reader guard at its apply site below. This lambda is POSTED, and
@@ -2349,7 +2365,7 @@ public sealed class ApplicateMainWindow : MainWindow
 
                     // The tab we are leaving = the document the editor holds.
                     var previous = FindOpenDocumentByPath(
-                        openDocs, viewModel.EditorSession.CurrentPath);
+                        openDocs, viewModel.EditorSession!.CurrentPath);
 
                     // Audit H2 guard: the stub load above failed (swallowed
                     // IOException / UnauthorizedAccessException) — its
@@ -2392,15 +2408,15 @@ public sealed class ApplicateMainWindow : MainWindow
                     // queued prompt leaves the just-clicked file tab highlighted
                     // over the untitled for the whole time it is open. Clear the
                     // active file first so no tab is highlighted behind the draft.
-                    // Gate on IsDirty (mirrors the VM's private
-                    // RequiresDirtyResolution = IsEditMode && EditorSession.IsDirty):
+                    // Gate on IsDirty (mirrors the VM's mode-independent
+                    // RequiresDirtyResolution = EditorSession?.IsDirty == true):
                     // a CLEAN untitled switches immediately with no prompt, and an
                     // unconditional clear there would add a null->target
                     // double-Rebuild flicker on every clean switch. Hold the
                     // inVmMirror latch (as P1/P2/P4 do) so this null activation does
                     // not re-enter the handler and reach the CloseFile branch.
                     if (UntitledSessionOwnsWindow()
-                        && viewModel.EditorSession.IsDirty
+                        && viewModel.EditorSession!.IsDirty
                         && openDocs.ActiveDocument is not null)
                     {
                         inVmMirror = true;

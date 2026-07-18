@@ -42,8 +42,12 @@ internal sealed class StubDocumentLoader : IDocumentLoader
 
     public Exception? NextException { get; set; }
 
+    public int LoadCount { get; private set; }
+
     public Task<MarkdownSource> LoadAsync(string path, CancellationToken cancellationToken = default)
     {
+        LoadCount++;
+
         if (NextException is Exception exception)
         {
             NextException = null;
