@@ -24,6 +24,30 @@ public sealed class ApplicateWebMarkdownDocumentViewShellModeTests
     }
 
     [Theory]
+    // Bug #7: a shell navigation that fails (IsSuccess=false) while the
+    // shell-ready latch is still pending must fault the latch + raise the
+    // fallback, instead of leaving every shell-ready awaiter hung forever on a
+    // blank surface (runtime-reproduced 2026-07-18).
+    [InlineData(false, true, true)]   // nav failed + latch pending  -> fault (the fix)
+    // Must NOT fault on the tolerated / harmless cases:
+    [InlineData(true, true, false)]   // nav succeeded + latch pending -> shell will post document-ready
+    [InlineData(false, false, false)] // nav failed but latch already completed/absent
+    //   (legacy-mode superseded-navigate, or after document-ready posted) — this
+    //   is the exact 2026-05-19 regression the pending-latch gate protects against
+    [InlineData(true, false, false)]  // nav succeeded + latch completed/absent
+    public void NavigationFailureFaultsShellReadyOnlyWhileLatchPending(
+        bool navigationSucceeded,
+        bool shellReadyPending,
+        bool expectedFault)
+    {
+        Assert.Equal(
+            expectedFault,
+            ApplicateWebMarkdownDocumentView.ShouldFaultShellReadyOnNavigationFailureForTesting(
+                navigationSucceeded,
+                shellReadyPending));
+    }
+
+    [Theory]
     [InlineData("related.md#details")]
     [InlineData("related.md?plain=1")]
     public void LocalMarkdownLinkResolverIgnoresFragmentAndQueryWhenCheckingFileExtension(string href)

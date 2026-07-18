@@ -1710,15 +1710,61 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         // Ready the native-UI (context menu / print dialog) theme once WebView2
         // has navigated — the CoreWebView2 pointer is available by now.
         TryApplyNativeUiColorScheme();
-        // NavigationCompleted with IsSuccess=false on our local file:// pipeline
-        // is dominated by superseded-navigate events (rapid tab switches cancel
-        // the in-flight navigate). Real WebView load errors surface through the
-        // exception catches in RenderShell / render-generated-document, which
-        // is the single source of truth for "FallbackRequested". Empirically
-        // confirmed via diagnostic logging 2026-05-19: every observed
-        // user-visible false-fire of the failure view originated here, never
-        // from the catches. Branch removed.
+
+        // Bug #7: a shell navigation that FAILS at the navigation level
+        // (IsSuccess=false — the shell HTML never loads: disk/lock error, a
+        // corrupt WebView2 profile, or a resource-policy cancel) throws no
+        // exception, fires no ProcessFailed, and never posts document-ready, so
+        // _shellReady stays pending forever and every shell-ready awaiter hangs
+        // on a permanently blank surface (runtime-reproduced 2026-07-18).
+        //
+        // The 2026-05-19 removal of a *blanket* IsSuccess=false failure branch
+        // was correct: in the LEGACY per-document Navigate path, rapid tab
+        // switches supersede the in-flight navigate and surface IsSuccess=false
+        // en masse (false failure-view fires). The narrow branch below cannot
+        // re-introduce that regression because it fires ONLY while _shellReady is
+        // still pending. In shell mode the shell navigates exactly once (guarded
+        // by _shellNavigated) and is never superseded — documents load via the
+        // load-document IPC, not Navigate — so within the pending window the only
+        // navigation that can report failure IS the shell. In legacy mode
+        // _shellReady is never created (null gate → no fire), and once the shell
+        // posts document-ready the latch is completed (completed gate → no fire),
+        // so superseded per-document navigations never trip it. The pending-latch
+        // state, not WebErrorStatus, is the reliable superseded-navigate
+        // discriminator (a genuine miss reports WebErrorStatus.Unknown, which no
+        // status allow-list separates cleanly from a cancel).
+        //
+        // Mirror H7 (OnCoreProcessFailed): fault the latch so the awaiters unblock,
+        // and raise FallbackRequested so the failure view owns recovery (replacing
+        // the blank surface). NOTE: _shellReady is never recreated (only ??=), so
+        // after a fault the latch stays completed — a later render re-navigates but
+        // its "wait for first document-ready" gate completes instantly, so that one
+        // recovery-path render's load-document can be lost until the next render
+        // re-arms on a fresh document-ready. This one-render recurrence is a
+        // pre-existing H7-mirrored residual; the proper fix (reset _shellReady=null
+        // in BOTH fault sites) is a separate tracked item, not this commit's scope.
+        var shellReady = _shellReady;
+        if (shellReady is not null
+            && ShouldFaultShellReadyOnNavigationFailure(e.IsSuccess, shellReadyPending: !shellReady.Task.IsCompleted))
+        {
+            _shellNavigated = false;
+            shellReady.TrySetResult(false);
+            FallbackRequested?.Invoke(this, EventArgs.Empty);
+        }
     }
+
+    // Bug #7 decision seam (unit-tested via ShouldFaultShellReadyOnNavigationFailureForTesting):
+    // fault the shell-ready latch on a navigation that FAILED (IsSuccess=false)
+    // only while the latch is still pending. The pending state is the
+    // superseded-navigate discriminator — the shell navigates once and is never
+    // superseded, so a failure during the pending window is a genuine dead shell;
+    // a completed or absent latch (legacy mode, or after document-ready posted)
+    // never faults. See OnNavigationCompleted for the full rationale.
+    private static bool ShouldFaultShellReadyOnNavigationFailure(bool navigationSucceeded, bool shellReadyPending)
+        => !navigationSucceeded && shellReadyPending;
+
+    internal static bool ShouldFaultShellReadyOnNavigationFailureForTesting(bool navigationSucceeded, bool shellReadyPending)
+        => ShouldFaultShellReadyOnNavigationFailure(navigationSucceeded, shellReadyPending);
 
     private void OnNewWindowRequested(object? sender, WebViewNewWindowRequestedEventArgs e)
     {
