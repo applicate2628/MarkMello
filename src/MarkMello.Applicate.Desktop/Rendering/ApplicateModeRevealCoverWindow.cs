@@ -374,8 +374,13 @@ internal sealed class ApplicateModeRevealCoverWindow : IDisposable
         var titleFont = ResolveFontFamily(host, "MmDocumentSerifFontFamily", "Georgia, Cambria, serif");
         var bodyFont = ResolveFontFamily(host, "MmDocumentSansFontFamily", "Segoe UI, system-ui, sans-serif");
         var status = string.IsNullOrWhiteSpace(documentName)
-            ? "Preparing document..."
-            : $"Preparing {documentName}...";
+            ? MarkMello.Applicate.Desktop.Localization.ApplicateLocalizedText.Resolve(
+                "SplashPreparingDocument",
+                "Preparing document...")
+            : MarkMello.Applicate.Desktop.Localization.ApplicateLocalizedText.Format(
+                "SplashPreparingNamedDocument",
+                "Preparing {0}...",
+                documentName);
 
         var wordmark = new TextBlock
         {

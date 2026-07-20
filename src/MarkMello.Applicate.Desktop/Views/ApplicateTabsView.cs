@@ -18,7 +18,6 @@ using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Editing;
-using MarkMello.Presentation.Localization;
 
 namespace MarkMello.Applicate.Desktop.Views;
 
@@ -122,7 +121,7 @@ internal sealed class ApplicateTabsView : UserControl
 
         _addButtonIcon = BuildPlusIcon(ResolveBrush("MmTextSoftBrush"));
         _addButton = BuildAddButton(_addButtonIcon);
-        ToolTip.SetTip(_addButton, "Open file");
+        ToolTip.SetTip(_addButton, ResolveText("AppMenuOpenFileLabel", "Open file"));
         _addButton.Click += async (_, _) => await OnAddClickAsync().ConfigureAwait(true);
 
         // v0.3.2 — magnifier button. Placed to the LEFT of the "+" button
@@ -134,7 +133,7 @@ internal sealed class ApplicateTabsView : UserControl
         // second click closes it — same semantics as Ctrl+F.
         _findButtonIcon = BuildMagnifierIcon(ResolveBrush("MmTextSoftBrush"));
         _findButton = BuildToolbarButton(_findButtonIcon);
-        ToolTip.SetTip(_findButton, "Find in document (Ctrl+F)");
+        ToolTip.SetTip(_findButton, ResolveText("FindBarTooltip", "Find in document (Ctrl+F)"));
         _findButton.Click += OnFindButtonClick;
 
         // Edge scroll arrows (← / →) — distinct from the TOC ‹/› toggle by
@@ -144,14 +143,14 @@ internal sealed class ApplicateTabsView : UserControl
         _scrollLeftButton = BuildToolbarButton(_scrollLeftIcon);
         _scrollLeftButton.Width = 16;
         _scrollLeftButton.IsVisible = false;
-        ToolTip.SetTip(_scrollLeftButton, "Scroll tabs left");
+        ToolTip.SetTip(_scrollLeftButton, ResolveText("TabScrollLeft", "Scroll tabs left"));
         _scrollLeftButton.Click += (_, _) => ScrollTabs(-1);
 
         _scrollRightIcon = BuildScrollArrowIcon(left: false, ResolveBrush("MmTextSoftBrush"));
         _scrollRightButton = BuildToolbarButton(_scrollRightIcon);
         _scrollRightButton.Width = 16;
         _scrollRightButton.IsVisible = false;
-        ToolTip.SetTip(_scrollRightButton, "Scroll tabs right");
+        ToolTip.SetTip(_scrollRightButton, ResolveText("TabScrollRight", "Scroll tabs right"));
         _scrollRightButton.Click += (_, _) => ScrollTabs(1);
 
         _leftScrollSeparator = BuildScrollSeparator();
@@ -163,7 +162,7 @@ internal sealed class ApplicateTabsView : UserControl
         _tabListIcon = BuildTabListIcon(ResolveBrush("MmTextSoftBrush"));
         _tabListButton = BuildToolbarButton(_tabListIcon);
         _tabListButton.IsVisible = false;
-        ToolTip.SetTip(_tabListButton, "All open tabs");
+        ToolTip.SetTip(_tabListButton, ResolveText("TabListAll", "All open tabs"));
         // A plain MenuFlyout renders in the in-window overlay layer, which the
         // WebView2 NativeControlHost HWND occludes (the dropdown was invisible
         // over the document). Use a WINDOWED Popup (ShouldUseOverlayLayer=False)
@@ -695,7 +694,7 @@ internal sealed class ApplicateTabsView : UserControl
             FontSize = 14,
             CornerRadius = new CornerRadius(3)
         };
-        ToolTip.SetTip(closeButton, "Close");
+        ToolTip.SetTip(closeButton, ResolveText("TabClose", "Close"));
         closeButton.Click += (_, e) => OnCloseClicked(doc, e);
 
         var tabContent = new Grid
@@ -770,12 +769,12 @@ internal sealed class ApplicateTabsView : UserControl
         var menu = new ContextMenu();
         var tabIndex = _openDocsService.OpenDocuments.IndexOf(doc);
 
-        var closeItem = new MenuItem { Header = "Close" };
+        var closeItem = new MenuItem { Header = ResolveText("TabClose", "Close") };
         closeItem.Click += (_, _) => CloseDocument(doc);
 
         var closeOthersItem = new MenuItem
         {
-            Header = "Close Others",
+            Header = ResolveText("TabCloseOthers", "Close Others"),
             IsEnabled = _openDocsService.OpenDocuments.Count > 1
         };
         closeOthersItem.Click += (_, _) => CloseOthers(doc);
@@ -795,13 +794,16 @@ internal sealed class ApplicateTabsView : UserControl
         };
         closeToRightItem.Click += (_, _) => CloseToRight(doc);
 
-        var closeAllItem = new MenuItem { Header = "Close All" };
+        var closeAllItem = new MenuItem { Header = ResolveText("TabCloseAll", "Close All") };
         closeAllItem.Click += (_, _) => CloseAll();
 
-        var copyPathItem = new MenuItem { Header = "Copy Path" };
+        var copyPathItem = new MenuItem { Header = ResolveText("TabCopyPath", "Copy Path") };
         copyPathItem.Click += async (_, _) => await CopyPathAsync(doc).ConfigureAwait(true);
 
-        var revealItem = new MenuItem { Header = "Reveal in File Explorer" };
+        var revealItem = new MenuItem
+        {
+            Header = ResolveText("TabRevealInExplorer", "Reveal in File Explorer")
+        };
         revealItem.Click += (_, _) => RevealInExplorer(doc);
 
         menu.Items.Add(closeItem);
@@ -1263,7 +1265,7 @@ internal sealed class ApplicateTabsView : UserControl
         {
             var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
             {
-                Title = "Open Markdown file",
+                Title = ResolveText("OpenDialogTitle", "Open Markdown file"),
                 AllowMultiple = false,
                 FileTypeFilter = PickerFilters
             }).ConfigureAwait(true);
@@ -1319,15 +1321,6 @@ internal sealed class ApplicateTabsView : UserControl
     }
 
     private static string ResolveText(string resourceKey, string fallback)
-    {
-        var app = Avalonia.Application.Current;
-        if (app is not null
-            && app.TryGetResource("Localization", null, out var value)
-            && value is ILocalizationService localization)
-        {
-            return localization[resourceKey];
-        }
-
-        return fallback;
-    }
+        => MarkMello.Applicate.Desktop.Localization.ApplicateLocalizedText
+            .Resolve(resourceKey, fallback);
 }

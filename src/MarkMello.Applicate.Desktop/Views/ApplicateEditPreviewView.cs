@@ -215,7 +215,9 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     {
         var label = new TextBlock
         {
-            Text = "PREVIEW",
+            Text = MarkMello.Applicate.Desktop.Localization.ApplicateLocalizedText.Resolve(
+                "EditorPreviewLabel",
+                "PREVIEW"),
             VerticalAlignment = VerticalAlignment.Center,
         };
         label.Classes.Add("mm-editor-toolbar-label");
@@ -282,7 +284,11 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     {
         var toggle = CreateToolbarToggle("⇅");
         toggle.IsChecked = true;
-        ToolTip.SetTip(toggle, "Editor ↔ preview scroll sync");
+        ToolTip.SetTip(
+            toggle,
+            MarkMello.Applicate.Desktop.Localization.ApplicateLocalizedText.Resolve(
+                "EditorScrollSyncTooltip",
+                "Editor ↔ preview scroll sync"));
         toggle.IsCheckedChanged += OnSyncToggleChanged;
         return toggle;
     }

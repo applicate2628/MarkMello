@@ -978,7 +978,11 @@ public sealed class ApplicateMainWindow : MainWindow
             Content = chevronPath,
             Cursor = new Cursor(StandardCursorType.Hand),
         };
-        ToolTip.SetTip(chevronButton, "Hide table of contents (Ctrl+T)");
+        ToolTip.SetTip(
+            chevronButton,
+            MarkMello.Applicate.Desktop.Localization.ApplicateLocalizedText.Resolve(
+                "TocToggleHide",
+                "Hide table of contents (Ctrl+T)"));
         chevronButton.Bind(
             Button.CommandProperty,
             new Avalonia.Data.Binding(nameof(MainWindowViewModel.ToggleTocCommand)));
@@ -1372,8 +1376,12 @@ public sealed class ApplicateMainWindow : MainWindow
             ToolTip.SetTip(
                 chevronButton,
                 isTocVisible
-                    ? "Hide table of contents (Ctrl+T)"
-                    : "Show table of contents (Ctrl+T)");
+                    ? MarkMello.Applicate.Desktop.Localization.ApplicateLocalizedText.Resolve(
+                        "TocToggleHide",
+                        "Hide table of contents (Ctrl+T)")
+                    : MarkMello.Applicate.Desktop.Localization.ApplicateLocalizedText.Resolve(
+                        "TocToggleShow",
+                        "Show table of contents (Ctrl+T)"));
         }
     }
 
