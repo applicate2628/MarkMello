@@ -15,9 +15,17 @@ function makeDeps(overrides: Partial<LoadDocumentDeps> = {}): LoadDocumentDeps {
   };
 }
 
+// The fixture mounts <head><title> because the SHIPPED shell always has one
+// (ApplicateHtmlDocumentTemplate.cs BuildShell/Build both emit <title>), and
+// applyLoadDocument writes document.title. A headless documentElement is a shape
+// navigation can never produce: happy-dom's title setter dereferences
+// `this.head` unguarded when no <title> exists (happy-dom/src/nodes/document/
+// Document.ts set title), so stripping the head here fails the fixture, not the
+// renderer. Keep the head.
 beforeEach(() => {
   document.documentElement.innerHTML =
-    `<body><main class="mm-document"><p>old</p></main></body>`;
+    `<head><title>MarkMello</title></head>`
+    + `<body><main class="mm-document"><p>old</p></main></body>`;
 });
 
 describe("applyLoadDocument", () => {

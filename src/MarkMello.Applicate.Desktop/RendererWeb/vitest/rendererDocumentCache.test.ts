@@ -5,7 +5,14 @@ type HostBridge = (msg: unknown) => void;
 
 async function loadRendererWithMessages() {
   vi.resetModules();
-  document.documentElement.innerHTML = `<body><main class="mm-document"></main></body>`;
+  // <head><title> mirrors the SHIPPED shell (ApplicateHtmlDocumentTemplate.cs
+  // BuildShell). These loads carry a documentName, and applyLoadDocument writes
+  // document.title; happy-dom's setter dereferences `this.head` unguarded when no
+  // <title> exists, so a headless fixture throws on a DOM shape navigation cannot
+  // produce. Keep the head.
+  document.documentElement.innerHTML =
+    `<head><title>MarkMello</title></head>`
+    + `<body><main class="mm-document"></main></body>`;
   const messages: unknown[] = [];
   (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
     webview: { postMessage: (m: unknown) => messages.push(m) }
