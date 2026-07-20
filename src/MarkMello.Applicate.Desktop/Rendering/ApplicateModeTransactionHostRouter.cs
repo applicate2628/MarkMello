@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 
 namespace MarkMello.Applicate.Desktop.Rendering;
 
@@ -10,7 +11,15 @@ internal sealed class ApplicateModeTransactionHostRouter :
 {
     private readonly IApplicateSharedWebViewHost _viewerHost;
     private readonly IApplicateSharedWebViewHost _editPreviewHost;
-    private readonly Dictionary<long, IApplicateSharedWebViewHost> _hostsByGeneration = new();
+    // Keyed by HOST, not by generation: each host tracks at most ONE pending
+    // transactional reveal (a scalar it overwrites on every transactional
+    // commit) and rejects any generation other than that latest one. Keying by
+    // generation instead let superseded generations accumulate for the whole
+    // window session — the router outlives every transaction (built once in
+    // ApplicateMainWindow.InstallSiblingMountedViews, disposed on Window.Closed),
+    // so an entry abandoned by a rolled-back transaction was never removed.
+    // Keying by host mirrors the hosts' own contract and is bounded at two.
+    private readonly Dictionary<IApplicateSharedWebViewHost, long> _pendingRevealGenerationByHost = new();
     private bool _disposed;
 
     public ApplicateModeTransactionHostRouter(
@@ -38,7 +47,7 @@ internal sealed class ApplicateModeTransactionHostRouter :
 
     public bool RevealNativeWebViewForCommittedTransaction(long transactionGeneration)
     {
-        if (!_hostsByGeneration.TryGetValue(transactionGeneration, out var host))
+        if (!TryResolvePendingHost(transactionGeneration, out var host))
         {
             return false;
         }
@@ -46,7 +55,7 @@ internal sealed class ApplicateModeTransactionHostRouter :
         var revealed = host.RevealNativeWebViewForCommittedTransaction(transactionGeneration);
         if (revealed)
         {
-            _hostsByGeneration.Remove(transactionGeneration);
+            _pendingRevealGenerationByHost.Remove(host);
         }
 
         return revealed;
@@ -70,7 +79,7 @@ internal sealed class ApplicateModeTransactionHostRouter :
 
     public void RequestTransactionRendererSettleProbe(long transactionGeneration, bool skipFrameWait)
     {
-        if (_hostsByGeneration.TryGetValue(transactionGeneration, out var host)
+        if (TryResolvePendingHost(transactionGeneration, out var host)
             && host is IApplicateTransactionRendererSettleProbeRequester requester)
         {
             requester.RequestTransactionRendererSettleProbe(transactionGeneration, skipFrameWait);
@@ -91,7 +100,29 @@ internal sealed class ApplicateModeTransactionHostRouter :
             Unwire(_editPreviewHost);
         }
 
-        _hostsByGeneration.Clear();
+        _pendingRevealGenerationByHost.Clear();
+    }
+
+    private bool TryResolvePendingHost(
+        long transactionGeneration,
+        [MaybeNullWhen(false)] out IApplicateSharedWebViewHost host)
+    {
+        if (transactionGeneration > 0)
+        {
+            // At most two entries by construction, so the scan is cheaper than
+            // maintaining a second index and cannot drift out of sync with it.
+            foreach (var pending in _pendingRevealGenerationByHost)
+            {
+                if (pending.Value == transactionGeneration)
+                {
+                    host = pending.Key;
+                    return true;
+                }
+            }
+        }
+
+        host = null;
+        return false;
     }
 
     private void Wire(IApplicateSharedWebViewHost host)
@@ -122,7 +153,11 @@ internal sealed class ApplicateModeTransactionHostRouter :
     {
         if (sender is IApplicateSharedWebViewHost host && e.TransactionGeneration > 0)
         {
-            _hostsByGeneration[e.TransactionGeneration] = host;
+            // Replaces rather than accumulates: this host has just overwritten
+            // its own pending-reveal scalar, so every older generation on it is
+            // permanently unrevealable and holding it would only ever forward a
+            // call the host rejects.
+            _pendingRevealGenerationByHost[host] = e.TransactionGeneration;
         }
 
         CommitCompleted?.Invoke(this, e);

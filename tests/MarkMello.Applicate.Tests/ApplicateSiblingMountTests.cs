@@ -343,6 +343,81 @@ public sealed class ApplicateSiblingMountTests
         Assert.Single(editHost.RevealedGenerations);
     }
 
+    // Roadmap #30. The router's pending-reveal state is private, so residency is
+    // asserted behaviourally: a RESIDENT entry forwards the reveal call to the
+    // owning host (the fake records every attempt); an ABSENT entry
+    // short-circuits inside the router and never touches the host.
+    //
+    // A transaction that commits but never reveals (rolled back by a rapid
+    // toggle, renderer failure, or stale-commit discard) must not strand its
+    // entry: the router outlives every transaction, so a stranded entry
+    // accumulates for the whole window session.
+    [Fact]
+    public void TransactionRouterDropsSupersededGenerationOnSameHost()
+    {
+        var viewerHost = new FakeTransactionHost(() => (ViewerOpacity: 1.0, EditOpacity: 0.0));
+        var editHost = new FakeTransactionHost(() => (ViewerOpacity: 0.0, EditOpacity: 1.0));
+        using var router = new ApplicateModeTransactionHostRouter(viewerHost, editHost);
+
+        // Generation 101 commits, then its transaction is abandoned — no reveal.
+        editHost.RaiseCommitCompleted(101, ApplicateMode.Edit);
+
+        // Generation 102 commits on the SAME host, overwriting that host's own
+        // pending-reveal scalar and making 101 permanently unrevealable.
+        editHost.RaiseCommitCompleted(102, ApplicateMode.Edit);
+
+        var attemptsBeforeProbe = editHost.RevealedGenerations.Count;
+
+        Assert.False(router.RevealNativeWebViewForCommittedTransaction(101));
+        Assert.Equal(attemptsBeforeProbe, editHost.RevealedGenerations.Count);
+        Assert.True(router.RevealNativeWebViewForCommittedTransaction(102));
+    }
+
+    // Guards against an over-strong fix: the router fronts TWO hosts, each with
+    // its own pending-reveal scalar, so a commit on one host must not evict the
+    // other host's still-live pending generation.
+    [Fact]
+    public void TransactionRouterKeepsPendingGenerationPerHostIndependently()
+    {
+        var viewerHost = new FakeTransactionHost(() => (ViewerOpacity: 1.0, EditOpacity: 0.0));
+        var editHost = new FakeTransactionHost(() => (ViewerOpacity: 0.0, EditOpacity: 1.0));
+        using var router = new ApplicateModeTransactionHostRouter(viewerHost, editHost);
+
+        editHost.RaiseCommitCompleted(301, ApplicateMode.Edit);
+        viewerHost.RaiseCommitCompleted(302, ApplicateMode.Viewer);
+
+        Assert.True(router.RevealNativeWebViewForCommittedTransaction(301));
+        Assert.Single(editHost.RevealedGenerations);
+        Assert.Equal(301L, editHost.RevealedGenerations[0].Generation);
+
+        Assert.True(router.RevealNativeWebViewForCommittedTransaction(302));
+        Assert.Single(viewerHost.RevealedGenerations);
+        Assert.Equal(302L, viewerHost.RevealedGenerations[0].Generation);
+    }
+
+    // Supersession — not rejection — is what drops an entry. A rejected reveal
+    // leaves the generation as the host's latest pending one, so it stays
+    // routable; dropping it here would strand a still-serviceable transaction.
+    [Fact]
+    public void TransactionRouterRetainsGenerationEntryWhenRevealIsRejected()
+    {
+        var viewerHost = new FakeTransactionHost(() => (ViewerOpacity: 1.0, EditOpacity: 0.0));
+        var editHost = new FakeTransactionHost(() => (ViewerOpacity: 0.0, EditOpacity: 1.0))
+        {
+            RejectReveals = true
+        };
+        using var router = new ApplicateModeTransactionHostRouter(viewerHost, editHost);
+
+        editHost.RaiseCommitCompleted(201, ApplicateMode.Edit);
+        Assert.False(router.RevealNativeWebViewForCommittedTransaction(201));
+
+        editHost.RejectReveals = false;
+        var attemptsBeforeProbe = editHost.RevealedGenerations.Count;
+
+        Assert.True(router.RevealNativeWebViewForCommittedTransaction(201));
+        Assert.Equal(attemptsBeforeProbe + 1, editHost.RevealedGenerations.Count);
+    }
+
     [Fact]
     public void TransactionRouterSuppressesOnlyDisplayedModeHostBeforeLayoutMutation()
     {
