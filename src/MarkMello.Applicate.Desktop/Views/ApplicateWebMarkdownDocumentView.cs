@@ -2420,9 +2420,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             var printed = await printToPdfAsync(destinationPath, cancellationToken).ConfigureAwait(true);
             return printed
                 ? new ExportResult(ExportStatus.Success)
+                // CoreWebView2.PrintToPdfAsync returning false is a GENERIC failure
+                // signal: per the official API contract it covers both "another
+                // PrintToPdf is already in progress" AND "the path is not valid /
+                // could not be written", with no way to tell which. The previous
+                // detail asserted the first as fact and sent a real investigation
+                // chasing a phantom stuck-print state when the true cause was a
+                // destination PDF locked open in a reader. State only what the API
+                // reports; the user-facing what-to-do lives in the notice's
+                // localized guidance line, which offers both causes to check.
                 : new ExportResult(
                     ExportStatus.PrintReturnedFalse,
-                    "WebView2 rejected the PDF request because another print operation may be active.");
+                    "PDF-PRINT-REJECTED: PrintToPdfAsync returned false; WebView2 does not report which condition caused it.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

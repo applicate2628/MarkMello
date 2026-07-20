@@ -55,6 +55,30 @@ public sealed class LocalizationService : ObservableObject, ILocalizationService
         ["HtmlDocuments"] = "HTML documents",
         ["ExportFailedTitle"] = "Export failed",
         ["ExportFailureDetailsFormat"] = "Export status: {0}. {1}",
+        ["ExportFailureDismiss"] = "Dismiss",
+        // Per-status guidance: what the user can DO. Each line may only assert a
+        // cause the code actually knows. PrintReturnedFalse in particular is a
+        // GENERIC failure signal from CoreWebView2.PrintToPdfAsync — the API does
+        // not distinguish "another job running" from "destination not writable" —
+        // so its copy offers both as things to check and diagnoses neither.
+        ["ExportFailureGuidancePrintReturnedFalse"] =
+            "The PDF could not be saved. Check whether that file is already open in another program — close it or save under a different name. An earlier export or print job may also still be finishing.",
+        ["ExportFailureGuidanceWriteFailed"] =
+            "The file could not be written. It may be open in another program, write-protected, or the disk may be out of space. The exact reason is in the details below.",
+        ["ExportFailureGuidanceRenderIncomplete"] =
+            "The document had not finished rendering, so the export would have been incomplete. Wait until the document is fully displayed, then export again.",
+        ["ExportFailureGuidanceCaptureFailed"] =
+            "The document could not be prepared for export. This is an internal failure — please report the code below.",
+        ["ExportFailureGuidanceProcessCrashed"] =
+            "The document renderer stopped unexpectedly. Reopen the document, then try the export again.",
+        ["ExportFailureGuidanceNoDocument"] = "There is no open document to export.",
+        ["ExportFailureGuidanceFaulted"] =
+            "The export stopped with an unexpected error. Please report the code below.",
+        ["ExportFailureGuidanceDeferred"] = "This export format is not available yet.",
+        ["ExportFailureGuidanceCancelled"] = "The export was cancelled, so nothing was saved.",
+        ["ExportFailureGuidanceDefault"] =
+            "The export did not complete. Please report the code below.",
+        ["ExportFailureDiagnosticLabel"] = "Details for a bug report",
         ["TocPanelHeader"] = "Contents",
         ["TocPanelEmpty"] = "No headings in this document.",
         ["FindBarTooltip"] = "Find in document (Ctrl+F)",
@@ -280,6 +304,25 @@ public sealed class LocalizationService : ObservableObject, ILocalizationService
         ["HtmlDocuments"] = "HTML-документы",
         ["ExportFailedTitle"] = "Ошибка экспорта",
         ["ExportFailureDetailsFormat"] = "Статус экспорта: {0}. {1}",
+        ["ExportFailureDismiss"] = "Скрыть",
+        ["ExportFailureGuidancePrintReturnedFalse"] =
+            "Не удалось сохранить PDF. Проверьте, не открыт ли этот файл в другой программе — закройте его или сохраните под другим именем. Возможно также, что предыдущий экспорт или печать ещё не завершились.",
+        ["ExportFailureGuidanceWriteFailed"] =
+            "Не удалось записать файл. Возможно, он открыт в другой программе, защищён от записи или на диске нет свободного места. Точная причина — в подробностях ниже.",
+        ["ExportFailureGuidanceRenderIncomplete"] =
+            "Документ не успел полностью отрисоваться, поэтому экспорт получился бы неполным. Дождитесь полной отрисовки документа и повторите экспорт.",
+        ["ExportFailureGuidanceCaptureFailed"] =
+            "Не удалось подготовить документ к экспорту. Это внутренняя ошибка — пожалуйста, сообщите код, указанный ниже.",
+        ["ExportFailureGuidanceProcessCrashed"] =
+            "Обработчик документа аварийно завершился. Переоткройте документ и повторите экспорт.",
+        ["ExportFailureGuidanceNoDocument"] = "Нет открытого документа для экспорта.",
+        ["ExportFailureGuidanceFaulted"] =
+            "Экспорт прервался из-за непредвиденной ошибки. Пожалуйста, сообщите код, указанный ниже.",
+        ["ExportFailureGuidanceDeferred"] = "Этот формат экспорта пока недоступен.",
+        ["ExportFailureGuidanceCancelled"] = "Экспорт отменён, файл не сохранён.",
+        ["ExportFailureGuidanceDefault"] =
+            "Экспорт не завершился. Пожалуйста, сообщите код, указанный ниже.",
+        ["ExportFailureDiagnosticLabel"] = "Данные для сообщения об ошибке",
         ["TocPanelHeader"] = "Оглавление",
         ["TocPanelEmpty"] = "В документе нет заголовков.",
         ["FindBarTooltip"] = "Поиск по документу (Ctrl+F)",

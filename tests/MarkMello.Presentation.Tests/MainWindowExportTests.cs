@@ -112,10 +112,147 @@ public sealed class MainWindowExportTests
 
         await harness.ViewModel.ExportPdfCommand.ExecuteAsync(null);
 
-        Assert.Equal(ViewState.LoadError, harness.ViewModel.State);
-        Assert.Equal("Export failed", harness.ViewModel.ErrorTitle);
-        Assert.Contains(status.ToString(), harness.ViewModel.ErrorDetails, StringComparison.Ordinal);
-        Assert.Contains("detail-X", harness.ViewModel.ErrorDetails, StringComparison.Ordinal);
+        // THE point of the fix: a failed EXPORT must not replace the document
+        // view with the load-error screen. The file loaded fine; only the save
+        // leg failed, so the rendered document (and the reading position) stays.
+        Assert.Equal(ViewState.Viewing, harness.ViewModel.State);
+        Assert.True(harness.ViewModel.IsExportFailureNoticeVisible);
+        Assert.Equal("Export failed", harness.ViewModel.ExportFailureNoticeTitle);
+        Assert.Contains(
+            status.ToString(),
+            harness.ViewModel.ExportFailureNoticeDetails,
+            StringComparison.Ordinal);
+        Assert.Contains("detail-X", harness.ViewModel.ExportFailureNoticeDetails, StringComparison.Ordinal);
+
+        // The load-error surface is a different owner and must stay untouched.
+        Assert.Empty(harness.ViewModel.ErrorTitle);
+        Assert.Empty(harness.ViewModel.ErrorDetails);
+    }
+
+    [Fact]
+    public async Task ExportFailureFallsBackToExceptionMessageWhenDetailIsBlank()
+    {
+        var harness = await CreateHarnessWithDocumentAsync();
+        harness.FilePicker.GenericSavePath = Path.Combine("exports", "failure.pdf");
+        harness.Exporter.NextResult = new ExportResult(
+            ExportStatus.WriteFailed,
+            "   ",
+            new IOException("destination-locked"));
+
+        await harness.ViewModel.ExportPdfCommand.ExecuteAsync(null);
+
+        Assert.Equal(ViewState.Viewing, harness.ViewModel.State);
+        Assert.Contains(
+            "destination-locked",
+            harness.ViewModel.ExportFailureNoticeDetails,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SuccessfulExportShowsNoFailureNotice()
+    {
+        var harness = await CreateHarnessWithDocumentAsync();
+        harness.FilePicker.GenericSavePath = Path.Combine("exports", "ok.pdf");
+
+        await harness.ViewModel.ExportPdfCommand.ExecuteAsync(null);
+
+        Assert.Equal(ViewState.Viewing, harness.ViewModel.State);
+        Assert.False(harness.ViewModel.IsExportFailureNoticeVisible);
+        Assert.Empty(harness.ViewModel.ExportFailureNoticeTitle);
+        Assert.Empty(harness.ViewModel.ExportFailureNoticeDetails);
+    }
+
+    [Fact]
+    public async Task ExportFailureNoticeIsRetiredByExplicitDismiss()
+    {
+        var harness = await FailExportAsync();
+
+        harness.ViewModel.DismissExportFailureNoticeCommand.Execute(null);
+
+        Assert.False(harness.ViewModel.IsExportFailureNoticeVisible);
+        Assert.Empty(harness.ViewModel.ExportFailureNoticeDetails);
+        Assert.Equal(ViewState.Viewing, harness.ViewModel.State);
+    }
+
+    [Fact]
+    public async Task ExportFailureNoticeIsRetiredByStartingAnotherExport()
+    {
+        var harness = await FailExportAsync();
+        harness.Exporter.NextResult = new ExportResult(ExportStatus.Success);
+
+        await harness.ViewModel.ExportHtmlCommand.ExecuteAsync(null);
+
+        Assert.False(harness.ViewModel.IsExportFailureNoticeVisible);
+        Assert.Equal(ViewState.Viewing, harness.ViewModel.State);
+    }
+
+    [Fact]
+    public async Task ExportFailureNoticeIsRetiredBySwitchingDocument()
+    {
+        var harness = await FailExportAsync();
+
+        const string otherPath = "C:\\docs\\other.md";
+        harness.Loader.Sources[otherPath] = new MarkdownSource(otherPath, "other.md", "# Other");
+        await harness.ViewModel.OpenPathAsync(otherPath);
+
+        Assert.False(harness.ViewModel.IsExportFailureNoticeVisible);
+        Assert.Equal(ViewState.Viewing, harness.ViewModel.State);
+    }
+
+    [Fact]
+    public async Task ExportFailureNoticeIsRetiredByClosingDocument()
+    {
+        var harness = await FailExportAsync();
+
+        harness.ViewModel.CloseFileCommand.Execute(null);
+
+        Assert.False(harness.ViewModel.IsExportFailureNoticeVisible);
+        Assert.Equal(ViewState.NoDocument, harness.ViewModel.State);
+    }
+
+    [Fact]
+    public async Task ExportFailureNoticeRaisesItsOwnBindingsOnVisibilityChange()
+    {
+        var harness = await CreateHarnessWithDocumentAsync();
+        harness.FilePicker.GenericSavePath = Path.Combine("exports", "failure.pdf");
+        harness.Exporter.NextResult = new ExportResult(ExportStatus.WriteFailed, "detail-X");
+
+        var raised = new List<string>();
+        harness.ViewModel.PropertyChanged += (_, e) => raised.Add(e.PropertyName ?? string.Empty);
+
+        await harness.ViewModel.ExportPdfCommand.ExecuteAsync(null);
+
+        Assert.Contains(nameof(MainWindowViewModel.IsExportFailureNoticeVisible), raised);
+        Assert.Contains(nameof(MainWindowViewModel.ExportFailureNoticeTitle), raised);
+        Assert.Contains(nameof(MainWindowViewModel.ExportFailureNoticeDetails), raised);
+    }
+
+    [Fact]
+    public async Task ExportFailureNoticeTextFollowsLanguageSwitch()
+    {
+        var harness = await FailExportAsync();
+        Assert.Equal("Export failed", harness.ViewModel.ExportFailureNoticeTitle);
+
+        harness.ViewModel.SelectRussianLanguageCommand.Execute(null);
+
+        Assert.Equal("Ошибка экспорта", harness.ViewModel.ExportFailureNoticeTitle);
+        Assert.Contains(
+            "detail-X",
+            harness.ViewModel.ExportFailureNoticeDetails,
+            StringComparison.Ordinal);
+        Assert.Equal("Скрыть", harness.ViewModel.ExportFailureNoticeDismissLabel);
+    }
+
+    private static async Task<ExportHarness> FailExportAsync()
+    {
+        var harness = await CreateHarnessWithDocumentAsync();
+        harness.FilePicker.GenericSavePath = Path.Combine("exports", "failure.pdf");
+        harness.Exporter.NextResult = new ExportResult(ExportStatus.WriteFailed, "detail-X");
+
+        await harness.ViewModel.ExportPdfCommand.ExecuteAsync(null);
+
+        Assert.True(harness.ViewModel.IsExportFailureNoticeVisible);
+        return harness;
     }
 
     [Fact]

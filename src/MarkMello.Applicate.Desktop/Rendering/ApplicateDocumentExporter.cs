@@ -151,12 +151,19 @@ public sealed class ApplicateDocumentExporter : IDocumentExporter
             () => _exportPdf(destinationPath, cancellationToken),
             cancellationToken);
 
+    /// <summary>
+    /// PNG export is not implemented and is not planned -- the feature was
+    /// cancelled, so there is no phase that delivers it. The method and its
+    /// <see cref="ExportStatus.Deferred"/> verdict stay so the
+    /// <c>IDocumentExporter</c> contract remains total and any caller reaching
+    /// this leg gets a typed refusal instead of a crash; no menu exposes it.
+    /// </summary>
     public Task<ExportResult> ExportPngAsync(
         string destinationPath,
         CancellationToken cancellationToken = default)
         => Task.FromResult(new ExportResult(
             ExportStatus.Deferred,
-            "PNG export is deferred to Phase 2."));
+            "PNG export is not implemented and is not planned."));
 
     public Task<ExportResult> ShowPrintDialogAsync(CancellationToken cancellationToken = default)
         => ExecuteViewerOperationAsync(

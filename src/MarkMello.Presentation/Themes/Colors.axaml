@@ -38,6 +38,11 @@
       <SolidColorBrush x:Key="MmAccentBrush">#BD592F</SolidColorBrush>
       <!-- oklch(0.94 0.04 50) -->
       <SolidColorBrush x:Key="MmAccentSoftBrush">#FFE4D4</SolidColorBrush>
+      <!-- oklch(0.55 0.19 27) — failure/danger. Distinct from the accent (hue 42):
+           an error must not read as "one more accented thing". -->
+      <SolidColorBrush x:Key="MmDangerBrush">#C9302D</SolidColorBrush>
+      <!-- oklch(0.94 0.045 30) -->
+      <SolidColorBrush x:Key="MmDangerSoftBrush">#FFE1DA</SolidColorBrush>
       <!-- oklch(0.95 0.008 75) -->
       <SolidColorBrush x:Key="MmCodeBackgroundBrush">#F2EEE9</SolidColorBrush>
       <!-- oklch(0.90 0.008 75) -->
@@ -64,6 +69,10 @@
       <SolidColorBrush x:Key="MmTextFaintBrush">#7D8792</SolidColorBrush>
       <SolidColorBrush x:Key="MmAccentBrush">#2563EB</SolidColorBrush>
       <SolidColorBrush x:Key="MmAccentSoftBrush">#EAF2FF</SolidColorBrush>
+      <!-- Danger pair for this theme stays in its own (GitHub-lineage) idiom,
+           like the #2563EB / #F6F8FA / #D0D7DE values around it. -->
+      <SolidColorBrush x:Key="MmDangerBrush">#CF222E</SolidColorBrush>
+      <SolidColorBrush x:Key="MmDangerSoftBrush">#FFEBE9</SolidColorBrush>
       <SolidColorBrush x:Key="MmCodeBackgroundBrush">#F6F8FA</SolidColorBrush>
       <SolidColorBrush x:Key="MmCodeBorderBrush">#D0D7DE</SolidColorBrush>
       <SolidColorBrush x:Key="MmQuoteBarBrush">#D0D7DE</SolidColorBrush>
@@ -95,6 +104,10 @@
       <SolidColorBrush x:Key="MmAccentBrush">#E38A67</SolidColorBrush>
       <!-- oklch(0.30 0.05 42) -->
       <SolidColorBrush x:Key="MmAccentSoftBrush">#432519</SolidColorBrush>
+      <!-- oklch(0.70 0.16 27) — lifted for a dark ground, same hue as light. -->
+      <SolidColorBrush x:Key="MmDangerBrush">#F17166</SolidColorBrush>
+      <!-- oklch(0.30 0.06 27) -->
+      <SolidColorBrush x:Key="MmDangerSoftBrush">#47211D</SolidColorBrush>
       <!-- oklch(0.22 0.010 60) -->
       <SolidColorBrush x:Key="MmCodeBackgroundBrush">#1E1A16</SolidColorBrush>
       <!-- oklch(0.28 0.010 60) -->

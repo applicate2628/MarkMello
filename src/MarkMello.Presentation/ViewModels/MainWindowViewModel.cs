@@ -1521,6 +1521,10 @@ public partial class MainWindowViewModel : ObservableObject
         {
             _pendingScrollToHeadingId = null;
         }
+        // An export-failure notice reports "exporting THIS document failed", so
+        // it is retired the moment the active document changes (open / tab
+        // switch / close). Event-driven, never a timer.
+        SetExportFailure(null);
         RefreshDocumentSummary();
         OnPropertyChanged(nameof(ShowsEditToggle));
         RefreshWindowTitle();

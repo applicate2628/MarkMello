@@ -125,6 +125,7 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallActiveDocumentBridge(viewModel);
         InstallSingleInstanceActivationBridge(viewModel, singleInstance);
         InstallPopupZOrderFollow(viewModel);
+        InstallNoticePopupActivationFollow();
         InstallPopupFadeIn();
         InstallUnifiedScrollBarStyle();
         InstallEditModeDragSuppression(viewModel);
@@ -138,6 +139,9 @@ public sealed class ApplicateMainWindow : MainWindow
             Avalonia.Threading.DispatcherPriority.Loaded);
         Opened += (_, _) => Avalonia.Threading.Dispatcher.UIThread.Post(
             () => InstallDocumentHealthBannerOverlay(viewModel),
+            Avalonia.Threading.DispatcherPriority.Loaded);
+        Opened += (_, _) => Avalonia.Threading.Dispatcher.UIThread.Post(
+            () => InstallExportFailureNoticeOverlay(viewModel),
             Avalonia.Threading.DispatcherPriority.Loaded);
         // Start the recurring background update check once the window is shown
         // (the one-shot startup check already runs from InitializeAsync). The VM
@@ -209,6 +213,7 @@ public sealed class ApplicateMainWindow : MainWindow
     // top-level windows always stack above their owner's child HWNDs.
     private Avalonia.Controls.Primitives.Popup? _statusHintPopup;
     private Avalonia.Controls.Primitives.Popup? _healthBannerPopup;
+    private Avalonia.Controls.Primitives.Popup? _exportFailureNoticePopup;
 
     // Ctrl+1..9 activates the open document at that 1-based ordinal index.
     // Browser convention: Ctrl+9 jumps to the LAST tab rather than the 9th
@@ -432,33 +437,178 @@ public sealed class ApplicateMainWindow : MainWindow
             return;
         }
 
-        // Float the health banner as a Popup (Win32 transient top-level via
-        // ShouldUseOverlayLayer=false) so it stacks ABOVE the WebView2 child HWND
-        // AND never participates in layout — showing/hiding it does not resize or
-        // shift the document (an in-layout row jumped the text on toggle).
-        var banner = BuildDocumentHealthBanner();
-        _healthBannerPopup = new Avalonia.Controls.Primitives.Popup
+        // Anchored at the BOTTOM of the body; the export-failure notice takes the
+        // right edge mid-height, so the two never overlap.
+        _healthBannerPopup = CreateBodyNoticePopup(
+            bodyPanel,
+            Avalonia.Controls.Primitives.PopupPositioning.PopupAnchor.Bottom,
+            Avalonia.Controls.Primitives.PopupPositioning.PopupGravity.Top,
+            BuildDocumentHealthBanner());
+        bodyPanel.Children.Add(_healthBannerPopup);
+
+        BindNoticeVisibility(
+            _healthBannerPopup,
+            viewModel,
+            nameof(MainWindowViewModel.IsDocumentHealthBannerVisible),
+            () => viewModel.IsDocumentHealthBannerVisible);
+    }
+
+    /// <summary>
+    /// Export-failure notice: a failed export must report itself WITHOUT
+    /// replacing the document view (setting ViewState.LoadError did exactly that
+    /// and cost the user their reading position for a locked destination file).
+    /// Anchored to the middle of BodyPanel's RIGHT edge and, being a Popup, it
+    /// neither resizes nor shifts the document underneath it.
+    /// </summary>
+    private void InstallExportFailureNoticeOverlay(MainWindowViewModel viewModel)
+    {
+        if (_exportFailureNoticePopup is not null)
         {
-            PlacementTarget = bodyPanel,
-            Placement = Avalonia.Controls.PlacementMode.AnchorAndGravity,
-            PlacementAnchor = Avalonia.Controls.Primitives.PopupPositioning.PopupAnchor.Bottom,
-            PlacementGravity = Avalonia.Controls.Primitives.PopupPositioning.PopupGravity.Top,
+            return;
+        }
+
+        var bodyPanel = _mountPoints.BodyPanel;
+        if (bodyPanel is null)
+        {
+            return;
+        }
+
+        // BodyPanel — NOT ViewerContentSlot, which an earlier revision targeted to
+        // clear the tab strip. That slot carries IsVisible="{Binding IsViewer}"
+        // (MainWindow.axaml), and this notice deliberately OUTLIVES viewer mode:
+        // IsExportFailureNoticeVisible stays true for as long as the failure's
+        // document is active, so switching to edit mode after a failed export would
+        // leave the popup anchored to a zero-bounds, invisible control. A notice
+        // whose lifetime is document-scoped must not hang off a mode-scoped anchor.
+        // BodyPanel is also the anchor the status hint and the health banner already
+        // use, so all three notices share one placement owner.
+        //
+        // CENTRED on the body. The earlier right-edge anchor was chosen only to dodge
+        // the tab strip without measuring its height at runtime, and it read as a stray
+        // card parked in a corner rather than as an alert ("почему оно не в центре
+        // появляется а где-то сбоку"). Centring satisfies the original constraint by
+        // construction — the centre of the body cannot reach the tab strip at its top —
+        // and it still clears the status hint (BottomRight) and health banner (Bottom),
+        // because the card is far shorter than the body it is centred in.
+        var noticeCard = BuildExportFailureNotice();
+        _exportFailureNoticePopup = CreateBodyNoticePopup(
+            bodyPanel,
+            Avalonia.Controls.Primitives.PopupPositioning.PopupAnchor.Right,
+            Avalonia.Controls.Primitives.PopupPositioning.PopupGravity.Left,
+            noticeCard,
+            Avalonia.Controls.PlacementMode.Center);
+        _exportFailureNoticePopup.Opened += (_, _) => PlayNoticeEntry(noticeCard);
+        bodyPanel.Children.Add(_exportFailureNoticePopup);
+
+        BindNoticeVisibility(
+            _exportFailureNoticePopup,
+            viewModel,
+            nameof(MainWindowViewModel.IsExportFailureNoticeVisible),
+            () => viewModel.IsExportFailureNoticeVisible);
+    }
+
+    /// <summary>
+    /// Single owner of "float a view-model-driven transient notice above the
+    /// WebView". A Popup (Win32 transient top-level via
+    /// <c>ShouldUseOverlayLayer=false</c>) is the only managed surface that stacks
+    /// ABOVE the WebView2 child HWND — an in-tree Avalonia visual loses that
+    /// airspace fight and is simply invisible — AND it never participates in
+    /// layout, so showing or hiding one does not resize or shift the document (an
+    /// in-layout row jumped the text on toggle). Every notice of this class goes
+    /// through here; a second copy of this configuration would be a second
+    /// half-owner of the same airspace rule.
+    /// </summary>
+    private Avalonia.Controls.Primitives.Popup CreateBodyNoticePopup(
+        Control placementTarget,
+        Avalonia.Controls.Primitives.PopupPositioning.PopupAnchor anchor,
+        Avalonia.Controls.Primitives.PopupPositioning.PopupGravity gravity,
+        Control child,
+        Avalonia.Controls.PlacementMode placement = Avalonia.Controls.PlacementMode.AnchorAndGravity)
+    {
+        var popup = new Avalonia.Controls.Primitives.Popup
+        {
+            PlacementTarget = placementTarget,
+            Placement = placement,
+            PlacementAnchor = anchor,
+            PlacementGravity = gravity,
             PlacementConstraintAdjustment =
                 Avalonia.Controls.Primitives.PopupPositioning.PopupPositionerConstraintAdjustment.SlideX
                 | Avalonia.Controls.Primitives.PopupPositioning.PopupPositionerConstraintAdjustment.SlideY,
             ShouldUseOverlayLayer = false,
             IsLightDismissEnabled = false,
             OverlayDismissEventPassThrough = true,
-            Topmost = false,
+            // Runtime-proven necessary: with Topmost=false the notice's PopupRoot renders
+            // correctly (verified by PrintWindow capture of the window itself) and is
+            // reported visible by the OS, but it falls BEHIND the main window, so the user
+            // never sees it. Nothing else in this window keeps a popup above the main
+            // window — InstallPopupZOrderFollow only CLOSES popups on Deactivated despite
+            // its name, and InstallPopupFadeIn covers only the five named XAML popups.
+            //
+            // Topmost is WS_EX_TOPMOST — global, i.e. above OTHER applications too, which
+            // is not what a notice owned by this window should do. So it is not a constant:
+            // InstallNoticePopupActivationFollow below drives it from this window's own
+            // activation, leaving it true only while MarkMello is the active app.
+            //
+            // It still STARTS true — the runtime-proven value. A notice only opens in
+            // response to work the user just did in this window, so the app is active at
+            // that moment; seeding from IsActive instead would risk latching false if the
+            // flag is not yet set during the Loaded-priority install, and no Activated
+            // event would follow to correct it for an already-active window.
+            Topmost = true,
             Focusable = false,
-            Child = banner,
+            Child = child,
         };
-        bodyPanel.Children.Add(_healthBannerPopup);
 
-        void SyncOpen() => _healthBannerPopup!.IsOpen = viewModel.IsDocumentHealthBannerVisible;
+        _noticePopups.Add(popup);
+        return popup;
+    }
+
+    // Every notice popup created above, so one activation handler governs them all.
+    // A second copy of this rule would be a second half-owner of the same airspace.
+    private readonly List<Avalonia.Controls.Primitives.Popup> _noticePopups = new();
+
+    /// <summary>
+    /// Keep notice popups above this window's WebView2 while MarkMello is in front,
+    /// and below every other application once the user switches away. Avalonia's
+    /// <c>Popup.Topmost</c> is pushed to a LIVE popup host from its property-changed
+    /// handler (Avalonia 12.0.2, <c>Popup.cs</c>: <c>_openState.PopupHost.Topmost =
+    /// change.GetNewValue&lt;bool&gt;()</c>), so toggling it takes effect without
+    /// reopening the popup and without disturbing its open/closed state — which stays
+    /// owned by the view-model predicate in <see cref="BindNoticeVisibility"/>.
+    ///
+    /// Event-driven by construction: window activation is the trigger, never elapsed
+    /// time. This does not collide with <see cref="InstallPopupZOrderFollow"/>, which
+    /// closes the view-model's OVERLAY panels on deactivate and never touches these.
+    /// </summary>
+    private void InstallNoticePopupActivationFollow()
+    {
+        void SyncTopmost(bool active)
+        {
+            foreach (var popup in _noticePopups)
+            {
+                popup.Topmost = active;
+            }
+        }
+
+        Activated += (_, _) => SyncTopmost(true);
+        Deactivated += (_, _) => SyncTopmost(false);
+    }
+
+    /// <summary>
+    /// Drive a notice popup's open state from one view-model predicate. The
+    /// view-model owns WHEN a notice shows and what retires it; the view only
+    /// mirrors that flag, so no dismissal rule leaks into the host.
+    /// </summary>
+    private static void BindNoticeVisibility(
+        Avalonia.Controls.Primitives.Popup popup,
+        MainWindowViewModel viewModel,
+        string visibilityPropertyName,
+        Func<bool> isVisible)
+    {
+        void SyncOpen() => popup.IsOpen = isVisible();
         viewModel.PropertyChanged += (_, e) =>
         {
-            if (e.PropertyName == nameof(MainWindowViewModel.IsDocumentHealthBannerVisible))
+            if (e.PropertyName == visibilityPropertyName)
             {
                 SyncOpen();
             }
@@ -861,12 +1011,9 @@ public sealed class ApplicateMainWindow : MainWindow
         InstallChevronGlyphTracking(chevronPath, chevronButton);
     }
 
-    // Document-health banner: lives in its own grid row between the tabs strip
-    // and the document content (z-order-safe — a real layout row above the
-    // WebView, not a managed overlay over it). Collapsed it shows the defect
-    // count + "preview" + dismiss; expanded it previews the wrapped formulas the
-    // fix will join, with confirm/cancel. Auto-height row collapses to nothing
-    // when IsDocumentHealthBannerVisible is false.
+    // Document-health banner content: the defect count + "fix & save" + dismiss.
+    // Hosted in a body-anchored notice Popup (see CreateBodyNoticePopup) rather
+    // than a layout row, so toggling it never shifts the document text.
     private static Control BuildDocumentHealthBanner()
     {
         static Avalonia.Data.Binding B(string path) => new(path);
@@ -932,6 +1079,217 @@ public sealed class ApplicateMainWindow : MainWindow
         border.Bind(Border.BackgroundProperty, border.GetResourceObservable("MmElevatedBackgroundBrush"));
         border.Bind(Border.BorderBrushProperty, border.GetResourceObservable("MmAccentSoftBrush"));
         return border;
+    }
+
+    // Export-failure notice content: title, the verbatim typed status + detail,
+    // and a dismiss button. The detail is a SelectableTextBlock because those
+    // failure ids (HTMLX-*, PrintReturnedFalse, WriteFailed, ...) are the only
+    // diagnosis the user can report back, so they must be copyable. Every string
+    // is bound to the localized view-model property — no literal text here.
+    /// <summary>
+    /// The export-failure alert. Three deliberate layers, in the order the user
+    /// reads them: a danger-weighted header that says SOMETHING FAILED, a plain
+    /// sentence saying what to do about it, and — demoted to the bottom — the raw
+    /// machine diagnostic, kept selectable because it is the only thing worth
+    /// quoting in a bug report.
+    ///
+    /// The previous treatment inverted that: the diagnostic WAS the message
+    /// ("Export status: PrintReturnedFalse. WebView2 rejected the PDF request…"),
+    /// in English, in a 444x81 card on the window's right edge, styled in the same
+    /// accent every passive hint uses. It read as a stray note, so it was missed
+    /// outright and then judged a fiasco once seen. Weight, colour, size, position
+    /// and copy all carried the same defect: nothing said "error".
+    ///
+    /// Every string is bound to a localized view-model property — no literal text
+    /// here — except the glyph, which is typographic, not linguistic.
+    /// </summary>
+    private static Control BuildExportFailureNotice()
+    {
+        static Avalonia.Data.Binding B(string path) => new(path);
+
+        // ---- Header: danger wash + filled badge. This is the "look here" layer.
+        var badgeGlyph = new TextBlock
+        {
+            Text = "!",
+            FontSize = 18,
+            FontWeight = Avalonia.Media.FontWeight.Bold,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        // The badge fill is MmDangerBrush in every theme and MmElevatedBackgroundBrush
+        // is that theme's lightest surface, so the glyph always lands on the far side
+        // of the fill's luminance: near-white on dark red (light/classic-white),
+        // near-black on the lifted red used for dark.
+        badgeGlyph.Bind(
+            TextBlock.ForegroundProperty,
+            badgeGlyph.GetResourceObservable("MmElevatedBackgroundBrush"));
+
+        var badge = new Border
+        {
+            Width = 30,
+            Height = 30,
+            CornerRadius = new CornerRadius(15),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 14, 0),
+            Child = badgeGlyph,
+        };
+        badge.Bind(Border.BackgroundProperty, badge.GetResourceObservable("MmDangerBrush"));
+
+        var titleText = new TextBlock
+        {
+            FontSize = 16,
+            FontWeight = Avalonia.Media.FontWeight.SemiBold,
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        titleText.Bind(TextBlock.TextProperty, B(nameof(MainWindowViewModel.ExportFailureNoticeTitle)));
+        titleText.Bind(TextBlock.ForegroundProperty, titleText.GetResourceObservable("MmTextBrush"));
+
+        DockPanel.SetDock(badge, Dock.Left);
+        var headerRow = new DockPanel { LastChildFill = true };
+        headerRow.Children.Add(badge);
+        headerRow.Children.Add(titleText);
+
+        var header = new Border
+        {
+            Padding = new Thickness(20, 16),
+            CornerRadius = new CornerRadius(13, 13, 0, 0),
+            Child = headerRow,
+        };
+        header.Bind(Border.BackgroundProperty, header.GetResourceObservable("MmDangerSoftBrush"));
+
+        // ---- Guidance: the sentence the user is actually meant to act on.
+        var guidanceText = new TextBlock
+        {
+            FontSize = 14,
+            LineHeight = 21,
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+        };
+        guidanceText.Bind(
+            TextBlock.TextProperty,
+            B(nameof(MainWindowViewModel.ExportFailureNoticeGuidance)));
+        guidanceText.Bind(TextBlock.ForegroundProperty, guidanceText.GetResourceObservable("MmTextBrush"));
+        guidanceText.Bind(
+            TextBlock.FontFamilyProperty,
+            guidanceText.GetResourceObservable("MmDocumentSansFontFamily"));
+
+        // ---- Diagnostic: demoted, but selectable and copyable. Small monospace in
+        // a recessed code well, under a quiet label that says what it is FOR.
+        var diagnosticLabel = new TextBlock
+        {
+            FontSize = 11,
+            Margin = new Thickness(0, 18, 0, 6),
+        };
+        diagnosticLabel.Bind(
+            TextBlock.TextProperty,
+            B(nameof(MainWindowViewModel.ExportFailureNoticeDiagnosticLabel)));
+        diagnosticLabel.Bind(
+            TextBlock.ForegroundProperty,
+            diagnosticLabel.GetResourceObservable("MmTextFaintBrush"));
+
+        var detailText = new SelectableTextBlock
+        {
+            FontSize = 11,
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+        };
+        detailText.Bind(
+            SelectableTextBlock.TextProperty,
+            B(nameof(MainWindowViewModel.ExportFailureNoticeDetails)));
+        detailText.Bind(TextBlock.ForegroundProperty, detailText.GetResourceObservable("MmTextSoftBrush"));
+        detailText.Bind(
+            TextBlock.FontFamilyProperty,
+            detailText.GetResourceObservable("MmDocumentMonoFontFamily"));
+
+        var diagnosticWell = new Border
+        {
+            Padding = new Thickness(10, 8),
+            CornerRadius = new CornerRadius(6),
+            BorderThickness = new Thickness(1),
+            Child = detailText,
+        };
+        diagnosticWell.Bind(
+            Border.BackgroundProperty,
+            diagnosticWell.GetResourceObservable("MmCodeBackgroundBrush"));
+        diagnosticWell.Bind(
+            Border.BorderBrushProperty,
+            diagnosticWell.GetResourceObservable("MmCodeBorderBrush"));
+
+        // ---- Dismiss. A labelled button, not a 14px "×": the one action the alert
+        // offers should be legible and reachable, and the label is already localized.
+        var dismissButton = new Button
+        {
+            Classes = { "ghost" },
+            Padding = new Thickness(18, 8),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 18, 0, 0),
+            FontSize = 13,
+        };
+        dismissButton.Bind(
+            ContentControl.ContentProperty,
+            B(nameof(MainWindowViewModel.ExportFailureNoticeDismissLabel)));
+        dismissButton.Bind(
+            Button.CommandProperty,
+            B(nameof(MainWindowViewModel.DismissExportFailureNoticeCommand)));
+        dismissButton.Bind(
+            ToolTip.TipProperty,
+            B(nameof(MainWindowViewModel.ExportFailureNoticeDismissLabel)));
+        dismissButton.Bind(
+            Avalonia.Automation.AutomationProperties.NameProperty,
+            B(nameof(MainWindowViewModel.ExportFailureNoticeDismissLabel)));
+
+        var body = new StackPanel { Margin = new Thickness(20, 16, 20, 18) };
+        body.Children.Add(guidanceText);
+        body.Children.Add(diagnosticLabel);
+        body.Children.Add(diagnosticWell);
+        body.Children.Add(dismissButton);
+
+        var stack = new StackPanel();
+        stack.Children.Add(header);
+        stack.Children.Add(body);
+
+        var card = new Border
+        {
+            MinWidth = 460,
+            MaxWidth = 560,
+            CornerRadius = new CornerRadius(14),
+            BorderThickness = new Thickness(1),
+            // Elevation is what separates an alert LAYER from a card that happens to
+            // be drawn on top. Two stacked shadows — a wide soft one for the lift and
+            // a tight one for the contact edge. Shadow tone is deliberately neutral
+            // black-alpha rather than a palette token: it is depth, not colour, and it
+            // reads correctly on both the warm-paper and dark grounds.
+            BoxShadow = Avalonia.Media.BoxShadows.Parse("0 24 60 -12 #59000000, 0 4 12 -4 #40000000"),
+            Child = stack,
+        };
+        card.Bind(Border.BackgroundProperty, card.GetResourceObservable("MmElevatedBackgroundBrush"));
+        card.Bind(Border.BorderBrushProperty, card.GetResourceObservable("MmBorderBrush"));
+
+        // Entry motion: a short fade so the alert ARRIVES rather than blinking into
+        // place. Purely decorative — PlayNoticeEntry always ends at Opacity = 1, so a
+        // transition that never runs still yields a fully visible card. Nothing here
+        // is time-gated logic; the open/close state stays owned by the view-model.
+        card.Transitions = new Avalonia.Animation.Transitions
+        {
+            new Avalonia.Animation.DoubleTransition
+            {
+                Property = OpacityProperty,
+                Duration = System.TimeSpan.FromMilliseconds(140),
+            },
+        };
+
+        return card;
+    }
+
+    /// <summary>
+    /// Replay the notice's fade each time its popup opens. Driven by the popup's
+    /// Opened event — not by elapsed time — and the final state is set
+    /// unconditionally so the card is fully visible even if the transition is
+    /// skipped.
+    /// </summary>
+    private static void PlayNoticeEntry(Control card)
+    {
+        card.Opacity = 0;
+        Dispatcher.UIThread.Post(() => card.Opacity = 1, DispatcherPriority.Render);
     }
 
     private static void AttachSplitterDraggingHighlight(GridSplitter splitter)
