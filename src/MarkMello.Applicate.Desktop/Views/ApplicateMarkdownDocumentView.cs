@@ -6,10 +6,8 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
-using CSharpMath.Avalonia;
 using MarkMello.Application.Abstractions;
 using MarkMello.Applicate.Desktop.Math;
-using MarkMello.Applicate.Desktop.Views.Minimap;
 using MarkMello.Domain;
 using MarkMello.Presentation.Views;
 using SysMath = System.Math;
@@ -112,43 +110,6 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
 
     public event EventHandler? DocumentRenderInvalidated;
 
-    internal ApplicateDocumentMiniatureSnapshot CreateMiniatureSnapshot()
-    {
-        if (Document is null || Bounds.Height <= 0 || Bounds.Width <= 0)
-        {
-            return ApplicateDocumentMiniatureSnapshot.Empty;
-        }
-
-        return new ApplicateDocumentMiniatureSnapshot(
-            totalWidth: SysMath.Max(1, Bounds.Width),
-            totalHeight: SysMath.Max(1, Bounds.Height));
-    }
-
-    internal void RenderMiniature(DrawingContext context, Rect targetBounds)
-    {
-        var snapshot = CreateMiniatureSnapshot();
-        if (snapshot.IsEmpty || targetBounds.Width <= 0 || targetBounds.Height <= 0)
-        {
-            return;
-        }
-
-        var scaleX = targetBounds.Width / snapshot.TotalWidth;
-        var scaleY = targetBounds.Height / snapshot.TotalHeight;
-
-        using (context.PushClip(targetBounds))
-        {
-            foreach (var border in _root.GetVisualDescendants().OfType<Border>().Where(IsMiniatureVisibleBorder))
-            {
-                DrawBorderMiniature(context, border, targetBounds, scaleX, scaleY);
-            }
-
-            foreach (var control in _root.GetVisualDescendants().OfType<Control>().Where(IsMiniatureRenderableControl))
-            {
-                DrawControlMiniature(context, control, targetBounds, scaleX, scaleY);
-            }
-        }
-    }
-
     private void ApplyDocumentPadding()
     {
         _viewport.Padding = DocumentPadding;
@@ -197,122 +158,6 @@ public sealed partial class ApplicateMarkdownDocumentView : UserControl
 
     private void OnResourcesChanged(object? sender, ResourcesChangedEventArgs e)
         => Rebuild();
-
-    private void DrawBorderMiniature(
-        DrawingContext context,
-        Border border,
-        Rect targetBounds,
-        double scaleX,
-        double scaleY)
-    {
-        var bounds = TranslateControlBounds(border);
-        if (bounds is null)
-        {
-            return;
-        }
-
-        var target = MapMiniatureRect(bounds.Value, targetBounds, scaleX, scaleY);
-        if (target.Width <= 0 || target.Height <= 0)
-        {
-            return;
-        }
-
-        var background = border.Background;
-        var borderBrush = border.BorderBrush;
-        var pen = borderBrush is null || IsEmptyThickness(border.BorderThickness)
-            ? null
-            : new Pen(borderBrush, 1);
-        if (background is null && pen is null)
-        {
-            return;
-        }
-
-        using (context.PushOpacity(0.7))
-        {
-            context.DrawRectangle(background, pen, target, 1.5, 1.5);
-        }
-    }
-
-    private void DrawControlMiniature(
-        DrawingContext context,
-        Control control,
-        Rect targetBounds,
-        double scaleX,
-        double scaleY)
-    {
-        var bounds = TranslateControlBounds(control);
-        if (bounds is null)
-        {
-            return;
-        }
-
-        var matrix = new Matrix(
-            scaleX,
-            0,
-            0,
-            scaleY,
-            targetBounds.X + bounds.Value.X * scaleX,
-            targetBounds.Y + bounds.Value.Y * scaleY);
-
-        using (context.PushTransform(matrix))
-        {
-            control.Render(context);
-        }
-    }
-
-    private Rect? TranslateControlBounds(Control control)
-    {
-        if (control.Bounds.Width <= 0 || control.Bounds.Height <= 0)
-        {
-            return null;
-        }
-
-        var origin = control.TranslatePoint(new Point(0, 0), this);
-        return origin is null
-            ? null
-            : new Rect(origin.Value, control.Bounds.Size);
-    }
-
-    private static Rect MapMiniatureRect(Rect sourceBounds, Rect targetBounds, double scaleX, double scaleY)
-        => new(
-            targetBounds.X + sourceBounds.X * scaleX,
-            targetBounds.Y + sourceBounds.Y * scaleY,
-            sourceBounds.Width * scaleX,
-            SysMath.Max(1, sourceBounds.Height * scaleY));
-
-    private static bool IsMiniatureVisibleBorder(Border border)
-        => border.Background is not null
-            || border.BorderBrush is not null && !IsEmptyThickness(border.BorderThickness);
-
-    private static bool IsMiniatureRenderableControl(Control control)
-    {
-        if (!control.IsVisible || control.Bounds.Width <= 0 || control.Bounds.Height <= 0)
-        {
-            return false;
-        }
-
-        if (control is Border or Panel or ContentControl)
-        {
-            return false;
-        }
-
-        if (control is TextBlock or SelectableTextBlock or MathView)
-        {
-            return true;
-        }
-
-        var typeName = control.GetType().Name;
-        if (typeName.Contains("TextFragment", StringComparison.Ordinal)
-            || typeName.Contains("ImageView", StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        return !control.GetVisualChildren().OfType<Control>().Any();
-    }
-
-    private static bool IsEmptyThickness(Thickness thickness)
-        => thickness.Left <= 0 && thickness.Top <= 0 && thickness.Right <= 0 && thickness.Bottom <= 0;
 
     private void QueueRenderedNotification(long generation)
     {
