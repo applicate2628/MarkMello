@@ -56,8 +56,13 @@ public sealed class ApplicateHtmlShellTemplateTests
         Assert.Contains("img-src data:", html, StringComparison.Ordinal);
     }
 
+    // The shell's own title is the APP name, which is the right answer only while
+    // no document is loaded. It is not stable for the shell's lifetime: the page
+    // title is exported metadata (PDF Title field, captured HTML <head>), so the
+    // renderer overwrites it with the document's name on every document swap —
+    // loadDocument.ts, driven by the load-document message's documentName.
     [Fact]
-    public void BuildShellTitleIsStableForShellLifetime()
+    public void BuildShellTitleIsTheAppNameUntilADocumentLoads()
     {
         var html = ApplicateHtmlDocumentTemplate.BuildShell(
             ReadingPreferences.Default,

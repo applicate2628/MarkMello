@@ -39,6 +39,52 @@ describe("handleHostMessage(load-document)", () => {
     expect(() => load({ type: "load-document", html: "" })).not.toThrow();
   });
 
+  // The shell page is navigated once and reused, so its <title> is the app name
+  // ("MarkMello") until a document swap updates it. The page title is EXPORTED
+  // metadata — WebView2's PrintToPdfAsync writes it into the PDF Title field and
+  // the HTML snapshot serializes <head><title> verbatim — so a stale shell title
+  // means every exported file is named after the editor instead of the document.
+  // Mirrors ApplicateHtmlDocumentTemplate.BuildShell: a <head> whose <title> is
+  // the app name, and an empty <main class="mm-document"> waiting for a swap.
+  const mountShell = () => {
+    document.documentElement.innerHTML =
+      `<head><title>MarkMello</title></head><body><main class="mm-document"></main></body>`;
+  };
+
+  it("titles the page with the loaded document name, not the app name", () => {
+    const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
+    mountShell();
+
+    load({ type: "load-document", html: "<p>x</p>", documentName: "wave_ports.md" });
+
+    expect(document.title).toBe("wave_ports.md");
+  });
+
+  // Guards the actual export leak rather than only the DOM property:
+  // captureRenderedHtmlSnapshot clones document.documentElement and serializes
+  // outerHTML, so whatever <title> stands here is what lands in the exported file.
+  it("carries the document name into the serialized head the export captures", () => {
+    const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
+    mountShell();
+
+    load({ type: "load-document", html: "<p>x</p>", documentName: "wave_ports.md" });
+
+    const serialized = document.documentElement.outerHTML;
+    expect(serialized).toContain("<title>wave_ports.md</title>");
+    expect(serialized).not.toContain("<title>MarkMello</title>");
+  });
+
+  // No name to report ⇒ no document identity to claim. The shell title is the
+  // correct answer for "nothing loaded"; blanking it would be a worse export.
+  it("leaves the shell title standing when the host sends no document name", () => {
+    const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
+    mountShell();
+
+    load({ type: "load-document", html: "<p>x</p>" });
+
+    expect(document.title).toBe("MarkMello");
+  });
+
   it("applies load-document theme before renderer pipeline starts", () => {
     const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
     document.documentElement.dataset.theme = "light";

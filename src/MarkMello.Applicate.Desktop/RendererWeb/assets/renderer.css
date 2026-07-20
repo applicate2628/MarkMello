@@ -176,6 +176,16 @@ body.mm-saving div.mm-width-handle {
   --mm-document-font-family: var(--mm-document-font-family-serif);
   --mm-accent: #BD592F;
   --mm-accent-soft: #FFE4D4;
+  /* Ink the editable-cell affordance is mixed FROM. A table's structure (its
+     rules) is drawn from a neutral ink — see --mm-document-rule — but the
+     editable wash was mixed from the chromatic --mm-accent, so the two halves of
+     one surface never shared a source. Where the accent is warm and the paper is
+     warm (light/dark) the wash reads as paper and the mismatch is invisible;
+     against classic-white's pure-white ground a saturated blue accent makes the
+     wash the only chromatic element in an otherwise neutral table, and it reads
+     violet. Defaulting the tint to the accent keeps light/dark byte-identical;
+     classic-white overrides it to its own rule ink below. */
+  --mm-editable-tint: var(--mm-accent);
   --mm-minimap-width: 136px;
   --mm-minimap-gap: 16px;
   --mm-minimap-accent: color-mix(in srgb, var(--mm-accent, #d46d3d) 88%, transparent);
@@ -206,6 +216,15 @@ body.mm-saving div.mm-width-handle {
 :root[data-theme="classic-white"] {
   --mm-accent: #2563EB;
   --mm-accent-soft: #EAF2FF;
+  /* The missing half of the pairing: this theme draws its table rules from the
+     neutral ink rgb(31,35,40) (--mm-document-rule below), so the editable wash
+     is mixed from that SAME ink instead of the blue accent. Measured composite
+     over this theme's #FFFFFF ground: rest rgb(247,250,254)->rgb(247,247,247),
+     hover rgb(231,238,253)->rgb(230,231,231) — chroma 22 -> 1, i.e. the violet
+     cast becomes a neutral "input surface". The focus OUTLINE deliberately stays
+     --mm-accent: a crisp blue focus ring is the intentional signal (0b0773e),
+     and only the resting surface was reading as an unexplained tint. */
+  --mm-editable-tint: #1F2328;
   --mm-document-text: #171A1F;
   --mm-document-muted: #535B66;
   --mm-document-background: #FFFFFF;
@@ -569,20 +588,22 @@ img {
    negative offset keeps the full contour within the cell. */
 .mm-document .mm-editable-cell {
   cursor: text;
-  background: color-mix(in srgb, var(--mm-accent) 3.5%, transparent);
+  background: color-mix(in srgb, var(--mm-editable-tint) 3.5%, transparent);
   transition: background-color 120ms ease, box-shadow 120ms ease;
 }
 
 .mm-document .mm-editable-cell:hover {
-  background: color-mix(in srgb, var(--mm-accent) 11%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mm-accent) 26%, transparent);
+  background: color-mix(in srgb, var(--mm-editable-tint) 11%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mm-editable-tint) 26%, transparent);
 }
 
 .mm-document .mm-editable-cell:focus,
 .mm-document .mm-editable-cell:focus-visible {
+  /* Outline keeps the ACCENT (the deliberate focus signal); only the surface
+     under it follows the theme's editable tint. */
   outline: 2px solid var(--mm-accent);
   outline-offset: -2px;
-  background: color-mix(in srgb, var(--mm-accent) 8%, transparent);
+  background: color-mix(in srgb, var(--mm-editable-tint) 8%, transparent);
 }
 
 .mm-document table code {

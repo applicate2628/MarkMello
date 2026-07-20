@@ -107,6 +107,24 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
     });
   }
   deps.setCurrentDocumentCacheKey?.(message.cacheKey ?? null);
+
+  // The shell page is navigated once and reused for every document, so its
+  // <title> ("MarkMello", ApplicateHtmlDocumentTemplate.BuildShell) is only ever
+  // correct while no document is loaded. Nothing updated it on a swap, and the
+  // page title is EXPORTED metadata: WebView2's PrintToPdfAsync writes it into
+  // the PDF's Title field, and captureRenderedHtmlSnapshot clones
+  // document.documentElement — <head><title> included — into the HTML export. So
+  // every exported file was titled with the editor's name instead of its own.
+  // This is the single write point for it: both "load-document" and
+  // "load-cached-document" funnel through here carrying the host-supplied
+  // documentName (= MarkdownSource.FileName, a bare file name — never the
+  // absolute path, which must not leak into exported metadata). Setting it here
+  // rather than from the host keeps one owner and no ordering race against the
+  // body swap. Blank/absent name leaves the shell title standing.
+  if (message.documentName) {
+    document.title = message.documentName;
+  }
+
   const firstHeading = main.querySelector("h1,h2,h3")?.textContent?.trim().replace(/\s+/g, " ").slice(0, 120) ?? "";
   deps.debugLog(`load-document:swapped id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${document.documentElement.dataset.theme ?? "(none)"} firstHeading=${firstHeading}`);
 

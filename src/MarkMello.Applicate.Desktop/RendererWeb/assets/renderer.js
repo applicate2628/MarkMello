@@ -275,6 +275,9 @@
       });
     }
     deps.setCurrentDocumentCacheKey?.(message.cacheKey ?? null);
+    if (message.documentName) {
+      document.title = message.documentName;
+    }
     const firstHeading = main.querySelector("h1,h2,h3")?.textContent?.trim().replace(/\s+/g, " ").slice(0, 120) ?? "";
     deps.debugLog(`load-document:swapped id=${message.renderId ?? "(none)"} name=${message.documentName ?? ""} theme=${document.documentElement.dataset.theme ?? "(none)"} firstHeading=${firstHeading}`);
     deps.ensureChromeNodes(cachedFragment !== void 0);
