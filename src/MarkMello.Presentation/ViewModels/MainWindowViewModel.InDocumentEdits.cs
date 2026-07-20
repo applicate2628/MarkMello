@@ -153,7 +153,8 @@ public partial class MainWindowViewModel
             int line,
             int cellIndex,
             string canonicalText,
-            string canonicalKey)
-            => owner.CommitInPlaceTableCell(newBuffer, line, cellIndex, canonicalText, canonicalKey);
+            string canonicalKey,
+            bool raw)
+            => owner.CommitInPlaceTableCell(newBuffer, line, cellIndex, canonicalText, canonicalKey, raw);
     }
 }

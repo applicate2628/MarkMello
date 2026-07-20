@@ -81,5 +81,6 @@ internal interface IRealtimeInDocumentEditHost
         int line,
         int cellIndex,
         string canonicalText,
-        string canonicalKey);
+        string canonicalKey,
+        bool raw);
 }

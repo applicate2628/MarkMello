@@ -13,6 +13,12 @@ public sealed record TableCellCommit(
     string Text,
     string Key)
 {
+    // RAW commit: the cell was rich, so the user edited its markdown and
+    // <see cref="Text"/> carries the canonical RAW cell source, not decoded plain
+    // text. The renderer cannot turn markdown into HTML, so the Desktop layer
+    // renders the fragment before acknowledging such a commit.
+    public bool Raw { get; init; }
+
     // Edit-preview commits carry the raw-source splice that the source editor
     // applies. Reading-mode commits retain the positional payload and leave
     // this invalid sentinel untouched.
@@ -51,7 +57,8 @@ public partial class MainWindowViewModel
         int cellIndex,
         string text,
         string? key,
-        TableCellEditOrigin origin)
+        TableCellEditOrigin origin,
+        bool raw = false)
         => _inDocumentEditCoordinator.ApplyAsync(
             new TableCellEditKind(
                 _inDocumentEditHost,
@@ -60,7 +67,8 @@ public partial class MainWindowViewModel
                 cellIndex,
                 text,
                 key,
-                origin));
+                origin,
+                raw));
 
     private void RefuseTableCellEdit(int line, int cellIndex, string path, TableCellEditOrigin origin, bool busy = false)
     {
@@ -95,7 +103,8 @@ public partial class MainWindowViewModel
         int line,
         int cellIndex,
         string canonicalText,
-        string canonicalKey)
+        string canonicalKey,
+        bool raw)
     {
         var current = _document;
         if (current is null)
@@ -112,7 +121,8 @@ public partial class MainWindowViewModel
                 line,
                 cellIndex,
                 canonicalText,
-                canonicalKey);
+                canonicalKey,
+                raw);
             EnsureInPlaceEditorSession(current);
             committed = new MarkdownSource(current.Path, current.FileName, newBuffer);
             _document = committed;
@@ -136,7 +146,10 @@ public partial class MainWindowViewModel
             line,
             cellIndex,
             canonicalText,
-            canonicalKey));
+            canonicalKey)
+        {
+            Raw = raw,
+        });
     }
 
     private RealtimeInDocumentEditDomPatch CreateTableCellDomPatch(
@@ -144,9 +157,15 @@ public partial class MainWindowViewModel
         int line,
         int cellIndex,
         string canonicalText,
-        string canonicalKey)
+        string canonicalKey,
+        bool raw)
     {
-        var before = _tableCellSourceEditor.ParsePlainCell(source, line, cellIndex);
+        // A RAW patch addresses a rich cell, whose before-state ParsePlainCell
+        // cannot express — read the structural snapshot instead and carry the
+        // cell's RAW markdown, matching what a raw commit publishes.
+        var before = raw
+            ? _tableCellSourceEditor.ParseCell(source, line, cellIndex)
+            : _tableCellSourceEditor.ParsePlainCell(source, line, cellIndex);
         if (before is not { } snapshot
             || snapshot.Span.Start < 0
             || snapshot.Span.End < snapshot.Span.Start
@@ -159,10 +178,11 @@ public partial class MainWindowViewModel
         return RealtimeInDocumentEditDomPatch.ForTableCell(
             line,
             cellIndex,
-            snapshot.Text,
+            raw ? beforeRaw.Trim() : snapshot.Text,
             TableCellIdentity.ComputeKey(beforeRaw.Trim()),
             canonicalText,
-            canonicalKey);
+            canonicalKey,
+            raw);
     }
 
 }

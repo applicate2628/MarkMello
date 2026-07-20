@@ -22,17 +22,38 @@ public sealed class MarkdigTableCellSourceEditor : ITableCellSourceEditor
             return null;
         }
 
-        return new TableCellSourceSnapshot(
-            match.Value.Span,
-            text,
-            match.Value.TableIndex,
-            match.Value.TableStartLine,
-            match.Value.TableEndLine,
-            match.Value.RowIndex,
-            match.Value.ColumnIndex,
-            match.Value.RowCount,
-            match.Value.ColumnCount);
+        return CreateSnapshot(match.Value, text, isPlainText: true);
     }
+
+    public TableCellSourceSnapshot? ParseCell(string source, int line, int cellIndex)
+    {
+        var match = RawTableCellLocator.Find(source, line, cellIndex);
+        if (match is null)
+        {
+            return null;
+        }
+
+        // A rich cell keeps its structural coordinates and reports IsPlainText=false;
+        // its markdown is read from the span by the caller, never from Text.
+        var isPlainText = TryDecodePlainText(match.Value.Cell, out var text);
+        return CreateSnapshot(match.Value, isPlainText ? text : string.Empty, isPlainText);
+    }
+
+    private static TableCellSourceSnapshot CreateSnapshot(
+        RawTableCellMatch match,
+        string text,
+        bool isPlainText)
+        => new(
+            match.Span,
+            text,
+            match.TableIndex,
+            match.TableStartLine,
+            match.TableEndLine,
+            match.RowIndex,
+            match.ColumnIndex,
+            match.RowCount,
+            match.ColumnCount,
+            isPlainText);
 
     private static bool TryDecodePlainText(ContainerBlock cell, out string text)
     {

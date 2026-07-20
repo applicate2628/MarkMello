@@ -19,6 +19,7 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
     private readonly string _text;
     private readonly string? _key;
     private readonly TableCellEditOrigin _origin;
+    private readonly bool _raw;
 
     public TableCellEditKind(
         IRealtimeInDocumentEditHost host,
@@ -27,7 +28,8 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
         int cellIndex,
         string text,
         string? key,
-        TableCellEditOrigin origin)
+        TableCellEditOrigin origin,
+        bool raw = false)
     {
         _host = host;
         _tableCellSourceEditor = tableCellSourceEditor;
@@ -36,6 +38,7 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
         _text = text;
         _key = key;
         _origin = origin;
+        _raw = raw;
     }
 
     public void PublishBusy()
@@ -63,6 +66,7 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
                         _cellIndex,
                         _text,
                         _key,
+                        _raw,
                         out var editedBuffer,
                         out var editCanonicalText,
                         out var editCanonicalKey,
@@ -88,6 +92,7 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
                     editCanonicalText,
                     editCanonicalKey)
                 {
+                    Raw = _raw,
                     Start = editSpan.Start,
                     Length = editSpan.Length,
                     Replacement = editReplacement,
@@ -109,6 +114,7 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
                     _cellIndex,
                     _text,
                     _key,
+                    _raw,
                     out newBuffer,
                     out canonicalText,
                     out canonicalKey))
@@ -134,7 +140,7 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
         // Keep the commit outside the catch: the buffer mutation + publish is the
         // irreversible settlement, and a later observer failure must not become a
         // refusal (a validation refusal restores the DOM; a settled edit must not).
-        _host.CommitInPlaceTableCell(newBuffer, _line, _cellIndex, canonicalText, canonicalKey);
+        _host.CommitInPlaceTableCell(newBuffer, _line, _cellIndex, canonicalText, canonicalKey, _raw);
         return Task.CompletedTask;
     }
 
@@ -145,6 +151,7 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
         int cellIndex,
         string text,
         string? expectedKey,
+        bool raw,
         out string newContent,
         out string canonicalText,
         out string canonicalKey)
@@ -155,12 +162,25 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
             cellIndex,
             text,
             expectedKey,
+            raw,
             out newContent,
             out canonicalText,
             out canonicalKey,
             out _,
             out _);
 
+    /// <summary>
+    /// Prepares a validated cell rewrite. <paramref name="raw"/> selects the mode,
+    /// and the mode is a RENDERER-side fact: it states whether the user was editing
+    /// the cell's RENDERED text (literal mode — the cell was plain, so rendered text
+    /// == source text) or its RAW markdown (raw mode — the cell was rich, so the
+    /// renderer swapped in the source before handing the caret over). Both modes are
+    /// independently fail-closed, so the mode only picks the escaping/validation
+    /// policy and never has to be trusted for document safety:
+    /// literal mode escapes <c>\</c> and <c>|</c> and then REFUSES anything that no
+    /// longer reparses as plain text; raw mode escapes nothing and instead REFUSES
+    /// any splice whose reparsed cell no longer covers the spliced markdown.
+    /// </summary>
     internal static bool TryPrepareTableCellRewrite(
         ITableCellSourceEditor tableCellSourceEditor,
         string source,
@@ -168,6 +188,7 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
         int cellIndex,
         string text,
         string? expectedKey,
+        bool raw,
         out string newContent,
         out string canonicalText,
         out string canonicalKey,
@@ -180,6 +201,8 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
         sourceSpan = default;
         replacement = string.Empty;
 
+        // G2 identity gate, shared by both modes: the addressed span must still hold
+        // exactly the bytes whose key the emit side stamped into the DOM.
         var located = tableCellSourceEditor.Locate(source, line, cellIndex);
         if (located is not { } span
             || string.IsNullOrEmpty(expectedKey)
@@ -191,6 +214,55 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
         {
             return false;
         }
+
+        return raw
+            ? TryPrepareRawRewrite(
+                tableCellSourceEditor,
+                source,
+                line,
+                cellIndex,
+                text,
+                span,
+                out newContent,
+                out canonicalText,
+                out canonicalKey,
+                out sourceSpan,
+                out replacement)
+            : TryPrepareLiteralRewrite(
+                tableCellSourceEditor,
+                source,
+                line,
+                cellIndex,
+                text,
+                span,
+                out newContent,
+                out canonicalText,
+                out canonicalKey,
+                out sourceSpan,
+                out replacement);
+    }
+
+    // Literal path — UNCHANGED behaviour for plain cells: escape the typed text as
+    // literal content (G3 plain before / G4 reparse+shape / one-cell probe), so any
+    // typed markdown that would turn the cell rich is refused, exactly as before.
+    private static bool TryPrepareLiteralRewrite(
+        ITableCellSourceEditor tableCellSourceEditor,
+        string source,
+        int line,
+        int cellIndex,
+        string text,
+        TableCellSpan span,
+        out string newContent,
+        out string canonicalText,
+        out string canonicalKey,
+        out TableCellSpan sourceSpan,
+        out string replacement)
+    {
+        newContent = source;
+        canonicalText = string.Empty;
+        canonicalKey = string.Empty;
+        sourceSpan = default;
+        replacement = string.Empty;
 
         var original = tableCellSourceEditor.ParsePlainCell(source, line, cellIndex);
         if (original is not { } before || before.Span != span)
@@ -221,6 +293,69 @@ internal sealed class TableCellEditKind : IInDocumentEditKind
         canonicalKey = TableCellIdentity.ComputeKey(committedRaw.Trim());
         sourceSpan = span;
         replacement = escaped;
+        return true;
+    }
+
+    // Raw path — the typed text IS the cell's markdown, so nothing is escaped and
+    // the plain-text probes do not apply. The structural guarantee comes instead
+    // from COVERAGE: after splicing, the reparsed cell must still be the same cell
+    // of the same table (shape) AND must cover every non-whitespace character of
+    // what was spliced. That single check is what refuses a bare '|' (which would
+    // split the cell, leaving the reparsed cell covering only the fragment before
+    // the pipe) without silently rewriting the user's markdown behind their back.
+    private static bool TryPrepareRawRewrite(
+        ITableCellSourceEditor tableCellSourceEditor,
+        string source,
+        int line,
+        int cellIndex,
+        string text,
+        TableCellSpan span,
+        out string newContent,
+        out string canonicalText,
+        out string canonicalKey,
+        out TableCellSpan sourceSpan,
+        out string replacement)
+    {
+        newContent = source;
+        canonicalText = string.Empty;
+        canonicalKey = string.Empty;
+        sourceSpan = default;
+        replacement = string.Empty;
+
+        var original = tableCellSourceEditor.ParseCell(source, line, cellIndex);
+        if (original is not { } before
+            || before.Span != span
+            || !TryReadSpan(source, span, out var originalRaw))
+        {
+            return false;
+        }
+
+        var padded = TableCellRewrite.NormalizeRawCellContent(text, originalRaw);
+        var candidate = TableCellRewrite.Splice(source, span, padded);
+
+        var reparsed = tableCellSourceEditor.ParseCell(candidate, line, cellIndex);
+        if (reparsed is not { } after
+            || !HasSameTableCellShape(before, after)
+            || !TryReadSpan(candidate, after.Span, out var committedRaw))
+        {
+            return false;
+        }
+
+        // Coverage gate: the reparsed cell must hold exactly the markdown that was
+        // spliced. This is what refuses a bare '|' — that would split the cell, so
+        // the reparsed cell holds only the fragment before the pipe and no longer
+        // trim-matches. Compared on TRIMMED text because the located span includes
+        // the cell's padding for some contents and excludes it for others.
+        if (!string.Equals(committedRaw.Trim(), padded.Trim(), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        newContent = candidate;
+        canonicalText = committedRaw.Trim();
+        canonicalKey = TableCellIdentity.ComputeKey(canonicalText);
+        sourceSpan = span;
+        replacement = padded;
         return true;
     }
 

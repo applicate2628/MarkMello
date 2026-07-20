@@ -843,6 +843,12 @@ public sealed class ApplicateDocumentExporterTests
             IImageSourceResolver? imageSourceResolver,
             CancellationToken cancellationToken)
             => throw new NotSupportedException();
+
+        public Task<string> RenderTableCellHtmlAsync(
+            string rawCellMarkdown,
+            IImageSourceResolver? imageSourceResolver,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 
     private sealed class RecordingSaver : IDocumentSaver

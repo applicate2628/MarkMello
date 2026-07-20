@@ -65,5 +65,11 @@ public sealed class ApplicateWebMarkdownDocumentViewTaskToggleTests
             IImageSourceResolver? imageSourceResolver,
             CancellationToken cancellationToken)
             => throw new NotSupportedException("Renderer is not exercised by task-toggle bridge tests.");
+
+        public Task<string> RenderTableCellHtmlAsync(
+            string rawCellMarkdown,
+            IImageSourceResolver? imageSourceResolver,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException("Table-cell fragment rendering is not exercised by these tests.");
     }
 }

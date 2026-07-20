@@ -229,11 +229,11 @@ public sealed class ApplicateMainWindowBridgeTests
         var siblingViews = ExtractMethodBody(codeBehind, "private void InstallSiblingMountedViews(");
 
         Assert.Contains(
-            "viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.Viewer)",
+            "viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.Viewer, e.Raw)",
             siblingViews,
             StringComparison.Ordinal);
         Assert.Contains(
-            "viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.EditPreview)",
+            "viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.EditPreview, e.Raw)",
             siblingViews,
             StringComparison.Ordinal);
     }
@@ -246,7 +246,7 @@ public sealed class ApplicateMainWindowBridgeTests
         var tableHandler = ExtractFromMarker(bridge, "viewModel.TableCellCommitted");
         var mirror = ExtractMethodBody(bridge, "void MirrorReadingInPlaceEdit(");
 
-        Assert.Contains("host => host.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path)", tableHandler, StringComparison.Ordinal);
+        Assert.Contains("host => host.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path, commit.Raw)", tableHandler, StringComparison.Ordinal);
         Assert.Contains("applyViewerDomPatch: true", tableHandler, StringComparison.Ordinal);
         var viewerPatch = mirror.IndexOf("patchHost(channelViewerHost);", StringComparison.Ordinal);
         var viewerSwap = mirror.IndexOf("channelViewerHost?.CommitInPlaceSourceSwap(source);", StringComparison.Ordinal);
@@ -269,7 +269,7 @@ public sealed class ApplicateMainWindowBridgeTests
             bridge,
             StringComparison.Ordinal);
         var previewPatch = bridge.IndexOf(
-            "channelEditHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);",
+            "channelEditHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path, commit.Raw);",
             StringComparison.Ordinal);
         var previewSwap = previewPatch < 0
             ? -1

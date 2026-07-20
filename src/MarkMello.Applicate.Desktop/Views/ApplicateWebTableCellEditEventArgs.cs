@@ -1,13 +1,14 @@
 namespace MarkMello.Applicate.Desktop.Views;
 
 /// <summary>
-/// Literal plain-text table-cell edit received from the WebView renderer.
+/// Table-cell edit received from the WebView renderer.
 /// </summary>
 public sealed class ApplicateWebTableCellEditEventArgs(
     int line,
     int cellIndex,
     string text,
-    string? key) : EventArgs
+    string? key,
+    bool raw = false) : EventArgs
 {
     public int Line { get; } = line;
 
@@ -16,4 +17,11 @@ public sealed class ApplicateWebTableCellEditEventArgs(
     public string Text { get; } = text;
 
     public string? Key { get; } = key;
+
+    /// <summary>
+    /// The renderer edited the cell's RAW markdown (a rich cell whose rendered DOM
+    /// is not its source), so <see cref="Text"/> is markdown, not literal text.
+    /// Absent or <c>false</c> keeps the literal plain-text contract unchanged.
+    /// </summary>
+    public bool Raw { get; } = raw;
 }

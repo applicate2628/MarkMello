@@ -437,6 +437,156 @@ public sealed class MainWindowViewModelTableCellTests
         Assert.Empty(harness.Saver.Saves);
     }
 
+    // --- rich cells: raw-markdown write-back --------------------------------
+
+    [Fact]
+    public async Task RawCellEditRewritesAFormulaCellAndPublishesItsMarkdown()
+    {
+        // The reported gap, end to end: a cell holding a formula is edited as RAW
+        // markdown and the new markdown reaches the buffer verbatim (no escaping,
+        // so '$x^3$' stays a formula instead of becoming literal text).
+        const string source = "| A | B |\n|---|---|\n| $x^2$ | right |\n";
+        const string edited = "| A | B |\n|---|---|\n| $x^3$ | right |\n";
+        var harness = await CreateOpenHarnessAsync(source);
+        TableCellCommit? commit = null;
+        var refusals = 0;
+        harness.ViewModel.TableCellCommitted += (_, value) => commit = value;
+        harness.ViewModel.TableCellEditRefused += (_, _) => refusals++;
+
+        await harness.ViewModel.SetTableCellAsync(
+            line: 2,
+            cellIndex: 0,
+            text: "$x^3$",
+            key: TableCellIdentity.ComputeKey("$x^2$"),
+            origin: TableCellEditOrigin.Viewer,
+            raw: true);
+
+        Assert.Equal(0, refusals);
+        Assert.Equal(edited, harness.ViewModel.Document?.Content);
+        var published = Assert.IsType<TableCellCommit>(commit);
+        // The commit carries the canonical MARKDOWN and is flagged raw, so the
+        // Desktop layer knows to render the fragment before acknowledging.
+        Assert.True(published.Raw);
+        Assert.Equal("$x^3$", published.Text);
+        Assert.Equal(TableCellIdentity.ComputeKey("$x^3$"), published.Key);
+        Assert.Empty(harness.Saver.Saves);
+    }
+
+    [Fact]
+    public async Task RawCellEditRefusesTextThatWouldSplitTheCellWithABarePipe()
+    {
+        // Raw mode escapes NOTHING, so the structural guarantee is the coverage
+        // gate: a bare '|' would split the cell, and the edit must be refused
+        // rather than silently rewritten into '\|' behind the user's back.
+        const string source = "| A | B |\n|---|---|\n| $x^2$ | right |\n";
+        var harness = await CreateOpenHarnessAsync(source);
+        var refusals = 0;
+        harness.ViewModel.TableCellCommitted += (_, _) => Assert.Fail("must not commit");
+        harness.ViewModel.TableCellEditRefused += (_, _) => refusals++;
+
+        await harness.ViewModel.SetTableCellAsync(
+            line: 2,
+            cellIndex: 0,
+            text: "$x^2$ | injected",
+            key: TableCellIdentity.ComputeKey("$x^2$"),
+            origin: TableCellEditOrigin.Viewer,
+            raw: true);
+
+        Assert.Equal(1, refusals);
+        Assert.Equal(source, harness.ViewModel.Document?.Content);
+    }
+
+    [Fact]
+    public async Task RawCellEditStillFailsClosedOnAStaleIdentityKey()
+    {
+        // The identity gate is shared by both modes: raw mode must not become a
+        // hole through which a stale view rewrites the wrong cell.
+        const string source = "| A | B |\n|---|---|\n| $x^2$ | right |\n";
+        var harness = await CreateOpenHarnessAsync(source);
+        var refusals = 0;
+        harness.ViewModel.TableCellCommitted += (_, _) => Assert.Fail("must not commit");
+        harness.ViewModel.TableCellEditRefused += (_, _) => refusals++;
+
+        await harness.ViewModel.SetTableCellAsync(
+            line: 2,
+            cellIndex: 0,
+            text: "$x^3$",
+            key: TableCellIdentity.ComputeKey("something else"),
+            origin: TableCellEditOrigin.Viewer,
+            raw: true);
+
+        Assert.Equal(1, refusals);
+        Assert.Equal(source, harness.ViewModel.Document?.Content);
+    }
+
+    [Fact]
+    public async Task RawCellEditCanReplaceAFormulaWithPlainTextAndBack()
+    {
+        // A rich cell emptied of its markup becomes plain in source; the reverse
+        // direction (plain text typed as raw markdown) must round-trip too.
+        const string source = "| A | B |\n|---|---|\n| **bold** | right |\n";
+        const string plain = "| A | B |\n|---|---|\n| just text | right |\n";
+        var harness = await CreateOpenHarnessAsync(source);
+
+        await harness.ViewModel.SetTableCellAsync(
+            line: 2,
+            cellIndex: 0,
+            text: "just text",
+            key: TableCellIdentity.ComputeKey("**bold**"),
+            origin: TableCellEditOrigin.Viewer,
+            raw: true);
+
+        Assert.Equal(plain, harness.ViewModel.Document?.Content);
+    }
+
+    [Fact]
+    public async Task RawCellUndoRestoresTheOriginalMarkdownUnderARawPatch()
+    {
+        const string source = "| A | B |\n|---|---|\n| $x^2$ | right |\n";
+        var harness = await CreateOpenHarnessAsync(source);
+        InPlaceEditHistoryTransition? transition = null;
+        harness.ViewModel.InPlaceEditHistoryTransitioned += (_, value) => transition = value;
+
+        await harness.ViewModel.SetTableCellAsync(
+            line: 2,
+            cellIndex: 0,
+            text: "$x^3$",
+            key: TableCellIdentity.ComputeKey("$x^2$"),
+            origin: TableCellEditOrigin.Viewer,
+            raw: true);
+        harness.ViewModel.UndoRealtimeInDocumentEditCommand.Execute(null);
+
+        var applied = Assert.IsType<InPlaceEditHistoryTransition>(transition);
+        Assert.Equal(source, applied.Source.Content);
+        // The patch carries MARKDOWN and is flagged raw, so undo re-renders the
+        // fragment instead of writing '$x^2$' into the cell as literal text.
+        Assert.True(applied.DomPatch.Raw);
+        Assert.Equal("$x^2$", applied.DomPatch.Text);
+        Assert.Equal(source, harness.ViewModel.Document!.Content);
+    }
+
+    [Fact]
+    public async Task LiteralCellEditStillRefusesMarkdownTypedIntoAPlainCell()
+    {
+        // No regression on the literal path: a plain cell is edited as literal
+        // text, so typed markdown that would turn it rich is refused exactly as
+        // before. Rich-cell editing did not widen the plain-cell contract.
+        const string source = "| A | B |\n|---|---|\n| plain | right |\n";
+        var harness = await CreateOpenHarnessAsync(source);
+        var refusals = 0;
+        harness.ViewModel.TableCellEditRefused += (_, _) => refusals++;
+
+        await harness.ViewModel.SetTableCellAsync(
+            line: 2,
+            cellIndex: 0,
+            text: "$x^2$",
+            key: TableCellIdentity.ComputeKey("plain"),
+            origin: TableCellEditOrigin.Viewer);
+
+        Assert.Equal(1, refusals);
+        Assert.Equal(source, harness.ViewModel.Document?.Content);
+    }
+
     private static async Task<Harness> CreateOpenHarnessAsync(string content)
     {
         var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "table-cell.md");
@@ -503,6 +653,15 @@ public sealed class MainWindowViewModelTableCellTests
         {
             ParseCount++;
             var snapshot = inner.ParsePlainCell(source, line, cellIndex);
+            return TransformSnapshot?.Invoke(ParseCount, snapshot) ?? snapshot;
+        }
+
+        // Raw-path structural parse. It shares the ParseCount/TransformSnapshot
+        // instrumentation so a raw rewrite is observable by the same probes.
+        public TableCellSourceSnapshot? ParseCell(string source, int line, int cellIndex)
+        {
+            ParseCount++;
+            var snapshot = inner.ParseCell(source, line, cellIndex);
             return TransformSnapshot?.Invoke(ParseCount, snapshot) ?? snapshot;
         }
     }

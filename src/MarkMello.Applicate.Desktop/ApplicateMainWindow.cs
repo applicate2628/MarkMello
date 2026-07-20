@@ -1228,12 +1228,12 @@ public sealed class ApplicateMainWindow : MainWindow
         if (viewerHostForMode is not null)
         {
             viewerHostForMode.View.TableCellEditRequested += (_, e)
-                => _ = viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.Viewer);
+                => _ = viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.Viewer, e.Raw);
         }
         if (editHost is not null && !ReferenceEquals(editHost, viewerHostForMode))
         {
             editHost.View.TableCellEditRequested += (_, e)
-                => _ = viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.EditPreview);
+                => _ = viewModel.SetTableCellAsync(e.Line, e.CellIndex, e.Text, e.Key, TableCellEditOrigin.EditPreview, e.Raw);
         }
 
         ApplicateTrace.DiagMs("startup-synthetic-mount", "construct-edit-preview-start");
@@ -2154,7 +2154,8 @@ public sealed class ApplicateMainWindow : MainWindow
                         transition.DomPatch.CellIndex,
                         text,
                         key,
-                        transition.Source.Path);
+                        transition.Source.Path,
+                        transition.DomPatch.Raw);
                     return;
                 case RealtimeInDocumentEditDomPatchKind.TableCell:
                     throw new InvalidOperationException("Realtime table-cell history patch requires canonical text and key.");
@@ -2206,7 +2207,7 @@ public sealed class ApplicateMainWindow : MainWindow
         {
             MirrorReadingInPlaceEdit(
                 commit.Source,
-                host => host.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path),
+                host => host.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path, commit.Raw),
                 applyViewerDomPatch: true);
         };
         viewModel.TableCellEditRefused += (_, refusal) =>
@@ -2218,7 +2219,7 @@ public sealed class ApplicateMainWindow : MainWindow
             // edit-preview when the directed edit reached the source editor.
             if (_editWorkspaceView?.ApplyEditModeSourceEdit(commit.Start, commit.Length, commit.Replacement) == true)
             {
-                channelEditHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path);
+                channelEditHost?.View.SetTableCellText(commit.Line, commit.CellIndex, commit.Text, commit.Key, commit.Source.Path, commit.Raw);
                 channelEditHost?.CommitInPlaceSourceSwap(commit.Source);
             }
             else

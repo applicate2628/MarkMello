@@ -121,15 +121,23 @@ public sealed class ApplicateWebMarkdownDocumentViewTableCellTests
             "src", "MarkMello.Applicate.Desktop", "Views", "ApplicateWebMarkdownDocumentView.cs"));
         var success = ExtractMethodBody(
             source,
-            "internal void SetTableCellText(int line, int cellIndex, string text, string key, string expectedPath)");
+            "internal void SetTableCellText(int line, int cellIndex, string text, string key, string expectedPath, bool raw = false)");
         var failure = ExtractMethodBody(
             source,
             "internal void RejectTableCellEdit(int line, int cellIndex, string expectedPath, bool busy = false)");
 
+        // The RAW settle posts from its own async continuation after the fragment
+        // render, so the document may have changed in between — it carries its own
+        // copy of the identity guard and must be pinned too.
+        var rawSettle = ExtractMethodBody(
+            source,
+            "private async Task SetRawTableCellAsync(");
+
         AssertIdentityGuardPrecedesPost(success, "BuildTableCellUpdatedSuccessMessage");
         AssertIdentityGuardPrecedesPost(failure, "BuildTableCellUpdatedFailureMessage");
+        AssertIdentityGuardPrecedesPost(rawSettle, "BuildTableCellUpdatedSuccessMessage");
         Assert.Contains(
-            "internal void SetTableCellText(int line, int cellIndex, string text, string key)",
+            "internal void SetTableCellText(int line, int cellIndex, string text, string key, bool raw = false)",
             source,
             StringComparison.Ordinal);
     }
@@ -198,5 +206,11 @@ public sealed class ApplicateWebMarkdownDocumentViewTableCellTests
             IImageSourceResolver? imageSourceResolver,
             CancellationToken cancellationToken)
             => throw new NotSupportedException("Renderer is not exercised by table-cell bridge tests.");
+
+        public Task<string> RenderTableCellHtmlAsync(
+            string rawCellMarkdown,
+            IImageSourceResolver? imageSourceResolver,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException("Table-cell fragment rendering is not exercised by these tests.");
     }
 }

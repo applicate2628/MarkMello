@@ -23,6 +23,7 @@ import type {
 } from "./ipcContract";
 import { applyLoadDocument, clearDocumentState } from "./loadDocument";
 import { renderMath as renderMathInit } from "./mathRenderInit";
+import { isTerminalMathState } from "./mathRenderQueue";
 import { schedulePhaseBRebuild } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
 import { createScrollCoalescer } from "./scrollCoalescer";
@@ -4908,6 +4909,104 @@ function readEditableTableCellText(cell: HTMLTableCellElement): string {
     : (cell.textContent ?? "");
 }
 
+// A RICH cell (math, emphasis, link, code, <br>) carries its markdown in
+// data-mm-cell-raw because its DOM holds RENDERED content that is not its
+// source: committing cell.textContent there would write the rendered glyphs
+// back over the user's `$x^2$`. Presence of the attribute IS the raw-mode
+// marker; a plain cell has none and keeps the literal contract untouched.
+function rawTableCellSource(cell: HTMLTableCellElement): string | null {
+  return cell.getAttribute("data-mm-cell-raw");
+}
+
+// Swap a rich cell's rendered DOM for its markdown so the caret edits SOURCE.
+// Returns the raw text now displayed, or null when the cell is plain.
+function showRawTableCellSource(cell: HTMLTableCellElement): string | null {
+  const raw = rawTableCellSource(cell);
+  if (raw === null) {
+    return null;
+  }
+
+  cell.textContent = raw;
+  placeCaretAtEndOfTableCell(cell);
+  return raw;
+}
+
+// Replacing every child under the caret leaves the selection undefined, so the
+// caret is re-anchored explicitly rather than left to engine-specific recovery.
+function placeCaretAtEndOfTableCell(cell: HTMLTableCellElement): void {
+  const selection = window.getSelection();
+  if (!selection || typeof document.createRange !== "function") {
+    return;
+  }
+
+  const range = document.createRange();
+  range.selectNodeContents(cell);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+// The rendered/source duality has ONE rule, shared by the settle branch and by
+// both restore paths (Escape, a validation refusal): while a raw-mode cell holds
+// the caret its DOM text is the markdown SOURCE, and once the caret leaves the
+// cell shows RENDERED content again.
+//
+// Restoring rendered content UNDER a live caret is document corruption, not a
+// cosmetic slip. Escape used to revert `**bold**` to <strong>bold</strong> and
+// latch the submit guard on the rendered word; one further keystroke made the
+// cell read `bold!`, and the blur posted THAT under raw:true, so the host
+// spliced it over the markdown and the `**` was gone from the file. Escape means
+// "undo my edit", not "commit whatever glyphs you happen to be showing".
+//
+// Re-swapping the source in — rather than blurring on Escape and letting the
+// blur path restore — keeps showRawTableCellSource the SINGLE owner of "a
+// focused raw cell shows its source". The validation refusal arrives
+// asynchronously while the user is legitimately still typing: that path cannot
+// blur without stealing the caret, and would additionally need a second channel
+// to stop the blur handler re-posting the very text the host just refused.
+function restoreRenderedTableCellContent(cell: HTMLTableCellElement, state: TableCellEditState): void {
+  cell.innerHTML = state.stashedInnerHtml;
+  if (document.activeElement === cell) {
+    showRawTableCellSource(cell);
+  }
+
+  // Latched AFTER the possible swap, so it describes the text actually in the
+  // DOM. Seeding it from the rendered glyphs is what let a cancelled edit post.
+  state.lastSubmittedText = readEditableTableCellText(cell);
+}
+
+// Re-run the pre-existing enhancement passes over ONE settled cell. The
+// renderer owns no markdown parser — the HTML arrived rendered from the host —
+// but KaTeX and highlight.js are renderer-side passes that only ever ran over
+// the initial document, so a freshly spliced fragment must be walked too.
+// Scoped to the cell: a document-wide pass would re-queue every formula in the
+// document for a single-cell edit.
+function enhanceSettledTableCell(cell: HTMLTableCellElement): void {
+  const katex = hostWindow.katex;
+  if (katex) {
+    cell.querySelectorAll<HTMLElement>("[data-tex]").forEach((node) => {
+      if (isTerminalMathState(node.dataset["mmMathRendered"])) {
+        return;
+      }
+
+      try {
+        katex.render(node.dataset.tex ?? node.getAttribute("data-tex") ?? "", node, {
+          throwOnError: false,
+          displayMode: node.classList.contains("math-display"),
+          strict: "warn",
+          trust: false,
+        });
+        node.dataset["mmMathRendered"] = "true";
+      } catch (error) {
+        node.dataset["mmMathRendered"] = "failed";
+        emitMark("mm-render-math-fail", { tex: node.getAttribute("data-tex") ?? "", error: String(error) });
+      }
+    });
+  }
+
+  renderCodeBlocks(cell);
+}
+
 function getOrCreateTableCellEditState(cell: HTMLTableCellElement): TableCellEditState {
   const existing = tableCellEditStates.get(cell);
   if (existing) {
@@ -4941,6 +5040,10 @@ function postTableCellEdit(cell: HTMLTableCellElement): boolean {
     cellIndex,
     text,
     key: cell.getAttribute("data-mm-cell-key"),
+    // Declares WHICH surface was edited, so the host knows whether `text` is
+    // literal content or markdown. Both host policies are independently
+    // fail-closed, so this selects escaping, never document safety.
+    raw: rawTableCellSource(cell) !== null,
     // Currency stamp: the render generation this renderer currently holds. The
     // host refuses the write if a different document has since become active
     // (the addressed line/index/key can collide with an unrelated cell there).
@@ -5019,6 +5122,41 @@ function handleTableCellUpdatedMessage(raw: unknown): void {
       return;
     }
 
+    if (typeof message.html === "string") {
+      // RAW settle: `text` is the cell's canonical markdown and `html` is that
+      // markdown RENDERED by the host (the only side that owns a parser), so
+      // the cell lands re-rendered instead of displaying literal `$x^2$`.
+      cell.innerHTML = message.html;
+      // The COMMITTED markdown decides the cell's mode, not the mode it had
+      // before. Editing `$x^2$` down to `hello` leaves a PLAIN cell; keeping
+      // data-mm-cell-raw there would hold the cell on the raw lane for the rest
+      // of the session, so a later `**bold**` would reach the file UNESCAPED —
+      // while a cold reload of the same document refuses it, because the host
+      // re-derives the mode from the source. Read the mode off the fragment the
+      // host just rendered: ApplicateHtmlMarkdownRenderer.RenderInlineAsync
+      // emits escaped text and NO element for MarkdownTextInline, and at least
+      // one element for every other inline (<strong>, <em>, <code>, <a>,
+      // <img> / <span class="image-placeholder">, <br>, <span class="math-inline">),
+      // so "the fragment holds no element" is exactly that renderer's own
+      // IsPlainTextCell verdict. Read before enhancement, which mutates children.
+      if (cell.querySelector("*") === null) {
+        cell.removeAttribute("data-mm-cell-raw");
+      } else {
+        cell.setAttribute("data-mm-cell-raw", message.text);
+      }
+      enhanceSettledTableCell(cell);
+      state.stashedInnerHtml = cell.innerHTML;
+      // An Enter commit does not blur. If the caret is still here the user is
+      // mid-edit, so hand the SOURCE straight back — otherwise the next blur
+      // would post the freshly rendered glyphs as if they were markdown.
+      if (document.activeElement === cell) {
+        showRawTableCellSource(cell);
+      }
+      state.lastSubmittedText = readEditableTableCellText(cell);
+      cell.dataset.mmCellKey = message.key;
+      return;
+    }
+
     cell.textContent = message.text;
     cell.dataset.mmCellKey = message.key;
     state.stashedInnerHtml = cell.innerHTML;
@@ -5036,8 +5174,7 @@ function handleTableCellUpdatedMessage(raw: unknown): void {
     return;
   }
 
-  cell.innerHTML = state.stashedInnerHtml;
-  state.lastSubmittedText = readEditableTableCellText(cell);
+  restoreRenderedTableCellContent(cell, state);
 }
 
 function wireTableCellEditing(): void {
@@ -5054,11 +5191,17 @@ function wireTableCellEditing(): void {
       return;
     }
 
+    // Stash the RENDERED html before any swap: Escape and a validation refusal
+    // both restore exactly what the host rendered.
+    const stashedInnerHtml = cell.innerHTML;
+    // A rich cell hands the caret its markdown instead of the rendered content.
+    showRawTableCellSource(cell);
     tableCellEditStates.set(cell, {
-      stashedInnerHtml: cell.innerHTML,
-      // Seed the submit latch with the cell's CURRENT text so an unmodified
-      // blur posts nothing: a no-op write would rewrite the file on read-only
-      // interaction and re-pad the source, destroying hand-aligned cell padding.
+      stashedInnerHtml,
+      // Seed the submit latch with the cell's CURRENT text (post-swap for a rich
+      // cell) so an unmodified blur posts nothing: a no-op write would rewrite
+      // the file on read-only interaction and re-pad the source, destroying
+      // hand-aligned cell padding.
       lastSubmittedText: readEditableTableCellText(cell),
     });
   });
@@ -5080,9 +5223,7 @@ function wireTableCellEditing(): void {
     }
 
     if (event.key === "Escape") {
-      const state = getOrCreateTableCellEditState(cell);
-      cell.innerHTML = state.stashedInnerHtml;
-      state.lastSubmittedText = readEditableTableCellText(cell);
+      restoreRenderedTableCellContent(cell, getOrCreateTableCellEditState(cell));
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -5099,7 +5240,20 @@ function wireTableCellEditing(): void {
 
   document.addEventListener("blur", (event) => {
     const cell = editableTableCellFromEventTarget(event.target);
-    if (cell) postTableCellEdit(cell);
+    if (!cell) {
+      return;
+    }
+
+    // The caret has left, so the other half of the raw-mode invariant applies: a
+    // raw cell goes back to showing RENDERED content instead of lingering on its
+    // literal `$x^2$`. Only when nothing was posted — a posted edit's typed text
+    // must survive in the DOM until the host either settles it (which replaces
+    // the content outright) or refuses it, and a BUSY refusal explicitly relies
+    // on that text still being there so a re-blur can retry. A plain cell needs
+    // no restore at all: its DOM text already IS its source.
+    if (!postTableCellEdit(cell) && rawTableCellSource(cell) !== null) {
+      restoreRenderedTableCellContent(cell, getOrCreateTableCellEditState(cell));
+    }
   }, true);
 
   document.addEventListener("beforeinput", (event) => {

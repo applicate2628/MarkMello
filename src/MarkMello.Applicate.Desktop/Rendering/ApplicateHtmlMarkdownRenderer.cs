@@ -91,6 +91,50 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             RendererCacheKeySuffix: ApplicateRendererDocumentCacheKeys.CreateSuffix(bodyHtml));
     }
 
+    /// <summary>
+    /// Renders ONE table cell's markdown to the inner HTML the document pipeline
+    /// would have produced for it. The renderer process owns no markdown parser —
+    /// all HTML originates here — so a committed RAW cell edit (the user retyped a
+    /// formula) can only settle back to rendered content by round-tripping the new
+    /// markdown through this single owner. Reuses the very same inline renderer the
+    /// full document pass uses, so math, emphasis, links, and code stay identical to
+    /// a cold re-render; the one-cell table probe mirrors the write-back validator's.
+    /// Falls back to escaped literal text when the markdown does not yield exactly
+    /// one cell, so a malformed fragment degrades to visible text, never to markup.
+    /// </summary>
+    public async Task<string> RenderTableCellHtmlAsync(
+        string rawCellMarkdown,
+        IImageSourceResolver? imageSourceResolver,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(rawCellMarkdown);
+
+        var probe = "| " + rawCellMarkdown + " |\n| --- |\n";
+        var rendered = _markdownRenderer.Render(probe, baseDirectory: null);
+        MarkdownTableCell? target = null;
+        foreach (var block in rendered.Blocks)
+        {
+            if (block is MarkdownTableBlock { Header.Count: 1 } table)
+            {
+                target = table.Header[0];
+                break;
+            }
+        }
+
+        if (target is null)
+        {
+            return HtmlText(rawCellMarkdown);
+        }
+
+        var context = new RenderContext(
+            imageSourceResolver,
+            baseDirectory: null,
+            cancellationToken,
+            probe.Split('\n'));
+        await RenderInlinesAsync(context, target.Inlines).ConfigureAwait(false);
+        return context.Html.ToString();
+    }
+
     private async Task<RenderContext> RenderMarkdownToContextAsync(
         MarkdownSource source,
         IImageSourceResolver? imageSourceResolver,
@@ -335,16 +379,27 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         context.Html.AppendLine("</div>");
     }
 
-    // A PLAIN table cell (all-text inlines) carries dormant write-back handles: the
-    // DOCUMENT-absolute source line, the ordinal cell index, and an identity key of
-    // its RAW cell source via the shared TableCellIdentity routine — the same routine
-    // the write-back verify side uses, so the two cannot diverge. Rich cells (any
-    // non-text inline: math, bold, links, code, <br>) and cells with no captured
-    // Source emit nothing and stay non-editable. Mirrors the data-task-* shape; the
-    // raw text is NOT emitted (only its 8-hex key), keeping tables + minimap small.
+    // Every table cell with a captured Source carries dormant write-back handles:
+    // the DOCUMENT-absolute source line, the ordinal cell index, and an identity key
+    // of its RAW cell source via the shared TableCellIdentity routine — the same
+    // routine the write-back verify side uses, so the two cannot diverge.
+    //
+    // A PLAIN cell (all-text inlines) stops there: its RENDERED text already IS its
+    // source text, so the renderer can edit it in place and the raw text would only
+    // bloat tables + minimap for nothing. That size rationale does not hold for a
+    // RICH cell (math, bold, link, code, <br>), whose DOM holds rendered content
+    // (KaTeX spans, <strong>, <a>) that is NOT its markdown. Such a cell additionally
+    // carries data-mm-cell-raw, its trimmed markdown, so the renderer can swap the
+    // raw source in for editing and post the user's markdown back verbatim instead
+    // of committing rendered glyphs. Only rich cells pay the extra bytes, and both
+    // the export snapshot and the minimap clone strip every data-mm-cell-* attribute.
     private static void AppendEditableCellAttributes(StringBuilder html, MarkdownTableCell cell)
     {
-        if (cell.Source is not { } source || !IsPlainTextCell(cell.Inlines))
+        // Fail closed on an unresolved math placeholder: such RawText is NOT the
+        // file's bytes, so its key could never match the write-back key and the
+        // caret would be handed a token instead of markdown. Stay non-editable.
+        if (cell.Source is not { } source
+            || source.RawText.Contains("@@APPLICATE_MATH_", StringComparison.Ordinal))
         {
             return;
         }
@@ -356,6 +411,13 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
             .Append("\" data-mm-cell-key=\"")
             .Append(TableCellIdentity.ComputeKey(source.RawText))
             .Append('"');
+
+        if (!IsPlainTextCell(cell.Inlines))
+        {
+            html.Append(" data-mm-cell-raw=\"")
+                .Append(HtmlAttribute(source.RawText.Trim()))
+                .Append('"');
+        }
     }
 
     private static bool IsPlainTextCell(IReadOnlyList<MarkdownInline> inlines)

@@ -117,7 +117,7 @@ public sealed class EditableTableCellTests
     // --- (d) $x$ math cell BEFORE a plain cell: plain key still correct -----
 
     [Fact]
-    public async Task InlineMathCellBeforePlainCellKeepsPlainCellKeyAndExcludesMathCell()
+    public async Task InlineMathCellBeforePlainCellKeepsPlainCellKey()
     {
         // header | $x$ | plain | / delimiter / data | $y$ | keep |.
         const string md = "| $x$ | plain |\n| --- | ----- |\n| $y$ | keep |\n";
@@ -134,12 +134,18 @@ public sealed class EditableTableCellTests
             html,
             StringComparison.Ordinal);
 
-        // The two math cells are rich → NOT editable. Only the two plain cells
-        // (both at ordinal 1) carry handles; the math cells at ordinal 0 do not.
-        Assert.Equal(2, Regex.Count(html, "mm-editable-cell"));
+        // All FOUR cells are editable. The two math cells are RICH, so they also
+        // carry data-mm-cell-raw: their DOM is KaTeX markup, and only the raw
+        // markdown can be handed to the caret and committed back.
+        Assert.Equal(4, Regex.Count(html, "mm-editable-cell"));
         Assert.Contains("data-mm-cell-index=\"1\"", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("data-mm-cell-index=\"0\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-mm-cell-index=\"0\"", html, StringComparison.Ordinal);
         Assert.Contains("math-inline", html, StringComparison.Ordinal);
+
+        // Exactly the two rich cells carry the raw source; the plain ones do not.
+        Assert.Equal(2, Regex.Count(html, "data-mm-cell-raw"));
+        Assert.Contains("data-mm-cell-raw=\"$x$\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-mm-cell-raw=\"$y$\"", html, StringComparison.Ordinal);
 
         // Write-back agreement for the plain cell despite the math token.
         var span = RawTableCellLocator.Locate(md, line: 0, cellIndex: 1);
@@ -215,6 +221,121 @@ public sealed class EditableTableCellTests
         // Exact measured overhead: 1176 bytes for 12 plain cells (~98 B/cell) —
         // 3 short attrs + class per cell, no raw-text attr. Pins the per-cell cost.
         Assert.Equal(1176, delta);
+    }
+
+    // --- rich cells: raw source emission + fragment rendering ---------------
+
+    [Fact]
+    public async Task RichCellsEmitTheirRawMarkdownAlongsideTheEditHandles()
+    {
+        // One cell per rich flavour the old gate excluded outright.
+        const string md =
+            "| Plain | $x^2$ | **bold** | [t](u) | `code` |\n"
+            + "| - | - | - | - | - |\n"
+            + "| a | b | c | d | e |\n";
+        var html = await RenderHtmlAsync(md);
+
+        // Every cell is editable now — 5 header + 5 body.
+        Assert.Equal(10, Regex.Count(html, "mm-editable-cell"));
+
+        // The four rich header cells carry their markdown verbatim (HTML-escaped),
+        // so the renderer can hand the SOURCE to the caret.
+        Assert.Contains("data-mm-cell-raw=\"$x^2$\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-mm-cell-raw=\"**bold**\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-mm-cell-raw=\"[t](u)\"", html, StringComparison.Ordinal);
+        Assert.Contains("data-mm-cell-raw=\"`code`\"", html, StringComparison.Ordinal);
+
+        // Only those four: the six plain cells stay on the literal contract and
+        // pay no raw-text bytes (the size rationale the plain path was built on).
+        Assert.Equal(4, Regex.Count(html, "data-mm-cell-raw"));
+    }
+
+    [Fact]
+    public async Task EmitKeyMatchesWriteBackLocatorKeyForMathCell()
+    {
+        // THE gate for rich-cell editing. The emit side captures a cell's RawText
+        // from the math-PROTECTED source, so without placeholder restoration a math
+        // cell's key would hash '@@APPLICATE_MATH_0@@' while the write-back hashes
+        // the real '$x^2$' bytes — and every rich-cell edit would be refused.
+        const string original = "| A | B |\n|---|---|\n| $x^2$ | right |\n";
+        var html = await RenderHtmlAsync(original);
+
+        var span = RawTableCellLocator.Locate(original, line: 2, cellIndex: 0);
+        Assert.NotNull(span);
+        var writeBackRaw = original.Substring(span!.Value.Start, span.Value.Length);
+        Assert.Equal("$x^2$", writeBackRaw.Trim());
+
+        // The emitted key and the raw attribute both come from the TRUE file bytes.
+        Assert.Contains(
+            $"data-mm-cell-key=\"{TableCellIdentity.ComputeKey(writeBackRaw)}\"",
+            html,
+            StringComparison.Ordinal);
+        Assert.Contains("data-mm-cell-raw=\"$x^2$\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("APPLICATE_MATH", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EmitKeyMatchesWriteBackLocatorKeyForMathCellAfterDisplayMath()
+    {
+        // Same agreement across a display-math segment boundary, where the cell's
+        // line is segment-relative before OffsetSourceSpans makes it absolute.
+        const string original = "$$\na=b\n$$\n\n| A | B |\n| - | - |\n| $y_1$ | 2 |\n";
+        var html = await RenderHtmlAsync(original);
+
+        var span = RawTableCellLocator.Locate(original, line: 6, cellIndex: 0);
+        Assert.NotNull(span);
+        var writeBackRaw = original.Substring(span!.Value.Start, span.Value.Length);
+        Assert.Equal("$y_1$", writeBackRaw.Trim());
+
+        Assert.Contains(
+            $"data-mm-cell-key=\"{TableCellIdentity.ComputeKey(writeBackRaw)}\"",
+            html,
+            StringComparison.Ordinal);
+        Assert.Contains("data-mm-cell-raw=\"$y_1$\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RichCellRawAttributeIsHtmlEscaped()
+    {
+        // A quote or angle bracket in the source must not break out of the
+        // attribute — the emit side escapes, the renderer reads it back decoded.
+        const string md = "| a <br> \"q\" | b |\n| - | - |\n| 1 | 2 |\n";
+        var html = await RenderHtmlAsync(md);
+
+        Assert.Contains("data-mm-cell-raw=\"a &lt;br&gt; &quot;q&quot;\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("data-mm-cell-raw=\"a <br>", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RenderTableCellHtmlRendersMarkdownThroughTheDocumentPipeline()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+
+        // Math reaches KaTeX through the same data-tex contract the document pass
+        // emits — this is what lets a committed raw edit settle RE-RENDERED.
+        var math = await renderer.RenderTableCellHtmlAsync("$x^3$", null, CancellationToken.None);
+        Assert.Contains("data-tex=\"x^3\"", math, StringComparison.Ordinal);
+        Assert.Contains("math-inline", math, StringComparison.Ordinal);
+
+        var bold = await renderer.RenderTableCellHtmlAsync("**b**", null, CancellationToken.None);
+        Assert.Contains("<strong>b</strong>", bold, StringComparison.Ordinal);
+
+        // Plain text renders as escaped text, not markup.
+        var plain = await renderer.RenderTableCellHtmlAsync("a & b", null, CancellationToken.None);
+        Assert.Contains("a &amp; b", plain, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RenderTableCellHtmlDegradesToEscapedTextWhenTheFragmentIsNotOneCell()
+    {
+        var renderer = new ApplicateHtmlMarkdownRenderer();
+
+        // A bare pipe would split the probe into two cells. The write-back path
+        // refuses such text before it ever gets here; if it somehow arrives, the
+        // fragment must degrade to VISIBLE TEXT, never to injected markup.
+        var html = await renderer.RenderTableCellHtmlAsync("a | b | c", null, CancellationToken.None);
+        Assert.DoesNotContain("<td", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<table", html, StringComparison.Ordinal);
     }
 
     // --- helpers ------------------------------------------------------------

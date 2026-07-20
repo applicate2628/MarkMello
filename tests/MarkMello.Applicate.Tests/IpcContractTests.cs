@@ -526,6 +526,10 @@ public sealed class IpcContractTests
             typeof(int),
             typeof(string),
             typeof(string),
+            // Rendered fragment for a RAW (rich-cell) settle; null keeps the
+            // original literal shapes byte-for-byte. renderId stays LAST, as on
+            // every host patch builder.
+            typeof(string),
             typeof(long?));
         var tableFailureBuilder = RequirePatchBuilder(
             "BuildTableCellUpdatedFailureMessage",
@@ -548,15 +552,27 @@ public sealed class IpcContractTests
 
         var legacySuccess = Serialize(tableSuccessBuilder.Invoke(
             null,
-            [12, 3, "Canonical plain text", "f00dcafe", null])!);
+            [12, 3, "Canonical plain text", "f00dcafe", null, null])!);
         Assert.Equal(
             new SortedSet<string>(StringComparer.Ordinal) { "type", "line", "cellIndex", "ok", "text", "key" },
             new SortedSet<string>(ObjectKeys(legacySuccess), StringComparer.Ordinal));
 
         var currentSuccess = Serialize(tableSuccessBuilder.Invoke(
             null,
-            [12, 3, "Canonical plain text", "f00dcafe", 42L])!);
+            [12, 3, "Canonical plain text", "f00dcafe", null, 42L])!);
         Assert.Equal(42L, currentSuccess.GetProperty("renderId").GetInt64());
+
+        // A RAW (rich-cell) settle adds the rendered fragment so the cell lands
+        // re-rendered; every other key stays exactly as on the literal shapes.
+        var rawSuccess = Serialize(tableSuccessBuilder.Invoke(
+            null,
+            [12, 3, "$x^2$", "f00dcafe", "<span data-tex=\"x^2\"></span>", 42L])!);
+        Assert.Equal(
+            new SortedSet<string>(StringComparer.Ordinal)
+                { "type", "line", "cellIndex", "ok", "text", "key", "html", "renderId" },
+            new SortedSet<string>(ObjectKeys(rawSuccess), StringComparer.Ordinal));
+        Assert.Equal("$x^2$", rawSuccess.GetProperty("text").GetString());
+        Assert.Equal("<span data-tex=\"x^2\"></span>", rawSuccess.GetProperty("html").GetString());
 
         var legacyFailure = Serialize(tableFailureBuilder.Invoke(null, [12, 3, false, null])!);
         Assert.Equal(
@@ -644,7 +660,7 @@ public sealed class IpcContractTests
                 handler => view.TaskToggleRequested += (_, _) => handler());
 
             AssertInbound(view, "table-cell-edit", renderer,
-                new() { ["type"] = "table-cell-edit", ["line"] = 12, ["cellIndex"] = 3, ["text"] = "plain", ["key"] = null, ["renderId"] = null },
+                new() { ["type"] = "table-cell-edit", ["line"] = 12, ["cellIndex"] = 3, ["text"] = "plain", ["key"] = null, ["raw"] = false, ["renderId"] = null },
                 handler => view.TableCellEditRequested += (_, _) => handler());
         });
     }
@@ -1558,6 +1574,12 @@ public sealed class IpcContractTests
         public System.Threading.Tasks.Task<ApplicateRenderedBody> RenderBodyAsync(
             MarkdownSource source,
             ReadingPreferences preferences,
+            IImageSourceResolver? imageSourceResolver,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException("renderer is not exercised by IPC-contract tests");
+
+        public System.Threading.Tasks.Task<string> RenderTableCellHtmlAsync(
+            string rawCellMarkdown,
             IImageSourceResolver? imageSourceResolver,
             CancellationToken cancellationToken)
             => throw new NotSupportedException("renderer is not exercised by IPC-contract tests");

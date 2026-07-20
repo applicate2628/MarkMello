@@ -5340,6 +5340,59 @@
   function readEditableTableCellText(cell) {
     return cell.dataset.mmCellPlaintextFallback === "true" ? cell.innerText : cell.textContent ?? "";
   }
+  function rawTableCellSource(cell) {
+    return cell.getAttribute("data-mm-cell-raw");
+  }
+  function showRawTableCellSource(cell) {
+    const raw = rawTableCellSource(cell);
+    if (raw === null) {
+      return null;
+    }
+    cell.textContent = raw;
+    placeCaretAtEndOfTableCell(cell);
+    return raw;
+  }
+  function placeCaretAtEndOfTableCell(cell) {
+    const selection = window.getSelection();
+    if (!selection || typeof document.createRange !== "function") {
+      return;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  function restoreRenderedTableCellContent(cell, state2) {
+    cell.innerHTML = state2.stashedInnerHtml;
+    if (document.activeElement === cell) {
+      showRawTableCellSource(cell);
+    }
+    state2.lastSubmittedText = readEditableTableCellText(cell);
+  }
+  function enhanceSettledTableCell(cell) {
+    const katex = hostWindow.katex;
+    if (katex) {
+      cell.querySelectorAll("[data-tex]").forEach((node) => {
+        if (isTerminalMathState(node.dataset["mmMathRendered"])) {
+          return;
+        }
+        try {
+          katex.render(node.dataset.tex ?? node.getAttribute("data-tex") ?? "", node, {
+            throwOnError: false,
+            displayMode: node.classList.contains("math-display"),
+            strict: "warn",
+            trust: false
+          });
+          node.dataset["mmMathRendered"] = "true";
+        } catch (error) {
+          node.dataset["mmMathRendered"] = "failed";
+          emitMark("mm-render-math-fail", { tex: node.getAttribute("data-tex") ?? "", error: String(error) });
+        }
+      });
+    }
+    renderCodeBlocks(cell);
+  }
   function getOrCreateTableCellEditState(cell) {
     const existing = tableCellEditStates.get(cell);
     if (existing) {
@@ -5369,6 +5422,10 @@
       cellIndex,
       text,
       key: cell.getAttribute("data-mm-cell-key"),
+      // Declares WHICH surface was edited, so the host knows whether `text` is
+      // literal content or markdown. Both host policies are independently
+      // fail-closed, so this selects escaping, never document safety.
+      raw: rawTableCellSource(cell) !== null,
       // Currency stamp: the render generation this renderer currently holds. The
       // host refuses the write if a different document has since become active
       // (the addressed line/index/key can collide with an unrelated cell there).
@@ -5426,6 +5483,22 @@
       if (typeof message.text !== "string" || typeof message.key !== "string") {
         return;
       }
+      if (typeof message.html === "string") {
+        cell.innerHTML = message.html;
+        if (cell.querySelector("*") === null) {
+          cell.removeAttribute("data-mm-cell-raw");
+        } else {
+          cell.setAttribute("data-mm-cell-raw", message.text);
+        }
+        enhanceSettledTableCell(cell);
+        state2.stashedInnerHtml = cell.innerHTML;
+        if (document.activeElement === cell) {
+          showRawTableCellSource(cell);
+        }
+        state2.lastSubmittedText = readEditableTableCellText(cell);
+        cell.dataset.mmCellKey = message.key;
+        return;
+      }
       cell.textContent = message.text;
       cell.dataset.mmCellKey = message.key;
       state2.stashedInnerHtml = cell.innerHTML;
@@ -5436,8 +5509,7 @@
       state2.lastSubmittedText = null;
       return;
     }
-    cell.innerHTML = state2.stashedInnerHtml;
-    state2.lastSubmittedText = readEditableTableCellText(cell);
+    restoreRenderedTableCellContent(cell, state2);
   }
   function wireTableCellEditing() {
     if (tableCellEditingWired) {
@@ -5451,11 +5523,14 @@
       if (!cell) {
         return;
       }
+      const stashedInnerHtml = cell.innerHTML;
+      showRawTableCellSource(cell);
       tableCellEditStates.set(cell, {
-        stashedInnerHtml: cell.innerHTML,
-        // Seed the submit latch with the cell's CURRENT text so an unmodified
-        // blur posts nothing: a no-op write would rewrite the file on read-only
-        // interaction and re-pad the source, destroying hand-aligned cell padding.
+        stashedInnerHtml,
+        // Seed the submit latch with the cell's CURRENT text (post-swap for a rich
+        // cell) so an unmodified blur posts nothing: a no-op write would rewrite
+        // the file on read-only interaction and re-pad the source, destroying
+        // hand-aligned cell padding.
         lastSubmittedText: readEditableTableCellText(cell)
       });
     });
@@ -5473,9 +5548,7 @@
         return;
       }
       if (event.key === "Escape") {
-        const state2 = getOrCreateTableCellEditState(cell);
-        cell.innerHTML = state2.stashedInnerHtml;
-        state2.lastSubmittedText = readEditableTableCellText(cell);
+        restoreRenderedTableCellContent(cell, getOrCreateTableCellEditState(cell));
         event.preventDefault();
         event.stopPropagation();
         return;
@@ -5489,7 +5562,12 @@
     });
     document.addEventListener("blur", (event) => {
       const cell = editableTableCellFromEventTarget(event.target);
-      if (cell) postTableCellEdit(cell);
+      if (!cell) {
+        return;
+      }
+      if (!postTableCellEdit(cell) && rawTableCellSource(cell) !== null) {
+        restoreRenderedTableCellContent(cell, getOrCreateTableCellEditState(cell));
+      }
     }, true);
     document.addEventListener("beforeinput", (event) => {
       const cell = editableTableCellFromEventTarget(event.target);

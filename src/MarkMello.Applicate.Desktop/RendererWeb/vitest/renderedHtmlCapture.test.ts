@@ -96,7 +96,10 @@ function installVisualFixture(): void {
         <pre class="mm-mermaid is-rendered"><svg><path d="M0 0h1"></path></svg></pre>
         <pre><code class="hljs"><span class="hljs-keyword">const</span> x = 1;</code></pre>
         <table><tbody><tr><td class="mm-editable-cell" contenteditable="true"
-          data-mm-cell-line="7" data-mm-cell-index="0" onblur="evil()">value</td></tr></tbody></table>
+          data-mm-cell-line="7" data-mm-cell-index="0" onblur="evil()">value</td>
+          <td class="mm-editable-cell" contenteditable="true" data-mm-cell-line="7"
+            data-mm-cell-index="1" data-mm-cell-key="deadbeef" data-mm-cell-raw="$x^2$"
+            ><span class="math-inline" data-tex="x^2"><span class="katex">x&sup2;</span></span></td></tr></tbody></table>
         <label><input class="mm-task-checkbox" type="checkbox" checked data-task-line="8"
           data-task-key="task" onchange="evil()">done</label>
         <img alt="fixture" src="data:image/png;base64,AAAA"
@@ -144,12 +147,17 @@ describe("rendered HTML snapshot", () => {
     expect(parsed.querySelectorAll("style")).toHaveLength(3);
     expect(html).toContain("::-webkit-scrollbar");
     expect(html).toContain("scrollbar-width:auto");
-    expect(parsed.querySelectorAll(".katex")).toHaveLength(2);
+    expect(parsed.querySelectorAll(".katex")).toHaveLength(3);
     expect(parsed.querySelectorAll("[data-tex]")).toHaveLength(0);
     expect(parsed.querySelectorAll(".mm-mermaid svg")).toHaveLength(1);
     expect(parsed.querySelectorAll("code.hljs .hljs-keyword")).toHaveLength(1);
     expect(parsed.querySelectorAll("script, meta[http-equiv='refresh'], .mm-minimap, .mm-width-handle, #mm-drop-overlay, .mm-find-bar, .mm-mode-reveal-shield, .mm-document-reveal-shield")).toHaveLength(0);
     expect(parsed.querySelectorAll("[contenteditable], .mm-editable-cell, [data-task-line], [data-task-key]")).toHaveLength(0);
+    // A RICH editable cell carries its markdown in data-mm-cell-raw. That must
+    // never reach an exported document: the generic data-mm-* strip covers it,
+    // and assertSnapshotCleanup throws if any survives.
+    expect(parsed.querySelectorAll("[data-mm-cell-raw], [data-mm-cell-key]")).toHaveLength(0);
+    expect(captureSnapshot()).not.toContain("data-mm-cell-raw");
     expect(parsed.querySelectorAll("[onclick], [onload], [onchange], [onblur]")).toHaveLength(0);
     expect(parsed.querySelector("#unsafe-link")?.hasAttribute("href")).toBe(false);
     expect(parsed.querySelector<HTMLInputElement>(".mm-task-checkbox")?.disabled).toBe(true);
@@ -163,17 +171,17 @@ describe("rendered HTML snapshot", () => {
     installVisualFixture();
     const before = document.documentElement.outerHTML;
 
-    expect(document.querySelectorAll("[data-tex]")).toHaveLength(2);
-    expect(document.querySelectorAll(".katex")).toHaveLength(2);
+    expect(document.querySelectorAll("[data-tex]")).toHaveLength(3);
+    expect(document.querySelectorAll(".katex")).toHaveLength(3);
 
     const parsed = new DOMParser().parseFromString(captureSnapshot(), "text/html");
 
     expect(parsed.querySelectorAll("[data-tex]")).toHaveLength(0);
-    expect(parsed.querySelectorAll(".katex")).toHaveLength(2);
+    expect(parsed.querySelectorAll(".katex")).toHaveLength(3);
     expect(parsed.querySelector(".math-display")?.textContent).toBe("x²");
     expect(parsed.querySelector(".math-inline")?.textContent).toBe("y");
     expect(document.documentElement.outerHTML).toBe(before);
-    expect(document.querySelectorAll("[data-tex]")).toHaveLength(2);
+    expect(document.querySelectorAll("[data-tex]")).toHaveLength(3);
   });
 
   it("Snapshot_DoesNotMutateLiveDom on success or resource failure", () => {

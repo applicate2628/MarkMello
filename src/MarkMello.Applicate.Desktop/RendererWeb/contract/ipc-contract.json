@@ -262,6 +262,10 @@
         "kind": "string",
         "optional": true
       },
+      "html": {
+        "kind": "string",
+        "optional": true
+      },
       "reason": {
         "kind": "string",
         "optional": true
@@ -568,6 +572,10 @@
       "key": {
         "kind": "string",
         "nullable": true
+      },
+      "raw": {
+        "kind": "boolean",
+        "optional": true
       },
       "renderId": {
         "kind": "number",

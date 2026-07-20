@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using MarkMello.Application.Abstractions;
@@ -56,7 +57,7 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
                 continue;
             }
 
-            var protectedText = ProtectInlineMath(segment.Text, _normalizeTex, out var inlineMath);
+            var protectedText = ProtectInlineMath(segment.Text, _normalizeTex, out var inlineMath, out var inlineMathSource);
             // AFTER math tokenization (so no math text remains), BEFORE Markdig:
             // wrap bare space-containing link destinations in <…> so CommonMark
             // parses them. Line-count-preserving, so every line-indexed consumer
@@ -65,7 +66,7 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
             var rendered = _inner.Render(protectedText, baseDirectory);
             var renderedBlocks = inlineMath.Count == 0
                 ? rendered.Blocks
-                : RestoreInlineMath(rendered.Blocks, inlineMath);
+                : RestoreInlineMath(rendered.Blocks, inlineMath, inlineMathSource);
             blocks.AddRange(OffsetSourceSpans(renderedBlocks, segment.StartLine));
         }
 
@@ -139,9 +140,15 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
     private static string ProtectInlineMath(
         string markdown,
         Func<string, string> normalizeTex,
-        out IReadOnlyDictionary<int, string> inlineMath)
+        out IReadOnlyDictionary<int, string> inlineMath,
+        out IReadOnlyDictionary<int, string> inlineMathSource)
     {
         var replacements = new Dictionary<int, string>();
+        // Parallel map of the ORIGINAL matched bytes ('$x$', '\(x\)'). The tex map
+        // above holds NORMALIZED tex, which cannot reconstruct the source, and a
+        // table cell's captured RawText must be the true file bytes or its identity
+        // key can never match the write-back key.
+        var sources = new Dictionary<int, string>();
         var result = new StringBuilder(markdown.Length);
         var inFence = false;
         var fenceMarker = string.Empty;
@@ -155,10 +162,11 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
                 continue;
             }
 
-            AppendLineWithProtectedInlineMath(result, line, replacements, normalizeTex);
+            AppendLineWithProtectedInlineMath(result, line, replacements, sources, normalizeTex);
         }
 
         inlineMath = replacements;
+        inlineMathSource = sources;
         return result.ToString();
     }
 
@@ -166,6 +174,7 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         StringBuilder result,
         string line,
         Dictionary<int, string> replacements,
+        Dictionary<int, string> sources,
         Func<string, string> normalizeTex)
     {
         var cursor = 0;
@@ -187,7 +196,7 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
 
             var nextCodeSpan = line.IndexOf('`', cursor);
             var segmentEnd = nextCodeSpan < 0 ? line.Length : nextCodeSpan;
-            AppendProtectedInlineMathSegment(result, line[cursor..segmentEnd], replacements, normalizeTex);
+            AppendProtectedInlineMathSegment(result, line[cursor..segmentEnd], replacements, sources, normalizeTex);
             cursor = segmentEnd;
         }
     }
@@ -209,6 +218,7 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
         StringBuilder result,
         string text,
         Dictionary<int, string> replacements,
+        Dictionary<int, string> sources,
         Func<string, string> normalizeTex)
     {
         result.Append(InlineMathPattern.Replace(text, match =>
@@ -221,43 +231,78 @@ public sealed class ApplicateMarkdownDocumentRenderer : IMarkdownDocumentRendere
 
             var index = replacements.Count;
             replacements.Add(index, normalizeTex(tex.Trim()));
+            sources.Add(index, match.Value);
             return $"@@APPLICATE_MATH_{index}@@";
         }));
     }
 
     private static IReadOnlyList<MarkdownBlock> RestoreInlineMath(
         IReadOnlyList<MarkdownBlock> blocks,
-        IReadOnlyDictionary<int, string> inlineMath)
-        => blocks.Select(block => RestoreInlineMath(block, inlineMath)).ToList();
+        IReadOnlyDictionary<int, string> inlineMath,
+        IReadOnlyDictionary<int, string> inlineMathSource)
+        => blocks.Select(block => RestoreInlineMath(block, inlineMath, inlineMathSource)).ToList();
 
     private static MarkdownBlock RestoreInlineMath(
         MarkdownBlock block,
-        IReadOnlyDictionary<int, string> inlineMath)
+        IReadOnlyDictionary<int, string> inlineMath,
+        IReadOnlyDictionary<int, string> inlineMathSource)
         => block switch
         {
             MarkdownHeadingBlock heading => heading with { Inlines = RestoreInlineMath(heading.Inlines, inlineMath) },
             MarkdownParagraphBlock paragraph => paragraph with { Inlines = RestoreInlineMath(paragraph.Inlines, inlineMath) },
-            MarkdownQuoteBlock quote => quote with { Blocks = RestoreInlineMath(quote.Blocks, inlineMath) },
+            MarkdownQuoteBlock quote => quote with { Blocks = RestoreInlineMath(quote.Blocks, inlineMath, inlineMathSource) },
             MarkdownListBlock list => list with
             {
                 Items = list.Items.Select(item => item with
                 {
-                    Blocks = RestoreInlineMath(item.Blocks, inlineMath)
+                    Blocks = RestoreInlineMath(item.Blocks, inlineMath, inlineMathSource)
                 }).ToList()
             },
             MarkdownTableBlock table => table with
             {
-                Header = table.Header.Select(cell => cell with
-                {
-                    Inlines = RestoreInlineMath(cell.Inlines, inlineMath)
-                }).ToList(),
-                Rows = table.Rows.Select(row => row.Select(cell => cell with
-                {
-                    Inlines = RestoreInlineMath(cell.Inlines, inlineMath)
-                }).ToList()).ToList()
+                Header = table.Header.Select(cell => RestoreTableCell(cell, inlineMath, inlineMathSource)).ToList(),
+                Rows = table.Rows
+                    .Select(row => row.Select(cell => RestoreTableCell(cell, inlineMath, inlineMathSource)).ToList())
+                    .ToList()
             },
             _ => block
         };
+
+    /// <summary>
+    /// Restores a table cell's inlines AND its captured raw source. The cell's
+    /// RawText was extracted from the math-PROTECTED text, so a cell holding a
+    /// formula carries '@@APPLICATE_MATH_n@@' instead of the file's own bytes.
+    /// Substituting the original matched text back makes RawText the true source
+    /// again. Load-bearing twice over: it is what the identity key hashes (a key
+    /// over placeholder bytes could never match the write-back key, which comes
+    /// from a RAW parse of the real file, so every rich-cell edit would be
+    /// refused), and it is what the renderer hands to the caret for editing.
+    /// </summary>
+    private static MarkdownTableCell RestoreTableCell(
+        MarkdownTableCell cell,
+        IReadOnlyDictionary<int, string> inlineMath,
+        IReadOnlyDictionary<int, string> inlineMathSource)
+    {
+        var restored = cell with { Inlines = RestoreInlineMath(cell.Inlines, inlineMath) };
+        if (cell.Source is not { } source
+            || !source.RawText.Contains("@@APPLICATE_MATH_", StringComparison.Ordinal))
+        {
+            return restored;
+        }
+
+        var rawText = InlineMathTokenPattern.Replace(
+            source.RawText,
+            match => int.TryParse(
+                    match.Groups[1].Value,
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out var index)
+                && inlineMathSource.TryGetValue(index, out var original)
+                    ? original
+                    : match.Value);
+
+        return restored with { Source = source with { RawText = rawText } };
+    }
 
     private static IReadOnlyList<MarkdownInline> RestoreInlineMath(
         IReadOnlyList<MarkdownInline> inlines,

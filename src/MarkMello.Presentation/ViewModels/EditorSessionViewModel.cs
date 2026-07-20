@@ -524,7 +524,8 @@ internal sealed record RealtimeInDocumentEditDomPatch
         string? beforeText,
         string? beforeKey,
         string? afterText,
-        string? afterKey)
+        string? afterKey,
+        bool raw = false)
     {
         Kind = kind;
         Line = line;
@@ -535,6 +536,7 @@ internal sealed record RealtimeInDocumentEditDomPatch
         BeforeKey = beforeKey;
         AfterText = afterText;
         AfterKey = afterKey;
+        Raw = raw;
     }
 
     public RealtimeInDocumentEditDomPatchKind Kind { get; }
@@ -554,6 +556,10 @@ internal sealed record RealtimeInDocumentEditDomPatch
     public string? AfterText { get; }
 
     public string? AfterKey { get; }
+
+    // RAW table-cell patch: BeforeText/AfterText carry the cell's markdown, so
+    // undo/redo must re-render the fragment rather than write it as text.
+    public bool Raw { get; }
 
     internal static RealtimeInDocumentEditDomPatch ForTaskCheckbox(int line, bool beforeChecked, bool afterChecked)
     {
@@ -576,7 +582,8 @@ internal sealed record RealtimeInDocumentEditDomPatch
         string beforeText,
         string beforeKey,
         string afterText,
-        string afterKey)
+        string afterKey,
+        bool raw = false)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(line);
         ArgumentOutOfRangeException.ThrowIfNegative(cellIndex);
@@ -594,7 +601,8 @@ internal sealed record RealtimeInDocumentEditDomPatch
             beforeText,
             beforeKey,
             afterText,
-            afterKey);
+            afterKey,
+            raw);
     }
 
     internal RealtimeInDocumentEditDirectedDomPatch CreateDirectedPatch(bool useAfterValues)
@@ -607,7 +615,8 @@ internal sealed record RealtimeInDocumentEditDomPatch
                 Line,
                 CellIndex,
                 useAfterValues ? AfterText! : BeforeText!,
-                useAfterValues ? AfterKey! : BeforeKey!),
+                useAfterValues ? AfterKey! : BeforeKey!,
+                Raw),
             _ => throw new InvalidOperationException($"Unsupported realtime edit DOM patch kind '{Kind}'."),
         };
 }
@@ -618,13 +627,19 @@ public sealed record RealtimeInDocumentEditDirectedDomPatch(
     int CellIndex,
     bool Checked,
     string? Text,
-    string? Key)
+    string? Key,
+    bool Raw = false)
 {
     internal static RealtimeInDocumentEditDirectedDomPatch ForTaskCheckbox(int line, bool checkedValue)
         => new(RealtimeInDocumentEditDomPatchKind.TaskCheckbox, line, -1, checkedValue, null, null);
 
-    internal static RealtimeInDocumentEditDirectedDomPatch ForTableCell(int line, int cellIndex, string text, string key)
-        => new(RealtimeInDocumentEditDomPatchKind.TableCell, line, cellIndex, false, text, key);
+    internal static RealtimeInDocumentEditDirectedDomPatch ForTableCell(
+        int line,
+        int cellIndex,
+        string text,
+        string key,
+        bool raw = false)
+        => new(RealtimeInDocumentEditDomPatchKind.TableCell, line, cellIndex, false, text, key, raw);
 }
 
 internal sealed record RealtimeInDocumentEditHistoryEntry(

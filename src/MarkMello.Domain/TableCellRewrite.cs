@@ -29,6 +29,43 @@ public static class TableCellRewrite
         return $" {escaped} ";
     }
 
+    /// <summary>
+    /// Prepares RAW cell markdown for splicing over <paramref name="originalRawCell"/>
+    /// (the located span's current bytes). The typed text IS markdown here (the user
+    /// edited the cell's raw source), so NOTHING is escaped — in particular a bare
+    /// <c>|</c> is deliberately left alone so the caller's re-validation REFUSES the
+    /// edit instead of silently rewriting the user's markdown into <c>\|</c>. Only
+    /// contenteditable artifacts (NBSP, CR/LF, control characters) are normalized.
+    /// <para>
+    /// The replacement REUSES the original span's own leading/trailing whitespace
+    /// rather than imposing a fresh <c>" x "</c> pad: the located span includes the
+    /// cell's padding for some cell contents and excludes it for others, so a fixed
+    /// pad would double-space one of those cases and re-pad hand-aligned tables.
+    /// </para>
+    /// </summary>
+    public static string NormalizeRawCellContent(string content, string originalRawCell)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        ArgumentNullException.ThrowIfNull(originalRawCell);
+
+        var start = 0;
+        while (start < originalRawCell.Length && char.IsWhiteSpace(originalRawCell[start]))
+        {
+            start++;
+        }
+
+        var end = originalRawCell.Length;
+        while (end > start && char.IsWhiteSpace(originalRawCell[end - 1]))
+        {
+            end--;
+        }
+
+        return string.Concat(
+            originalRawCell.AsSpan(0, start),
+            NormalizeContentEditableArtifacts(content).AsSpan(),
+            originalRawCell.AsSpan(end));
+    }
+
     public static string Splice(string content, TableCellSpan span, string padded)
     {
         ArgumentNullException.ThrowIfNull(content);

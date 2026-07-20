@@ -2214,13 +2214,22 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                         return;
                     }
 
+                    // The renderer declares which surface it edited: a rich cell
+                    // hands back markdown ("raw"), a plain cell literal text. The
+                    // flag only selects the write-back escaping/validation policy —
+                    // both policies are independently fail-closed, so a wrong or
+                    // absent flag can never corrupt the document.
+                    var cellRaw = document.RootElement.TryGetProperty("raw", out var cellRawProperty)
+                        && cellRawProperty.ValueKind == JsonValueKind.True;
+
                     TableCellEditRequested?.Invoke(
                         this,
                         new ApplicateWebTableCellEditEventArgs(
                             cellLine,
                             cellIndex,
                             cellTextProperty.GetString() ?? string.Empty,
-                            cellKeyProperty.ValueKind == JsonValueKind.String ? cellKeyProperty.GetString() : null));
+                            cellKeyProperty.ValueKind == JsonValueKind.String ? cellKeyProperty.GetString() : null,
+                            cellRaw));
                 }
 
                 return;
@@ -4320,10 +4329,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             ? new { type = "set-task-checkbox", line, @checked = isChecked, renderId = renderId.Value }
             : new { type = "set-task-checkbox", line, @checked = isChecked };
 
-    internal void SetTableCellText(int line, int cellIndex, string text, string key)
-        => SetTableCellText(line, cellIndex, text, key, Source?.Path ?? string.Empty);
+    internal void SetTableCellText(int line, int cellIndex, string text, string key, bool raw = false)
+        => SetTableCellText(line, cellIndex, text, key, Source?.Path ?? string.Empty, raw);
 
-    internal void SetTableCellText(int line, int cellIndex, string text, string key, string expectedPath)
+    internal void SetTableCellText(int line, int cellIndex, string text, string key, string expectedPath, bool raw = false)
     {
         if (!_hasLoadedDocument
             || _awaitingLayoutReady
@@ -4336,12 +4345,64 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
+        if (!raw)
+        {
+            PostRendererMessage(BuildTableCellUpdatedSuccessMessage(
+                line,
+                cellIndex,
+                text,
+                key,
+                renderId: ActiveRendererPatchRenderId));
+            return;
+        }
+
+        // RAW settle: `text` is the cell's markdown, and the renderer owns no
+        // markdown parser, so writing it as text would leave `$x^2$` on screen.
+        // Render the fragment here — the single HTML owner — and acknowledge with
+        // it so the cell lands RE-RENDERED without a cold document re-render.
+        _ = SetRawTableCellAsync(line, cellIndex, text, key, expectedPath, ActiveRendererPatchRenderId);
+    }
+
+    private async Task SetRawTableCellAsync(
+        int line,
+        int cellIndex,
+        string rawCellMarkdown,
+        string key,
+        string expectedPath,
+        long? renderId)
+    {
+        string? html = null;
+        try
+        {
+            html = await _renderer
+                .RenderTableCellHtmlAsync(rawCellMarkdown, ImageSourceResolver, CancellationToken.None)
+                .ConfigureAwait(true);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Fragment render failed: still ACKNOWLEDGE, without html. The commit is
+            // already settled in the buffer, so swallowing the reply would strand the
+            // renderer's submit latch; a text-only settle degrades to visible markdown
+            // and self-heals on the next full render.
+            ApplicateTrace.ModeToggle(
+                $"Web.SetRawTableCell fragment-render-failed line={line} cell={cellIndex} ex={exception.GetType().Name}");
+        }
+
+        // The document may have changed while the fragment rendered.
+        if (!_hasLoadedDocument
+            || _awaitingLayoutReady
+            || !string.Equals(Source?.Path ?? string.Empty, expectedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
         PostRendererMessage(BuildTableCellUpdatedSuccessMessage(
             line,
             cellIndex,
-            text,
+            rawCellMarkdown,
             key,
-            ActiveRendererPatchRenderId));
+            html,
+            renderId));
     }
 
     internal void RejectTableCellEdit(int line, int cellIndex, string expectedPath, bool busy = false)
@@ -4362,13 +4423,42 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             ActiveRendererPatchRenderId));
     }
 
+    // `html` is present ONLY for a raw (rich-cell) settle, where `text` is the
+    // cell's markdown and the renderer needs the rendered fragment to display.
+    // A literal settle keeps the original two shapes byte-for-byte.
     internal static object BuildTableCellUpdatedSuccessMessage(
         int line,
         int cellIndex,
         string text,
         string key,
+        string? html = null,
         long? renderId = null)
-        => renderId is > 0
+    {
+        if (html is null)
+        {
+            return renderId is > 0
+                ? new
+                {
+                    type = "table-cell-updated",
+                    line,
+                    cellIndex,
+                    ok = true,
+                    text,
+                    key,
+                    renderId = renderId.Value,
+                }
+                : new
+                {
+                    type = "table-cell-updated",
+                    line,
+                    cellIndex,
+                    ok = true,
+                    text,
+                    key,
+                };
+        }
+
+        return renderId is > 0
             ? new
             {
                 type = "table-cell-updated",
@@ -4377,6 +4467,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 ok = true,
                 text,
                 key,
+                html,
                 renderId = renderId.Value,
             }
             : new
@@ -4387,7 +4478,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 ok = true,
                 text,
                 key,
+                html,
             };
+    }
 
     internal static object BuildTableCellUpdatedFailureMessage(
         int line,

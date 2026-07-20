@@ -26,6 +26,16 @@ public interface ITableCellSourceEditor
     /// Re-parses a raw source cell and returns its decoded plain-text state, or <c>null</c> when absent or rich.
     /// </summary>
     TableCellSourceSnapshot? ParsePlainCell(string source, int line, int cellIndex);
+
+    /// <summary>
+    /// Re-parses a raw source cell for its STRUCTURAL state regardless of richness:
+    /// returns <c>null</c> only when the cell is absent. A rich cell (math, emphasis,
+    /// link, code, <c>&lt;br&gt;</c>) comes back with <see cref="TableCellSourceSnapshot.IsPlainText"/>
+    /// <c>false</c> and an empty <see cref="TableCellSourceSnapshot.Text"/> — callers on
+    /// the raw path read the cell's markdown from the span, never from <c>Text</c>,
+    /// because an EMPTY plain cell is also <c>Text == ""</c>.
+    /// </summary>
+    TableCellSourceSnapshot? ParseCell(string source, int line, int cellIndex);
 }
 
 /// <summary>
@@ -40,4 +50,5 @@ public readonly record struct TableCellSourceSnapshot(
     int RowIndex,
     int ColumnIndex,
     int RowCount,
-    int ColumnCount);
+    int ColumnCount,
+    bool IsPlainText = true);

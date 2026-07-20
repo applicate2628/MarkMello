@@ -116,10 +116,11 @@ public sealed record MarkdownTableCell(
 /// <c>' A '</c> or <c>' a\|b '</c>. For a PLAIN cell this equals the original file
 /// bytes even when a sibling cell's inline-math token shifted the row, so
 /// <c>TableCellIdentity.ComputeKey(RawText)</c> at emit matches the key the
-/// write-back re-derives from a fresh raw parse of the same cell. Carried
-/// in-memory only; never serialized to HTML (the emitted attributes are
-/// line/index/key — the raw text is NOT emitted, to keep tables and the minimap
-/// clone small).
+/// write-back re-derives from a fresh raw parse of the same cell. A PLAIN cell
+/// emits line/index/key only, keeping tables and the minimap clone small. A RICH
+/// cell (math, emphasis, link, code, &lt;br&gt;) additionally emits
+/// <c>RawText.Trim()</c> as <c>data-mm-cell-raw</c>, because its rendered DOM is
+/// NOT its source and the renderer must hand the caret the markdown to edit.
 /// </param>
 public sealed record MarkdownTableCellSource(int SourceLine, int CellIndex, string RawText);
 

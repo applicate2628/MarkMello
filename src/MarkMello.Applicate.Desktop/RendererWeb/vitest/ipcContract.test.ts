@@ -194,7 +194,7 @@ describe("renderer->host producer capture", () => {
     const edit = messages.find((message) => message.type === "table-cell-edit");
 
     expect(Object.keys(edit as CapturedMessage).sort()).toEqual(
-      ["cellIndex", "key", "line", "renderId", "text", "type"],
+      ["cellIndex", "key", "line", "raw", "renderId", "text", "type"],
     );
     assertNoViolations(messages);
   });
