@@ -16,6 +16,7 @@ using Avalonia.Media.Transformation;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Applicate.Desktop.Editing;
 using MarkMello.Presentation.Localization;
 
@@ -56,6 +57,13 @@ internal sealed class ApplicateTabsView : UserControl
     // matches popup fades, hover transitions, and the rest of the UI's
     // pacing in one place.
     private static TimeSpan ReorderAnimationDuration => ApplicateMotion.Standard;
+
+    /// <summary>
+    /// Diagnostic group for the bulk-close owner-resolution guard in <see cref="CloseSet"/>.
+    /// Permanent (not a bug-hunt call site): it is the ONLY externally observable trace that a
+    /// bulk close was refused because its unsaved-changes gate could not be reached.
+    /// </summary>
+    private const string BulkCloseDiagnosticGroup = "bulk-close";
 
     private readonly IOpenDocumentsService _openDocsService;
     private readonly StackPanel _tabsPanel;
@@ -868,9 +876,30 @@ internal sealed class ApplicateTabsView : UserControl
     // no prompt, the session was persisted empty via OpenDocuments.CollectionChanged BEFORE the
     // downstream prompt appeared, and Cancel restored nothing (CloseFileAsync passes no onCancel).
     // Putting the removal INSIDE the gated closure means Cancel removes nothing and no empty session
-    // is persisted. Closing docs other than the active one carries no dirty risk and runs directly.
-    // See BulkCloseDirtyBypassTests. The Contains guard tolerates the prompt-delay window in which a
-    // snapshot doc may already have been closed (Close throws on an absent doc).
+    // is persisted. See BulkCloseSessionLossReproTests for the wired contract.
+    //
+    // There are exactly TWO reasons this method may close without a prompt, and they are NOT
+    // interchangeable — collapsing them into one unconditional fallback is what made the pre-80994f2
+    // bug (A0-bis / #22) a silent data-loss defect:
+    //
+    //   (1) The set does not contain the ACTIVE document. No prompt is needed because no other
+    //       document can hold unsaved work, so the direct close is DESIGNED and correct.
+    //   (2) The set DOES contain the active document but the owning MainWindowViewModel cannot be
+    //       resolved. The dirty gate is REQUIRED here and is unavailable — so we FAIL CLOSED and
+    //       remove nothing. Closing anyway would destroy the unsaved buffer AND, via the
+    //       OpenDocuments.CollectionChanged -> SaveSession seam, persist the shrunken tab set,
+    //       with no exception, no log and no visible seam. A click that does nothing is visible
+    //       and reportable; silently shredding the user's session is not.
+    //
+    // Case (2) fails closed rather than throwing: unlike the NAMED-anchor misses in
+    // ApplicateMountPoints (an .axaml integration break, impossible at runtime, so a hard throw is
+    // right there), an unresolved owner here is a reachable RUNTIME state — the strip can be
+    // detached from its TopLevel, or the window's DataContext torn down, while a context menu is
+    // still live. Throwing out of a click handler would turn that into a dispatcher crash, i.e. a
+    // new failure mode introduced by a safety fix. The always-on diagnostic keeps it loud.
+    //
+    // The Contains guard tolerates the prompt-delay window in which a snapshot doc may already have
+    // been closed (Close throws on an absent doc).
     private void CloseSet(System.Collections.Generic.IReadOnlyList<MarkMello.Applicate.Desktop.Editing.OpenDocument> toClose)
     {
         if (toClose.Count == 0)
@@ -889,20 +918,30 @@ internal sealed class ApplicateTabsView : UserControl
             }
         }
 
+        // (1) No active document in the set — nothing here can be dirty.
         var closingActive = toClose.Any(d => ReferenceEquals(d, _openDocsService.ActiveDocument));
-        if (closingActive
-            && TopLevel.GetTopLevel(this)?.DataContext
-                is MarkMello.Presentation.ViewModels.MainWindowViewModel vm)
+        if (!closingActive)
         {
-            _ = vm.RequestBulkCloseWithDirtyCheckAsync(() =>
-            {
-                CloseDirect();
-                return System.Threading.Tasks.Task.CompletedTask;
-            });
+            CloseDirect();
             return;
         }
 
-        CloseDirect();
+        // (2) The dirty gate is required. If its owner is unreachable, refuse the close.
+        if (TopLevel.GetTopLevel(this)?.DataContext
+            is not MarkMello.Presentation.ViewModels.MainWindowViewModel vm)
+        {
+            ApplicateTrace.DiagMs(
+                BulkCloseDiagnosticGroup,
+                "owner-unresolved-close-refused",
+                $"count={toClose.Count} hasTopLevel={(TopLevel.GetTopLevel(this) is not null ? "1" : "0")}");
+            return;
+        }
+
+        _ = vm.RequestBulkCloseWithDirtyCheckAsync(() =>
+        {
+            CloseDirect();
+            return System.Threading.Tasks.Task.CompletedTask;
+        });
     }
 
     private async System.Threading.Tasks.Task CopyPathAsync(OpenDocument doc)
