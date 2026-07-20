@@ -294,6 +294,90 @@ public sealed class MainWindowOverlayTests
     }
 
     [Fact]
+    public void AppOverlayKeepsMenuVisibleAndFliesSubPanelOutToTheRight()
+    {
+        var codeBehind = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Views",
+            "MainWindow.axaml.cs"));
+        var controlsTheme = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Presentation",
+            "Themes",
+            "Controls.axaml"));
+
+        // The menu is a permanent column of the cascade host, not a ShellOverlay-selected
+        // swap target: it is added unconditionally and the sub-panel lookup has no menu arm.
+        Assert.Contains("CreateAppOverlayCascadeHost(", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("private Control? GetAppOverlaySubPanel()", codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain("_ => _appMenuPanelView ??= new AppMenuPanelView(),", codeBehind, StringComparison.Ordinal);
+
+        var menuColumn = codeBehind.IndexOf("host.Children.Add(menu);", StringComparison.Ordinal);
+        var subColumn = codeBehind.IndexOf("host.Children.Add(subHost);", StringComparison.Ordinal);
+        Assert.True(menuColumn >= 0, "The main menu should be a permanent cascade column.");
+        Assert.True(subColumn > menuColumn, "The sub-panel column should sit to the right of the menu.");
+        Assert.Contains("Orientation = Orientation.Horizontal,", codeBehind, StringComparison.Ordinal);
+
+        // The fly-out is a width slide on the clipped sub column (Avalonia transition, no timer).
+        Assert.Contains("Property = Layoutable.WidthProperty,", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("AppOverlaySubColumnWidth = AppOverlayPanelWidth + AppOverlaySubColumnGap", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("ClipToBounds = true,", codeBehind, StringComparison.Ordinal);
+
+        // Assert the CALL SITES, not just the declarations: a source-text test that only
+        // pins the constant's definition still passes when the open call is mutated to 0
+        // or to animate: false — i.e. when the fly-out is dead. These three pin the
+        // behaviour itself as far as source text can.
+        Assert.Contains(
+            "SetAppOverlaySubColumnWidth(subHost, AppOverlaySubColumnWidth, animate: true);",
+            codeBehind,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "SetAppOverlaySubColumnWidth(subHost, 0, animate: false);",
+            codeBehind,
+            StringComparison.Ordinal);
+
+        // The close snap detaches the transitions around the width set, so a slide can
+        // never run while the popup is hidden and be caught half-open by a fast reopen.
+        Assert.Contains("subHost.Transitions = null;", codeBehind, StringComparison.Ordinal);
+        Assert.Contains("subHost.Transitions = transitions;", codeBehind, StringComparison.Ordinal);
+
+        // The menu stays revealed for every app-overlay state, not just the menu root.
+        Assert.Contains(
+            "Classes.Set(\"mm-app-overlay-open\", _viewModel.IsAppOverlayOpen)",
+            codeBehind,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Window.mm-app-overlay-open Border.mm-settings-panel.mm-app-menu-panel",
+            controlsTheme,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("Window.mm-app-menu-open ", controlsTheme, StringComparison.Ordinal);
+
+        // The box-height glide existed only because a sub-panel REPLACED the menu; the
+        // cascade popup is max(menu, sub) tall, so the whole mechanism is gone.
+        Assert.DoesNotContain("_appOverlayGlideGeneration", codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain("ReleaseAppOverlayHeightWhenSettled", codeBehind, StringComparison.Ordinal);
+        Assert.DoesNotContain("AppOverlayGlideMilliseconds", codeBehind, StringComparison.Ordinal);
+
+        // Ban the height TRANSITION, not every mention of the token: a file-wide ban on
+        // Layoutable.HeightProperty would fail this app-menu test for any unrelated height
+        // work elsewhere in this file, while the glide's actual signature is a transition.
+        Assert.DoesNotContain("Property = Layoutable.HeightProperty", codeBehind, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ReadingSettingsUsesRadioSegmentsForExclusiveChoices()
     {
         var readingSettings = File.ReadAllText(Path.Combine(

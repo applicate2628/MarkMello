@@ -268,7 +268,7 @@
     <Setter Property="IsHitTestVisible" Value="True" />
     <Setter Property="RenderTransform" Value="translate(0px,0px) scale(1)" />
   </Style>
-  <Style Selector="Window.mm-app-menu-open Border.mm-settings-panel.mm-app-menu-panel">
+  <Style Selector="Window.mm-app-overlay-open Border.mm-settings-panel.mm-app-menu-panel">
     <Setter Property="Opacity" Value="1" />
     <Setter Property="IsHitTestVisible" Value="True" />
     <Setter Property="RenderTransform" Value="translate(0px,0px) scale(1)" />

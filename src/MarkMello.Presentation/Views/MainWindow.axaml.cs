@@ -26,19 +26,14 @@ public partial class MainWindow : Window
     private const double DefaultWindowHeight = 840;
     private const int WindowPlacementMarginPixels = 8;
 
-    // App-overlay sub-panel width (mirrors the Width="320" on each panel Border) and the
-    // box-height glide duration on menu<->sub-panel swaps. 280ms == MmDurationSlow
-    // (Motion.axaml), the same duration the panel opacity/scale reveal runs at, so the
-    // box glide and the panel reveal land together instead of the box finishing early.
+    // App-overlay cascade geometry. The sub-panel column is the panel's own Width="320"
+    // plus the gap that separates it from the persistent main menu; it slides open in
+    // 280ms == MmDurationSlow (Motion.axaml), the same duration the panel opacity/scale
+    // reveal runs at, so the column slide and the panel reveal land together.
     private const double AppOverlayPanelWidth = 320;
-    private const double AppOverlayGlideMilliseconds = 280;
-
-    // Monotonic token for the overlay height-glide, bumped on every swap and on close.
-    // A queued glide callback / release handler captures the token at schedule time and
-    // no-ops if it no longer matches — so a superseded glide (including an A->B->A reuse
-    // where content reference-equality alone would wrongly re-validate) or a closed
-    // overlay cannot fire a stale height set.
-    private int _appOverlayGlideGeneration;
+    private const double AppOverlaySubColumnGap = 8;
+    private const double AppOverlaySubColumnWidth = AppOverlayPanelWidth + AppOverlaySubColumnGap;
+    private const double AppOverlaySlideMilliseconds = 280;
 
     private readonly MainWindowViewModel _viewModel = default!;
     private readonly StartupSmokeTestOptions _startupSmokeTestOptions = StartupSmokeTestOptions.Disabled;
@@ -50,7 +45,8 @@ public partial class MainWindow : Window
     private AppSettingsPanelView? _appSettingsPanelView;
     private AppAboutPanelView? _appAboutPanelView;
     private AppUpdatesPanelView? _appUpdatesPanelView;
-    private ContentControl? _appOverlayContentHost;
+    private StackPanel? _appOverlayCascadeHost;
+    private ContentControl? _appOverlaySubHost;
     private bool _allowConfirmedClose;
     private bool _isTopChromeHovering;
     private IDisposable? _windowStateSubscription;
@@ -267,122 +263,113 @@ public partial class MainWindow : Window
             return;
         }
 
-        var host = _appOverlayContentHost ??= CreateAppOverlayContentHost();
+        if (_appOverlayCascadeHost is null || _appOverlaySubHost is null)
+        {
+            _appOverlaySubHost = CreateAppOverlaySubHost();
+            _appOverlayCascadeHost = CreateAppOverlayCascadeHost(
+                _appMenuPanelView ??= new AppMenuPanelView(),
+                _appOverlaySubHost);
+        }
+
+        var host = _appOverlayCascadeHost;
+        var subHost = _appOverlaySubHost;
         if (!ReferenceEquals(popup.Child, host))
         {
             popup.Child = host;
         }
 
-        var content = GetAppOverlayPopupContent();
-
-        // Overlay closing/closed: drop any height pinned by a prior glide so the next
-        // open starts at the panel's natural size (and dynamic panels are not clipped).
+        // Overlay closing/closed: snap the cascade shut without animating, so a fast
+        // close -> reopen starts from a collapsed sub column instead of catching the
+        // tail of a slide that would otherwise run while the popup is hidden.
         if (!_viewModel.IsAppOverlayOpen)
         {
-            _appOverlayGlideGeneration++;
-            host.ClearValue(Layoutable.HeightProperty);
-            if (!ReferenceEquals(host.Content, content))
-            {
-                host.Content = content;
-            }
-
+            SetAppOverlaySubColumnWidth(subHost, 0, animate: false);
             return;
         }
 
-        if (ReferenceEquals(host.Content, content))
+        // Back at the menu root: collapse the sub column beside the still-visible menu.
+        // The outgoing panel stays as the sub host's content on purpose — its own reveal
+        // style fades it out while the column slides shut, and clearing the content would
+        // make it vanish instantly instead.
+        if (GetAppOverlaySubPanel() is not { } sub)
         {
+            SetAppOverlaySubColumnWidth(subHost, 0, animate: true);
             return;
         }
 
-        // Swap between two OPEN sub-panels. The panels share one popup + content host
-        // and only opacity/scale animate on swap, so a large box-height delta (e.g.
-        // 7-row menu -> 2-row export) snaps instantly and reads as un-smooth. Glide the
-        // host height from the outgoing panel's rendered height to the incoming panel's
-        // measured height; the incoming panel keeps its natural size (no empty padding).
-        var generation = ++_appOverlayGlideGeneration;
-        var oldHeight = host.Bounds.Height;
-        host.Content = content;
-
-        if (oldHeight <= 1)
+        if (!ReferenceEquals(subHost.Content, sub))
         {
-            // First open this cycle: nothing to glide from, show at natural size.
-            return;
+            subHost.Content = sub;
         }
 
-        var width = host.Bounds.Width > 1 ? host.Bounds.Width : AppOverlayPanelWidth;
-        content.Measure(new Size(width, double.PositiveInfinity));
-        var newHeight = content.DesiredSize.Height;
-        if (newHeight <= 1 || Math.Abs(newHeight - oldHeight) < 1)
-        {
-            return;
-        }
-
-        // Pin the current height (== rendered bounds, so no visible jump), then set the
-        // target next frame so the DoubleTransition interpolates old -> new.
-        host.Height = oldHeight;
-        Dispatcher.UIThread.Post(
-            () =>
-            {
-                // Superseded by a newer swap (including an A->B->A reuse) or the overlay
-                // closed while this was queued: that path owns the height now — do nothing.
-                if (generation != _appOverlayGlideGeneration || !_viewModel.IsAppOverlayOpen)
-                {
-                    return;
-                }
-
-                host.Height = newHeight;
-                ReleaseAppOverlayHeightWhenSettled(host, newHeight, generation);
-            },
-            DispatcherPriority.Render);
+        SetAppOverlaySubColumnWidth(subHost, AppOverlaySubColumnWidth, animate: true);
     }
 
-    // Once the height glide has settled on its target, drop the explicit Height so a
-    // panel that later changes its OWN desired height (e.g. the Updates panel as its
-    // status text updates) can grow/shrink to fit instead of being clipped by the
-    // pinned value. Event-driven off LayoutUpdated (no timer); self-detaches on settle,
-    // supersede, or close.
-    private void ReleaseAppOverlayHeightWhenSettled(ContentControl host, double target, int generation)
+    // Width is the cascade's only animated property. Setting it with the transitions
+    // detached applies it instantly — used when the popup is hidden, where the slide
+    // could only run invisibly and leak into the next open.
+    private static void SetAppOverlaySubColumnWidth(ContentControl subHost, double width, bool animate)
     {
-        EventHandler? onLayoutUpdated = null;
-        onLayoutUpdated = (_, _) =>
+        if (animate)
         {
-            if (generation != _appOverlayGlideGeneration || !_viewModel.IsAppOverlayOpen)
-            {
-                host.LayoutUpdated -= onLayoutUpdated;
-                return;
-            }
+            subHost.Width = width;
+            return;
+        }
 
-            if (Math.Abs(host.Bounds.Height - target) <= 1.5)
-            {
-                host.LayoutUpdated -= onLayoutUpdated;
-                host.ClearValue(Layoutable.HeightProperty);
-            }
-        };
-
-        host.LayoutUpdated += onLayoutUpdated;
+        var transitions = subHost.Transitions;
+        subHost.Transitions = null;
+        subHost.Width = width;
+        subHost.Transitions = transitions;
     }
 
-    private static ContentControl CreateAppOverlayContentHost()
+    // The sub column clips to its animating width while the panel inside keeps its
+    // natural 320 width and hugs the column's right edge, so the panel slides out from
+    // behind the main menu instead of being squeezed. Top-aligned so a short sub-panel
+    // is not stretched to the taller menu's height.
+    private static ContentControl CreateAppOverlaySubHost()
         => new()
         {
+            Width = 0,
+            ClipToBounds = true,
+            Padding = new Thickness(AppOverlaySubColumnGap, 0, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            HorizontalContentAlignment = HorizontalAlignment.Right,
+            VerticalContentAlignment = VerticalAlignment.Top,
             Transitions =
             [
                 new DoubleTransition
                 {
-                    Property = Layoutable.HeightProperty,
-                    Duration = TimeSpan.FromMilliseconds(AppOverlayGlideMilliseconds),
+                    Property = Layoutable.WidthProperty,
+                    Duration = TimeSpan.FromMilliseconds(AppOverlaySlideMilliseconds),
                     Easing = new CubicEaseOut(),
                 },
             ],
         };
 
-    private Control GetAppOverlayPopupContent() => _viewModel.ShellOverlay switch
+    // Cascade host: the main menu is always present in column 1, the sub-panel flies out
+    // beside it in column 2. The popup sizes to both, so opening a sub-panel grows the
+    // popup rightward instead of replacing the menu.
+    private static StackPanel CreateAppOverlayCascadeHost(Control menu, Control subHost)
+    {
+        var host = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Top,
+        };
+
+        host.Children.Add(menu);
+        host.Children.Add(subHost);
+        return host;
+    }
+
+    private Control? GetAppOverlaySubPanel() => _viewModel.ShellOverlay switch
     {
         ShellOverlayKind.AppSettings => _appSettingsPanelView ??= new AppSettingsPanelView(),
         ShellOverlayKind.AppExport => _appExportPanelView ??= new AppExportPanelView(),
         ShellOverlayKind.AppAbout => _appAboutPanelView ??= new AppAboutPanelView(),
         ShellOverlayKind.AppUpdates => _appUpdatesPanelView ??= new AppUpdatesPanelView(),
-        _ => _appMenuPanelView ??= new AppMenuPanelView(),
+        _ => null,
     };
 
     private async Task InitializeStartupAsync()
@@ -1007,7 +994,9 @@ public partial class MainWindow : Window
         Classes.Set("mm-top-chrome-hover", _isTopChromeHovering);
         Classes.Set("mm-overlay-open", _viewModel.HasOpenOverlay);
         Classes.Set("mm-reading-settings-open", _viewModel.IsSettingsOpen);
-        Classes.Set("mm-app-menu-open", _viewModel.IsAppMenuOpen);
+        // The main menu is the cascade's persistent column: it stays revealed for every
+        // app-overlay state, not only when the overlay sits at the menu root.
+        Classes.Set("mm-app-overlay-open", _viewModel.IsAppOverlayOpen);
         Classes.Set("mm-app-export-open", _viewModel.IsAppExportOpen);
         Classes.Set("mm-app-settings-open", _viewModel.IsAppSettingsOpen);
         Classes.Set("mm-app-about-open", _viewModel.IsAppAboutOpen);
