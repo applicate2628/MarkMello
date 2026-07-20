@@ -483,8 +483,8 @@ public sealed class MarkdownDocumentView : UserControl
             return;
         }
 
-        var fill = LookupBrush("MmSurfaceRaisedBrush") ?? LookupBrush("MmCodeBackgroundBrush") ?? Brushes.Transparent;
-        var stroke = LookupBrush("MmBorderSubtleBrush") ?? LookupBrush("MmTextFaintBrush");
+        var fill = LookupBrush("MmCodeBackgroundBrush") ?? Brushes.Transparent;
+        var stroke = LookupBrush("MmTextFaintBrush");
         context.DrawRectangle(fill, stroke is null ? null : new Pen(stroke, 1), target, 1.5, 1.5);
     }
 

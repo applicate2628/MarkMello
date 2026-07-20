@@ -441,8 +441,8 @@ internal sealed class MarkdownImageFlowFragment : MarkdownDocumentSelectionFragm
             return;
         }
 
-        var fill = ResolveOptionalBrush("MmCodeBackgroundBrush") ?? ResolveOptionalBrush("MmSurfaceRaisedBrush") ?? Brushes.LightGray;
-        var borderBrush = ResolveOptionalBrush("MmCodeBorderBrush") ?? ResolveOptionalBrush("MmBorderSubtleBrush") ?? Brushes.Gray;
+        var fill = ResolveOptionalBrush("MmCodeBackgroundBrush") ?? Brushes.LightGray;
+        var borderBrush = ResolveOptionalBrush("MmCodeBorderBrush") ?? Brushes.Gray;
         var textBrush = ResolveOptionalBrush("MmTextSoftBrush") ?? ResolveOptionalBrush("MmTextBrush") ?? Brushes.Black;
         var pen = new Pen(borderBrush, 1);
 
