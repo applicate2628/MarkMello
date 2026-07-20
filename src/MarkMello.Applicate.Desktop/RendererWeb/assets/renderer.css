@@ -415,20 +415,35 @@ a:hover {
   border-radius: 2px;
 }
 
-/* D12 reduced-motion policy. The document surface carries only two motions —
-   the reading-width handle's 160ms width/opacity transition and the TOC-click
-   smooth scroll — but a policy is future-proof: it neutralises any current or
-   later transition/animation and forces instant scrolling for a reader who has
-   asked the OS for reduced motion. The JS smooth-scroll (scrollIntoView with an
-   explicit behavior:"smooth") overrides scroll-behavior, so it is gated
-   separately at its call site in renderer.ts; this block covers the CSS side. */
+/* D12 reduced-motion policy. Motion inventory on the document surface:
+     - the reading-width handle's 160ms width/opacity/background transition
+       (.mm-width-handle-track);
+     - the editable cell's 120ms background/box-shadow transition
+       (.mm-editable-cell);
+     - the mode/document reveal choreography, which sets `style.transition`
+       INLINE from renderer.ts (startModeReveal / startDocumentReveal) and
+       drives a translateY(4px) -> translateY(0) slide;
+     - the TOC-click smooth scroll.
+   The universal selector is load-bearing, not lazy: the reveal choreography's
+   transition lives in a style attribute, and per CSS Cascade 4 sorting order an
+   important author declaration outranks a normal author declaration in a style
+   attribute, so only an `!important` rule reaches it. Durations are clamped to
+   0.01ms rather than removed: a zero-length transition never fires
+   `transitionend`, which would strand any listener waiting on one. Delays are
+   clamped for the same reason a duration is — a 0.01ms transition that starts
+   200ms late is still motion arriving late. The JS smooth-scroll (scrollIntoView
+   with an explicit behavior:"smooth") overrides scroll-behavior, so it is gated
+   separately at its call site in renderer.ts; this block covers the CSS side.
+   Guarded by vitest/reducedMotion.test.ts. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+    animation-delay: 0.01ms !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0.01ms !important;
     scroll-behavior: auto !important;
   }
 }
