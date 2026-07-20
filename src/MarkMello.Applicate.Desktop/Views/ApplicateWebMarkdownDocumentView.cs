@@ -40,6 +40,32 @@ public sealed class ApplicateWebThemeAppliedEventArgs(string theme, long request
     public long RequestId { get; } = requestId;
 }
 
+internal enum ApplicateFullRenderStatus
+{
+    Completed,
+    RendererFailed,
+    ProcessFailed,
+    Cancelled,
+    Disposed,
+}
+
+internal readonly record struct ApplicateFullRenderResult(
+    ApplicateFullRenderStatus Status,
+    int MermaidErrorCount = 0,
+    string? Reason = null);
+
+internal readonly record struct ApplicateRenderedHtmlCaptureResult(
+    ExportStatus Status,
+    string? Html = null,
+    string? FailureId = null,
+    string? Reason = null);
+
+internal sealed record ApplicateFullRenderDeliveryHooks(
+    Func<object, string> Serialize,
+    Func<string, bool> TryPostNative,
+    Func<string, Task> InvokeRaw,
+    Action<Exception?>? DeliveryObserved = null);
+
 public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 {
     private const double MaxRendererReportedMinimapReservedWidth = 2000;
@@ -49,6 +75,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private const int ProgressiveViewerInitialTopLevelBlockCount = 96;
     private const int ProgressiveViewerMinimumAppendHtmlLength = 128 * 1024;
     private const int ProgressiveAppendChunkTargetHtmlLength = 64 * 1024;
+    private static readonly string[] RendererCaptureFailureIds =
+    [
+        "HTMLX-NOT-READ-MODE",
+        "HTMLX-DOCUMENT-CHANGED",
+        "HTMLX-CLEANUP-CONTRACT",
+        "HTMLX-RESOURCE-NOT-DATA-URI",
+        "HTMLX-SERIALIZATION",
+    ];
     private static readonly TimeSpan DuplicateThemePostWindow = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan ProgressiveAppendChunkDelay = TimeSpan.FromMilliseconds(16);
     private const string CoreWebView2InteropTypeName = "Avalonia.Controls.Win.WebView2.Interop.ICoreWebView2";
@@ -129,6 +163,17 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private NativeWindowPlacement? _pendingNativeHiddenPaintPlacement;
     private readonly HashSet<string> _postedRendererDocumentCacheKeys = new(StringComparer.Ordinal);
     private readonly Dictionary<long, object> _pendingRendererCacheFallbackLoads = new();
+    private readonly object _fullRenderRequestGate = new();
+    private readonly Dictionary<string, TaskCompletionSource<ApplicateFullRenderResult>> _pendingFullRenderRequests = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FullRenderDeliverySupervision> _fullRenderDeliverySupervisions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, PendingRenderedHtmlCaptureRequest> _pendingRenderedHtmlCaptureRequests = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, RenderedHtmlCaptureDeliverySupervision> _renderedHtmlCaptureDeliverySupervisions = new(StringComparer.Ordinal);
+    private readonly TaskCompletionSource<object?> _fullRenderDisposalCompletion = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly Func<object, string> _serializeFullRenderMessage;
+    private readonly Func<string, bool> _tryPostFullRenderMessageNative;
+    private readonly Func<string, Task> _invokeFullRenderMessageRaw;
+    private readonly Action<Exception?>? _fullRenderDeliveryObserved;
 
     static ApplicateWebMarkdownDocumentView()
     {
@@ -157,6 +202,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         IApplicateHtmlMarkdownRenderer renderer,
         IApplicateShellAssetBundleFactory? shellAssetFactory,
         ApplicateRenderedBodyCache renderedBodyCache)
+        : this(renderer, shellAssetFactory, renderedBodyCache, fullRenderDeliveryHooks: null)
+    {
+    }
+
+    internal ApplicateWebMarkdownDocumentView(
+        IApplicateHtmlMarkdownRenderer renderer,
+        IApplicateShellAssetBundleFactory? shellAssetFactory,
+        ApplicateRenderedBodyCache renderedBodyCache,
+        ApplicateFullRenderDeliveryHooks? fullRenderDeliveryHooks)
     {
         ApplicateTrace.DiagMs("startup-webview", "webview-view-ctor-start");
         _renderer = renderer;
@@ -175,6 +229,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
             VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch
         };
+        var webView = _webView;
+        _serializeFullRenderMessage = fullRenderDeliveryHooks?.Serialize
+            ?? (static message => JsonSerializer.Serialize(message));
+        _tryPostFullRenderMessageNative = fullRenderDeliveryHooks?.TryPostNative
+            ?? TryPostRendererMessageNative;
+        _invokeFullRenderMessageRaw = fullRenderDeliveryHooks?.InvokeRaw
+            ?? (script => webView.InvokeScript(script));
+        _fullRenderDeliveryObserved = fullRenderDeliveryHooks?.DeliveryObserved;
         ApplicateTrace.DiagMs("startup-webview", "native-webview-ctor-end");
 
         _webView.EnvironmentRequested += OnEnvironmentRequested;
@@ -1701,7 +1763,16 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         if (!allowed)
         {
             e.Cancel = true;
+            return;
         }
+
+        CompleteAllPendingFullRenderRequests(new ApplicateFullRenderResult(
+            ApplicateFullRenderStatus.RendererFailed,
+            Reason: "renderer navigation started"));
+        CompleteAllPendingRenderedHtmlCaptures(new ApplicateRenderedHtmlCaptureResult(
+            ExportStatus.CaptureFailed,
+            FailureId: "HTMLX-DOCUMENT-CHANGED",
+            Reason: "HTMLX-DOCUMENT-CHANGED"));
     }
 
     private void OnNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
@@ -1863,6 +1934,30 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             if (type == "shell-init-failed")
             {
                 TryFaultPendingShellReady();
+                return;
+            }
+
+            if (type == "full-render-complete")
+            {
+                HandleFullRenderCompleteMessage(document.RootElement);
+                return;
+            }
+
+            if (type == "full-render-failed")
+            {
+                HandleFullRenderFailedMessage(document.RootElement);
+                return;
+            }
+
+            if (type == "rendered-html-captured")
+            {
+                HandleRenderedHtmlCapturedMessage(document.RootElement);
+                return;
+            }
+
+            if (type == "rendered-html-failed")
+            {
+                HandleRenderedHtmlFailedMessage(document.RootElement);
                 return;
             }
 
@@ -2197,6 +2292,725 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         catch (JsonException)
         {
             // Ignore malformed renderer messages; the WebView cannot drive shell state through them.
+        }
+    }
+
+    internal Task<ApplicateFullRenderResult> PrepareForExportAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Task.FromResult(new ApplicateFullRenderResult(ApplicateFullRenderStatus.Cancelled));
+        }
+
+        var requestId = Guid.NewGuid().ToString("N");
+        var completion = new TaskCompletionSource<ApplicateFullRenderResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var message = BuildPrepareForExportMessage(requestId);
+        FullRenderDeliverySupervision supervision;
+        lock (_fullRenderRequestGate)
+        {
+            if (_disposed)
+            {
+                return Task.FromResult(new ApplicateFullRenderResult(ApplicateFullRenderStatus.Disposed));
+            }
+            _pendingFullRenderRequests.Add(requestId, completion);
+            supervision = new FullRenderDeliverySupervision(this, requestId, message, completion.Task);
+            _fullRenderDeliverySupervisions.Add(requestId, supervision);
+        }
+
+        var cancellationRegistration = cancellationToken.CanBeCanceled
+            ? cancellationToken.Register(() => CompleteFullRenderRequest(
+                requestId,
+                new ApplicateFullRenderResult(ApplicateFullRenderStatus.Cancelled)))
+            : default;
+
+        supervision.Start();
+
+        return AwaitFullRenderRequestAsync(completion.Task, cancellationRegistration);
+    }
+
+    internal Task<ApplicateRenderedHtmlCaptureResult> CaptureRenderedHtmlAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Task.FromResult(new ApplicateRenderedHtmlCaptureResult(
+                ExportStatus.Cancelled,
+                FailureId: "HTMLX-CANCELLED",
+                Reason: "HTMLX-CANCELLED"));
+        }
+
+        var requestId = Guid.NewGuid().ToString("N");
+        var pending = new PendingRenderedHtmlCaptureRequest();
+        var message = BuildCaptureRenderedHtmlMessage(requestId);
+        RenderedHtmlCaptureDeliverySupervision supervision;
+        lock (_fullRenderRequestGate)
+        {
+            if (_disposed)
+            {
+                return Task.FromResult(new ApplicateRenderedHtmlCaptureResult(
+                    ExportStatus.Faulted,
+                    FailureId: "HTMLX-DISPOSED",
+                    Reason: "HTMLX-DISPOSED"));
+            }
+
+            _pendingRenderedHtmlCaptureRequests.Add(requestId, pending);
+            supervision = new RenderedHtmlCaptureDeliverySupervision(
+                this,
+                requestId,
+                message,
+                pending.Task);
+            _renderedHtmlCaptureDeliverySupervisions.Add(requestId, supervision);
+        }
+
+        var registration = cancellationToken.CanBeCanceled
+            ? cancellationToken.Register(() => CompleteRenderedHtmlCaptureRequest(
+                requestId,
+                new ApplicateRenderedHtmlCaptureResult(
+                    ExportStatus.Cancelled,
+                    FailureId: "HTMLX-CANCELLED",
+                    Reason: "HTMLX-CANCELLED")))
+            : default;
+        pending.SetCancellationRegistration(registration, cancellationToken.CanBeCanceled);
+        supervision.Start();
+        return pending.Task;
+    }
+
+    internal Task<ExportResult> ExportPdfAsync(
+        string destinationPath,
+        CancellationToken cancellationToken = default)
+        => ExportPdfCoreAsync(
+            destinationPath,
+            PrepareForExportAsync,
+            PrintToPdfNativeAsync,
+            cancellationToken);
+
+    internal Task<ExportResult> ShowPrintDialogAsync(CancellationToken cancellationToken = default)
+        => ShowPrintDialogCoreAsync(
+            PrepareForExportAsync,
+            ShowNativePrintUI,
+            cancellationToken);
+
+    internal static async Task<ExportResult> ExportPdfCoreAsync(
+        string destinationPath,
+        Func<CancellationToken, Task<ApplicateFullRenderResult>> prepareForExportAsync,
+        Func<string, CancellationToken, Task<bool>> printToPdfAsync,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var barrier = await prepareForExportAsync(cancellationToken).ConfigureAwait(true);
+            var barrierFailure = MapFullRenderFailure(barrier);
+            if (barrierFailure is not null)
+            {
+                return barrierFailure;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var printed = await printToPdfAsync(destinationPath, cancellationToken).ConfigureAwait(true);
+            return printed
+                ? new ExportResult(ExportStatus.Success)
+                : new ExportResult(
+                    ExportStatus.PrintReturnedFalse,
+                    "WebView2 rejected the PDF request because another print operation may be active.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new ExportResult(ExportStatus.Cancelled);
+        }
+        catch (Exception ex)
+        {
+            return new ExportResult(ExportStatus.Faulted, ex.Message, ex);
+        }
+    }
+
+    internal static async Task<ExportResult> ShowPrintDialogCoreAsync(
+        Func<CancellationToken, Task<ApplicateFullRenderResult>> prepareForExportAsync,
+        Action showPrintUi,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var barrier = await prepareForExportAsync(cancellationToken).ConfigureAwait(true);
+            var barrierFailure = MapFullRenderFailure(barrier);
+            if (barrierFailure is not null)
+            {
+                return barrierFailure;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            showPrintUi();
+            return new ExportResult(ExportStatus.Success);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new ExportResult(ExportStatus.Cancelled);
+        }
+        catch (Exception ex)
+        {
+            return new ExportResult(ExportStatus.Faulted, ex.Message, ex);
+        }
+    }
+
+    private async Task<bool> PrintToPdfNativeAsync(
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var core = _nativeUiCore
+            ?? throw new InvalidOperationException("The viewer WebView2 core is not available.");
+        var settings = _nativeUiCore.Environment.CreatePrintSettings();
+        settings.ShouldPrintBackgrounds = true;
+        settings.ShouldPrintHeaderAndFooter = false;
+        settings.Orientation = Microsoft.Web.WebView2.Core.CoreWebView2PrintOrientation.Portrait;
+        settings.ScaleFactor = 1.0;
+        settings.MarginTop = 0.4;
+        settings.MarginBottom = 0.4;
+        settings.MarginLeft = 0.4;
+        settings.MarginRight = 0.4;
+
+        // PDF scale-to-fit: before printing, ask the renderer to scale any block
+        // wider than the printable page (display math / wide tables / code) down to
+        // fit. Programmatic PrintToPdf does NOT fire the beforeprint event, so this
+        // host hook is required (renderer.ts wirePrintScaleToFit). The width is the
+        // exact printable content width from these settings; the renderer falls back
+        // to its A4 default if the value is non-positive. Cleared on every exit path.
+        var pageContentWidthCssPx =
+            (settings.PageWidth - settings.MarginLeft - settings.MarginRight) * 96.0;
+        var widthArg = pageContentWidthCssPx.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        try
+        {
+            // Apply is INSIDE the try so the finally always clears it — even if apply
+            // itself partially mutates the DOM and then throws.
+            await core.ExecuteScriptAsync(
+                $"window.__mmApplyPrintFit&&window.__mmApplyPrintFit({widthArg})").ConfigureAwait(true);
+            return await core.PrintToPdfAsync(Path.GetFullPath(destinationPath), settings).ConfigureAwait(true);
+        }
+        finally
+        {
+            // Best-effort cleanup: the print-fit markers are @media-print only and inert
+            // on screen, so a cleanup failure must NEVER replace the real PrintToPdf
+            // result/exception (a throw here would mask the primary print outcome).
+            try
+            {
+                await core.ExecuteScriptAsync("window.__mmClearPrintFit&&window.__mmClearPrintFit()").ConfigureAwait(true);
+            }
+            catch
+            {
+                // ignore — markers are inert on screen; surfacing the real print outcome wins.
+            }
+        }
+    }
+
+    private void ShowNativePrintUI()
+    {
+        var core = _nativeUiCore
+            ?? throw new InvalidOperationException("The viewer WebView2 core is not available.");
+        core.ShowPrintUI();
+    }
+
+    private static ExportResult? MapFullRenderFailure(ApplicateFullRenderResult result)
+        => result.Status switch
+        {
+            ApplicateFullRenderStatus.Completed when result.MermaidErrorCount == 0 => null,
+            ApplicateFullRenderStatus.Completed => new ExportResult(
+                ExportStatus.RenderIncomplete,
+                result.Reason ?? $"{result.MermaidErrorCount} Mermaid diagram(s) failed to render."),
+            ApplicateFullRenderStatus.RendererFailed => new ExportResult(
+                ExportStatus.RenderIncomplete,
+                result.Reason),
+            ApplicateFullRenderStatus.ProcessFailed => new ExportResult(
+                ExportStatus.ProcessCrashed,
+                result.Reason),
+            ApplicateFullRenderStatus.Cancelled => new ExportResult(
+                ExportStatus.Cancelled,
+                result.Reason),
+            ApplicateFullRenderStatus.Disposed => new ExportResult(
+                ExportStatus.Faulted,
+                result.Reason ?? "The viewer was disposed before export completed."),
+            _ => new ExportResult(
+                ExportStatus.Faulted,
+                result.Reason ?? "The export render barrier returned an unknown status."),
+        };
+
+    internal int PendingFullRenderRequestCountForTesting
+    {
+        get
+        {
+            lock (_fullRenderRequestGate)
+            {
+                return _pendingFullRenderRequests.Count;
+            }
+        }
+    }
+
+    internal int FullRenderDeliverySupervisorCountForTesting
+    {
+        get
+        {
+            lock (_fullRenderRequestGate)
+            {
+                return _fullRenderDeliverySupervisions.Count;
+            }
+        }
+    }
+
+    internal static object BuildPrepareForExportMessage(string requestId)
+        => new { type = "prepare-for-export", requestId };
+
+    internal static object BuildCaptureRenderedHtmlMessage(string requestId)
+        => new { type = "capture-rendered-html", requestId };
+
+    internal int RenderedHtmlCaptureDeliverySupervisorCountForTesting
+    {
+        get
+        {
+            lock (_fullRenderRequestGate)
+            {
+                return _renderedHtmlCaptureDeliverySupervisions.Count;
+            }
+        }
+    }
+
+    internal int RenderedHtmlCaptureCancellationRegistrationCountForTesting
+    {
+        get
+        {
+            lock (_fullRenderRequestGate)
+            {
+                return _pendingRenderedHtmlCaptureRequests.Values.Count(
+                    static request => request.HasLiveCancellationRegistration);
+            }
+        }
+    }
+
+    private static async Task<ApplicateFullRenderResult> AwaitFullRenderRequestAsync(
+        Task<ApplicateFullRenderResult> completion,
+        CancellationTokenRegistration cancellationRegistration)
+    {
+        try
+        {
+            return await completion.ConfigureAwait(false);
+        }
+        finally
+        {
+            cancellationRegistration.Dispose();
+        }
+    }
+
+    private void HandleFullRenderCompleteMessage(JsonElement root)
+    {
+        if (!TryGetFullRenderRequestId(root, out var requestId)
+            || !root.TryGetProperty("mermaidErrorCount", out var errorCountElement)
+            || errorCountElement.ValueKind != JsonValueKind.Number
+            || !errorCountElement.TryGetInt32(out var mermaidErrorCount)
+            || mermaidErrorCount < 0)
+        {
+            return;
+        }
+
+        CompleteFullRenderRequest(
+            requestId,
+            new ApplicateFullRenderResult(
+                ApplicateFullRenderStatus.Completed,
+                mermaidErrorCount));
+    }
+
+    private void HandleFullRenderFailedMessage(JsonElement root)
+    {
+        if (!TryGetFullRenderRequestId(root, out var requestId)
+            || !root.TryGetProperty("reason", out var reasonElement)
+            || reasonElement.ValueKind != JsonValueKind.String)
+        {
+            return;
+        }
+
+        CompleteFullRenderRequest(
+            requestId,
+            new ApplicateFullRenderResult(
+                ApplicateFullRenderStatus.RendererFailed,
+                Reason: reasonElement.GetString()));
+    }
+
+    private static bool TryGetFullRenderRequestId(JsonElement root, out string requestId)
+    {
+        requestId = string.Empty;
+        if (!root.TryGetProperty("requestId", out var requestIdElement)
+            || requestIdElement.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        requestId = requestIdElement.GetString() ?? string.Empty;
+        return requestId.Length > 0;
+    }
+
+    private void CompleteFullRenderRequest(
+        string requestId,
+        ApplicateFullRenderResult result)
+    {
+        TaskCompletionSource<ApplicateFullRenderResult>? completion;
+        lock (_fullRenderRequestGate)
+        {
+            if (!_pendingFullRenderRequests.Remove(requestId, out completion))
+            {
+                return;
+            }
+        }
+
+        completion.TrySetResult(result);
+    }
+
+    private void CompleteAllPendingFullRenderRequests(ApplicateFullRenderResult result)
+    {
+        TaskCompletionSource<ApplicateFullRenderResult>[] completions;
+        lock (_fullRenderRequestGate)
+        {
+            completions = _pendingFullRenderRequests.Values.ToArray();
+            _pendingFullRenderRequests.Clear();
+        }
+
+        foreach (var completion in completions)
+        {
+            completion.TrySetResult(result);
+        }
+    }
+
+    private void FailPendingFullRenderRequestsForProcessFailure(string reason)
+    {
+        CompleteAllPendingFullRenderRequests(new ApplicateFullRenderResult(
+            ApplicateFullRenderStatus.ProcessFailed,
+            Reason: reason));
+        CompleteAllPendingRenderedHtmlCaptures(new ApplicateRenderedHtmlCaptureResult(
+            ExportStatus.ProcessCrashed,
+            FailureId: "HTMLX-PROCESS-FAILED",
+            Reason: "HTMLX-PROCESS-FAILED"));
+    }
+
+    private bool IsFullRenderRequestPending(string requestId)
+    {
+        lock (_fullRenderRequestGate)
+        {
+            return _pendingFullRenderRequests.ContainsKey(requestId);
+        }
+    }
+
+    private async Task SuperviseFullRenderDeliveryAsync(
+        string requestId,
+        object message,
+        Task<ApplicateFullRenderResult> requestTerminal)
+    {
+        try
+        {
+            if (!IsFullRenderRequestPending(requestId))
+            {
+                return;
+            }
+
+            var payload = _serializeFullRenderMessage(message);
+            if (_tryPostFullRenderMessageNative(payload))
+            {
+                _fullRenderDeliveryObserved?.Invoke(null);
+                return;
+            }
+
+            var rawDelivery = _invokeFullRenderMessageRaw($"window.postMessage({payload},'*');");
+            ObserveLateFullRenderDeliveryFault(rawDelivery);
+            var completed = await Task.WhenAny(
+                rawDelivery,
+                requestTerminal,
+                _fullRenderDisposalCompletion.Task).ConfigureAwait(false);
+            if (ReferenceEquals(completed, rawDelivery))
+            {
+                await rawDelivery.ConfigureAwait(false);
+                _fullRenderDeliveryObserved?.Invoke(null);
+            }
+        }
+        catch (Exception ex)
+        {
+            _fullRenderDeliveryObserved?.Invoke(ex);
+            CompleteFullRenderRequest(
+                requestId,
+                new ApplicateFullRenderResult(
+                    ApplicateFullRenderStatus.RendererFailed,
+                    Reason: $"prepare-for-export delivery failed:{ex.GetType().Name}"));
+        }
+        finally
+        {
+            lock (_fullRenderRequestGate)
+            {
+                _fullRenderDeliverySupervisions.Remove(requestId);
+            }
+        }
+    }
+
+    private static void ObserveLateFullRenderDeliveryFault(Task delivery)
+        => _ = delivery.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+    private sealed class FullRenderDeliverySupervision(
+        ApplicateWebMarkdownDocumentView owner,
+        string requestId,
+        object message,
+        Task<ApplicateFullRenderResult> requestTerminal)
+    {
+        public void Start()
+            => _ = owner.SuperviseFullRenderDeliveryAsync(requestId, message, requestTerminal);
+    }
+
+    private void HandleRenderedHtmlCapturedMessage(JsonElement root)
+    {
+        if (!TryGetFullRenderRequestId(root, out var requestId))
+        {
+            return;
+        }
+
+        if (!HasExactProperties(root, "type", "requestId", "html")
+            || !root.TryGetProperty("html", out var htmlElement)
+            || htmlElement.ValueKind != JsonValueKind.String
+            || string.IsNullOrEmpty(htmlElement.GetString()))
+        {
+            CompleteMalformedRenderedHtmlCapture(requestId);
+            return;
+        }
+
+        CompleteRenderedHtmlCaptureRequest(
+            requestId,
+            new ApplicateRenderedHtmlCaptureResult(
+                ExportStatus.Success,
+                Html: htmlElement.GetString()));
+    }
+
+    private void HandleRenderedHtmlFailedMessage(JsonElement root)
+    {
+        if (!TryGetFullRenderRequestId(root, out var requestId))
+        {
+            return;
+        }
+
+        if (!HasExactProperties(root, "type", "requestId", "reason")
+            || !root.TryGetProperty("reason", out var reasonElement)
+            || reasonElement.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(reasonElement.GetString())
+            || !TryClassifyRendererCaptureFailure(reasonElement.GetString()!, out var failureId))
+        {
+            CompleteMalformedRenderedHtmlCapture(requestId);
+            return;
+        }
+
+        var reason = reasonElement.GetString()!;
+        CompleteRenderedHtmlCaptureRequest(
+            requestId,
+            new ApplicateRenderedHtmlCaptureResult(
+                ExportStatus.CaptureFailed,
+                FailureId: failureId,
+                Reason: reason));
+    }
+
+    private void CompleteMalformedRenderedHtmlCapture(string requestId)
+        => CompleteRenderedHtmlCaptureRequest(
+            requestId,
+            new ApplicateRenderedHtmlCaptureResult(
+                ExportStatus.CaptureFailed,
+                FailureId: "HTMLX-IPC-SHAPE",
+                Reason: "Malformed rendered HTML capture terminal."));
+
+    private static bool HasExactProperties(JsonElement root, params string[] expected)
+    {
+        var count = 0;
+        foreach (var property in root.EnumerateObject())
+        {
+            count++;
+            if (!expected.Contains(property.Name, StringComparer.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return count == expected.Length;
+    }
+
+    private static bool TryClassifyRendererCaptureFailure(string reason, out string failureId)
+    {
+        foreach (var candidate in RendererCaptureFailureIds)
+        {
+            if (reason.Equals(candidate, StringComparison.Ordinal)
+                || reason.StartsWith(candidate + ":", StringComparison.Ordinal))
+            {
+                failureId = candidate;
+                return true;
+            }
+        }
+
+        failureId = string.Empty;
+        return false;
+    }
+
+    private bool CompleteRenderedHtmlCaptureRequest(
+        string requestId,
+        ApplicateRenderedHtmlCaptureResult result)
+    {
+        PendingRenderedHtmlCaptureRequest? pending;
+        lock (_fullRenderRequestGate)
+        {
+            if (!_pendingRenderedHtmlCaptureRequests.Remove(requestId, out pending))
+            {
+                pending = null;
+            }
+            else
+            {
+                _renderedHtmlCaptureDeliverySupervisions.Remove(requestId);
+            }
+        }
+
+        if (pending is null)
+        {
+            ApplicateTrace.Diag(
+                "html-export",
+                "HTMLX-LATE-TERMINAL",
+                $"requestId={requestId}");
+            return false;
+        }
+
+        pending.Complete(result);
+        ApplicateTrace.Diag(
+            "html-export",
+            "HtmlExportCaptureSettled",
+            $"requestId={requestId} status={result.Status} failureId={result.FailureId ?? "none"}");
+        return true;
+    }
+
+    private void CompleteAllPendingRenderedHtmlCaptures(ApplicateRenderedHtmlCaptureResult result)
+    {
+        string[] requestIds;
+        lock (_fullRenderRequestGate)
+        {
+            requestIds = _pendingRenderedHtmlCaptureRequests.Keys.ToArray();
+        }
+
+        foreach (var requestId in requestIds)
+        {
+            CompleteRenderedHtmlCaptureRequest(requestId, result);
+        }
+    }
+
+    private bool IsRenderedHtmlCapturePending(string requestId)
+    {
+        lock (_fullRenderRequestGate)
+        {
+            return _pendingRenderedHtmlCaptureRequests.ContainsKey(requestId);
+        }
+    }
+
+    private async Task SuperviseRenderedHtmlCaptureDeliveryAsync(
+        string requestId,
+        object message,
+        Task<ApplicateRenderedHtmlCaptureResult> requestTerminal)
+    {
+        try
+        {
+            if (!IsRenderedHtmlCapturePending(requestId))
+            {
+                return;
+            }
+
+            var payload = _serializeFullRenderMessage(message);
+            if (_tryPostFullRenderMessageNative(payload))
+            {
+                _fullRenderDeliveryObserved?.Invoke(null);
+                return;
+            }
+
+            var rawDelivery = _invokeFullRenderMessageRaw($"window.postMessage({payload},'*');");
+            ObserveLateFullRenderDeliveryFault(rawDelivery);
+            var completed = await Task.WhenAny(
+                rawDelivery,
+                requestTerminal,
+                _fullRenderDisposalCompletion.Task).ConfigureAwait(false);
+            if (ReferenceEquals(completed, rawDelivery))
+            {
+                await rawDelivery.ConfigureAwait(false);
+                _fullRenderDeliveryObserved?.Invoke(null);
+            }
+        }
+        catch (Exception ex)
+        {
+            _fullRenderDeliveryObserved?.Invoke(ex);
+            CompleteRenderedHtmlCaptureRequest(
+                requestId,
+                new ApplicateRenderedHtmlCaptureResult(
+                    ExportStatus.CaptureFailed,
+                    FailureId: "HTMLX-CAPTURE-DELIVERY",
+                    Reason: $"HTMLX-CAPTURE-DELIVERY:{ex.GetType().Name}"));
+        }
+        finally
+        {
+            lock (_fullRenderRequestGate)
+            {
+                _renderedHtmlCaptureDeliverySupervisions.Remove(requestId);
+            }
+        }
+    }
+
+    private sealed class RenderedHtmlCaptureDeliverySupervision(
+        ApplicateWebMarkdownDocumentView owner,
+        string requestId,
+        object message,
+        Task<ApplicateRenderedHtmlCaptureResult> requestTerminal)
+    {
+        public void Start()
+            => _ = owner.SuperviseRenderedHtmlCaptureDeliveryAsync(requestId, message, requestTerminal);
+    }
+
+    private sealed class PendingRenderedHtmlCaptureRequest
+    {
+        private readonly TaskCompletionSource<ApplicateRenderedHtmlCaptureResult> _completion = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private CancellationTokenRegistration _cancellationRegistration;
+        private int _cancellationRegistrationAssigned;
+        private int _settled;
+
+        public Task<ApplicateRenderedHtmlCaptureResult> Task => _completion.Task;
+
+        public bool HasLiveCancellationRegistration =>
+            Volatile.Read(ref _cancellationRegistrationAssigned) == 1
+            && Volatile.Read(ref _settled) == 0;
+
+        public void SetCancellationRegistration(
+            CancellationTokenRegistration registration,
+            bool hasRegistration)
+        {
+            if (!hasRegistration)
+            {
+                return;
+            }
+
+            _cancellationRegistration = registration;
+            Volatile.Write(ref _cancellationRegistrationAssigned, 1);
+            if (Volatile.Read(ref _settled) != 0
+                && Interlocked.Exchange(ref _cancellationRegistrationAssigned, 0) == 1)
+            {
+                _cancellationRegistration.Dispose();
+            }
+        }
+
+        public void Complete(ApplicateRenderedHtmlCaptureResult result)
+        {
+            if (Interlocked.Exchange(ref _settled, 1) != 0)
+            {
+                return;
+            }
+
+            if (Interlocked.Exchange(ref _cancellationRegistrationAssigned, 0) == 1)
+            {
+                _cancellationRegistration.Dispose();
+            }
+
+            _completion.TrySetResult(result);
         }
     }
 
@@ -3117,6 +3931,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             shellReady.TrySetResult(false);
         }
 
+        FailPendingFullRenderRequestsForProcessFailure(e.ProcessFailedKind.ToString());
+
         FallbackRequested?.Invoke(this, EventArgs.Empty);
     }
 
@@ -3872,6 +4688,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         _disposed = true;
+        CompleteAllPendingFullRenderRequests(new ApplicateFullRenderResult(ApplicateFullRenderStatus.Disposed));
+        CompleteAllPendingRenderedHtmlCaptures(new ApplicateRenderedHtmlCaptureResult(
+            ExportStatus.Faulted,
+            FailureId: "HTMLX-DISPOSED",
+            Reason: "HTMLX-DISPOSED"));
+        _fullRenderDisposalCompletion.TrySetResult(null);
         if (_nativeUiCore is not null)
         {
             _nativeUiCore.ProcessFailed -= OnCoreProcessFailed;

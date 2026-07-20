@@ -97,6 +97,52 @@
                     EndPoint="1,0.5" />
 
               <Button Classes="mm-menu-item"
+                      AutomationProperties.Name="{Binding AppMenuExportLabel}"
+                      Command="{Binding OpenAppExportCommand}">
+                <Grid ColumnDefinitions="*,Auto"
+                      ColumnSpacing="12">
+                  <StackPanel Grid.Column="0"
+                              Spacing="2"
+                              HorizontalAlignment="Left">
+                    <TextBlock Classes="mm-setting-label"
+                               Text="{Binding AppMenuExportLabel}" />
+                    <TextBlock Classes="mm-setting-hint"
+                               Text="{Binding AppMenuExportHint}" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1"
+                             Classes="mm-setting-meta"
+                             Text="{Binding MetaOpen}" />
+                </Grid>
+              </Button>
+
+              <Line Classes="mm-setting-divider"
+                    StartPoint="0,0.5"
+                    EndPoint="1,0.5" />
+
+              <Button Classes="mm-menu-item"
+                      AutomationProperties.Name="{Binding AppMenuPrintLabel}"
+                      Command="{Binding PrintCommand}">
+                <Grid ColumnDefinitions="*,Auto"
+                      ColumnSpacing="12">
+                  <StackPanel Grid.Column="0"
+                              Spacing="2"
+                              HorizontalAlignment="Left">
+                    <TextBlock Classes="mm-setting-label"
+                               Text="{Binding AppMenuPrintLabel}" />
+                    <TextBlock Classes="mm-setting-hint"
+                               Text="{Binding AppMenuPrintHint}" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1"
+                             Classes="mm-setting-meta"
+                             Text="{Binding MetaOpen}" />
+                </Grid>
+              </Button>
+
+              <Line Classes="mm-setting-divider"
+                    StartPoint="0,0.5"
+                    EndPoint="1,0.5" />
+
+              <Button Classes="mm-menu-item"
                       Command="{Binding OpenAppSettingsCommand}">
                 <Grid ColumnDefinitions="*,Auto"
                       ColumnSpacing="12">

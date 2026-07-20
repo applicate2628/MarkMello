@@ -71,6 +71,10 @@ internal sealed class StubFilePicker : IFilePicker
 
     public List<string> SuggestedSaveFileNames { get; } = [];
 
+    public string? GenericSavePath { get; set; }
+
+    public List<FileSavePickerSpec> SaveSpecs { get; } = [];
+
     public Task<string?> PickMarkdownFileAsync(CancellationToken cancellationToken = default)
         => Task.FromResult(OpenPath);
 
@@ -78,6 +82,14 @@ internal sealed class StubFilePicker : IFilePicker
     {
         SuggestedSaveFileNames.Add(suggestedFileName);
         return Task.FromResult(SavePath);
+    }
+
+    public Task<string?> PickSaveFileAsync(
+        FileSavePickerSpec spec,
+        CancellationToken cancellationToken = default)
+    {
+        SaveSpecs.Add(spec);
+        return Task.FromResult(GenericSavePath);
     }
 }
 

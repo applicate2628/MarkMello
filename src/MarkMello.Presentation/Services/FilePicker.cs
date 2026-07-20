@@ -87,6 +87,36 @@ public sealed class FilePicker : IFilePicker
         return file?.TryGetLocalPath();
     }
 
+    public async Task<string?> PickSaveFileAsync(
+        FileSavePickerSpec spec,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+
+        var topLevel = _topLevelAccessor();
+        if (topLevel?.StorageProvider is not { CanSave: true } provider)
+        {
+            return null;
+        }
+
+        var options = new FilePickerSaveOptions
+        {
+            Title = spec.Title,
+            SuggestedFileName = spec.SuggestedFileName,
+            DefaultExtension = spec.DefaultExtension,
+            FileTypeChoices =
+            [
+                new FilePickerFileType(spec.FileTypeName)
+                {
+                    Patterns = spec.Patterns
+                }
+            ]
+        };
+
+        var file = await provider.SaveFilePickerAsync(options).ConfigureAwait(true);
+        return file?.TryGetLocalPath();
+    }
+
     private string NormalizeSuggestedFileName(string suggestedFileName)
     {
         if (string.IsNullOrWhiteSpace(suggestedFileName))

@@ -423,6 +423,22 @@
         "kind": "number",
         "optional": true
       }
+    },
+    "prepare-for-export": {
+      "type": {
+        "kind": "string"
+      },
+      "requestId": {
+        "kind": "string"
+      }
+    },
+    "capture-rendered-html": {
+      "type": {
+        "kind": "string"
+      },
+      "requestId": {
+        "kind": "string"
+      }
     }
   },
   "rendererMessageShapes": {
@@ -776,6 +792,50 @@
       },
       "renderId": {
         "kind": "number"
+      }
+    },
+    "full-render-complete": {
+      "type": {
+        "kind": "string"
+      },
+      "requestId": {
+        "kind": "string"
+      },
+      "mermaidErrorCount": {
+        "kind": "number"
+      }
+    },
+    "full-render-failed": {
+      "type": {
+        "kind": "string"
+      },
+      "requestId": {
+        "kind": "string"
+      },
+      "reason": {
+        "kind": "string"
+      }
+    },
+    "rendered-html-captured": {
+      "type": {
+        "kind": "string"
+      },
+      "requestId": {
+        "kind": "string"
+      },
+      "html": {
+        "kind": "string"
+      }
+    },
+    "rendered-html-failed": {
+      "type": {
+        "kind": "string"
+      },
+      "requestId": {
+        "kind": "string"
+      },
+      "reason": {
+        "kind": "string"
       }
     },
     "mode-toggle-settled": {

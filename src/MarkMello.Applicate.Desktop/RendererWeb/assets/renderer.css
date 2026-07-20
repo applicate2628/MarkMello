@@ -67,10 +67,86 @@
   div.mm-width-handle {
     display: none !important;
   }
+  /* Reproduce the READING VIEW, scaled to fit the printable page width, rather
+   * than reflowing the text column to the full page. Reflowing (max-width:none)
+   * changed the line breaks and printed at the on-screen font size, which read
+   * as "too big for A4". Instead: keep the reading column at its on-screen width
+   * (--mm-document-max-width, the width-handle value) with symmetric reading
+   * padding, then shrink the WHOLE document with `zoom` so the reading column
+   * border-box maps exactly onto the printable width.
+   *
+   * `zoom` (not `transform: scale`) is deliberate: in Chromium `zoom` is
+   * layout-affecting, so pagination reflows to the scaled metrics and pages
+   * break AND fill correctly. A paint-only `transform: scale` leaves the
+   * page-break positions at the un-scaled layout height, so every page
+   * under-fills with a blank band (verified empirically, headless print-to-pdf).
+   *
+   * The scale --mm-print-doc-scale is written by the renderer
+   * (wirePrintScaleToFit) as min(1, printableWidth / readingColumnWidth) from
+   * the exact printable width the host passes; the var() fallback (A4 portrait
+   * printable 717px ÷ default reading width 820px = 0.874) keeps a sane,
+   * never-upscaling pure-CSS result if the script did not run. padding-left/right
+   * are pinned to the base value so the minimap width reservation (the aside is
+   * display:none in print, but body.mm-has-minimap still inflates padding-right)
+   * cannot skew the text column. All of this is @media print only — the on-screen
+   * reading view is untouched (--mm-print-doc-scale is inert on screen; nothing
+   * reads it outside this block). */
   body > main.mm-document {
+    width: var(--mm-document-max-width) !important;
     max-width: none !important;
-    padding-left: 0 !important;
-    padding-right: 0 !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    padding-left: var(--mm-document-base-padding-x) !important;
+    padding-right: var(--mm-document-base-padding-x) !important;
+    zoom: var(--mm-print-doc-scale, 0.874);
+  }
+
+  /* Over-wide blocks (display math, wide tables, code, mermaid) scroll on
+   * screen via overflow-x:auto. On paper/PDF a scrollbar is meaningless and
+   * the block is clipped at the container width. Break them out of the scroll
+   * container so the whole block is laid out at natural width; the mermaid
+   * <svg> keeps its own max-width:100% so it scales natively to the page. */
+  main.mm-document .math-display,
+  main.mm-document .mm-table-scroll,
+  main.mm-document pre,
+  main.mm-document .mm-mermaid-svg {
+    overflow: visible !important;
+  }
+  main.mm-document .math-display,
+  main.mm-document .mm-table-scroll,
+  main.mm-document .mm-table-scroll > table,
+  main.mm-document pre {
+    max-width: none !important;
+  }
+
+  /* Scale-to-fit for blocks STILL wider than the READING column after break-out.
+   * applyPrintFit() (renderer, printFit.ts) measures each block's natural width
+   * and, when it exceeds the reading content width, writes the scale factor and
+   * a corrected bottom margin as inline custom properties. The per-block scale
+   * fits the block to the reading column; the document `zoom` above then brings
+   * the whole reading column (this block included) to the printable width — the
+   * two compose (block→column, column→page), they do not double-shrink. This
+   * rule is INERT on screen because it lives only inside @media print — the live
+   * reading view is never transformed. transform-origin keeps the block
+   * left/top-anchored; the corrected margin reserves the scaled height so
+   * following content does not gap or overlap.
+   *
+   * width:max-content (Change 1, generalised to EVERY scaled block): a scaled
+   * block's border-box must grow to its content's natural width BEFORE
+   * transform:scale. Otherwise the box stays column-width while the content
+   * overflows to natural width, and after transform:scale the overflowing
+   * content is CLIPPED at the box (verified: a wide display-math tail and wide
+   * table columns were sliced off) — and for a decorated `pre` the blue
+   * background/border also ends mid-line, under-covering the code. Growing the
+   * box to max-content first makes transform:scale shrink box+content together,
+   * so the box exactly wraps the content and nothing is clipped or under-covered.
+   * Applies to all three candidate blocks (pre, .math-display, .mm-table-scroll);
+   * a fitting (unscaled) block is never marked, so it keeps its column-width box. */
+  main.mm-document [data-mm-print-fit] {
+    width: max-content !important;
+    transform: scale(var(--mm-print-fit-scale, 1));
+    transform-origin: 0 0;
+    margin-bottom: var(--mm-print-fit-margin-bottom, 0);
   }
 }
 

@@ -65,6 +65,29 @@ describe("ipc-contract.json single-source", () => {
       expect((shape as IpcShapeDescriptor).type?.kind, `${messageType}`).toBe("string");
     }
   });
+
+  it("capture-rendered-html uses the exact fixed host request shape", () => {
+    expect(HOST_MESSAGE_SHAPES["capture-rendered-html"]).toEqual({
+      type: { kind: "string" },
+      requestId: { kind: "string" },
+    });
+  });
+
+  it("rendered-html-captured uses the exact fixed success shape", () => {
+    expect(RENDERER_MESSAGE_SHAPES["rendered-html-captured"]).toEqual({
+      type: { kind: "string" },
+      requestId: { kind: "string" },
+      html: { kind: "string" },
+    });
+  });
+
+  it("rendered-html-failed uses the exact reason-bearing failure shape", () => {
+    expect(RENDERER_MESSAGE_SHAPES["rendered-html-failed"]).toEqual({
+      type: { kind: "string" },
+      requestId: { kind: "string" },
+      reason: { kind: "string" },
+    });
+  });
 });
 
 describe("recursive wire-shape validator", () => {

@@ -28,6 +28,7 @@ public partial class MainWindowViewModel : ObservableObject
     private readonly OpenDocumentUseCase _openDocument;
     private readonly SaveDocumentUseCase _saveDocument;
     private readonly IFilePicker _filePicker;
+    private readonly IDocumentExporter? _documentExporter;
     private readonly ICommandLineActivation _commandLine;
     private readonly ILocalizationService _localization;
     private readonly ISettingsStore _settings;
@@ -119,7 +120,8 @@ public partial class MainWindowViewModel : ObservableObject
         IUpdateService updateService,
         ITableCellSourceEditor tableCellSourceEditor,
         IImageSourceResolver? imageSourceResolver = null,
-        IRendererReadinessService? rendererReadiness = null)
+        IRendererReadinessService? rendererReadiness = null,
+        IDocumentExporter? documentExporter = null)
     {
         _openDocument = openDocument;
         _saveDocument = saveDocument;
@@ -134,6 +136,7 @@ public partial class MainWindowViewModel : ObservableObject
         _tableCellSourceEditor = tableCellSourceEditor;
         _imageSourceResolver = imageSourceResolver;
         _rendererReadiness = rendererReadiness;
+        _documentExporter = documentExporter;
         _inDocumentEditCoordinator = new RealtimeInDocumentEditCoordinator();
         _inDocumentEditHost = new InDocumentEditHost(this);
         _aboutVersion = GetProductVersion();
@@ -188,6 +191,7 @@ public partial class MainWindowViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsSettingsOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppMenuOpen))]
+    [NotifyPropertyChangedFor(nameof(IsAppExportOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppSettingsOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppAboutOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppUpdatesOpen))]
@@ -221,6 +225,7 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(ShowsReadEyeIcon))]
     [NotifyPropertyChangedFor(nameof(ShowsAppMenuControl))]
     [NotifyPropertyChangedFor(nameof(IsAppMenuOpen))]
+    [NotifyPropertyChangedFor(nameof(IsAppExportOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppSettingsOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppAboutOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppUpdatesOpen))]
@@ -319,6 +324,8 @@ public partial class MainWindowViewModel : ObservableObject
 
     public bool IsAppMenuOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppMenu;
 
+    public bool IsAppExportOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppExport;
+
     public bool IsAppSettingsOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppSettings;
 
     public bool IsAppAboutOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppAbout;
@@ -328,6 +335,7 @@ public partial class MainWindowViewModel : ObservableObject
     public bool IsAppOverlayOpen => ShowsAppMenuControl
         && ShellOverlay is
             ShellOverlayKind.AppMenu
+            or ShellOverlayKind.AppExport
             or ShellOverlayKind.AppSettings
             or ShellOverlayKind.AppAbout
             or ShellOverlayKind.AppUpdates;
@@ -1537,6 +1545,7 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(ShowsAppMenuControl));
         OnPropertyChanged(nameof(CanShowTopLevelUpdateNotification));
         OnPropertyChanged(nameof(IsAppMenuOpen));
+        OnPropertyChanged(nameof(IsAppExportOpen));
         OnPropertyChanged(nameof(IsAppSettingsOpen));
         OnPropertyChanged(nameof(IsAppAboutOpen));
         OnPropertyChanged(nameof(IsAppUpdatesOpen));
@@ -2553,6 +2562,10 @@ public partial class MainWindowViewModel : ObservableObject
         CheckForUpdatesCommand.NotifyCanExecuteChanged();
         DownloadUpdateCommand.NotifyCanExecuteChanged();
         OpenDownloadedUpdateCommand.NotifyCanExecuteChanged();
+        OpenAppExportCommand.NotifyCanExecuteChanged();
+        ExportPdfCommand.NotifyCanExecuteChanged();
+        ExportHtmlCommand.NotifyCanExecuteChanged();
+        PrintCommand.NotifyCanExecuteChanged();
 
         OnPropertyChanged(nameof(CanCheckForUpdates));
         OnPropertyChanged(nameof(CanDownloadAvailableUpdate));
@@ -2627,6 +2640,7 @@ public partial class MainWindowViewModel : ObservableObject
     {
         if (ShellOverlay is
             ShellOverlayKind.AppMenu
+            or ShellOverlayKind.AppExport
             or ShellOverlayKind.AppSettings
             or ShellOverlayKind.AppAbout
             or ShellOverlayKind.AppUpdates)

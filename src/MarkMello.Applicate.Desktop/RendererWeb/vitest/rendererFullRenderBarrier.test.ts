@@ -1,0 +1,617 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+
+type HostBridge = (message: unknown) => void;
+type RendererMessage = { type?: string; requestId?: string; mermaidErrorCount?: number; reason?: string };
+
+type FakeObserverRecord = {
+  elements: Set<Element>;
+  callback: IntersectionObserverCallback;
+};
+
+type MermaidApiForTesting = {
+  initialize?: (config: unknown) => void;
+  render: (id: string, source: string) => Promise<{ svg: string }>;
+};
+
+type MermaidLifecycleSnapshot = {
+  documentIdentity: number;
+  owner: "normal" | "barrier" | "terminal";
+  retainedErrorCount: number | null;
+  activeRenderCount: number;
+  generation: number;
+  observerPresent: boolean;
+  cacheResumeScheduled: boolean;
+  themeRefreshScheduled: boolean;
+};
+
+type RendererInternals = {
+  initMermaidWithTheme: (theme: "light" | "dark" | "classic-white") => void;
+  renderMermaid: () => Promise<void>;
+  renderMermaidNodes: (nodes: HTMLElement[], mermaid: MermaidApiForTesting, perfMarkName?: string) => Promise<void>;
+  scheduleCachedMermaidResume: (hasMermaid?: boolean) => void;
+  scheduleThemeMermaidRefresh: (theme: "light" | "dark" | "classic-white") => void;
+  installLazyMermaidObserver: (nodes: HTMLElement[], generation: number, mermaid: MermaidApiForTesting) => void;
+  enqueueLazyMermaidRender: (node: HTMLElement, generation: number, mermaid: MermaidApiForTesting) => void;
+  handlePrepareForExport: (message: { type: "prepare-for-export"; requestId: string }) => Promise<void>;
+  getMermaidLifecycleSnapshotForTesting: () => MermaidLifecycleSnapshot;
+  setFullRenderBarrierFailureForTesting: (reason: unknown | null) => void;
+};
+
+async function loadRenderer(body = '<main class="mm-document"></main>') {
+  vi.resetModules();
+  document.documentElement.innerHTML = `<body>${body}</body>`;
+
+  const animationFrames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    animationFrames.push(callback);
+    return animationFrames.length;
+  });
+
+  const idleCallbacks: Array<() => void> = [];
+  vi.stubGlobal("requestIdleCallback", (callback: () => void) => {
+    idleCallbacks.push(callback);
+    return idleCallbacks.length;
+  });
+
+  const observers: FakeObserverRecord[] = [];
+  class FakeIntersectionObserver {
+    private readonly record = { elements: new Set<Element>() } as FakeObserverRecord;
+
+    constructor(callback: IntersectionObserverCallback) {
+      this.record.callback = callback;
+      observers.push(this.record);
+    }
+
+    observe(element: Element): void {
+      this.record.elements.add(element);
+    }
+
+    unobserve(element: Element): void {
+      this.record.elements.delete(element);
+    }
+
+    disconnect(): void {
+      this.record.elements.clear();
+    }
+  }
+  vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver as unknown as typeof IntersectionObserver);
+
+  const messages: RendererMessage[] = [];
+  (window as unknown as {
+    chrome: { webview: { postMessage: (message: RendererMessage) => void } };
+  }).chrome = {
+    webview: { postMessage: (message) => messages.push(message) },
+  };
+
+  const rendererModule = await import("../src/renderer");
+  const send = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
+
+  async function drainAnimationFrames(maxFrames = 200): Promise<void> {
+    let idleTurns = 0;
+    for (let index = 0; index < maxFrames; index++) {
+      await Promise.resolve();
+      const callback = animationFrames.shift();
+      if (!callback) {
+        idleTurns++;
+        if (idleTurns >= 20) return;
+        continue;
+      }
+      idleTurns = 0;
+      callback(index * 16);
+    }
+    throw new Error("renderer animation-frame queue did not settle");
+  }
+
+  return { drainAnimationFrames, idleCallbacks, messages, observers, rendererModule, send };
+}
+
+function requireRendererInternals(rendererModule: object): RendererInternals {
+  const candidate = rendererModule as Partial<RendererInternals>;
+  const names: Array<keyof RendererInternals> = [
+    "initMermaidWithTheme",
+    "renderMermaid",
+    "renderMermaidNodes",
+    "scheduleCachedMermaidResume",
+    "scheduleThemeMermaidRefresh",
+    "installLazyMermaidObserver",
+    "enqueueLazyMermaidRender",
+    "handlePrepareForExport",
+    "getMermaidLifecycleSnapshotForTesting",
+    "setFullRenderBarrierFailureForTesting",
+  ];
+  for (const name of names) {
+    expect(candidate[name], `actual production export ${name}`).toBeTypeOf("function");
+  }
+  return candidate as RendererInternals;
+}
+
+function createGate<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(next => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+async function flushMicrotasks(turns = 20): Promise<void> {
+  for (let index = 0; index < turns; index++) {
+    await Promise.resolve();
+  }
+}
+
+afterEach(() => {
+  delete (window as unknown as { chrome?: unknown }).chrome;
+  delete (window as unknown as { katex?: unknown }).katex;
+  delete (window as unknown as { mermaid?: unknown }).mermaid;
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("prepare-for-export full-render barrier", () => {
+  it("waits for append-final, warms every block, and drains appended math before completion", async () => {
+    const katexRender = vi.fn((_tex: string, node: Element) => {
+      node.textContent = "rendered math";
+    });
+    (window as unknown as { katex: { render: typeof katexRender } }).katex = { render: katexRender };
+    const { drainAnimationFrames, idleCallbacks, messages, send } = await loadRenderer();
+
+    send({
+      type: "load-document",
+      html: "<h1>Intro</h1>",
+      renderId: 41,
+      cacheKey: null,
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    send({ type: "prepare-for-export", requestId: "export-41" });
+    await drainAnimationFrames();
+
+    expect(messages.some(message => message.type === "full-render-complete")).toBe(false);
+    expect(messages.some(message => message.type === "full-render-failed")).toBe(false);
+
+    const ordinaryBlocks = Array.from({ length: 65 }, (_, index) => `<p>block ${index}</p>`).join("");
+    send({
+      type: "append-document",
+      html: `${ordinaryBlocks}<p data-tex="x^2"></p>`,
+      renderId: 41,
+      isFinal: true,
+      cacheKey: "full-cache",
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await drainAnimationFrames();
+
+    expect(idleCallbacks.length).toBeGreaterThan(0);
+    expect(document.querySelectorAll("main.mm-document > *:not(.mm-warmed)")).toHaveLength(0);
+    expect(document.querySelector<HTMLElement>("[data-tex]")?.dataset.mmMathRendered).toBe("true");
+    expect(katexRender).toHaveBeenCalled();
+    expect(messages).toContainEqual({
+      type: "full-render-complete",
+      requestId: "export-41",
+      mermaidErrorCount: 0,
+    });
+  });
+
+  it("ignores stale append-final messages and accepts an empty matching final append", async () => {
+    const { drainAnimationFrames, messages, rendererModule, send } = await loadRenderer();
+
+    send({
+      type: "load-document",
+      html: "<p>progressive start</p>",
+      renderId: 61,
+      cacheKey: null,
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    send({ type: "prepare-for-export", requestId: "export-61" });
+    send({
+      type: "append-document",
+      html: "",
+      renderId: 60,
+      isFinal: true,
+      cacheKey: "stale-cache",
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await drainAnimationFrames();
+
+    expect(messages.some(message => message.type === "full-render-complete")).toBe(false);
+    expect(messages.some(message => message.type === "full-render-failed")).toBe(false);
+
+    send({
+      type: "append-document",
+      html: "",
+      renderId: 61,
+      isFinal: true,
+      cacheKey: "matching-cache",
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await drainAnimationFrames();
+
+    expect(messages).toContainEqual({
+      type: "full-render-complete",
+      requestId: "export-61",
+      mermaidErrorCount: 0,
+    });
+  });
+
+  it("renders only pending Mermaid nodes directly and counts per-node failures", async () => {
+    const mermaidRender = vi.fn(async (_id: string, source: string) => {
+      if (source === "bad") throw new Error("bad diagram");
+      return { svg: `<svg>${source}</svg>` };
+    });
+    (window as unknown as {
+      mermaid: { initialize: (config: unknown) => void; render: typeof mermaidRender };
+    }).mermaid = { initialize: vi.fn(), render: mermaidRender };
+
+    const { drainAnimationFrames, messages, observers, send } = await loadRenderer();
+    send({
+      type: "load-document",
+      html: [
+        '<pre class="mm-mermaid is-rendered"><code data-mm-mermaid>already</code></pre>',
+        '<pre class="mm-mermaid"><code data-mm-mermaid>good</code></pre>',
+        '<pre class="mm-mermaid"><code data-mm-mermaid>bad</code></pre>',
+      ].join(""),
+      renderId: 52,
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await drainAnimationFrames();
+
+    send({ type: "prepare-for-export", requestId: "export-52" });
+    await drainAnimationFrames();
+
+    expect(mermaidRender.mock.calls.map(call => call[1])).toEqual(["good", "bad"]);
+    expect(messages).toContainEqual({
+      type: "full-render-complete",
+      requestId: "export-52",
+      mermaidErrorCount: 1,
+    });
+    const alreadyRendered = document.querySelectorAll<HTMLElement>("pre.mm-mermaid")[0]!;
+    expect(observers.every(observer => !observer.elements.has(alreadyRendered))).toBe(true);
+  });
+
+  it("posts a correlated failure when the barrier driver cannot find the document root", async () => {
+    const { drainAnimationFrames, messages, send } = await loadRenderer("");
+
+    send({ type: "prepare-for-export", requestId: "export-fatal" });
+    await drainAnimationFrames();
+
+    expect(messages).toContainEqual({
+      type: "full-render-failed",
+      requestId: "export-fatal",
+      reason: expect.stringContaining("document root"),
+    });
+    expect(messages.some(message => message.type === "full-render-complete")).toBe(false);
+  });
+
+  it("keeps the barrier event-driven and the processed cache progressively reloadable", () => {
+    const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+    const barrierStart = source.indexOf("async function driveFullRenderBarrier(");
+    const barrierEnd = source.indexOf("async function handlePrepareForExport(", barrierStart);
+    const barrier = source.slice(barrierStart, barrierEnd);
+    const cacheStart = source.indexOf("function preserveCurrentProcessedDocument()");
+    const cacheEnd = source.indexOf("function applyViewerChromeState", cacheStart);
+    const cacheOwner = source.slice(cacheStart, cacheEnd);
+
+    expect(barrierStart).toBeGreaterThanOrEqual(0);
+    expect(barrierEnd).toBeGreaterThan(barrierStart);
+    expect(barrier).toContain("await waitForProgressiveAppendFinal()");
+    expect(barrier).toContain("await waitForDocumentWarmup()");
+    expect(barrier).toContain("await trackMermaidRenderCall(");
+    expect(barrier).not.toContain("setTimeout");
+    expect(barrier).not.toContain("setInterval");
+    expect(cacheOwner).toContain('node.classList.remove("mm-warmed")');
+  });
+
+  it("MermaidSequentialPrepareReplay retains the terminal count and starts zero new work", async () => {
+    const mermaidRender = vi.fn(async (_id: string, source: string) => {
+      if (source === "bad") throw new Error("bad diagram");
+      return { svg: `<svg>${source}</svg>` };
+    });
+    const initialize = vi.fn();
+    (window as unknown as { mermaid: MermaidApiForTesting }).mermaid = { initialize, render: mermaidRender };
+    const { drainAnimationFrames, messages, send } = await loadRenderer();
+
+    send({
+      type: "load-document",
+      html: '<pre class="mm-mermaid"><code data-mm-mermaid>bad</code></pre>',
+      renderId: 71,
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await drainAnimationFrames();
+    send({ type: "prepare-for-export", requestId: "sequential-1" });
+    await drainAnimationFrames();
+    const callsAfterTerminal = mermaidRender.mock.calls.length;
+    send({ type: "prepare-for-export", requestId: "sequential-2" });
+    await drainAnimationFrames();
+
+    expect(messages).toContainEqual({
+      type: "full-render-complete",
+      requestId: "sequential-1",
+      mermaidErrorCount: 1,
+    });
+    expect(messages).toContainEqual({
+      type: "full-render-complete",
+      requestId: "sequential-2",
+      mermaidErrorCount: 1,
+    });
+    expect(mermaidRender).toHaveBeenCalledTimes(callsAfterTerminal);
+    expect(initialize).not.toHaveBeenCalled();
+  });
+
+  it("MermaidMissingApiReplay retains the count and terminally suppresses later API work", async () => {
+    const { drainAnimationFrames, messages, rendererModule, send } = await loadRenderer();
+    send({
+      type: "load-document",
+      html: [
+        '<pre class="mm-mermaid"><code data-mm-mermaid>one</code></pre>',
+        '<pre class="mm-mermaid"><code data-mm-mermaid>two</code></pre>',
+      ].join(""),
+      renderId: 72,
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await drainAnimationFrames();
+    send({ type: "prepare-for-export", requestId: "missing-api-1" });
+    await drainAnimationFrames();
+    send({ type: "prepare-for-export", requestId: "missing-api-2" });
+    await drainAnimationFrames();
+
+    const initialize = vi.fn();
+    const render = vi.fn(async () => ({ svg: "<svg></svg>" }));
+    (window as unknown as { mermaid: MermaidApiForTesting }).mermaid = { initialize, render };
+    const internals = requireRendererInternals(rendererModule);
+    internals.initMermaidWithTheme("dark");
+    await flushMicrotasks();
+
+    expect(messages).toContainEqual({
+      type: "full-render-complete",
+      requestId: "missing-api-1",
+      mermaidErrorCount: 2,
+    });
+    expect(messages).toContainEqual({
+      type: "full-render-complete",
+      requestId: "missing-api-2",
+      mermaidErrorCount: 2,
+    });
+    expect(initialize).not.toHaveBeenCalled();
+    expect(render).not.toHaveBeenCalled();
+  });
+
+  it("MermaidBarrierOwnsEveryApiStarter and drains an already active render", async () => {
+    const firstRender = createGate<{ svg: string }>();
+    const initialize = vi.fn();
+    const render = vi.fn()
+      .mockImplementationOnce(() => firstRender.promise)
+      .mockResolvedValue({ svg: "<svg>barrier</svg>" });
+    const mermaid = { initialize, render } satisfies MermaidApiForTesting;
+    (window as unknown as { mermaid: MermaidApiForTesting }).mermaid = mermaid;
+    const { drainAnimationFrames, messages, observers, rendererModule } = await loadRenderer(
+      '<main class="mm-document"><pre class="mm-mermaid"><code data-mm-mermaid>active</code></pre></main>'
+    );
+    const internals = requireRendererInternals(rendererModule);
+    const node = document.querySelector<HTMLElement>("pre.mm-mermaid")!;
+    const normalRender = internals.renderMermaidNodes([node], mermaid);
+    await flushMicrotasks();
+    expect(render).toHaveBeenCalledTimes(1);
+
+    const lazy = document.createElement("pre");
+    lazy.className = "mm-mermaid";
+    lazy.innerHTML = "<code data-mm-mermaid>lazy</code>";
+    document.querySelector("main.mm-document")!.append(lazy);
+    const normalSnapshot = internals.getMermaidLifecycleSnapshotForTesting();
+    internals.installLazyMermaidObserver([lazy], normalSnapshot.generation, mermaid);
+    const staleObserver = observers.at(-1)!;
+
+    const barrier = internals.handlePrepareForExport({ type: "prepare-for-export", requestId: "active-drain" });
+    await flushMicrotasks();
+    const barrierSnapshot = internals.getMermaidLifecycleSnapshotForTesting();
+    expect(barrierSnapshot.owner).toBe("barrier");
+    expect(barrierSnapshot.activeRenderCount).toBe(1);
+    expect(messages.some(message => message.requestId === "active-drain")).toBe(false);
+
+    const callsBeforeSuppressedStarters = render.mock.calls.length;
+    const generationBeforeSuppressedStarters = barrierSnapshot.generation;
+    internals.initMermaidWithTheme("dark");
+    void internals.renderMermaid();
+    void internals.renderMermaidNodes([lazy], mermaid);
+    internals.scheduleCachedMermaidResume(true);
+    internals.scheduleThemeMermaidRefresh("dark");
+    internals.installLazyMermaidObserver([lazy], generationBeforeSuppressedStarters, mermaid);
+    internals.enqueueLazyMermaidRender(lazy, generationBeforeSuppressedStarters, mermaid);
+    staleObserver.callback([
+      { isIntersecting: true, target: lazy } as IntersectionObserverEntry,
+    ], {} as IntersectionObserver);
+    await flushMicrotasks();
+    const suppressedSnapshot = internals.getMermaidLifecycleSnapshotForTesting();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledTimes(callsBeforeSuppressedStarters);
+    expect(suppressedSnapshot.generation).toBe(generationBeforeSuppressedStarters);
+    expect(suppressedSnapshot.observerPresent).toBe(false);
+    expect(suppressedSnapshot.cacheResumeScheduled).toBe(false);
+    expect(suppressedSnapshot.themeRefreshScheduled).toBe(false);
+
+    firstRender.resolve({ svg: "<svg>stale</svg>" });
+    await normalRender;
+    await drainAnimationFrames();
+    await barrier;
+    const terminalSnapshot = internals.getMermaidLifecycleSnapshotForTesting();
+    expect(terminalSnapshot.owner).toBe("terminal");
+    expect(terminalSnapshot.activeRenderCount).toBe(0);
+    expect(messages).toContainEqual({
+      type: "full-render-complete",
+      requestId: "active-drain",
+      mermaidErrorCount: 0,
+    });
+
+    const terminalCalls = render.mock.calls.length;
+    internals.initMermaidWithTheme("light");
+    void internals.renderMermaid();
+    void internals.renderMermaidNodes([lazy], mermaid);
+    internals.scheduleCachedMermaidResume(true);
+    internals.scheduleThemeMermaidRefresh("light");
+    internals.installLazyMermaidObserver([lazy], terminalSnapshot.generation, mermaid);
+    internals.enqueueLazyMermaidRender(lazy, terminalSnapshot.generation, mermaid);
+    staleObserver.callback([
+      { isIntersecting: true, target: lazy } as IntersectionObserverEntry,
+    ], {} as IntersectionObserver);
+    await flushMicrotasks();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledTimes(terminalCalls);
+    expect(internals.getMermaidLifecycleSnapshotForTesting()).toEqual(terminalSnapshot);
+  });
+
+  it("MermaidFailureRecoverySameIdentity drains before restoring exactly one owner", async () => {
+    const firstRender = createGate<{ svg: string }>();
+    const render = vi.fn()
+      .mockImplementationOnce(() => firstRender.promise)
+      .mockResolvedValue({ svg: "<svg>retry</svg>" });
+    const mermaid = { initialize: vi.fn(), render } satisfies MermaidApiForTesting;
+    (window as unknown as { mermaid: MermaidApiForTesting }).mermaid = mermaid;
+    const { drainAnimationFrames, messages, observers, rendererModule } = await loadRenderer(
+      '<main class="mm-document"><pre class="mm-mermaid"><code data-mm-mermaid>recover</code></pre></main>'
+    );
+    const internals = requireRendererInternals(rendererModule);
+    const node = document.querySelector<HTMLElement>("pre.mm-mermaid")!;
+    const normalRender = internals.renderMermaidNodes([node], mermaid);
+    await flushMicrotasks();
+    internals.setFullRenderBarrierFailureForTesting(new Error("injected barrier failure"));
+    const barrier = internals.handlePrepareForExport({ type: "prepare-for-export", requestId: "recover-same" });
+    await flushMicrotasks();
+    expect(internals.getMermaidLifecycleSnapshotForTesting().owner).toBe("barrier");
+    expect(messages.some(message => message.requestId === "recover-same")).toBe(false);
+
+    firstRender.resolve({ svg: "<svg>stale</svg>" });
+    await normalRender;
+    await drainAnimationFrames();
+    await barrier;
+    const recovered = internals.getMermaidLifecycleSnapshotForTesting();
+    expect(recovered.owner).toBe("normal");
+    expect(recovered.activeRenderCount).toBe(0);
+    expect(recovered.observerPresent).toBe(true);
+    expect(messages).toContainEqual({
+      type: "full-render-failed",
+      requestId: "recover-same",
+      reason: "injected barrier failure",
+    });
+
+    const recoveryObserver = observers.at(-1)!;
+    recoveryObserver.callback([
+      { isIntersecting: true, target: node } as IntersectionObserverEntry,
+    ], {} as IntersectionObserver);
+    await flushMicrotasks();
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(recoveryObserver.elements.has(node)).toBe(false);
+  });
+
+  it("MermaidFailureRecoveryStaleIdentity restores no owner and performs no stale DOM work", async () => {
+    const firstRender = createGate<{ svg: string }>();
+    const render = vi.fn()
+      .mockImplementationOnce(() => firstRender.promise)
+      .mockResolvedValue({ svg: "<svg>unexpected</svg>" });
+    const mermaid = { initialize: vi.fn(), render } satisfies MermaidApiForTesting;
+    (window as unknown as { mermaid: MermaidApiForTesting }).mermaid = mermaid;
+    const { drainAnimationFrames, messages, observers, rendererModule, send } = await loadRenderer(
+      '<main class="mm-document"><pre class="mm-mermaid"><code data-mm-mermaid>stale</code></pre></main>'
+    );
+    const internals = requireRendererInternals(rendererModule);
+    const node = document.querySelector<HTMLElement>("pre.mm-mermaid")!;
+    const normalRender = internals.renderMermaidNodes([node], mermaid);
+    await flushMicrotasks();
+    const oldIdentity = internals.getMermaidLifecycleSnapshotForTesting().documentIdentity;
+    internals.setFullRenderBarrierFailureForTesting(new Error("stale barrier failure"));
+    const barrier = internals.handlePrepareForExport({ type: "prepare-for-export", requestId: "recover-stale" });
+    await flushMicrotasks();
+
+    send({
+      type: "load-document",
+      html: '<p id="fresh-document">fresh</p>',
+      renderId: 73,
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await drainAnimationFrames();
+    const observerCountAfterMutation = observers.length;
+    firstRender.resolve({ svg: "<svg>stale</svg>" });
+    await normalRender;
+    await barrier;
+    await flushMicrotasks();
+
+    const recovered = internals.getMermaidLifecycleSnapshotForTesting();
+    expect(recovered.documentIdentity).toBe(oldIdentity + 1);
+    expect(recovered.owner).toBe("normal");
+    expect(recovered.observerPresent).toBe(false);
+    expect(observers).toHaveLength(observerCountAfterMutation);
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("#fresh-document")?.textContent).toBe("fresh");
+    expect(messages).toContainEqual({
+      type: "full-render-failed",
+      requestId: "recover-stale",
+      reason: "stale barrier failure",
+    });
+  });
+
+  it("MermaidTerminalResetOnPostMutationLoadAndClear advances once only after successful writes", async () => {
+    const { applyLoadDocument, clearDocumentState } = await import("../src/loadDocument");
+    let mutationCount = 0;
+    const seenBodies: string[] = [];
+    const deps = {
+      runInitialRenderPipeline: async () => undefined,
+      cancelCurrentMathController: vi.fn(),
+      resetModuleGlobals: vi.fn(),
+      scrollWindowToTop: vi.fn(),
+      emitMark: vi.fn(),
+      ensureChromeNodes: vi.fn(),
+      applyTheme: vi.fn(),
+      debugLog: vi.fn(),
+      onDocumentBodyMutated: () => {
+        mutationCount++;
+        seenBodies.push(document.querySelector("main.mm-document")?.innerHTML ?? "<missing>");
+      },
+    };
+
+    document.body.innerHTML = '<main class="mm-document"><p>old</p></main>';
+    applyLoadDocument({ html: "<p>cold</p>", hasMermaid: false }, deps);
+    expect(mutationCount).toBe(1);
+    expect(seenBodies.at(-1)).toBe("<p>cold</p>");
+
+    const fragment = document.createDocumentFragment();
+    const cached = document.createElement("p");
+    cached.textContent = "cached";
+    fragment.append(cached);
+    applyLoadDocument({ cacheKey: "cached" }, {
+      ...deps,
+      getCachedDocumentFragment: () => fragment,
+    });
+    expect(mutationCount).toBe(2);
+    expect(seenBodies.at(-1)).toBe("<p>cached</p>");
+
+    clearDocumentState(deps);
+    expect(mutationCount).toBe(3);
+    expect(seenBodies.at(-1)).toBe("");
+
+    document.body.innerHTML = "";
+    applyLoadDocument({ html: "<p>missing root</p>" }, deps);
+    expect(mutationCount).toBe(3);
+
+    document.body.innerHTML = '<main class="mm-document"></main>';
+    applyLoadDocument({ cacheKey: "missing" }, {
+      ...deps,
+      getCachedDocumentFragment: () => undefined,
+    });
+    expect(mutationCount).toBe(3);
+
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    Object.defineProperty(main, "innerHTML", {
+      configurable: true,
+      get: () => "",
+      set: () => { throw new Error("pre-write failure"); },
+    });
+    expect(() => applyLoadDocument({ html: "<p>never written</p>" }, deps)).toThrow("pre-write failure");
+    expect(mutationCount).toBe(3);
+  });
+});

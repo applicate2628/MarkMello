@@ -355,6 +355,7 @@ internal static class Program
         collection.AddSingleton<IOpenDocumentsService, OpenDocumentsService>();
         collection.AddSingleton<IApplicateSessionStore>(new JsonApplicateSessionStore());
         collection.AddApplication();
+        collection.AddSingleton<IDocumentExporter, ApplicateDocumentExporter>();
         collection.AddPresentation();
         collection.Replace(ServiceDescriptor.Singleton<MainWindow>(provider => new ApplicateMainWindow(
             provider.GetRequiredService<MarkMello.Presentation.ViewModels.MainWindowViewModel>(),

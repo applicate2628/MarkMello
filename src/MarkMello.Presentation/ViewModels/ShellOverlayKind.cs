@@ -4,6 +4,7 @@ public enum ShellOverlayKind
 {
     None,
     AppMenu,
+    AppExport,
     AppSettings,
     AppAbout,
     AppUpdates,

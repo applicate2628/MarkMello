@@ -36,6 +36,7 @@ export type LoadDocumentDeps = {
   completeCachedDocumentLoad?: (renderId?: number, hasMermaid?: boolean, hasHljs?: boolean, skipFrameWait?: boolean) => void;
   notifyDocumentCacheMiss?: (renderId?: number, cacheKey?: string) => void;
   notifyDocumentFirstPaint?: (renderId?: number) => void;
+  onDocumentBodyMutated?: () => void;
 };
 
 export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocumentDeps): void {
@@ -97,6 +98,7 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
   } else {
     main.innerHTML = message.html ?? "";
   }
+  deps.onDocumentBodyMutated?.();
   if (deps.notifyDocumentFirstPaint) {
     const notifyDocumentFirstPaint = deps.notifyDocumentFirstPaint;
     const renderId = message.renderId;
@@ -150,5 +152,6 @@ export function clearDocumentState(deps: LoadDocumentDeps): void {
   deps.setCurrentDocumentCacheKey?.(null);
   if (main) {
     main.innerHTML = "";
+    deps.onDocumentBodyMutated?.();
   }
 }

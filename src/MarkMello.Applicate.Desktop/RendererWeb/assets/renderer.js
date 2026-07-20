@@ -266,6 +266,7 @@
     } else {
       main.innerHTML = message.html ?? "";
     }
+    deps.onDocumentBodyMutated?.();
     if (deps.notifyDocumentFirstPaint) {
       const notifyDocumentFirstPaint = deps.notifyDocumentFirstPaint;
       const renderId = message.renderId;
@@ -303,6 +304,7 @@
     deps.setCurrentDocumentCacheKey?.(null);
     if (main) {
       main.innerHTML = "";
+      deps.onDocumentBodyMutated?.();
     }
   }
 
@@ -1640,6 +1642,115 @@
     return current === container ? top : null;
   }
 
+  // RendererWeb/src/printFit.ts
+  var PRINT_FIT_ATTR = "data-mm-print-fit";
+  var PRINT_FIT_SCALE_VAR = "--mm-print-fit-scale";
+  var PRINT_FIT_MARGIN_VAR = "--mm-print-fit-margin-bottom";
+  var PRINT_DOC_SCALE_VAR = "--mm-print-doc-scale";
+  function computeGlobalPrintScale(printableWidthPx, readingColumnWidthPx) {
+    if (!Number.isFinite(printableWidthPx) || !Number.isFinite(readingColumnWidthPx)) {
+      return 1;
+    }
+    if (printableWidthPx <= 0 || readingColumnWidthPx <= 0) {
+      return 1;
+    }
+    return Math.min(1, printableWidthPx / readingColumnWidthPx);
+  }
+  var CANDIDATE_SELECTOR = ".math-display, .mm-table-scroll, pre";
+  var A4_PORTRAIT_WIDTH_IN = 8.27;
+  var PRINT_MARGIN_IN_PER_SIDE = 0.4;
+  var CSS_PX_PER_IN = 96;
+  var DEFAULT_PRINT_PAGE_CONTENT_WIDTH_PX = Math.floor(
+    (A4_PORTRAIT_WIDTH_IN - 2 * PRINT_MARGIN_IN_PER_SIDE) * CSS_PX_PER_IN
+  );
+  function computePrintFit(input) {
+    const { contentWidth, availableWidth, contentHeight, marginBottom } = input;
+    if (!Number.isFinite(contentWidth) || !Number.isFinite(availableWidth)) {
+      return null;
+    }
+    if (contentWidth <= 0 || availableWidth <= 0) {
+      return null;
+    }
+    if (contentWidth <= availableWidth) {
+      return null;
+    }
+    const scale = availableWidth / contentWidth;
+    const reservedShift = Number.isFinite(contentHeight) && contentHeight > 0 ? contentHeight * (1 - scale) : 0;
+    const correctedMargin = Number.isFinite(marginBottom) ? marginBottom - reservedShift : -reservedShift;
+    return { scale, marginBottom: correctedMargin };
+  }
+  function parsePx(value) {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  function measureNaturalSize(el) {
+    const previous = {
+      width: el.style.width,
+      maxWidth: el.style.maxWidth,
+      contentVisibility: el.style.contentVisibility
+    };
+    const table = el.querySelector(":scope > table");
+    const previousTable = table ? { width: table.style.width, maxWidth: table.style.maxWidth } : null;
+    try {
+      el.style.width = "max-content";
+      el.style.maxWidth = "none";
+      el.style.contentVisibility = "visible";
+      if (table) {
+        table.style.width = "max-content";
+        table.style.maxWidth = "none";
+      }
+      const rect = el.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    } finally {
+      el.style.width = previous.width;
+      el.style.maxWidth = previous.maxWidth;
+      el.style.contentVisibility = previous.contentVisibility;
+      if (table && previousTable) {
+        table.style.width = previousTable.width;
+        table.style.maxWidth = previousTable.maxWidth;
+      }
+    }
+  }
+  function clearPrintFitOne(el) {
+    if (el.hasAttribute(PRINT_FIT_ATTR)) {
+      el.removeAttribute(PRINT_FIT_ATTR);
+    }
+    el.style.removeProperty(PRINT_FIT_SCALE_VAR);
+    el.style.removeProperty(PRINT_FIT_MARGIN_VAR);
+  }
+  function applyPrintFit(root, availableWidthPx) {
+    if (!Number.isFinite(availableWidthPx) || availableWidthPx <= 0) {
+      return;
+    }
+    const candidates = root.querySelectorAll(CANDIDATE_SELECTOR);
+    candidates.forEach((el) => {
+      const { width, height } = measureNaturalSize(el);
+      if (!Number.isFinite(width) || width <= 0) {
+        clearPrintFitOne(el);
+        return;
+      }
+      const marginBottom = parsePx(getComputedStyle(el).marginBottom);
+      const fit = computePrintFit({
+        contentWidth: width,
+        availableWidth: availableWidthPx,
+        contentHeight: height,
+        marginBottom
+      });
+      if (fit === null) {
+        clearPrintFitOne(el);
+        return;
+      }
+      el.style.setProperty(PRINT_FIT_SCALE_VAR, `${fit.scale}`);
+      el.style.setProperty(PRINT_FIT_MARGIN_VAR, `${fit.marginBottom}px`);
+      el.setAttribute(PRINT_FIT_ATTR, "");
+    });
+  }
+  function clearPrintFit(root) {
+    root.querySelectorAll(`[${PRINT_FIT_ATTR}]`).forEach((el) => {
+      clearPrintFitOne(el);
+    });
+  }
+
   // RendererWeb/src/renderer.ts
   var hostWindow = window;
   var MINIMAP_CLASS = "mm-minimap";
@@ -1688,6 +1799,9 @@
   var minimapDragGrabOffset = 0;
   var MINIMAP_DRAG_THRESHOLD_PX = 4;
   var minimapSourceReady = false;
+  var documentIdentity = 0;
+  var mermaidLifecycleState = { owner: "normal", identity: documentIdentity };
+  var activeMermaidRenderCalls = /* @__PURE__ */ new Set();
   var mermaidRenderGeneration = 0;
   var mermaidLazyObserver = null;
   var mermaidLazyRenderQueue = Promise.resolve();
@@ -2129,7 +2243,35 @@
   function applyTheme(theme) {
     document.documentElement.dataset.theme = theme;
   }
+  function isNormalMermaidOwner(identity = documentIdentity) {
+    return mermaidLifecycleState.owner === "normal" && mermaidLifecycleState.identity === identity && documentIdentity === identity;
+  }
+  function trackMermaidRenderCall(node, generation, mermaid) {
+    const renderCall = Promise.resolve().then(() => renderMermaidNode(
+      node,
+      generation,
+      () => mermaidRenderGeneration,
+      mermaid,
+      MERMAID_PER_DIAGRAM_TIMEOUT_MS,
+      invalidateTopVisibleBlockIndexCache
+    ));
+    activeMermaidRenderCalls.add(renderCall);
+    void renderCall.finally(() => {
+      activeMermaidRenderCalls.delete(renderCall);
+    }).catch(() => void 0);
+    return renderCall;
+  }
+  async function drainActiveMermaidRenderCalls() {
+    while (activeMermaidRenderCalls.size > 0) {
+      await Promise.allSettled(Array.from(activeMermaidRenderCalls));
+    }
+  }
+  function establishNormalMermaidOwnerAfterBodyMutation() {
+    const identity = ++documentIdentity;
+    mermaidLifecycleState = { owner: "normal", identity };
+  }
   function initMermaidWithTheme(theme) {
+    if (!isNormalMermaidOwner()) return;
     hostWindow.mermaid?.initialize({
       startOnLoad: false,
       theme: theme === "dark" ? "dark" : "default",
@@ -2138,6 +2280,8 @@
     });
   }
   async function renderMermaidNodes(allNodes, mermaid, perfMarkName = "mm-mermaid-visible-first") {
+    const identity = documentIdentity;
+    if (!isNormalMermaidOwner(identity)) return;
     if (allNodes.length === 0) return;
     const generation = ++mermaidRenderGeneration;
     mermaidLazyRenderQueue = Promise.resolve();
@@ -2158,14 +2302,7 @@
     }, MERMAID_WATCHDOG_MS);
     try {
       for (const node of eagerNodes) {
-        await renderMermaidNode(
-          node,
-          generation,
-          () => mermaidRenderGeneration,
-          mermaid,
-          MERMAID_PER_DIAGRAM_TIMEOUT_MS,
-          invalidateTopVisibleBlockIndexCache
-        );
+        await trackMermaidRenderCall(node, generation, mermaid);
         if (eagerBudgetExpired || generation !== mermaidRenderGeneration) return;
       }
     } finally {
@@ -2173,6 +2310,7 @@
     }
   }
   async function renderMermaid() {
+    if (!isNormalMermaidOwner()) return;
     disconnectMermaidLazyObserver();
     const mermaid = hostWindow.mermaid;
     if (!mermaid) return;
@@ -2180,12 +2318,15 @@
     await renderMermaidNodes(allNodes, mermaid);
   }
   function scheduleCachedMermaidResume(hasMermaid) {
+    const identity = documentIdentity;
+    if (!isNormalMermaidOwner(identity)) return;
     if (hasMermaid === false) {
       return;
     }
     const cacheKey = currentDocumentCacheKey;
     window.clearTimeout(mermaidCacheResumeTimer);
     mermaidCacheResumeTimer = window.setTimeout(() => {
+      if (!isNormalMermaidOwner(identity)) return;
       mermaidCacheResumeTimer = void 0;
       if (cacheKey !== currentDocumentCacheKey) {
         return;
@@ -2238,7 +2379,8 @@
     mermaidLazyObserver?.disconnect();
     mermaidLazyObserver = null;
   }
-  function installLazyMermaidObserver(nodes, generation, mermaid) {
+  function installLazyMermaidObserver(nodes, generation, mermaid, identity = documentIdentity) {
+    if (!isNormalMermaidOwner(identity)) return;
     if (nodes.length === 0) return;
     postPerfMark("mm-mermaid-lazy-observe", {
       total: nodes.length,
@@ -2246,16 +2388,17 @@
     });
     if (typeof window.IntersectionObserver !== "function") {
       for (const node of nodes) {
-        enqueueLazyMermaidRender(node, generation, mermaid);
+        enqueueLazyMermaidRender(node, generation, mermaid, identity);
       }
       return;
     }
     mermaidLazyObserver = new IntersectionObserver((entries) => {
+      if (!isNormalMermaidOwner(identity)) return;
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
         const node = entry.target;
         mermaidLazyObserver?.unobserve(node);
-        enqueueLazyMermaidRender(node, generation, mermaid);
+        enqueueLazyMermaidRender(node, generation, mermaid, identity);
       }
     }, {
       root: null,
@@ -2266,22 +2409,17 @@
       mermaidLazyObserver.observe(node);
     }
   }
-  function enqueueLazyMermaidRender(node, generation, mermaid) {
+  function enqueueLazyMermaidRender(node, generation, mermaid, identity = documentIdentity) {
+    if (!isNormalMermaidOwner(identity)) return;
     if (generation !== mermaidRenderGeneration) return;
     const marker = String(generation);
     if (node.dataset.mmMermaidRenderQueued === marker) return;
     node.dataset.mmMermaidRenderQueued = marker;
     mermaidLazyRenderQueue = mermaidLazyRenderQueue.catch(() => void 0).then(async () => {
+      if (!isNormalMermaidOwner(identity)) return;
       if (generation !== mermaidRenderGeneration) return;
       postPerfMark("mm-mermaid-lazy-render-start");
-      await renderMermaidNode(
-        node,
-        generation,
-        () => mermaidRenderGeneration,
-        mermaid,
-        MERMAID_PER_DIAGRAM_TIMEOUT_MS,
-        invalidateTopVisibleBlockIndexCache
-      );
+      await trackMermaidRenderCall(node, generation, mermaid);
       if (generation === mermaidRenderGeneration) {
         postPerfMark("mm-mermaid-lazy-render-end");
       }
@@ -2318,7 +2456,49 @@
   }
   var warmupAllowed = false;
   var warmupRunning = false;
+  var warmupWaiters = [];
+  var progressiveAppendFinalPromise = Promise.resolve();
+  var resolveProgressiveAppendFinal = null;
+  var activeFullRenderBarrier = null;
   var WARMUP_BLOCKS_PER_SLICE = 60;
+  function setProgressiveAppendPending(pending) {
+    resolveProgressiveAppendFinal?.();
+    resolveProgressiveAppendFinal = null;
+    if (!pending) {
+      progressiveAppendFinalPromise = Promise.resolve();
+      return;
+    }
+    progressiveAppendFinalPromise = new Promise((resolve) => {
+      resolveProgressiveAppendFinal = resolve;
+    });
+  }
+  function completeProgressiveAppend() {
+    resolveProgressiveAppendFinal?.();
+    resolveProgressiveAppendFinal = null;
+    progressiveAppendFinalPromise = Promise.resolve();
+  }
+  function waitForProgressiveAppendFinal() {
+    return progressiveAppendFinalPromise;
+  }
+  function settleDocumentWarmupWaiters(reason) {
+    const waiters = warmupWaiters;
+    warmupWaiters = [];
+    for (const waiter of waiters) {
+      if (reason === void 0) waiter.resolve();
+      else waiter.reject(reason);
+    }
+  }
+  function waitForDocumentWarmup() {
+    warmupAllowed = true;
+    if (document.querySelector("body > main.mm-document > *:not(.mm-warmed)") === null) {
+      return Promise.resolve();
+    }
+    const completion = new Promise((resolve, reject) => {
+      warmupWaiters.push({ resolve, reject });
+    });
+    ensureDocumentWarmup();
+    return completion;
+  }
   function ensureDocumentWarmup() {
     if (!warmupAllowed || warmupRunning) return;
     warmupRunning = true;
@@ -2347,12 +2527,418 @@
         }
       }
       scheduleNext = true;
+    } catch (reason) {
+      settleDocumentWarmupWaiters(reason);
+      throw reason;
     } finally {
       if (scheduleNext) {
         window.requestAnimationFrame(warmupSlice);
       } else {
         warmupRunning = false;
+        settleDocumentWarmupWaiters();
       }
+    }
+  }
+  function assertFullRenderIdentity(identity) {
+    if (documentIdentity !== identity || mermaidLifecycleState.owner !== "barrier" || mermaidLifecycleState.identity !== identity) {
+      throw new Error("full render document changed before completion");
+    }
+  }
+  function acquireMermaidBarrierOwner(identity) {
+    mermaidLifecycleState = { owner: "barrier", identity };
+    disconnectMermaidLazyObserver();
+    ++mermaidRenderGeneration;
+    if (mermaidCacheResumeTimer !== void 0) {
+      window.clearTimeout(mermaidCacheResumeTimer);
+      mermaidCacheResumeTimer = void 0;
+    }
+    if (themeMermaidRefreshTimer !== void 0) {
+      window.clearTimeout(themeMermaidRefreshTimer);
+      themeMermaidRefreshTimer = void 0;
+    }
+    ++themeMermaidRefreshGeneration;
+  }
+  async function settleMermaidBarrierWork(identity) {
+    await mermaidLazyRenderQueue.catch(() => void 0);
+    await drainActiveMermaidRenderCalls();
+    assertFullRenderIdentity(identity);
+  }
+  async function recoverMermaidBarrierFailure(identity) {
+    await mermaidLazyRenderQueue.catch(() => void 0);
+    await drainActiveMermaidRenderCalls();
+    if (documentIdentity !== identity || mermaidLifecycleState.owner !== "barrier" || mermaidLifecycleState.identity !== identity) {
+      return;
+    }
+    mermaidLifecycleState = { owner: "normal", identity };
+    const mermaid = hostWindow.mermaid;
+    if (!mermaid) return;
+    const pendingNodes = Array.from(
+      document.querySelectorAll("pre.mm-mermaid:not(.is-rendered)")
+    );
+    installLazyMermaidObserver(pendingNodes, mermaidRenderGeneration, mermaid, identity);
+  }
+  async function driveFullRenderBarrier(identity) {
+    if (!document.querySelector("main.mm-document")) {
+      throw new Error("full render document root is unavailable");
+    }
+    const injectedFailure = fullRenderBarrierFailureForTesting;
+    fullRenderBarrierFailureForTesting = null;
+    if (injectedFailure !== null) {
+      throw injectedFailure;
+    }
+    await settleMermaidBarrierWork(identity);
+    await waitForProgressiveAppendFinal();
+    assertFullRenderIdentity(identity);
+    await waitForDocumentWarmup();
+    assertFullRenderIdentity(identity);
+    const pendingMathController = currentController;
+    if (pendingMathController) {
+      await pendingMathController.allMathRendered;
+      assertFullRenderIdentity(identity);
+    }
+    if (hasUnrenderedDocumentMath()) {
+      const exportMathController = renderMath2();
+      await exportMathController.allMathRendered;
+      assertFullRenderIdentity(identity);
+    }
+    const mermaidGeneration = mermaidRenderGeneration;
+    const pendingMermaidNodes = Array.from(
+      document.querySelectorAll("pre.mm-mermaid:not(.is-rendered)")
+    );
+    const mermaid = hostWindow.mermaid;
+    if (!mermaid) {
+      const mermaidErrorCount2 = pendingMermaidNodes.length;
+      mermaidLifecycleState = { owner: "terminal", identity, mermaidErrorCount: mermaidErrorCount2 };
+      return mermaidErrorCount2;
+    }
+    let mermaidErrorCount = 0;
+    for (const node of pendingMermaidNodes) {
+      await trackMermaidRenderCall(node, mermaidGeneration, mermaid);
+      assertFullRenderIdentity(identity);
+      if (!node.classList.contains("is-rendered")) {
+        mermaidErrorCount++;
+      }
+    }
+    await drainActiveMermaidRenderCalls();
+    await waitForDocumentWarmup();
+    assertFullRenderIdentity(identity);
+    mermaidLifecycleState = { owner: "terminal", identity, mermaidErrorCount };
+    return mermaidErrorCount;
+  }
+  async function handlePrepareForExport(message) {
+    if (typeof message.requestId !== "string" || message.requestId.length === 0) {
+      return;
+    }
+    const identity = documentIdentity;
+    if (mermaidLifecycleState.owner === "terminal" && mermaidLifecycleState.identity === identity) {
+      postHostMessage({
+        type: "full-render-complete",
+        requestId: message.requestId,
+        mermaidErrorCount: mermaidLifecycleState.mermaidErrorCount
+      });
+      return;
+    }
+    if (!activeFullRenderBarrier || activeFullRenderBarrier.identity !== identity || mermaidLifecycleState.owner !== "barrier") {
+      acquireMermaidBarrierOwner(identity);
+      activeFullRenderBarrier = { identity, promise: driveFullRenderBarrier(identity) };
+    }
+    const barrier = activeFullRenderBarrier;
+    try {
+      const mermaidErrorCount = await barrier.promise;
+      postHostMessage({
+        type: "full-render-complete",
+        requestId: message.requestId,
+        mermaidErrorCount
+      });
+    } catch (reason) {
+      await recoverMermaidBarrierFailure(barrier.identity);
+      postHostMessage({
+        type: "full-render-failed",
+        requestId: message.requestId,
+        reason: reason instanceof Error ? reason.message : String(reason)
+      });
+    } finally {
+      if (activeFullRenderBarrier === barrier) {
+        activeFullRenderBarrier = null;
+      }
+    }
+  }
+  var HTML_SNAPSHOT_DOCTYPE = "<!DOCTYPE html>\n";
+  var HTML_SNAPSHOT_CHROME_SELECTORS = [
+    ".mm-minimap",
+    ".mm-width-handle",
+    "#mm-drop-overlay",
+    ".mm-drop-overlay",
+    ".mm-find-bar",
+    ".mm-mode-reveal-shield",
+    ".mm-document-reveal-shield"
+  ];
+  var HTML_SNAPSHOT_CHROME_CLASSES = [
+    "mm-has-minimap",
+    "mm-minimap-visible",
+    "mm-width-resizer-always",
+    "mm-saving",
+    "mm-find-bar-open"
+  ];
+  var HTML_SNAPSHOT_ACTIVE_SELECTOR = "script, iframe, object, embed, meta[http-equiv='refresh' i]";
+  var HTML_SNAPSHOT_CSS_URL = /url\(\s*(?:(["'])(.*?)\1|([^"')]*))\s*\)/giu;
+  var HTML_SNAPSHOT_FONT_FACE = /@font-face\s*\{([\s\S]*?)\}/giu;
+  var HtmlSnapshotError = class extends Error {
+    constructor(discriminator, detail) {
+      super(`${discriminator}: ${detail}`);
+      this.discriminator = discriminator;
+      this.name = "HtmlSnapshotError";
+    }
+  };
+  function htmlSnapshotError(discriminator, detail) {
+    return new HtmlSnapshotError(discriminator, detail);
+  }
+  function describeHtmlSnapshotFailure(reason) {
+    if (reason instanceof HtmlSnapshotError) {
+      return reason.message;
+    }
+    if (reason instanceof Error && reason.message.trim().length > 0) {
+      return `HTMLX-CLEANUP-CONTRACT: ${reason.message}`;
+    }
+    const detail = String(reason).trim();
+    return `HTMLX-CLEANUP-CONTRACT: ${detail || "rendered HTML capture failed"}`;
+  }
+  function copySnapshotFontPreference(liveRoot, cloneRoot) {
+    const fontFamily = liveRoot.getAttribute("data-mm-font-family");
+    if (fontFamily === "serif" || fontFamily === "sans" || fontFamily === "mono") {
+      cloneRoot.style.setProperty(
+        "--mm-document-font-family",
+        `var(--mm-document-font-family-${fontFamily})`
+      );
+    }
+  }
+  function removeSnapshotChrome(cloneRoot) {
+    for (const selector of HTML_SNAPSHOT_CHROME_SELECTORS) {
+      cloneRoot.querySelectorAll(selector).forEach((node) => node.remove());
+    }
+    cloneRoot.querySelectorAll(HTML_SNAPSHOT_ACTIVE_SELECTOR).forEach((node) => node.remove());
+    for (const element of [cloneRoot, ...Array.from(cloneRoot.querySelectorAll("*"))]) {
+      for (const attribute of Array.from(element.attributes)) {
+        const name = attribute.name.toLowerCase();
+        if (name.startsWith("on") || name.startsWith("data-mm-") || name === "contenteditable" || name === "data-task-line" || name === "data-task-key" || name === "data-tex") {
+          element.removeAttribute(attribute.name);
+          continue;
+        }
+        if (attribute.value.trimStart().toLowerCase().startsWith("javascript:")) {
+          element.removeAttribute(attribute.name);
+        }
+      }
+      element.classList.remove("mm-editable-cell");
+    }
+    for (const className of HTML_SNAPSHOT_CHROME_CLASSES) {
+      cloneRoot.classList.remove(className);
+      cloneRoot.querySelectorAll(`.${className}`).forEach((element) => element.classList.remove(className));
+    }
+    cloneRoot.querySelectorAll("input.mm-task-checkbox").forEach((checkbox) => {
+      checkbox.disabled = true;
+    });
+  }
+  function isValidSnapshotDataUri(value) {
+    const trimmed = value.trim();
+    if (!trimmed.toLowerCase().startsWith("data:") || /[\r\n]/u.test(trimmed)) {
+      return false;
+    }
+    const comma = trimmed.indexOf(",", 5);
+    return comma >= 5 && comma < trimmed.length - 1;
+  }
+  function requireSnapshotResourceUrl(value, label) {
+    const trimmed = value?.trim() ?? "";
+    if (trimmed.startsWith("#")) {
+      return;
+    }
+    if (!isValidSnapshotDataUri(trimmed)) {
+      throw htmlSnapshotError(
+        "HTMLX-RESOURCE-NOT-DATA-URI",
+        `${label} must be a non-empty data URI or fragment`
+      );
+    }
+  }
+  function collectSnapshotSrcsetUrls(value) {
+    const urls = [];
+    let index = 0;
+    while (index < value.length) {
+      while (index < value.length && /[\s,]/u.test(value[index] ?? "")) index++;
+      if (index >= value.length) break;
+      const start = index;
+      if (value.slice(index, index + 5).toLowerCase() === "data:") {
+        const dataComma = value.indexOf(",", index + 5);
+        if (dataComma < 0) {
+          urls.push(value.slice(start).trim());
+          break;
+        }
+        index = dataComma + 1;
+        while (index < value.length && !/\s/u.test(value[index] ?? "")) index++;
+      } else {
+        while (index < value.length && !/[\s,]/u.test(value[index] ?? "")) index++;
+      }
+      urls.push(value.slice(start, index));
+      while (index < value.length && value[index] !== ",") index++;
+      if (value[index] === ",") index++;
+    }
+    return urls;
+  }
+  function validateSnapshotCssResources(css, label) {
+    if (/@import\b/iu.test(css)) {
+      throw htmlSnapshotError(
+        "HTMLX-RESOURCE-NOT-DATA-URI",
+        `${label} contains an external CSS import`
+      );
+    }
+    HTML_SNAPSHOT_CSS_URL.lastIndex = 0;
+    for (const match of css.matchAll(HTML_SNAPSHOT_CSS_URL)) {
+      requireSnapshotResourceUrl(match[2] ?? match[3] ?? "", `${label} CSS url()`);
+    }
+    HTML_SNAPSHOT_FONT_FACE.lastIndex = 0;
+    for (const match of css.matchAll(HTML_SNAPSHOT_FONT_FACE)) {
+      const fontFace = match[1] ?? "";
+      const source = /(?:^|;)\s*src\s*:\s*([^;}]+)/iu.exec(fontFace)?.[1] ?? "";
+      if (source.length === 0 || /\blocal\s*\(/iu.test(source) || !/\burl\s*\(/iu.test(source)) {
+        throw htmlSnapshotError(
+          "HTMLX-RESOURCE-NOT-DATA-URI",
+          `${label} @font-face src must contain only data URI URLs`
+        );
+      }
+    }
+  }
+  function validateSnapshotResources(cloneRoot) {
+    cloneRoot.querySelectorAll("img").forEach((image, index) => {
+      requireSnapshotResourceUrl(image.getAttribute("src"), `img[${index}].src`);
+      const srcset = image.getAttribute("srcset");
+      if (srcset !== null) {
+        const candidates = collectSnapshotSrcsetUrls(srcset);
+        if (candidates.length === 0) {
+          requireSnapshotResourceUrl("", `img[${index}].srcset`);
+        }
+        candidates.forEach((url, candidate) => {
+          requireSnapshotResourceUrl(url, `img[${index}].srcset[${candidate}]`);
+        });
+      }
+    });
+    cloneRoot.querySelectorAll("source[srcset]").forEach((source, index) => {
+      const candidates = collectSnapshotSrcsetUrls(source.getAttribute("srcset") ?? "");
+      if (candidates.length === 0) {
+        requireSnapshotResourceUrl("", `source[${index}].srcset`);
+      }
+      candidates.forEach((url, candidate) => {
+        requireSnapshotResourceUrl(url, `source[${index}].srcset[${candidate}]`);
+      });
+    });
+    cloneRoot.querySelectorAll("input[type='image']").forEach((input, index) => {
+      requireSnapshotResourceUrl(input.getAttribute("src"), `input[type=image][${index}].src`);
+    });
+    cloneRoot.querySelectorAll("svg image").forEach((image, index) => {
+      requireSnapshotResourceUrl(
+        image.getAttribute("href") ?? image.getAttribute("xlink:href"),
+        `svg image[${index}].href`
+      );
+    });
+    cloneRoot.querySelectorAll("style").forEach((style, index) => {
+      validateSnapshotCssResources(style.textContent ?? "", `style[${index}]`);
+    });
+    cloneRoot.querySelectorAll("[style]").forEach((element, index) => {
+      validateSnapshotCssResources(element.getAttribute("style") ?? "", `inline style[${index}]`);
+    });
+  }
+  function assertSnapshotCleanup(cloneRoot) {
+    const forbidden = [
+      HTML_SNAPSHOT_ACTIVE_SELECTOR,
+      ...HTML_SNAPSHOT_CHROME_SELECTORS,
+      "[contenteditable]",
+      ".mm-editable-cell",
+      "[data-task-line]",
+      "[data-task-key]",
+      "[onabort], [onblur], [onchange], [onclick], [onerror], [onfocus], [oninput], [onload], [onmouseover], [onsubmit]"
+    ].join(", ");
+    if (cloneRoot.matches(forbidden) || cloneRoot.querySelector(forbidden) !== null) {
+      throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", "active, chrome, or edit hooks remain");
+    }
+    const attributes = [cloneRoot, ...Array.from(cloneRoot.querySelectorAll("*"))].flatMap((element) => Array.from(element.attributes));
+    if (attributes.some((attribute) => attribute.name.toLowerCase().startsWith("data-mm-"))) {
+      throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", "data-mm hook remains");
+    }
+    if (attributes.some((attribute) => attribute.value.trimStart().toLowerCase().startsWith("javascript:"))) {
+      throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", "javascript URL remains");
+    }
+  }
+  function enableStandaloneScrollbar(cloneRoot) {
+    const head = cloneRoot.querySelector("head");
+    if (!head) {
+      return;
+    }
+    const style = cloneRoot.ownerDocument.createElement("style");
+    style.textContent = "html{overflow-y:auto!important;scrollbar-width:auto!important}html::-webkit-scrollbar{display:block!important;width:14px;height:14px}html::-webkit-scrollbar-thumb{background:rgba(128,128,128,.45);border-radius:7px}html::-webkit-scrollbar-track{background:transparent}";
+    head.appendChild(style);
+  }
+  function captureRenderedHtmlSnapshot(source) {
+    const liveRoot = source.documentElement;
+    if (!liveRoot) {
+      throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", "document element is unavailable");
+    }
+    let cloneRoot;
+    try {
+      cloneRoot = liveRoot.cloneNode(true);
+    } catch (reason) {
+      const detail = reason instanceof Error ? reason.message : String(reason);
+      throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", detail || "document clone failed");
+    }
+    if (source.documentElement !== liveRoot) {
+      throw htmlSnapshotError("HTMLX-DOCUMENT-CHANGED", "document changed while cloning");
+    }
+    try {
+      copySnapshotFontPreference(liveRoot, cloneRoot);
+      removeSnapshotChrome(cloneRoot);
+      validateSnapshotResources(cloneRoot);
+      assertSnapshotCleanup(cloneRoot);
+      enableStandaloneScrollbar(cloneRoot);
+    } catch (reason) {
+      if (reason instanceof HtmlSnapshotError) throw reason;
+      throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", describeHtmlSnapshotFailure(reason));
+    }
+    if (source.documentElement !== liveRoot) {
+      throw htmlSnapshotError("HTMLX-DOCUMENT-CHANGED", "document changed before serialization");
+    }
+    let serialized;
+    try {
+      serialized = cloneRoot.outerHTML;
+    } catch (reason) {
+      const detail = reason instanceof Error ? reason.message : String(reason);
+      throw htmlSnapshotError("HTMLX-SERIALIZATION", detail || "DOM serialization failed");
+    }
+    if (serialized.length === 0) {
+      throw htmlSnapshotError("HTMLX-SERIALIZATION", "DOM serialization returned an empty document");
+    }
+    return HTML_SNAPSHOT_DOCTYPE + serialized;
+  }
+  function handleCaptureRenderedHtml(message) {
+    if (typeof message.requestId !== "string" || message.requestId.trim().length === 0) {
+      return;
+    }
+    if (!viewerChromeEnabled) {
+      postHostMessage({
+        type: "rendered-html-failed",
+        requestId: message.requestId,
+        reason: "HTMLX-NOT-READ-MODE: rendered HTML capture requires ViewerHost read mode"
+      });
+      return;
+    }
+    const identity = documentIdentity;
+    try {
+      const html = captureRenderedHtmlSnapshot(document);
+      if (documentIdentity !== identity) {
+        throw htmlSnapshotError("HTMLX-DOCUMENT-CHANGED", "document changed before capture settled");
+      }
+      postHostMessage({ type: "rendered-html-captured", requestId: message.requestId, html });
+    } catch (reason) {
+      postHostMessage({
+        type: "rendered-html-failed",
+        requestId: message.requestId,
+        reason: describeHtmlSnapshotFailure(reason)
+      });
     }
   }
   function postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs) {
@@ -2373,6 +2959,8 @@
     return document.querySelector("pre.mm-mermaid") !== null;
   }
   function scheduleThemeMermaidRefresh(theme) {
+    const identity = documentIdentity;
+    if (!isNormalMermaidOwner(identity)) return;
     const generation = ++themeMermaidRefreshGeneration;
     ++mermaidRenderGeneration;
     if (themeMermaidRefreshTimer !== void 0) {
@@ -2391,6 +2979,7 @@
       delayMs: THEME_MERMAID_REFRESH_DELAY_MS
     });
     themeMermaidRefreshTimer = window.setTimeout(() => {
+      if (!isNormalMermaidOwner(identity)) return;
       themeMermaidRefreshTimer = void 0;
       if (generation !== themeMermaidRefreshGeneration) {
         return;
@@ -2411,24 +3000,27 @@
       });
       return;
     }
+    const isFinal = message.isFinal !== false;
     const main = document.querySelector("main.mm-document");
-    if (!main || message.html.length === 0) {
+    if (!main) {
+      if (isFinal) completeProgressiveAppend();
       return;
     }
-    postPerfMark("mm-progressive-append-start", {
-      htmlLength: message.html.length,
-      renderId: message.renderId ?? null,
-      isFinal: message.isFinal !== false
-    });
-    const template = document.createElement("template");
-    template.innerHTML = message.html;
-    if (message.hasHljs !== false) {
-      renderCodeBlocks(template.content);
+    if (message.html.length > 0) {
+      postPerfMark("mm-progressive-append-start", {
+        htmlLength: message.html.length,
+        renderId: message.renderId ?? null,
+        isFinal
+      });
+      const template = document.createElement("template");
+      template.innerHTML = message.html;
+      if (message.hasHljs !== false) {
+        renderCodeBlocks(template.content);
+      }
+      main.append(template.content);
+      invalidateTopVisibleBlockIndexCache();
+      ensureDocumentWarmup();
     }
-    main.append(template.content);
-    invalidateTopVisibleBlockIndexCache();
-    ensureDocumentWarmup();
-    const isFinal = message.isFinal !== false;
     if (!isFinal) {
       postPerfMark("mm-progressive-append-end", {
         htmlLength: message.html.length,
@@ -2449,6 +3041,7 @@
     });
     queueProgressiveMinimapAppendRefresh(message);
     scheduleProgressiveDeferredEnhancements(message);
+    completeProgressiveAppend();
   }
   function postThemeAppliedAfterPaint(theme, requestId) {
     if (requestId === void 0 || !Number.isFinite(requestId) || requestId <= 0) {
@@ -4280,10 +4873,19 @@
         );
       }
       applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+      setProgressiveAppendPending(message.cacheKey === null);
       return;
     }
     if (message.type === "append-document") {
       appendProgressiveDocumentHtml(message);
+      return;
+    }
+    if (message.type === "prepare-for-export") {
+      void handlePrepareForExport(message);
+      return;
+    }
+    if (message.type === "capture-rendered-html") {
+      handleCaptureRenderedHtml(message);
       return;
     }
     if (message.type === "load-cached-document") {
@@ -4310,12 +4912,14 @@
         loadMessage.hasHljs = message.hasHljs;
       }
       applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+      setProgressiveAppendPending(false);
       return;
     }
     if (message.type === "clear-document") {
       currentDocumentRenderId = null;
       clearModeRevealShield();
       clearDocumentState(buildLoadDocumentDeps());
+      setProgressiveAppendPending(false);
       return;
     }
     if (message.type === "invalidate-document-cache-key") {
@@ -4508,6 +5112,8 @@
     applyReadingPreferences(preferences);
   }
   function resetModuleGlobalsForLoadDocument() {
+    setProgressiveAppendPending(false);
+    settleDocumentWarmupWaiters();
     ++initialRenderPipelineGeneration;
     ++progressiveMinimapRefreshGeneration;
     cancelDeferredMinimapContentRefresh(false);
@@ -4642,6 +5248,7 @@
       },
       ensureChromeNodes,
       applyTheme,
+      onDocumentBodyMutated: establishNormalMermaidOwnerAfterBodyMutation,
       debugLog: postDebugLog,
       preserveCurrentDocumentCache: preserveCurrentProcessedDocument,
       getCachedDocumentFragment: getCachedProcessedDocumentFragment,
@@ -5174,6 +5781,40 @@
       document.body.classList.remove("mm-saving");
     });
   }
+  function applyPrintScaleToFit(printableWidthCssPx) {
+    const readingColumnWidth = readDocumentMaxWidthFromCssModel();
+    const basePaddingX = readRootPixelVariable("--mm-document-base-padding-x", 72);
+    const readingContentWidth = Math.max(1, readingColumnWidth - 2 * basePaddingX);
+    const globalScale = computeGlobalPrintScale(printableWidthCssPx, readingColumnWidth);
+    const main = document.querySelector("body > main.mm-document");
+    if (main) {
+      main.style.setProperty(PRINT_DOC_SCALE_VAR, `${globalScale}`);
+    }
+    applyPrintFit(document, readingContentWidth);
+  }
+  function clearPrintScaleToFit() {
+    const main = document.querySelector("body > main.mm-document");
+    if (main) {
+      main.style.removeProperty(PRINT_DOC_SCALE_VAR);
+    }
+    clearPrintFit(document);
+  }
+  function wirePrintScaleToFit() {
+    const rendererWindow = window;
+    rendererWindow.__mmApplyPrintFit = (pageContentWidthCssPx) => {
+      const width = typeof pageContentWidthCssPx === "number" && Number.isFinite(pageContentWidthCssPx) && pageContentWidthCssPx > 0 ? pageContentWidthCssPx : DEFAULT_PRINT_PAGE_CONTENT_WIDTH_PX;
+      applyPrintScaleToFit(width);
+    };
+    rendererWindow.__mmClearPrintFit = () => {
+      clearPrintScaleToFit();
+    };
+    window.addEventListener("beforeprint", () => {
+      applyPrintScaleToFit(DEFAULT_PRINT_PAGE_CONTENT_WIDTH_PX);
+    });
+    window.addEventListener("afterprint", () => {
+      clearPrintScaleToFit();
+    });
+  }
   document.addEventListener("securitypolicyviolation", (e) => {
     postHostMessage({
       type: "csp-violation",
@@ -5223,6 +5864,7 @@
     wireFindBar();
     wireHostShortcuts();
     wireSaveAsPageChromeSuppress();
+    wirePrintScaleToFit();
     postHostMessage({
       type: "document-ready",
       mathCount: document.querySelectorAll("[data-tex]").length
@@ -5281,4 +5923,20 @@
     }
   };
   window.__mmRendererLoad = (msg) => handleHostMessage(msg);
+  var fullRenderBarrierFailureForTesting = null;
+  function getMermaidLifecycleSnapshotForTesting() {
+    return {
+      documentIdentity,
+      owner: mermaidLifecycleState.owner,
+      retainedErrorCount: mermaidLifecycleState.owner === "terminal" ? mermaidLifecycleState.mermaidErrorCount : null,
+      activeRenderCount: activeMermaidRenderCalls.size,
+      generation: mermaidRenderGeneration,
+      observerPresent: mermaidLazyObserver !== null,
+      cacheResumeScheduled: mermaidCacheResumeTimer !== void 0,
+      themeRefreshScheduled: themeMermaidRefreshTimer !== void 0
+    };
+  }
+  function setFullRenderBarrierFailureForTesting(reason) {
+    fullRenderBarrierFailureForTesting = reason;
+  }
 })();

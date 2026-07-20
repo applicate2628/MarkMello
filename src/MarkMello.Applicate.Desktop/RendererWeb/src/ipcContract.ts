@@ -86,6 +86,10 @@ export type RendererMessage =
   | { type: "csp-violation"; blockedURI: string; violatedDirective: string; sourceFile: string; lineNumber: number; columnNumber: number }
   | { type: "document-cache-miss"; renderId?: number; cacheKey?: string }
   | { type: "document-first-paint"; renderId: number }
+  | { type: "full-render-complete"; requestId: string; mermaidErrorCount: number }
+  | { type: "full-render-failed"; requestId: string; reason: string }
+  | { type: "rendered-html-captured"; requestId: string; html: string }
+  | { type: "rendered-html-failed"; requestId: string; reason: string }
   // Mode-toggle reveal gate (2026-05-20). Posted in response to a host-sent
   // `mode-settle-probe` message after the renderer has applied pending reading
   // preferences and let layout chrome such as the minimap paint at the new slot
@@ -159,7 +163,9 @@ export type HostMessage =
   | { type: "mode-reveal-prepare"; durationMs?: number }
   | { type: "mode-reveal-start"; durationMs?: number }
   | { type: "document-reveal-prepare"; durationMs?: number; theme?: RendererTheme }
-  | { type: "document-reveal-start"; durationMs?: number };
+  | { type: "document-reveal-start"; durationMs?: number }
+  | { type: "prepare-for-export"; requestId: string }
+  | { type: "capture-rendered-html"; requestId: string };
 
 // --- Recursive wire-shape descriptors (the enforced canon) --------------------
 //
@@ -253,6 +259,10 @@ export const RENDERER_MESSAGE_SHAPES = {
   "csp-violation": { type: STR, blockedURI: STR, violatedDirective: STR, sourceFile: STR, lineNumber: NUM, columnNumber: NUM },
   "document-cache-miss": { type: STR, renderId: NUM_OPT_NULLABLE, cacheKey: STR_OPT },
   "document-first-paint": { type: STR, renderId: NUM },
+  "full-render-complete": { type: STR, requestId: STR, mermaidErrorCount: NUM },
+  "full-render-failed": { type: STR, requestId: STR, reason: STR },
+  "rendered-html-captured": { type: STR, requestId: STR, html: STR },
+  "rendered-html-failed": { type: STR, requestId: STR, reason: STR },
   "mode-toggle-settled": { type: STR, transactionGeneration: NUM_OPT },
 } satisfies {
   [K in RendererMessage["type"]]: { readonly [F in keyof Extract<RendererMessage, { type: K }>]-?: IpcFieldDescriptor };
@@ -322,6 +332,8 @@ export const HOST_MESSAGE_SHAPES = {
   "mode-reveal-start": { type: STR, durationMs: NUM_OPT },
   "document-reveal-prepare": { type: STR, durationMs: NUM_OPT, theme: STR_OPT },
   "document-reveal-start": { type: STR, durationMs: NUM_OPT },
+  "prepare-for-export": { type: STR, requestId: STR },
+  "capture-rendered-html": { type: STR, requestId: STR },
 } satisfies {
   [K in HostMessage["type"]]: { readonly [F in keyof Extract<HostMessage, { type: K }>]-?: IpcFieldDescriptor };
 };

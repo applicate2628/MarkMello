@@ -1,10 +1,14 @@
+using System;
 using System.ComponentModel;
 using Avalonia;
+using Avalonia.Animation;
+using Avalonia.Animation.Easings;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Layout;
 using Avalonia.Platform;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
@@ -22,12 +26,27 @@ public partial class MainWindow : Window
     private const double DefaultWindowHeight = 840;
     private const int WindowPlacementMarginPixels = 8;
 
+    // App-overlay sub-panel width (mirrors the Width="320" on each panel Border) and the
+    // box-height glide duration on menu<->sub-panel swaps. 280ms == MmDurationSlow
+    // (Motion.axaml), the same duration the panel opacity/scale reveal runs at, so the
+    // box glide and the panel reveal land together instead of the box finishing early.
+    private const double AppOverlayPanelWidth = 320;
+    private const double AppOverlayGlideMilliseconds = 280;
+
+    // Monotonic token for the overlay height-glide, bumped on every swap and on close.
+    // A queued glide callback / release handler captures the token at schedule time and
+    // no-ops if it no longer matches — so a superseded glide (including an A->B->A reuse
+    // where content reference-equality alone would wrongly re-validate) or a closed
+    // overlay cannot fire a stale height set.
+    private int _appOverlayGlideGeneration;
+
     private readonly MainWindowViewModel _viewModel = default!;
     private readonly StartupSmokeTestOptions _startupSmokeTestOptions = StartupSmokeTestOptions.Disabled;
     private readonly ISettingsStore? _settings;
     private readonly Task _startupInitializationTask = Task.CompletedTask;
     private WindowPlacement? _lastNormalWindowPlacement;
     private AppMenuPanelView? _appMenuPanelView;
+    private AppExportPanelView? _appExportPanelView;
     private AppSettingsPanelView? _appSettingsPanelView;
     private AppAboutPanelView? _appAboutPanelView;
     private AppUpdatesPanelView? _appUpdatesPanelView;
@@ -248,22 +267,119 @@ public partial class MainWindow : Window
             return;
         }
 
-        _appOverlayContentHost ??= new ContentControl();
-        if (!ReferenceEquals(popup.Child, _appOverlayContentHost))
+        var host = _appOverlayContentHost ??= CreateAppOverlayContentHost();
+        if (!ReferenceEquals(popup.Child, host))
         {
-            popup.Child = _appOverlayContentHost;
+            popup.Child = host;
         }
 
         var content = GetAppOverlayPopupContent();
-        if (!ReferenceEquals(_appOverlayContentHost.Content, content))
+
+        // Overlay closing/closed: drop any height pinned by a prior glide so the next
+        // open starts at the panel's natural size (and dynamic panels are not clipped).
+        if (!_viewModel.IsAppOverlayOpen)
         {
-            _appOverlayContentHost.Content = content;
+            _appOverlayGlideGeneration++;
+            host.ClearValue(Layoutable.HeightProperty);
+            if (!ReferenceEquals(host.Content, content))
+            {
+                host.Content = content;
+            }
+
+            return;
         }
+
+        if (ReferenceEquals(host.Content, content))
+        {
+            return;
+        }
+
+        // Swap between two OPEN sub-panels. The panels share one popup + content host
+        // and only opacity/scale animate on swap, so a large box-height delta (e.g.
+        // 7-row menu -> 2-row export) snaps instantly and reads as un-smooth. Glide the
+        // host height from the outgoing panel's rendered height to the incoming panel's
+        // measured height; the incoming panel keeps its natural size (no empty padding).
+        var generation = ++_appOverlayGlideGeneration;
+        var oldHeight = host.Bounds.Height;
+        host.Content = content;
+
+        if (oldHeight <= 1)
+        {
+            // First open this cycle: nothing to glide from, show at natural size.
+            return;
+        }
+
+        var width = host.Bounds.Width > 1 ? host.Bounds.Width : AppOverlayPanelWidth;
+        content.Measure(new Size(width, double.PositiveInfinity));
+        var newHeight = content.DesiredSize.Height;
+        if (newHeight <= 1 || Math.Abs(newHeight - oldHeight) < 1)
+        {
+            return;
+        }
+
+        // Pin the current height (== rendered bounds, so no visible jump), then set the
+        // target next frame so the DoubleTransition interpolates old -> new.
+        host.Height = oldHeight;
+        Dispatcher.UIThread.Post(
+            () =>
+            {
+                // Superseded by a newer swap (including an A->B->A reuse) or the overlay
+                // closed while this was queued: that path owns the height now — do nothing.
+                if (generation != _appOverlayGlideGeneration || !_viewModel.IsAppOverlayOpen)
+                {
+                    return;
+                }
+
+                host.Height = newHeight;
+                ReleaseAppOverlayHeightWhenSettled(host, newHeight, generation);
+            },
+            DispatcherPriority.Render);
     }
+
+    // Once the height glide has settled on its target, drop the explicit Height so a
+    // panel that later changes its OWN desired height (e.g. the Updates panel as its
+    // status text updates) can grow/shrink to fit instead of being clipped by the
+    // pinned value. Event-driven off LayoutUpdated (no timer); self-detaches on settle,
+    // supersede, or close.
+    private void ReleaseAppOverlayHeightWhenSettled(ContentControl host, double target, int generation)
+    {
+        EventHandler? onLayoutUpdated = null;
+        onLayoutUpdated = (_, _) =>
+        {
+            if (generation != _appOverlayGlideGeneration || !_viewModel.IsAppOverlayOpen)
+            {
+                host.LayoutUpdated -= onLayoutUpdated;
+                return;
+            }
+
+            if (Math.Abs(host.Bounds.Height - target) <= 1.5)
+            {
+                host.LayoutUpdated -= onLayoutUpdated;
+                host.ClearValue(Layoutable.HeightProperty);
+            }
+        };
+
+        host.LayoutUpdated += onLayoutUpdated;
+    }
+
+    private static ContentControl CreateAppOverlayContentHost()
+        => new()
+        {
+            Transitions =
+            [
+                new DoubleTransition
+                {
+                    Property = Layoutable.HeightProperty,
+                    Duration = TimeSpan.FromMilliseconds(AppOverlayGlideMilliseconds),
+                    Easing = new CubicEaseOut(),
+                },
+            ],
+        };
 
     private Control GetAppOverlayPopupContent() => _viewModel.ShellOverlay switch
     {
         ShellOverlayKind.AppSettings => _appSettingsPanelView ??= new AppSettingsPanelView(),
+        ShellOverlayKind.AppExport => _appExportPanelView ??= new AppExportPanelView(),
         ShellOverlayKind.AppAbout => _appAboutPanelView ??= new AppAboutPanelView(),
         ShellOverlayKind.AppUpdates => _appUpdatesPanelView ??= new AppUpdatesPanelView(),
         _ => _appMenuPanelView ??= new AppMenuPanelView(),
@@ -557,6 +673,7 @@ public partial class MainWindow : Window
         if (e.PropertyName is nameof(MainWindowViewModel.ShellOverlay)
             or nameof(MainWindowViewModel.IsSettingsOpen)
             or nameof(MainWindowViewModel.IsAppMenuOpen)
+            or nameof(MainWindowViewModel.IsAppExportOpen)
             or nameof(MainWindowViewModel.IsAppSettingsOpen)
             or nameof(MainWindowViewModel.IsAppAboutOpen)
             or nameof(MainWindowViewModel.IsAppUpdatesOpen)
@@ -891,6 +1008,7 @@ public partial class MainWindow : Window
         Classes.Set("mm-overlay-open", _viewModel.HasOpenOverlay);
         Classes.Set("mm-reading-settings-open", _viewModel.IsSettingsOpen);
         Classes.Set("mm-app-menu-open", _viewModel.IsAppMenuOpen);
+        Classes.Set("mm-app-export-open", _viewModel.IsAppExportOpen);
         Classes.Set("mm-app-settings-open", _viewModel.IsAppSettingsOpen);
         Classes.Set("mm-app-about-open", _viewModel.IsAppAboutOpen);
         Classes.Set("mm-app-updates-open", _viewModel.IsAppUpdatesOpen);

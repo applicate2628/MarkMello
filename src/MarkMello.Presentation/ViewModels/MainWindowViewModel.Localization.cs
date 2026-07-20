@@ -66,9 +66,13 @@ public partial class MainWindowViewModel
         nameof(AlwaysOnTopOn),
         nameof(AppMenuCloseFileHint),
         nameof(AppMenuCloseFileLabel),
+        nameof(AppMenuExportHint),
+        nameof(AppMenuExportLabel),
         nameof(AppMenuHeader),
         nameof(AppMenuOpenFileHint),
         nameof(AppMenuOpenFileLabel),
+        nameof(AppMenuPrintHint),
+        nameof(AppMenuPrintLabel),
         nameof(AppMenuSettingsHint),
         nameof(AppMenuSettingsLabel),
         nameof(AppMenuTocHint),
@@ -79,6 +83,7 @@ public partial class MainWindowViewModel
         nameof(TocPanelHeader),
         nameof(MetaToggle),
         nameof(AppSettingsHeader),
+        nameof(AppExportHeader),
         nameof(DirtyPromptCancel),
         nameof(DirtyPromptDiscard),
         nameof(DirtyPromptSave),
@@ -96,11 +101,22 @@ public partial class MainWindowViewModel
         nameof(MetaOpen),
         nameof(MetaReset),
         nameof(OverlayBackToMenu),
+        nameof(OverlayCloseExport),
         nameof(OverlayBackToSettings),
         nameof(OverlayCloseAbout),
         nameof(OverlayCloseMenu),
         nameof(OverlayCloseSettings),
         nameof(OverlayCloseUpdates),
+        nameof(ExportPdfLabel),
+        nameof(ExportPdfHint),
+        nameof(ExportHtmlLabel),
+        nameof(ExportHtmlHint),
+        nameof(ExportPdfDialogTitle),
+        nameof(ExportHtmlDialogTitle),
+        nameof(PdfDocuments),
+        nameof(HtmlDocuments),
+        nameof(ExportFailedTitle),
+        nameof(ExportFailureDetailsFormat),
         nameof(ReadingFontHint),
         nameof(ReadingFontLabel),
         nameof(ReadingFontMono),
@@ -178,9 +194,13 @@ public partial class MainWindowViewModel
     public string AlwaysOnTopOn => _localization["AlwaysOnTopOn"];
     public string AppMenuCloseFileHint => _localization["AppMenuCloseFileHint"];
     public string AppMenuCloseFileLabel => _localization["AppMenuCloseFileLabel"];
+    public string AppMenuExportHint => _localization["AppMenuExportHint"];
+    public string AppMenuExportLabel => _localization["AppMenuExportLabel"];
     public string AppMenuHeader => _localization["AppMenuHeader"];
     public string AppMenuOpenFileHint => _localization["AppMenuOpenFileHint"];
     public string AppMenuOpenFileLabel => _localization["AppMenuOpenFileLabel"];
+    public string AppMenuPrintHint => _localization["AppMenuPrintHint"];
+    public string AppMenuPrintLabel => _localization["AppMenuPrintLabel"];
     public string AppMenuSettingsHint => _localization["AppMenuSettingsHint"];
     public string AppMenuSettingsLabel => _localization["AppMenuSettingsLabel"];
     public string AppMenuTocHint => _localization["AppMenuTocHint"];
@@ -191,6 +211,7 @@ public partial class MainWindowViewModel
     public string TocPanelHeader => _localization["TocPanelHeader"];
     public string MetaToggle => _localization["MetaToggle"];
     public string AppSettingsHeader => _localization["AppSettingsHeader"];
+    public string AppExportHeader => _localization["AppExportHeader"];
     public string DirtyPromptCancel => _localization["DirtyPromptCancel"];
     public string DirtyPromptDiscard => _localization["DirtyPromptDiscard"];
     public string DirtyPromptSave => _localization["DirtyPromptSave"];
@@ -208,11 +229,22 @@ public partial class MainWindowViewModel
     public string MetaOpen => _localization["MetaOpen"];
     public string MetaReset => _localization["MetaReset"];
     public string OverlayBackToMenu => _localization["OverlayBackToMenu"];
+    public string OverlayCloseExport => _localization["OverlayCloseExport"];
     public string OverlayBackToSettings => _localization["OverlayBackToSettings"];
     public string OverlayCloseAbout => _localization["OverlayCloseAbout"];
     public string OverlayCloseMenu => _localization["OverlayCloseMenu"];
     public string OverlayCloseSettings => _localization["OverlayCloseSettings"];
     public string OverlayCloseUpdates => _localization["OverlayCloseUpdates"];
+    public string ExportPdfLabel => _localization["ExportPdfLabel"];
+    public string ExportPdfHint => _localization["ExportPdfHint"];
+    public string ExportHtmlLabel => _localization["ExportHtmlLabel"];
+    public string ExportHtmlHint => _localization["ExportHtmlHint"];
+    public string ExportPdfDialogTitle => _localization["ExportPdfDialogTitle"];
+    public string ExportHtmlDialogTitle => _localization["ExportHtmlDialogTitle"];
+    public string PdfDocuments => _localization["PdfDocuments"];
+    public string HtmlDocuments => _localization["HtmlDocuments"];
+    public string ExportFailedTitle => _localization["ExportFailedTitle"];
+    public string ExportFailureDetailsFormat => _localization["ExportFailureDetailsFormat"];
     public string ReadingFontHint => _localization["ReadingFontHint"];
     public string ReadingFontLabel => _localization["ReadingFontLabel"];
     public string ReadingFontMono => _localization["ReadingFontMono"];

@@ -50,6 +50,13 @@ import {
   getDocumentViewportTopCloneYFromIndex,
   type BlockElementIndex
 } from "./topVisibleBlockIndex";
+import {
+  applyPrintFit,
+  clearPrintFit,
+  computeGlobalPrintScale,
+  DEFAULT_PRINT_PAGE_CONTENT_WIDTH_PX,
+  PRINT_DOC_SCALE_VAR
+} from "./printFit";
 
 type KatexApi = {
   render: (
@@ -85,6 +92,10 @@ type RendererWindow = Window & {
   };
   invokeCSharpAction?: (message: string) => void;
   __mmMathObserverPerfEnabled?: boolean;
+  // PDF/print scale-to-fit host seam (see wirePrintScaleToFit). The host awaits
+  // these via ExecuteScriptAsync around CoreWebView2.PrintToPdfAsync.
+  __mmApplyPrintFit?: (pageContentWidthCssPx?: number) => void;
+  __mmClearPrintFit?: () => void;
 };
 
 const hostWindow = window as RendererWindow;
@@ -169,6 +180,14 @@ let minimapDragFinalFlushPending = false;
 let minimapDragGrabOffset = 0;
 const MINIMAP_DRAG_THRESHOLD_PX = 4;
 let minimapSourceReady = false;
+type MermaidLifecycleState =
+  | { owner: "normal"; identity: number }
+  | { owner: "barrier"; identity: number }
+  | { owner: "terminal"; identity: number; mermaidErrorCount: number };
+
+let documentIdentity = 0;
+let mermaidLifecycleState: MermaidLifecycleState = { owner: "normal", identity: documentIdentity };
+const activeMermaidRenderCalls = new Set<Promise<void>>();
 let mermaidRenderGeneration = 0;
 let mermaidLazyObserver: IntersectionObserver | null = null;
 let mermaidLazyRenderQueue: Promise<void> = Promise.resolve();
@@ -735,7 +754,45 @@ function applyTheme(theme: RendererTheme): void {
   document.documentElement.dataset.theme = theme;
 }
 
+function isNormalMermaidOwner(identity = documentIdentity): boolean {
+  return mermaidLifecycleState.owner === "normal"
+    && mermaidLifecycleState.identity === identity
+    && documentIdentity === identity;
+}
+
+function trackMermaidRenderCall(
+  node: HTMLElement,
+  generation: number,
+  mermaid: MermaidApiLike
+): Promise<void> {
+  const renderCall = Promise.resolve().then(() => renderMermaidNode(
+    node,
+    generation,
+    () => mermaidRenderGeneration,
+    mermaid,
+    MERMAID_PER_DIAGRAM_TIMEOUT_MS,
+    invalidateTopVisibleBlockIndexCache
+  ));
+  activeMermaidRenderCalls.add(renderCall);
+  void renderCall.finally(() => {
+    activeMermaidRenderCalls.delete(renderCall);
+  }).catch(() => undefined);
+  return renderCall;
+}
+
+async function drainActiveMermaidRenderCalls(): Promise<void> {
+  while (activeMermaidRenderCalls.size > 0) {
+    await Promise.allSettled(Array.from(activeMermaidRenderCalls));
+  }
+}
+
+function establishNormalMermaidOwnerAfterBodyMutation(): void {
+  const identity = ++documentIdentity;
+  mermaidLifecycleState = { owner: "normal", identity };
+}
+
 function initMermaidWithTheme(theme: RendererTheme): void {
+  if (!isNormalMermaidOwner()) return;
   hostWindow.mermaid?.initialize({
     startOnLoad: false,
     theme: theme === "dark" ? "dark" : "default",
@@ -749,6 +806,8 @@ async function renderMermaidNodes(
   mermaid: MermaidApiLike,
   perfMarkName = "mm-mermaid-visible-first"
 ): Promise<void> {
+  const identity = documentIdentity;
+  if (!isNormalMermaidOwner(identity)) return;
   if (allNodes.length === 0) return;
 
   const generation = ++mermaidRenderGeneration;
@@ -782,14 +841,7 @@ async function renderMermaidNodes(
 
   try {
     for (const node of eagerNodes) {
-      await renderMermaidNode(
-        node,
-        generation,
-        () => mermaidRenderGeneration,
-        mermaid,
-        MERMAID_PER_DIAGRAM_TIMEOUT_MS,
-        invalidateTopVisibleBlockIndexCache
-      );
+      await trackMermaidRenderCall(node, generation, mermaid);
       if (eagerBudgetExpired || generation !== mermaidRenderGeneration) return;
     }
   } finally {
@@ -798,6 +850,7 @@ async function renderMermaidNodes(
 }
 
 async function renderMermaid(): Promise<void> {
+  if (!isNormalMermaidOwner()) return;
   disconnectMermaidLazyObserver();
   const mermaid = hostWindow.mermaid;
   if (!mermaid) return;
@@ -807,6 +860,8 @@ async function renderMermaid(): Promise<void> {
 }
 
 function scheduleCachedMermaidResume(hasMermaid?: boolean): void {
+  const identity = documentIdentity;
+  if (!isNormalMermaidOwner(identity)) return;
   if (hasMermaid === false) {
     return;
   }
@@ -814,6 +869,7 @@ function scheduleCachedMermaidResume(hasMermaid?: boolean): void {
   const cacheKey = currentDocumentCacheKey;
   window.clearTimeout(mermaidCacheResumeTimer);
   mermaidCacheResumeTimer = window.setTimeout(() => {
+    if (!isNormalMermaidOwner(identity)) return;
     mermaidCacheResumeTimer = undefined;
     if (cacheKey !== currentDocumentCacheKey) {
       return;
@@ -885,8 +941,10 @@ function disconnectMermaidLazyObserver(): void {
 function installLazyMermaidObserver(
   nodes: HTMLElement[],
   generation: number,
-  mermaid: MermaidApiLike
+  mermaid: MermaidApiLike,
+  identity = documentIdentity
 ): void {
+  if (!isNormalMermaidOwner(identity)) return;
   if (nodes.length === 0) return;
 
   postPerfMark("mm-mermaid-lazy-observe", {
@@ -895,17 +953,18 @@ function installLazyMermaidObserver(
   });
   if (typeof window.IntersectionObserver !== "function") {
     for (const node of nodes) {
-      enqueueLazyMermaidRender(node, generation, mermaid);
+      enqueueLazyMermaidRender(node, generation, mermaid, identity);
     }
     return;
   }
 
   mermaidLazyObserver = new IntersectionObserver((entries) => {
+    if (!isNormalMermaidOwner(identity)) return;
     for (const entry of entries) {
       if (!entry.isIntersecting) continue;
       const node = entry.target as HTMLElement;
       mermaidLazyObserver?.unobserve(node);
-      enqueueLazyMermaidRender(node, generation, mermaid);
+      enqueueLazyMermaidRender(node, generation, mermaid, identity);
     }
   }, {
     root: null,
@@ -921,8 +980,10 @@ function installLazyMermaidObserver(
 function enqueueLazyMermaidRender(
   node: HTMLElement,
   generation: number,
-  mermaid: MermaidApiLike
+  mermaid: MermaidApiLike,
+  identity = documentIdentity
 ): void {
+  if (!isNormalMermaidOwner(identity)) return;
   if (generation !== mermaidRenderGeneration) return;
   const marker = String(generation);
   if (node.dataset.mmMermaidRenderQueued === marker) return;
@@ -931,16 +992,10 @@ function enqueueLazyMermaidRender(
   mermaidLazyRenderQueue = mermaidLazyRenderQueue
     .catch(() => undefined)
     .then(async () => {
+      if (!isNormalMermaidOwner(identity)) return;
       if (generation !== mermaidRenderGeneration) return;
       postPerfMark("mm-mermaid-lazy-render-start");
-      await renderMermaidNode(
-        node,
-        generation,
-        () => mermaidRenderGeneration,
-        mermaid,
-        MERMAID_PER_DIAGRAM_TIMEOUT_MS,
-        invalidateTopVisibleBlockIndexCache
-      );
+      await trackMermaidRenderCall(node, generation, mermaid);
       if (generation === mermaidRenderGeneration) {
         postPerfMark("mm-mermaid-lazy-render-end");
       }
@@ -993,7 +1048,56 @@ function deferPostReadyEnhancements(work: () => void): void {
 // class that killed the shelved virtualization experiment). No timer.
 let warmupAllowed = false;
 let warmupRunning = false;
+let warmupWaiters: Array<{ resolve: () => void; reject: (reason: unknown) => void }> = [];
+let progressiveAppendFinalPromise: Promise<void> = Promise.resolve();
+let resolveProgressiveAppendFinal: (() => void) | null = null;
+let activeFullRenderBarrier: { identity: number; promise: Promise<number> } | null = null;
 const WARMUP_BLOCKS_PER_SLICE = 60;
+
+function setProgressiveAppendPending(pending: boolean): void {
+  resolveProgressiveAppendFinal?.();
+  resolveProgressiveAppendFinal = null;
+  if (!pending) {
+    progressiveAppendFinalPromise = Promise.resolve();
+    return;
+  }
+
+  progressiveAppendFinalPromise = new Promise(resolve => {
+    resolveProgressiveAppendFinal = resolve;
+  });
+}
+
+function completeProgressiveAppend(): void {
+  resolveProgressiveAppendFinal?.();
+  resolveProgressiveAppendFinal = null;
+  progressiveAppendFinalPromise = Promise.resolve();
+}
+
+function waitForProgressiveAppendFinal(): Promise<void> {
+  return progressiveAppendFinalPromise;
+}
+
+function settleDocumentWarmupWaiters(reason?: unknown): void {
+  const waiters = warmupWaiters;
+  warmupWaiters = [];
+  for (const waiter of waiters) {
+    if (reason === undefined) waiter.resolve();
+    else waiter.reject(reason);
+  }
+}
+
+function waitForDocumentWarmup(): Promise<void> {
+  warmupAllowed = true;
+  if (document.querySelector("body > main.mm-document > *:not(.mm-warmed)") === null) {
+    return Promise.resolve();
+  }
+
+  const completion = new Promise<void>((resolve, reject) => {
+    warmupWaiters.push({ resolve, reject });
+  });
+  ensureDocumentWarmup();
+  return completion;
+}
 
 function ensureDocumentWarmup(): void {
   if (!warmupAllowed || warmupRunning) return;
@@ -1029,6 +1133,9 @@ function warmupSlice(): void {
       }
     }
     scheduleNext = true;
+  } catch (reason) {
+    settleDocumentWarmupWaiters(reason);
+    throw reason;
   } finally {
     // Never strand warmupRunning=true with no pending rAF (an exception or an
     // early return would otherwise disable warm-up for the rest of the session).
@@ -1036,7 +1143,486 @@ function warmupSlice(): void {
       window.requestAnimationFrame(warmupSlice);
     } else {
       warmupRunning = false;
+      settleDocumentWarmupWaiters();
     }
+  }
+}
+
+function assertFullRenderIdentity(identity: number): void {
+  if (
+    documentIdentity !== identity
+    || mermaidLifecycleState.owner !== "barrier"
+    || mermaidLifecycleState.identity !== identity
+  ) {
+    throw new Error("full render document changed before completion");
+  }
+}
+
+function acquireMermaidBarrierOwner(identity: number): void {
+  mermaidLifecycleState = { owner: "barrier", identity };
+  disconnectMermaidLazyObserver();
+  ++mermaidRenderGeneration;
+  if (mermaidCacheResumeTimer !== undefined) {
+    window.clearTimeout(mermaidCacheResumeTimer);
+    mermaidCacheResumeTimer = undefined;
+  }
+  if (themeMermaidRefreshTimer !== undefined) {
+    window.clearTimeout(themeMermaidRefreshTimer);
+    themeMermaidRefreshTimer = undefined;
+  }
+  ++themeMermaidRefreshGeneration;
+}
+
+async function settleMermaidBarrierWork(identity: number): Promise<void> {
+  await mermaidLazyRenderQueue.catch(() => undefined);
+  await drainActiveMermaidRenderCalls();
+  assertFullRenderIdentity(identity);
+}
+
+async function recoverMermaidBarrierFailure(identity: number): Promise<void> {
+  await mermaidLazyRenderQueue.catch(() => undefined);
+  await drainActiveMermaidRenderCalls();
+  if (
+    documentIdentity !== identity
+    || mermaidLifecycleState.owner !== "barrier"
+    || mermaidLifecycleState.identity !== identity
+  ) {
+    return;
+  }
+
+  mermaidLifecycleState = { owner: "normal", identity };
+  const mermaid = hostWindow.mermaid;
+  if (!mermaid) return;
+  const pendingNodes = Array.from(
+    document.querySelectorAll<HTMLElement>("pre.mm-mermaid:not(.is-rendered)")
+  );
+  installLazyMermaidObserver(pendingNodes, mermaidRenderGeneration, mermaid, identity);
+}
+
+async function driveFullRenderBarrier(identity: number): Promise<number> {
+  if (!document.querySelector("main.mm-document")) {
+    throw new Error("full render document root is unavailable");
+  }
+
+  const injectedFailure = fullRenderBarrierFailureForTesting;
+  fullRenderBarrierFailureForTesting = null;
+  if (injectedFailure !== null) {
+    throw injectedFailure;
+  }
+
+  await settleMermaidBarrierWork(identity);
+  await waitForProgressiveAppendFinal();
+  assertFullRenderIdentity(identity);
+  await waitForDocumentWarmup();
+  assertFullRenderIdentity(identity);
+
+  const pendingMathController = currentController;
+  if (pendingMathController) {
+    await pendingMathController.allMathRendered;
+    assertFullRenderIdentity(identity);
+  }
+  if (hasUnrenderedDocumentMath()) {
+    const exportMathController = renderMath();
+    await exportMathController.allMathRendered;
+    assertFullRenderIdentity(identity);
+  }
+
+  const mermaidGeneration = mermaidRenderGeneration;
+  const pendingMermaidNodes = Array.from(
+    document.querySelectorAll<HTMLElement>("pre.mm-mermaid:not(.is-rendered)")
+  );
+  const mermaid = hostWindow.mermaid;
+  if (!mermaid) {
+    const mermaidErrorCount = pendingMermaidNodes.length;
+    mermaidLifecycleState = { owner: "terminal", identity, mermaidErrorCount };
+    return mermaidErrorCount;
+  }
+
+  let mermaidErrorCount = 0;
+  for (const node of pendingMermaidNodes) {
+    await trackMermaidRenderCall(node, mermaidGeneration, mermaid);
+    assertFullRenderIdentity(identity);
+    if (!node.classList.contains("is-rendered")) {
+      mermaidErrorCount++;
+    }
+  }
+
+  await drainActiveMermaidRenderCalls();
+  await waitForDocumentWarmup();
+  assertFullRenderIdentity(identity);
+  mermaidLifecycleState = { owner: "terminal", identity, mermaidErrorCount };
+  return mermaidErrorCount;
+}
+
+async function handlePrepareForExport(
+  message: Extract<HostMessage, { type: "prepare-for-export" }>
+): Promise<void> {
+  if (typeof message.requestId !== "string" || message.requestId.length === 0) {
+    return;
+  }
+
+  const identity = documentIdentity;
+  if (
+    mermaidLifecycleState.owner === "terminal"
+    && mermaidLifecycleState.identity === identity
+  ) {
+    postHostMessage({
+      type: "full-render-complete",
+      requestId: message.requestId,
+      mermaidErrorCount: mermaidLifecycleState.mermaidErrorCount,
+    });
+    return;
+  }
+
+  if (
+    !activeFullRenderBarrier
+    || activeFullRenderBarrier.identity !== identity
+    || mermaidLifecycleState.owner !== "barrier"
+  ) {
+    acquireMermaidBarrierOwner(identity);
+    activeFullRenderBarrier = { identity, promise: driveFullRenderBarrier(identity) };
+  }
+  const barrier = activeFullRenderBarrier;
+  try {
+    const mermaidErrorCount = await barrier.promise;
+    postHostMessage({
+      type: "full-render-complete",
+      requestId: message.requestId,
+      mermaidErrorCount,
+    });
+  } catch (reason) {
+    await recoverMermaidBarrierFailure(barrier.identity);
+    postHostMessage({
+      type: "full-render-failed",
+      requestId: message.requestId,
+      reason: reason instanceof Error ? reason.message : String(reason),
+    });
+  } finally {
+    if (activeFullRenderBarrier === barrier) {
+      activeFullRenderBarrier = null;
+    }
+  }
+}
+
+const HTML_SNAPSHOT_DOCTYPE = "<!DOCTYPE html>\n";
+const HTML_SNAPSHOT_CHROME_SELECTORS = [
+  ".mm-minimap",
+  ".mm-width-handle",
+  "#mm-drop-overlay",
+  ".mm-drop-overlay",
+  ".mm-find-bar",
+  ".mm-mode-reveal-shield",
+  ".mm-document-reveal-shield",
+] as const;
+const HTML_SNAPSHOT_CHROME_CLASSES = [
+  "mm-has-minimap",
+  "mm-minimap-visible",
+  "mm-width-resizer-always",
+  "mm-saving",
+  "mm-find-bar-open",
+] as const;
+const HTML_SNAPSHOT_ACTIVE_SELECTOR = "script, iframe, object, embed, meta[http-equiv='refresh' i]";
+const HTML_SNAPSHOT_CSS_URL = /url\(\s*(?:(["'])(.*?)\1|([^"')]*))\s*\)/giu;
+const HTML_SNAPSHOT_FONT_FACE = /@font-face\s*\{([\s\S]*?)\}/giu;
+
+class HtmlSnapshotError extends Error {
+  constructor(readonly discriminator: string, detail: string) {
+    super(`${discriminator}: ${detail}`);
+    this.name = "HtmlSnapshotError";
+  }
+}
+
+function htmlSnapshotError(discriminator: string, detail: string): HtmlSnapshotError {
+  return new HtmlSnapshotError(discriminator, detail);
+}
+
+function describeHtmlSnapshotFailure(reason: unknown): string {
+  if (reason instanceof HtmlSnapshotError) {
+    return reason.message;
+  }
+  if (reason instanceof Error && reason.message.trim().length > 0) {
+    return `HTMLX-CLEANUP-CONTRACT: ${reason.message}`;
+  }
+  const detail = String(reason).trim();
+  return `HTMLX-CLEANUP-CONTRACT: ${detail || "rendered HTML capture failed"}`;
+}
+
+function copySnapshotFontPreference(liveRoot: Element, cloneRoot: HTMLElement): void {
+  const fontFamily = liveRoot.getAttribute("data-mm-font-family");
+  if (fontFamily === "serif" || fontFamily === "sans" || fontFamily === "mono") {
+    cloneRoot.style.setProperty(
+      "--mm-document-font-family",
+      `var(--mm-document-font-family-${fontFamily})`,
+    );
+  }
+}
+
+function removeSnapshotChrome(cloneRoot: HTMLElement): void {
+  for (const selector of HTML_SNAPSHOT_CHROME_SELECTORS) {
+    cloneRoot.querySelectorAll(selector).forEach(node => node.remove());
+  }
+  cloneRoot.querySelectorAll(HTML_SNAPSHOT_ACTIVE_SELECTOR).forEach(node => node.remove());
+  for (const element of [cloneRoot, ...Array.from(cloneRoot.querySelectorAll<HTMLElement>("*"))]) {
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase();
+      if (
+        name.startsWith("on")
+        || name.startsWith("data-mm-")
+        || name === "contenteditable"
+        || name === "data-task-line"
+        || name === "data-task-key"
+        || name === "data-tex"
+      ) {
+        element.removeAttribute(attribute.name);
+        continue;
+      }
+      if (attribute.value.trimStart().toLowerCase().startsWith("javascript:")) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+    element.classList.remove("mm-editable-cell");
+  }
+  for (const className of HTML_SNAPSHOT_CHROME_CLASSES) {
+    cloneRoot.classList.remove(className);
+    cloneRoot.querySelectorAll(`.${className}`).forEach(element => element.classList.remove(className));
+  }
+  cloneRoot.querySelectorAll<HTMLInputElement>("input.mm-task-checkbox").forEach(checkbox => {
+    checkbox.disabled = true;
+  });
+}
+
+function isValidSnapshotDataUri(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed.toLowerCase().startsWith("data:") || /[\r\n]/u.test(trimmed)) {
+    return false;
+  }
+  const comma = trimmed.indexOf(",", 5);
+  return comma >= 5 && comma < trimmed.length - 1;
+}
+
+function requireSnapshotResourceUrl(value: string | null, label: string): void {
+  const trimmed = value?.trim() ?? "";
+  if (trimmed.startsWith("#")) {
+    return;
+  }
+  if (!isValidSnapshotDataUri(trimmed)) {
+    throw htmlSnapshotError(
+      "HTMLX-RESOURCE-NOT-DATA-URI",
+      `${label} must be a non-empty data URI or fragment`,
+    );
+  }
+}
+
+function collectSnapshotSrcsetUrls(value: string): string[] {
+  const urls: string[] = [];
+  let index = 0;
+  while (index < value.length) {
+    while (index < value.length && /[\s,]/u.test(value[index] ?? "")) index++;
+    if (index >= value.length) break;
+
+    const start = index;
+    if (value.slice(index, index + 5).toLowerCase() === "data:") {
+      const dataComma = value.indexOf(",", index + 5);
+      if (dataComma < 0) {
+        urls.push(value.slice(start).trim());
+        break;
+      }
+      index = dataComma + 1;
+      while (index < value.length && !/\s/u.test(value[index] ?? "")) index++;
+    } else {
+      while (index < value.length && !/[\s,]/u.test(value[index] ?? "")) index++;
+    }
+    urls.push(value.slice(start, index));
+
+    while (index < value.length && value[index] !== ",") index++;
+    if (value[index] === ",") index++;
+  }
+  return urls;
+}
+
+function validateSnapshotCssResources(css: string, label: string): void {
+  if (/@import\b/iu.test(css)) {
+    throw htmlSnapshotError(
+      "HTMLX-RESOURCE-NOT-DATA-URI",
+      `${label} contains an external CSS import`,
+    );
+  }
+
+  HTML_SNAPSHOT_CSS_URL.lastIndex = 0;
+  for (const match of css.matchAll(HTML_SNAPSHOT_CSS_URL)) {
+    requireSnapshotResourceUrl(match[2] ?? match[3] ?? "", `${label} CSS url()`);
+  }
+
+  HTML_SNAPSHOT_FONT_FACE.lastIndex = 0;
+  for (const match of css.matchAll(HTML_SNAPSHOT_FONT_FACE)) {
+    const fontFace = match[1] ?? "";
+    const source = /(?:^|;)\s*src\s*:\s*([^;}]+)/iu.exec(fontFace)?.[1] ?? "";
+    if (source.length === 0 || /\blocal\s*\(/iu.test(source) || !/\burl\s*\(/iu.test(source)) {
+      throw htmlSnapshotError(
+        "HTMLX-RESOURCE-NOT-DATA-URI",
+        `${label} @font-face src must contain only data URI URLs`,
+      );
+    }
+  }
+}
+
+function validateSnapshotResources(cloneRoot: HTMLElement): void {
+  cloneRoot.querySelectorAll<HTMLImageElement>("img").forEach((image, index) => {
+    requireSnapshotResourceUrl(image.getAttribute("src"), `img[${index}].src`);
+    const srcset = image.getAttribute("srcset");
+    if (srcset !== null) {
+      const candidates = collectSnapshotSrcsetUrls(srcset);
+      if (candidates.length === 0) {
+        requireSnapshotResourceUrl("", `img[${index}].srcset`);
+      }
+      candidates.forEach((url, candidate) => {
+        requireSnapshotResourceUrl(url, `img[${index}].srcset[${candidate}]`);
+      });
+    }
+  });
+  cloneRoot.querySelectorAll<HTMLSourceElement>("source[srcset]").forEach((source, index) => {
+    const candidates = collectSnapshotSrcsetUrls(source.getAttribute("srcset") ?? "");
+    if (candidates.length === 0) {
+      requireSnapshotResourceUrl("", `source[${index}].srcset`);
+    }
+    candidates.forEach((url, candidate) => {
+      requireSnapshotResourceUrl(url, `source[${index}].srcset[${candidate}]`);
+    });
+  });
+  cloneRoot.querySelectorAll<HTMLElement>("input[type='image']").forEach((input, index) => {
+    requireSnapshotResourceUrl(input.getAttribute("src"), `input[type=image][${index}].src`);
+  });
+  cloneRoot.querySelectorAll<SVGElement>("svg image").forEach((image, index) => {
+    requireSnapshotResourceUrl(
+      image.getAttribute("href") ?? image.getAttribute("xlink:href"),
+      `svg image[${index}].href`,
+    );
+  });
+  cloneRoot.querySelectorAll<HTMLStyleElement>("style").forEach((style, index) => {
+    validateSnapshotCssResources(style.textContent ?? "", `style[${index}]`);
+  });
+  cloneRoot.querySelectorAll<HTMLElement>("[style]").forEach((element, index) => {
+    validateSnapshotCssResources(element.getAttribute("style") ?? "", `inline style[${index}]`);
+  });
+}
+
+function assertSnapshotCleanup(cloneRoot: HTMLElement): void {
+  const forbidden = [
+    HTML_SNAPSHOT_ACTIVE_SELECTOR,
+    ...HTML_SNAPSHOT_CHROME_SELECTORS,
+    "[contenteditable]",
+    ".mm-editable-cell",
+    "[data-task-line]",
+    "[data-task-key]",
+    "[onabort], [onblur], [onchange], [onclick], [onerror], [onfocus], [oninput], [onload], [onmouseover], [onsubmit]",
+  ].join(", ");
+  if (cloneRoot.matches(forbidden) || cloneRoot.querySelector(forbidden) !== null) {
+    throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", "active, chrome, or edit hooks remain");
+  }
+  const attributes = [cloneRoot, ...Array.from(cloneRoot.querySelectorAll("*"))]
+    .flatMap(element => Array.from(element.attributes));
+  if (attributes.some(attribute => attribute.name.toLowerCase().startsWith("data-mm-"))) {
+    throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", "data-mm hook remains");
+  }
+  if (attributes.some(attribute => attribute.value.trimStart().toLowerCase().startsWith("javascript:"))) {
+    throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", "javascript URL remains");
+  }
+}
+
+// In the app the Avalonia host draws its own scrollbar overlay and the CSS hides
+// the native one (html { scrollbar-width: none } + ::-webkit-scrollbar { display:
+// none }) and drives scroll host-side. A saved file opened in a plain browser has
+// no host overlay, so restore native scrolling + a visible native scrollbar. The
+// document-scroll `off` attribute is already stripped by removeSnapshotChrome (it
+// is a data-mm-* hook), so no overflow:hidden rule applies; this only re-shows the
+// scrollbar. Injected AFTER assertSnapshotCleanup so the cleanup contract (which
+// forbids data-mm-* hooks) is validated on the untouched clone first.
+function enableStandaloneScrollbar(cloneRoot: HTMLElement): void {
+  const head = cloneRoot.querySelector("head");
+  if (!head) {
+    return;
+  }
+  const style = cloneRoot.ownerDocument.createElement("style");
+  style.textContent =
+    "html{overflow-y:auto!important;scrollbar-width:auto!important}"
+    + "html::-webkit-scrollbar{display:block!important;width:14px;height:14px}"
+    + "html::-webkit-scrollbar-thumb{background:rgba(128,128,128,.45);border-radius:7px}"
+    + "html::-webkit-scrollbar-track{background:transparent}";
+  head.appendChild(style);
+}
+
+function captureRenderedHtmlSnapshot(source: Document): string {
+  const liveRoot = source.documentElement;
+  if (!liveRoot) {
+    throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", "document element is unavailable");
+  }
+
+  let cloneRoot: HTMLElement;
+  try {
+    cloneRoot = liveRoot.cloneNode(true) as HTMLElement;
+  } catch (reason) {
+    const detail = reason instanceof Error ? reason.message : String(reason);
+    throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", detail || "document clone failed");
+  }
+  if (source.documentElement !== liveRoot) {
+    throw htmlSnapshotError("HTMLX-DOCUMENT-CHANGED", "document changed while cloning");
+  }
+
+  try {
+    copySnapshotFontPreference(liveRoot, cloneRoot);
+    removeSnapshotChrome(cloneRoot);
+    validateSnapshotResources(cloneRoot);
+    assertSnapshotCleanup(cloneRoot);
+    enableStandaloneScrollbar(cloneRoot);
+  } catch (reason) {
+    if (reason instanceof HtmlSnapshotError) throw reason;
+    throw htmlSnapshotError("HTMLX-CLEANUP-CONTRACT", describeHtmlSnapshotFailure(reason));
+  }
+  if (source.documentElement !== liveRoot) {
+    throw htmlSnapshotError("HTMLX-DOCUMENT-CHANGED", "document changed before serialization");
+  }
+
+  let serialized: string;
+  try {
+    serialized = cloneRoot.outerHTML;
+  } catch (reason) {
+    const detail = reason instanceof Error ? reason.message : String(reason);
+    throw htmlSnapshotError("HTMLX-SERIALIZATION", detail || "DOM serialization failed");
+  }
+  if (serialized.length === 0) {
+    throw htmlSnapshotError("HTMLX-SERIALIZATION", "DOM serialization returned an empty document");
+  }
+  return HTML_SNAPSHOT_DOCTYPE + serialized;
+}
+
+function handleCaptureRenderedHtml(
+  message: Extract<HostMessage, { type: "capture-rendered-html" }>,
+): void {
+  if (typeof message.requestId !== "string" || message.requestId.trim().length === 0) {
+    return;
+  }
+  if (!viewerChromeEnabled) {
+    postHostMessage({
+      type: "rendered-html-failed",
+      requestId: message.requestId,
+      reason: "HTMLX-NOT-READ-MODE: rendered HTML capture requires ViewerHost read mode",
+    });
+    return;
+  }
+
+  const identity = documentIdentity;
+  try {
+    const html = captureRenderedHtmlSnapshot(document);
+    if (documentIdentity !== identity) {
+      throw htmlSnapshotError("HTMLX-DOCUMENT-CHANGED", "document changed before capture settled");
+    }
+    postHostMessage({ type: "rendered-html-captured", requestId: message.requestId, html });
+  } catch (reason) {
+    postHostMessage({
+      type: "rendered-html-failed",
+      requestId: message.requestId,
+      reason: describeHtmlSnapshotFailure(reason),
+    });
   }
 }
 
@@ -1064,6 +1650,8 @@ function hasMermaidNodes(): boolean {
 }
 
 function scheduleThemeMermaidRefresh(theme: RendererTheme): void {
+  const identity = documentIdentity;
+  if (!isNormalMermaidOwner(identity)) return;
   const generation = ++themeMermaidRefreshGeneration;
   ++mermaidRenderGeneration;
   if (themeMermaidRefreshTimer !== undefined) {
@@ -1084,6 +1672,7 @@ function scheduleThemeMermaidRefresh(theme: RendererTheme): void {
     delayMs: THEME_MERMAID_REFRESH_DELAY_MS
   });
   themeMermaidRefreshTimer = window.setTimeout(() => {
+    if (!isNormalMermaidOwner(identity)) return;
     themeMermaidRefreshTimer = undefined;
     if (generation !== themeMermaidRefreshGeneration) {
       return;
@@ -1111,27 +1700,30 @@ function appendProgressiveDocumentHtml(message: Extract<HostMessage, { type: "ap
     return;
   }
 
+  const isFinal = message.isFinal !== false;
   const main = document.querySelector<HTMLElement>("main.mm-document");
-  if (!main || message.html.length === 0) {
+  if (!main) {
+    if (isFinal) completeProgressiveAppend();
     return;
   }
 
-  postPerfMark("mm-progressive-append-start", {
-    htmlLength: message.html.length,
-    renderId: message.renderId ?? null,
-    isFinal: message.isFinal !== false
-  });
-  const template = document.createElement("template");
-  template.innerHTML = message.html;
-  if (message.hasHljs !== false) {
-    renderCodeBlocks(template.content);
+  if (message.html.length > 0) {
+    postPerfMark("mm-progressive-append-start", {
+      htmlLength: message.html.length,
+      renderId: message.renderId ?? null,
+      isFinal
+    });
+    const template = document.createElement("template");
+    template.innerHTML = message.html;
+    if (message.hasHljs !== false) {
+      renderCodeBlocks(template.content);
+    }
+
+    main.append(template.content);
+    invalidateTopVisibleBlockIndexCache();
+    ensureDocumentWarmup();
   }
 
-  main.append(template.content);
-  invalidateTopVisibleBlockIndexCache();
-  ensureDocumentWarmup();
-
-  const isFinal = message.isFinal !== false;
   if (!isFinal) {
     postPerfMark("mm-progressive-append-end", {
       htmlLength: message.html.length,
@@ -1156,6 +1748,7 @@ function appendProgressiveDocumentHtml(message: Extract<HostMessage, { type: "ap
   });
   queueProgressiveMinimapAppendRefresh(message);
   scheduleProgressiveDeferredEnhancements(message);
+  completeProgressiveAppend();
 }
 
 function postThemeAppliedAfterPaint(theme: RendererTheme, requestId?: number): void {
@@ -3697,11 +4290,22 @@ function handleHostMessage(raw: unknown): void {
         message.theme ?? getCurrentTheme());
     }
     applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+    setProgressiveAppendPending(message.cacheKey === null);
     return;
   }
 
   if (message.type === "append-document") {
     appendProgressiveDocumentHtml(message);
+    return;
+  }
+
+  if (message.type === "prepare-for-export") {
+    void handlePrepareForExport(message);
+    return;
+  }
+
+  if (message.type === "capture-rendered-html") {
+    handleCaptureRenderedHtml(message);
     return;
   }
 
@@ -3729,6 +4333,7 @@ function handleHostMessage(raw: unknown): void {
       loadMessage.hasHljs = message.hasHljs;
     }
     applyLoadDocument(loadMessage, buildLoadDocumentDeps());
+    setProgressiveAppendPending(false);
     return;
   }
 
@@ -3736,6 +4341,7 @@ function handleHostMessage(raw: unknown): void {
     currentDocumentRenderId = null;
     clearModeRevealShield();
     clearDocumentState(buildLoadDocumentDeps());
+    setProgressiveAppendPending(false);
     return;
   }
 
@@ -3994,6 +4600,8 @@ function applyModeSettleProbePreferences(message: Extract<HostMessage, { type: "
 }
 
 function resetModuleGlobalsForLoadDocument(): void {
+  setProgressiveAppendPending(false);
+  settleDocumentWarmupWaiters();
   ++initialRenderPipelineGeneration;
   ++progressiveMinimapRefreshGeneration;
   cancelDeferredMinimapContentRefresh(false);
@@ -4183,6 +4791,7 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
     },
     ensureChromeNodes,
     applyTheme,
+    onDocumentBodyMutated: establishNormalMermaidOwnerAfterBodyMutation,
     debugLog: postDebugLog,
     preserveCurrentDocumentCache: preserveCurrentProcessedDocument,
     getCachedDocumentFragment: getCachedProcessedDocumentFragment,
@@ -4905,6 +5514,83 @@ function wireSaveAsPageChromeSuppress(): void {
   });
 }
 
+// === Applicate fork: PDF / print scale-to-fit ==================================
+// Goal: the PDF/print output reproduces the READING VIEW, scaled to fit the
+// printable page width (same column, same line breaks, same proportions as on
+// screen). Two composed scales, both driven from measured widths (no timers):
+//
+//   1. GLOBAL document scale (`--mm-print-doc-scale`, consumed by the @media
+//      print `zoom` on body > main.mm-document). The reading column is kept at
+//      its on-screen width (--mm-document-max-width) and the whole document is
+//      zoomed by min(1, printableWidth / readingColumnWidth) so the column maps
+//      onto the printable width. `zoom` (not transform) so pagination reflows.
+//   2. PER-BLOCK scale (`applyPrintFit`, printFit.ts): a block still wider than
+//      the reading CONTENT column (max-width - 2*base-padding) after break-out
+//      is scaled to the reading column; the global zoom then carries it, with
+//      everything else, down to the page. The two compose (block->column,
+//      column->page) — they do not double-shrink, so a wide formula fits the
+//      column and no block is clipped.
+//
+// Both scales are written as inline custom properties consumed ONLY inside
+// @media print, so the live on-screen reading view is never touched.
+//
+// Two trigger paths, both event/state-driven:
+//   * window.__mmApplyPrintFit(pageWidthPx) / window.__mmClearPrintFit() - the
+//     host awaits these via ExecuteScriptAsync right before/after
+//     CoreWebView2.PrintToPdfAsync. Programmatic PDF export does NOT fire the
+//     beforeprint event, so this deterministic host-driven hook is required for
+//     the export path; the host passes the exact printable width from its own
+//     CoreWebView2PrintSettings.
+//   * beforeprint / afterprint - cover interactive OS / Ctrl+P printing (which
+//     does fire them), using the derived A4 default printable width.
+function applyPrintScaleToFit(printableWidthCssPx: number): void {
+  // Reading COLUMN border-box width (the width-handle value) = what the @media
+  // print `width` pins main to and what the global zoom must map onto the page.
+  const readingColumnWidth = readDocumentMaxWidthFromCssModel();
+  // Reading CONTENT column width = the column the text/blocks actually occupy
+  // (border-box minus the symmetric base padding pinned in print). A block
+  // wider than this is scaled to it by the per-block pass.
+  const basePaddingX = readRootPixelVariable("--mm-document-base-padding-x", 72);
+  const readingContentWidth = Math.max(1, readingColumnWidth - 2 * basePaddingX);
+
+  const globalScale = computeGlobalPrintScale(printableWidthCssPx, readingColumnWidth);
+  const main = document.querySelector<HTMLElement>("body > main.mm-document");
+  if (main) {
+    main.style.setProperty(PRINT_DOC_SCALE_VAR, `${globalScale}`);
+  }
+  applyPrintFit(document, readingContentWidth);
+}
+
+function clearPrintScaleToFit(): void {
+  const main = document.querySelector<HTMLElement>("body > main.mm-document");
+  if (main) {
+    main.style.removeProperty(PRINT_DOC_SCALE_VAR);
+  }
+  clearPrintFit(document);
+}
+
+function wirePrintScaleToFit(): void {
+  const rendererWindow = window as RendererWindow;
+  rendererWindow.__mmApplyPrintFit = (pageContentWidthCssPx?: number): void => {
+    const width =
+      typeof pageContentWidthCssPx === "number" &&
+      Number.isFinite(pageContentWidthCssPx) &&
+      pageContentWidthCssPx > 0
+        ? pageContentWidthCssPx
+        : DEFAULT_PRINT_PAGE_CONTENT_WIDTH_PX;
+    applyPrintScaleToFit(width);
+  };
+  rendererWindow.__mmClearPrintFit = (): void => {
+    clearPrintScaleToFit();
+  };
+  window.addEventListener("beforeprint", () => {
+    applyPrintScaleToFit(DEFAULT_PRINT_PAGE_CONTENT_WIDTH_PX);
+  });
+  window.addEventListener("afterprint", () => {
+    clearPrintScaleToFit();
+  });
+}
+
 document.addEventListener("securitypolicyviolation", (e) => {
   postHostMessage({
     type: "csp-violation",
@@ -4963,6 +5649,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireFindBar();
   wireHostShortcuts();
   wireSaveAsPageChromeSuppress();
+  wirePrintScaleToFit();
   postHostMessage({
     type: "document-ready",
     mathCount: document.querySelectorAll("[data-tex]").length
@@ -5047,3 +5734,42 @@ window.addEventListener("resize", () => {
 // the real renderer module-globals via the same dispatcher the WebView uses.
 (window as unknown as { __mmRendererLoad: (msg: unknown) => void }).__mmRendererLoad =
   (msg) => handleHostMessage(msg);
+
+// Narrow test reachability for the real Mermaid starter/lifecycle owners. The
+// exports do not create an alternate implementation path; Vitest invokes the
+// same functions used by the WebView dispatcher and initial render pipeline.
+let fullRenderBarrierFailureForTesting: unknown | null = null;
+
+function getMermaidLifecycleSnapshotForTesting() {
+  return {
+    documentIdentity,
+    owner: mermaidLifecycleState.owner,
+    retainedErrorCount: mermaidLifecycleState.owner === "terminal"
+      ? mermaidLifecycleState.mermaidErrorCount
+      : null,
+    activeRenderCount: activeMermaidRenderCalls.size,
+    generation: mermaidRenderGeneration,
+    observerPresent: mermaidLazyObserver !== null,
+    cacheResumeScheduled: mermaidCacheResumeTimer !== undefined,
+    themeRefreshScheduled: themeMermaidRefreshTimer !== undefined,
+  };
+}
+
+function setFullRenderBarrierFailureForTesting(reason: unknown | null): void {
+  fullRenderBarrierFailureForTesting = reason;
+}
+
+export {
+  captureRenderedHtmlSnapshot,
+  enqueueLazyMermaidRender,
+  getMermaidLifecycleSnapshotForTesting,
+  handlePrepareForExport,
+  handleCaptureRenderedHtml,
+  initMermaidWithTheme,
+  installLazyMermaidObserver,
+  renderMermaid,
+  renderMermaidNodes,
+  scheduleCachedMermaidResume,
+  scheduleThemeMermaidRefresh,
+  setFullRenderBarrierFailureForTesting,
+};

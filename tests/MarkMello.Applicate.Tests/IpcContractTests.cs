@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
+using Avalonia.Controls;
 using Avalonia.Headless;
 using MarkMello.Applicate.Desktop.Rendering;
 using MarkMello.Applicate.Desktop.Views;
@@ -35,7 +36,7 @@ namespace MarkMello.Applicate.Tests;
 public sealed class IpcContractTests
 {
     private static readonly string RepoSrcRoot = Path.Combine(
-        AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "MarkMello.Applicate.Desktop");
+        FindRepoRoot(), "src", "MarkMello.Applicate.Desktop");
 
     private static readonly string ContractJsonPath = Path.Combine(
         RepoSrcRoot, "RendererWeb", "contract", "ipc-contract.json");
@@ -56,7 +57,7 @@ public sealed class IpcContractTests
         "clear-document", "invalidate-document-cache-key", "set-task-checkbox", "table-cell-updated", "scroll-to-heading",
         "scroll-to-source-line", "open-find-bar", "host-scrollbar", "mode-settle-probe",
         "minimap-settle-probe", "host-shortcuts-reset", "mode-reveal-prepare", "mode-reveal-start",
-        "document-reveal-prepare", "document-reveal-start",
+        "document-reveal-prepare", "document-reveal-start", "prepare-for-export", "capture-rendered-html",
     ];
 
     private static readonly string[] KnownRendererMessageTypes =
@@ -66,6 +67,7 @@ public sealed class IpcContractTests
         "wheel", "width-drag", "drag-hover", "drop-file", "host-shortcut", "debug-log", "perf-mark",
         "headings-updated", "active-heading-changed", "preview-source-line", "csp-violation",
         "document-cache-miss", "document-first-paint", "mode-toggle-settled", "shell-init-failed",
+        "full-render-complete", "full-render-failed", "rendered-html-captured", "rendered-html-failed",
     ];
 
     // ---- outbound: producer manifest serialized through the recursive walk -----
@@ -198,6 +200,316 @@ public sealed class IpcContractTests
         Assert.False(busyFailure.TryGetProperty("text", out _));
         Assert.False(busyFailure.TryGetProperty("key", out _));
         Assert.Empty(CollectViolations(busyFailure, contract.Host["table-cell-updated"], "table-cell-updated.busy-failure"));
+    }
+
+    [Fact]
+    public void PrepareForExportHostSenderMatchesDescriptor()
+    {
+        var builder = typeof(ApplicateWebMarkdownDocumentView).GetMethod(
+            "BuildPrepareForExportMessage",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(builder);
+
+        var payload = Serialize(builder!.Invoke(null, ["export-17"])!);
+        Assert.Equal("prepare-for-export", TypeValue(payload));
+        Assert.Equal("export-17", payload.GetProperty("requestId").GetString());
+        Assert.Empty(CollectViolations(payload, LoadContract().Host["prepare-for-export"], "prepare-for-export"));
+    }
+
+    [Fact]
+    public void CaptureRenderedHtmlHostSenderUsesExactRequestShape()
+    {
+        var builder = typeof(ApplicateWebMarkdownDocumentView).GetMethod(
+            "BuildCaptureRenderedHtmlMessage",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(builder);
+
+        var payload = Serialize(builder!.Invoke(null, ["capture-17"])!);
+        Assert.True(ObjectKeys(payload).SetEquals(["requestId", "type"]));
+        Assert.Equal("capture-rendered-html", TypeValue(payload));
+        Assert.Equal("capture-17", payload.GetProperty("requestId").GetString());
+        Assert.Empty(CollectViolations(
+            payload,
+            LoadContract().Host["capture-rendered-html"],
+            "capture-rendered-html"));
+    }
+
+    [Fact]
+    public void CaptureRenderedHtmlTerminalDescriptorsUseExactClosedShapes()
+    {
+        var contract = LoadContract();
+
+        var captured = contract.Renderer["rendered-html-captured"];
+        var failed = contract.Renderer["rendered-html-failed"];
+        Assert.Equal(["html", "requestId", "type"], captured.Keys.Order(StringComparer.Ordinal));
+        Assert.Equal(["reason", "requestId", "type"], failed.Keys.Order(StringComparer.Ordinal));
+        Assert.All(captured.Values, static field => Assert.False(field.Optional));
+        Assert.All(failed.Values, static field => Assert.False(field.Optional));
+        Assert.DoesNotContain("code", failed.Keys);
+    }
+
+    [Fact]
+    public void CaptureRenderedHtmlCorrelatesSuccessAndRendererFailureAndCleans()
+    {
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ => true,
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                var success = InvokeCaptureRenderedHtml(view, CancellationToken.None);
+                var successId = Assert.Single(PendingRenderedHtmlCaptureRequestIds(view));
+                view.HandleWebMessageBody(JsonSerializer.Serialize(new
+                {
+                    type = "rendered-html-captured",
+                    requestId = successId,
+                    html = "<!DOCTYPE html>\n<html></html>",
+                }));
+                AssertRenderedHtmlCaptureResult(
+                    success,
+                    "Success",
+                    "<!DOCTYPE html>\n<html></html>",
+                    null,
+                    null);
+
+                var failure = InvokeCaptureRenderedHtml(view, CancellationToken.None);
+                var failureId = Assert.Single(PendingRenderedHtmlCaptureRequestIds(view));
+                view.HandleWebMessageBody(JsonSerializer.Serialize(new
+                {
+                    type = "rendered-html-failed",
+                    requestId = failureId,
+                    reason = "HTMLX-SERIALIZATION: outerHTML failed",
+                }));
+                AssertRenderedHtmlCaptureResult(
+                    failure,
+                    "CaptureFailed",
+                    null,
+                    "HTMLX-SERIALIZATION",
+                    "HTMLX-SERIALIZATION: outerHTML failed");
+
+                AssertCaptureOwnersReleased(view);
+            });
+    }
+
+    [Theory]
+    [InlineData("HTMLX-NOT-READ-MODE")]
+    [InlineData("HTMLX-DOCUMENT-CHANGED")]
+    [InlineData("HTMLX-CLEANUP-CONTRACT")]
+    [InlineData("HTMLX-RESOURCE-NOT-DATA-URI")]
+    [InlineData("HTMLX-SERIALIZATION")]
+    public void RendererCaptureFailureReasonsMapToTheClosedHostTaxonomy(string failureId)
+    {
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ => true,
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                var capture = InvokeCaptureRenderedHtml(view, CancellationToken.None);
+                var requestId = Assert.Single(PendingRenderedHtmlCaptureRequestIds(view));
+                var reason = $"{failureId}: renderer detail";
+                view.HandleWebMessageBody(JsonSerializer.Serialize(new
+                {
+                    type = "rendered-html-failed",
+                    requestId,
+                    reason,
+                }));
+
+                AssertRenderedHtmlCaptureResult(
+                    capture,
+                    "CaptureFailed",
+                    null,
+                    failureId,
+                    reason);
+                AssertCaptureOwnersReleased(view);
+            });
+    }
+
+    [Theory]
+    [InlineData("captured-missing-html")]
+    [InlineData("captured-wrong-html-kind")]
+    [InlineData("captured-extra-field")]
+    [InlineData("failed-empty-reason")]
+    [InlineData("failed-extra-code")]
+    [InlineData("failed-unknown-reason")]
+    public void MalformedCaptureTerminalSettlesMatchingRequestAsTypedFailure(string scenario)
+    {
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ => true,
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                var capture = InvokeCaptureRenderedHtml(view, CancellationToken.None);
+                var requestId = Assert.Single(PendingRenderedHtmlCaptureRequestIds(view));
+                var body = scenario switch
+                {
+                    "captured-missing-html" => JsonSerializer.Serialize(new
+                    {
+                        type = "rendered-html-captured",
+                        requestId,
+                    }),
+                    "captured-wrong-html-kind" => JsonSerializer.Serialize(new
+                    {
+                        type = "rendered-html-captured",
+                        requestId,
+                        html = 17,
+                    }),
+                    "captured-extra-field" => JsonSerializer.Serialize(new
+                    {
+                        type = "rendered-html-captured",
+                        requestId,
+                        html = "<!DOCTYPE html>\n<html></html>",
+                        code = "forbidden",
+                    }),
+                    "failed-empty-reason" => JsonSerializer.Serialize(new
+                    {
+                        type = "rendered-html-failed",
+                        requestId,
+                        reason = string.Empty,
+                    }),
+                    "failed-extra-code" => JsonSerializer.Serialize(new
+                    {
+                        type = "rendered-html-failed",
+                        requestId,
+                        reason = "HTMLX-CLEANUP-CONTRACT",
+                        code = "forbidden",
+                    }),
+                    "failed-unknown-reason" => JsonSerializer.Serialize(new
+                    {
+                        type = "rendered-html-failed",
+                        requestId,
+                        reason = "renderer said no",
+                    }),
+                    _ => throw new Xunit.Sdk.XunitException($"Unknown malformed scenario: {scenario}"),
+                };
+
+                view.HandleWebMessageBody(body);
+
+                AssertRenderedHtmlCaptureResult(
+                    capture,
+                    "CaptureFailed",
+                    null,
+                    "HTMLX-IPC-SHAPE",
+                    "Malformed rendered HTML capture terminal.");
+                AssertCaptureOwnersReleased(view);
+            });
+    }
+
+    [Fact(DisplayName = "Capture_TerminalRace_FirstWinsAndCleans")]
+    public void CaptureTerminalRaceFirstWinsAndCleans()
+    {
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ => true,
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                var capture = InvokeCaptureRenderedHtml(view, CancellationToken.None);
+                var requestId = Assert.Single(PendingRenderedHtmlCaptureRequestIds(view));
+                view.HandleWebMessageBody(JsonSerializer.Serialize(new
+                {
+                    type = "rendered-html-captured",
+                    requestId,
+                    html = "<!DOCTYPE html>\n<html>first</html>",
+                }));
+                view.HandleWebMessageBody(JsonSerializer.Serialize(new
+                {
+                    type = "rendered-html-failed",
+                    requestId,
+                    reason = "HTMLX-SERIALIZATION: late",
+                }));
+
+                AssertRenderedHtmlCaptureResult(
+                    capture,
+                    "Success",
+                    "<!DOCTYPE html>\n<html>first</html>",
+                    null,
+                    null);
+                AssertCaptureOwnersReleased(view);
+            });
+
+        var source = File.ReadAllText(ViewSourcePath);
+        const string settledEvent = "\"HtmlExportCaptureSettled\"";
+        var settledEventOwner = source.IndexOf(settledEvent, StringComparison.Ordinal);
+        Assert.True(settledEventOwner >= 0);
+        Assert.Equal(
+            -1,
+            source.IndexOf(settledEvent, settledEventOwner + settledEvent.Length, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("cancellation", "Cancelled", "HTMLX-CANCELLED")]
+    [InlineData("allowed-navigation", "CaptureFailed", "HTMLX-DOCUMENT-CHANGED")]
+    [InlineData("process-failure", "ProcessCrashed", "HTMLX-PROCESS-FAILED")]
+    [InlineData("disposal", "Faulted", "HTMLX-DISPOSED")]
+    public void CaptureLifecycleTerminalReleasesEveryOwner(
+        string terminal,
+        string expectedStatus,
+        string expectedFailureId)
+    {
+        using var cancellation = new CancellationTokenSource();
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ => true,
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                var capture = InvokeCaptureRenderedHtml(view, cancellation.Token);
+                Assert.Single(PendingRenderedHtmlCaptureRequestIds(view));
+
+                switch (terminal)
+                {
+                    case "cancellation":
+                        cancellation.Cancel();
+                        break;
+                    case "allowed-navigation":
+                        Assert.False(InvokeNavigationStarted(view, "about:blank").Cancel);
+                        break;
+                    case "process-failure":
+                        InvokeFullRenderProcessFailure(view, "RendererProcessFailed");
+                        break;
+                    case "disposal":
+                        view.Dispose();
+                        break;
+                    default:
+                        throw new Xunit.Sdk.XunitException($"Unknown lifecycle terminal: {terminal}");
+                }
+
+                AssertRenderedHtmlCaptureResult(
+                    capture,
+                    expectedStatus,
+                    null,
+                    expectedFailureId,
+                    expectedFailureId);
+                AssertCaptureOwnersReleased(view);
+            });
+    }
+
+    [Fact]
+    public void CaptureDeliveryFailureReturnsTypedFailureAndCleans()
+    {
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: _ => throw new InvalidOperationException("serialize failed"),
+                TryPostNative: _ => throw new Xunit.Sdk.XunitException("native post must not run"),
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                var capture = InvokeCaptureRenderedHtml(view, CancellationToken.None);
+                AssertRenderedHtmlCaptureResult(
+                    capture,
+                    "CaptureFailed",
+                    null,
+                    "HTMLX-CAPTURE-DELIVERY",
+                    "HTMLX-CAPTURE-DELIVERY:InvalidOperationException");
+                AssertCaptureOwnersReleased(view);
+            });
     }
 
     [Fact]
@@ -352,6 +664,284 @@ public sealed class IpcContractTests
             Assert.False(shellReady.Task.GetAwaiter().GetResult());
             Assert.Equal(1, fallbackCount);
         });
+    }
+
+    [Fact]
+    public void FullRenderTerminalResponsesUseExactRequestCorrelationAndTypedResults()
+    {
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ => true,
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                var first = InvokePrepareForExport(view, CancellationToken.None);
+                var firstRequestId = Assert.Single(PendingFullRenderRequestIds(view));
+                var second = InvokePrepareForExport(view, CancellationToken.None);
+                var requestIds = PendingFullRenderRequestIds(view);
+                Assert.Equal(2, requestIds.Length);
+                var secondRequestId = Assert.Single(requestIds, requestId => requestId != firstRequestId);
+
+                view.HandleWebMessageBody(@"{""type"":""full-render-complete"",""requestId"":""unknown"",""mermaidErrorCount"":0}");
+                Assert.False(first.IsCompleted);
+                Assert.False(second.IsCompleted);
+
+                view.HandleWebMessageBody(JsonSerializer.Serialize(new
+                {
+                    type = "full-render-failed",
+                    requestId = firstRequestId,
+                    reason = "renderer driver failed",
+                }));
+                view.HandleWebMessageBody(JsonSerializer.Serialize(new
+                {
+                    type = "full-render-complete",
+                    requestId = secondRequestId,
+                    mermaidErrorCount = 2,
+                }));
+
+                AssertFullRenderResult(first, "RendererFailed", 0, "renderer driver failed");
+                AssertFullRenderResult(second, "Completed", 2, null);
+                Assert.Empty(PendingFullRenderRequestIds(view));
+            });
+    }
+
+    [Fact]
+    public void ProcessFailureCancellationAndDisposalSettleEveryPendingFullRenderRequest()
+    {
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ => true,
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                var processFirst = InvokePrepareForExport(view, CancellationToken.None);
+                var processSecond = InvokePrepareForExport(view, CancellationToken.None);
+                InvokeFullRenderProcessFailure(view, "RendererProcessFailed");
+                AssertFullRenderResult(processFirst, "ProcessFailed", 0, "RendererProcessFailed");
+                AssertFullRenderResult(processSecond, "ProcessFailed", 0, "RendererProcessFailed");
+
+                using var cancellation = new CancellationTokenSource();
+                var cancelled = InvokePrepareForExport(view, cancellation.Token);
+                cancellation.Cancel();
+                AssertFullRenderResult(cancelled, "Cancelled", 0, null);
+
+                var disposed = InvokePrepareForExport(view, CancellationToken.None);
+                view.Dispose();
+                AssertFullRenderResult(disposed, "Disposed", 0, null);
+                Assert.Empty(PendingFullRenderRequestIds(view));
+            });
+    }
+
+    [Fact]
+    public async Task ExportDeliveryFailureSettlesInsteadOfRemainingPending()
+    {
+        Task? request = null;
+        RunOnView(view => request = InvokePrepareForExport(view, CancellationToken.None));
+
+        Assert.NotNull(request);
+        var completed = await Task.WhenAny(request!, Task.Delay(TimeSpan.FromSeconds(2)));
+        Assert.Same(request, completed);
+        AssertFullRenderResult(
+            request,
+            "RendererFailed",
+            0,
+            "prepare-for-export delivery failed:InvalidOperationException");
+    }
+
+    [Fact]
+    public void ExportDeliveryRegistrationPrecedesSynchronousOutcomes()
+    {
+        var serializerPendingCounts = new List<int>();
+        var serializerSupervisorCounts = new List<int>();
+        ApplicateWebMarkdownDocumentView? serializerView = null;
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: _ =>
+                {
+                    serializerPendingCounts.Add(serializerView!.PendingFullRenderRequestCountForTesting);
+                    serializerSupervisorCounts.Add(serializerView.FullRenderDeliverySupervisorCountForTesting);
+                    throw new InvalidOperationException("serialize failed");
+                },
+                TryPostNative: _ => throw new Xunit.Sdk.XunitException("native post must not run"),
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                serializerView = view;
+                var request = InvokePrepareForExport(view, CancellationToken.None);
+                AssertFullRenderResult(
+                    request,
+                    "RendererFailed",
+                    0,
+                    "prepare-for-export delivery failed:InvalidOperationException");
+                Assert.Equal([1], serializerPendingCounts);
+                Assert.Equal([1], serializerSupervisorCounts);
+                Assert.Equal(0, view.PendingFullRenderRequestCountForTesting);
+                Assert.Equal(0, view.FullRenderDeliverySupervisorCountForTesting);
+            });
+
+        var nativePendingCounts = new List<int>();
+        var nativeSupervisorCounts = new List<int>();
+        ApplicateWebMarkdownDocumentView? nativeView = null;
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ =>
+                {
+                    nativePendingCounts.Add(nativeView!.PendingFullRenderRequestCountForTesting);
+                    nativeSupervisorCounts.Add(nativeView.FullRenderDeliverySupervisorCountForTesting);
+                    return true;
+                },
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                nativeView = view;
+                var request = InvokePrepareForExport(view, CancellationToken.None);
+                Assert.Equal([1], nativePendingCounts);
+                Assert.Equal([1], nativeSupervisorCounts);
+                Assert.Equal(1, view.PendingFullRenderRequestCountForTesting);
+                Assert.Equal(0, view.FullRenderDeliverySupervisorCountForTesting);
+
+                var requestId = Assert.Single(PendingFullRenderRequestIds(view));
+                CompleteFullRenderRequestFromRenderer(view, requestId, succeeded: true);
+                AssertFullRenderResult(request, "Completed", 0, null);
+            });
+
+        var observedFaults = new List<Exception?>();
+        var rawPendingCounts = new List<int>();
+        var rawSupervisorCounts = new List<int>();
+        ApplicateWebMarkdownDocumentView? rawView = null;
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ => false,
+                InvokeRaw: _ =>
+                {
+                    rawPendingCounts.Add(rawView!.PendingFullRenderRequestCountForTesting);
+                    rawSupervisorCounts.Add(rawView.FullRenderDeliverySupervisorCountForTesting);
+                    return Task.FromException(new InvalidOperationException("raw failed"));
+                },
+                DeliveryObserved: observedFaults.Add),
+            view =>
+            {
+                rawView = view;
+                var request = InvokePrepareForExport(view, CancellationToken.None);
+                AssertFullRenderResult(
+                    request,
+                    "RendererFailed",
+                    0,
+                    "prepare-for-export delivery failed:InvalidOperationException");
+                Assert.Equal([1], rawPendingCounts);
+                Assert.Equal([1], rawSupervisorCounts);
+                Assert.Single(observedFaults, fault => fault is InvalidOperationException);
+                Assert.Equal(0, view.PendingFullRenderRequestCountForTesting);
+                Assert.Equal(0, view.FullRenderDeliverySupervisorCountForTesting);
+            });
+    }
+
+    [Fact]
+    public void ExportDeliveryDisposalDetachesNeverSettlingFallback()
+    {
+        var fallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ => false,
+                InvokeRaw: _ => fallback.Task),
+            view =>
+            {
+                var request = InvokePrepareForExport(view, CancellationToken.None);
+                Assert.Equal(1, view.PendingFullRenderRequestCountForTesting);
+                Assert.Equal(1, view.FullRenderDeliverySupervisorCountForTesting);
+
+                view.Dispose();
+
+                AssertFullRenderResult(request, "Disposed", 0, null);
+                Assert.True(SpinWait.SpinUntil(
+                    () => view.FullRenderDeliverySupervisorCountForTesting == 0,
+                    TimeSpan.FromSeconds(2)));
+                Assert.Equal(0, view.PendingFullRenderRequestCountForTesting);
+                Assert.False(fallback.Task.IsCompleted);
+            });
+    }
+
+    [Theory]
+    [InlineData("cancellation", "Cancelled", null)]
+    [InlineData("allowed-navigation", "RendererFailed", "renderer navigation started")]
+    [InlineData("process-failure", "ProcessFailed", "RendererProcessFailed")]
+    [InlineData("renderer-complete", "Completed", null)]
+    [InlineData("renderer-failed", "RendererFailed", "renderer driver failed")]
+    public void ExportDeliveryTerminalCompetitorsDetachNeverSettlingFallback(
+        string competitor,
+        string expectedStatus,
+        string? expectedReason)
+    {
+        var fallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellation = new CancellationTokenSource();
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ => false,
+                InvokeRaw: _ => fallback.Task),
+            view =>
+            {
+                var request = InvokePrepareForExport(view, cancellation.Token);
+                var requestId = Assert.Single(PendingFullRenderRequestIds(view));
+                Assert.Equal(1, view.PendingFullRenderRequestCountForTesting);
+                Assert.Equal(1, view.FullRenderDeliverySupervisorCountForTesting);
+
+                switch (competitor)
+                {
+                    case "cancellation":
+                        cancellation.Cancel();
+                        break;
+                    case "allowed-navigation":
+                        Assert.False(InvokeNavigationStarted(view, "about:blank").Cancel);
+                        break;
+                    case "process-failure":
+                        InvokeFullRenderProcessFailure(view, "RendererProcessFailed");
+                        break;
+                    case "renderer-complete":
+                        CompleteFullRenderRequestFromRenderer(view, requestId, succeeded: true);
+                        break;
+                    case "renderer-failed":
+                        CompleteFullRenderRequestFromRenderer(view, requestId, succeeded: false);
+                        break;
+                    default:
+                        throw new Xunit.Sdk.XunitException($"Unknown terminal competitor: {competitor}");
+                }
+
+                AssertFullRenderResult(request, expectedStatus, 0, expectedReason);
+                Assert.True(SpinWait.SpinUntil(
+                    () => view.PendingFullRenderRequestCountForTesting == 0
+                        && view.FullRenderDeliverySupervisorCountForTesting == 0,
+                    TimeSpan.FromSeconds(2)),
+                    $"Terminal competitor '{competitor}' did not release both full-render owners.");
+                Assert.Equal(0, view.PendingFullRenderRequestCountForTesting);
+                Assert.Equal(0, view.FullRenderDeliverySupervisorCountForTesting);
+                Assert.False(fallback.Task.IsCompleted);
+            });
+    }
+
+    [Fact]
+    public void ExportAllowedNavigationUsesActualHandlerAndSettlesPendingRequest()
+    {
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: _ => true,
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                var request = InvokePrepareForExport(view, CancellationToken.None);
+                var navigation = InvokeNavigationStarted(view, "about:blank");
+
+                Assert.False(navigation.Cancel);
+                AssertFullRenderResult(request, "RendererFailed", 0, "renderer navigation started");
+                Assert.Equal(0, view.PendingFullRenderRequestCountForTesting);
+                Assert.Equal(0, view.FullRenderDeliverySupervisorCountForTesting);
+            });
     }
 
     [Fact]
@@ -577,6 +1167,117 @@ public sealed class IpcContractTests
         return method!;
     }
 
+    private static Task InvokePrepareForExport(
+        ApplicateWebMarkdownDocumentView view,
+        CancellationToken cancellationToken)
+    {
+        var method = typeof(ApplicateWebMarkdownDocumentView).GetMethod(
+            "PrepareForExportAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(CancellationToken)],
+            modifiers: null);
+        Assert.NotNull(method);
+        return Assert.IsAssignableFrom<Task>(method!.Invoke(view, [cancellationToken]));
+    }
+
+    private static Task InvokeCaptureRenderedHtml(
+        ApplicateWebMarkdownDocumentView view,
+        CancellationToken cancellationToken)
+    {
+        var method = typeof(ApplicateWebMarkdownDocumentView).GetMethod(
+            "CaptureRenderedHtmlAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: [typeof(CancellationToken)],
+            modifiers: null);
+        Assert.NotNull(method);
+        return Assert.IsAssignableFrom<Task>(method!.Invoke(view, [cancellationToken]));
+    }
+
+    private static string[] PendingRenderedHtmlCaptureRequestIds(ApplicateWebMarkdownDocumentView view)
+    {
+        var field = typeof(ApplicateWebMarkdownDocumentView).GetField(
+            "_pendingRenderedHtmlCaptureRequests",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        var pending = Assert.IsAssignableFrom<System.Collections.IEnumerable>(field!.GetValue(view));
+        return pending.Cast<object>()
+            .Select(entry => (string)entry.GetType().GetProperty("Key")!.GetValue(entry)!)
+            .OrderBy(requestId => requestId, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static void AssertRenderedHtmlCaptureResult(
+        Task task,
+        string expectedStatus,
+        string? expectedHtml,
+        string? expectedFailureId,
+        string? expectedReason)
+    {
+        task.GetAwaiter().GetResult();
+        var result = task.GetType().GetProperty("Result")!.GetValue(task)!;
+        var resultType = result.GetType();
+        Assert.Equal(expectedStatus, resultType.GetProperty("Status")!.GetValue(result)!.ToString());
+        Assert.Equal(expectedHtml, resultType.GetProperty("Html")!.GetValue(result));
+        Assert.Equal(expectedFailureId, resultType.GetProperty("FailureId")!.GetValue(result));
+        Assert.Equal(expectedReason, resultType.GetProperty("Reason")!.GetValue(result));
+    }
+
+    private static void AssertCaptureOwnersReleased(ApplicateWebMarkdownDocumentView view)
+    {
+        Assert.Empty(PendingRenderedHtmlCaptureRequestIds(view));
+        Assert.Equal(0, GetInternalIntProperty(view, "RenderedHtmlCaptureDeliverySupervisorCountForTesting"));
+        Assert.Equal(0, GetInternalIntProperty(view, "RenderedHtmlCaptureCancellationRegistrationCountForTesting"));
+    }
+
+    private static int GetInternalIntProperty(ApplicateWebMarkdownDocumentView view, string name)
+    {
+        var property = typeof(ApplicateWebMarkdownDocumentView).GetProperty(
+            name,
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(property);
+        return Assert.IsType<int>(property!.GetValue(view));
+    }
+
+    private static string[] PendingFullRenderRequestIds(ApplicateWebMarkdownDocumentView view)
+    {
+        var field = typeof(ApplicateWebMarkdownDocumentView).GetField(
+            "_pendingFullRenderRequests",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        var pending = Assert.IsAssignableFrom<System.Collections.IEnumerable>(field!.GetValue(view));
+        return pending.Cast<object>()
+            .Select(entry => (string)entry.GetType().GetProperty("Key")!.GetValue(entry)!)
+            .OrderBy(requestId => requestId, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static void InvokeFullRenderProcessFailure(
+        ApplicateWebMarkdownDocumentView view,
+        string reason)
+    {
+        var method = typeof(ApplicateWebMarkdownDocumentView).GetMethod(
+            "FailPendingFullRenderRequestsForProcessFailure",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(view, [reason]);
+    }
+
+    private static void AssertFullRenderResult(
+        Task task,
+        string expectedStatus,
+        int expectedMermaidErrorCount,
+        string? expectedReason)
+    {
+        task.GetAwaiter().GetResult();
+        var result = task.GetType().GetProperty("Result")!.GetValue(task)!;
+        var resultType = result.GetType();
+        Assert.Equal(expectedStatus, resultType.GetProperty("Status")!.GetValue(result)!.ToString());
+        Assert.Equal(expectedMermaidErrorCount, resultType.GetProperty("MermaidErrorCount")!.GetValue(result));
+        Assert.Equal(expectedReason, resultType.GetProperty("Reason")!.GetValue(result));
+    }
+
     private static void AssertOptionalRenderId(MethodInfo method)
     {
         var parameter = method.GetParameters()[^1];
@@ -714,6 +1415,58 @@ public sealed class IpcContractTests
         }, CancellationToken.None).GetAwaiter().GetResult();
     }
 
+    private static void RunOnView(
+        ApplicateFullRenderDeliveryHooks deliveryHooks,
+        Action<ApplicateWebMarkdownDocumentView> body)
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(() =>
+        {
+            var view = new ApplicateWebMarkdownDocumentView(
+                new NoopRenderer(),
+                shellAssetFactory: null,
+                new ApplicateRenderedBodyCache(),
+                deliveryHooks);
+            body(view);
+        }, CancellationToken.None).GetAwaiter().GetResult();
+    }
+
+    private static WebViewNavigationStartingEventArgs InvokeNavigationStarted(
+        ApplicateWebMarkdownDocumentView view,
+        string request)
+    {
+        var args = new WebViewNavigationStartingEventArgs
+        {
+            Request = new Uri(request),
+        };
+        var method = typeof(ApplicateWebMarkdownDocumentView).GetMethod(
+            "OnNavigationStarted",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(view, [null, args]);
+        return args;
+    }
+
+    private static void CompleteFullRenderRequestFromRenderer(
+        ApplicateWebMarkdownDocumentView view,
+        string requestId,
+        bool succeeded)
+    {
+        view.HandleWebMessageBody(succeeded
+            ? JsonSerializer.Serialize(new
+            {
+                type = "full-render-complete",
+                requestId,
+                mermaidErrorCount = 0,
+            })
+            : JsonSerializer.Serialize(new
+            {
+                type = "full-render-failed",
+                requestId,
+                reason = "renderer driver failed",
+            }));
+    }
+
     private static TaskCompletionSource<bool> InstallShellReadyLatch(
         ApplicateWebMarkdownDocumentView view,
         bool completed)
@@ -808,5 +1561,21 @@ public sealed class IpcContractTests
             IImageSourceResolver? imageSourceResolver,
             CancellationToken cancellationToken)
             => throw new NotSupportedException("renderer is not exercised by IPC-contract tests");
+    }
+
+    private static string FindRepoRoot()
+    {
+        foreach (var start in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+        {
+            for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
+            {
+                if (File.Exists(Path.Combine(directory.FullName, "MarkMello.sln")))
+                {
+                    return directory.FullName;
+                }
+            }
+        }
+
+        throw new DirectoryNotFoundException("Could not locate the MarkMello repository root.");
     }
 }
