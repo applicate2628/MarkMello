@@ -1101,6 +1101,15 @@ public partial class MainWindowViewModel : ObservableObject
             : ShellOverlayKind.AppMenu;
     }
 
+    /// <summary>
+    /// Menu entries are toggles: pressing the entry whose panel is already showing
+    /// collapses back to the panel that opened it, instead of re-selecting the panel
+    /// the user is already looking at. Single owner of that rule — each command keeps
+    /// its own guard and only asks which panel it should end up on.
+    /// </summary>
+    private ShellOverlayKind ToggleAppOverlayPanel(ShellOverlayKind panel, ShellOverlayKind parent)
+        => ShellOverlay == panel ? parent : panel;
+
     [RelayCommand]
     private void OpenAppSettings()
     {
@@ -1112,7 +1121,7 @@ public partial class MainWindowViewModel : ObservableObject
 
         MarkSecondaryFeaturesReady();
 
-        ShellOverlay = ShellOverlayKind.AppSettings;
+        ShellOverlay = ToggleAppOverlayPanel(ShellOverlayKind.AppSettings, ShellOverlayKind.AppMenu);
     }
 
     [RelayCommand]
@@ -1126,7 +1135,9 @@ public partial class MainWindowViewModel : ObservableObject
 
         MarkSecondaryFeaturesReady();
 
-        ShellOverlay = ShellOverlayKind.AppAbout;
+        // About is reached from the settings panel, so its collapse target is that
+        // panel, not the menu root.
+        ShellOverlay = ToggleAppOverlayPanel(ShellOverlayKind.AppAbout, ShellOverlayKind.AppSettings);
     }
 
     [RelayCommand]
@@ -1160,7 +1171,7 @@ public partial class MainWindowViewModel : ObservableObject
 
         MarkSecondaryFeaturesReady();
 
-        ShellOverlay = ShellOverlayKind.AppUpdates;
+        ShellOverlay = ToggleAppOverlayPanel(ShellOverlayKind.AppUpdates, ShellOverlayKind.AppMenu);
     }
 
     [RelayCommand]

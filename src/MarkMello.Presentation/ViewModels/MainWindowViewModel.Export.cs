@@ -26,7 +26,7 @@ public partial class MainWindowViewModel
         }
 
         MarkSecondaryFeaturesReady();
-        ShellOverlay = ShellOverlayKind.AppExport;
+        ShellOverlay = ToggleAppOverlayPanel(ShellOverlayKind.AppExport, ShellOverlayKind.AppMenu);
     }
 
     [RelayCommand(CanExecute = nameof(CanExportDocument))]
