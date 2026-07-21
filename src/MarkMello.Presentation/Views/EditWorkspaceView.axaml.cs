@@ -4,6 +4,7 @@ using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
@@ -50,6 +51,8 @@ public partial class EditWorkspaceView : UserControl
     // session -> editor Document rebuild so it does not echo back.
     private TextEditor? _writeBackEditor;
     private bool _suppressEditorWriteBack;
+    // The TextEditor whose file-drop handlers we own; see EnsureEditorDropWiring.
+    private TextEditor? _dropWiredEditor;
 
     public EditWorkspaceView()
     {
@@ -234,6 +237,9 @@ public partial class EditWorkspaceView : UserControl
         }
 
         EnsureEditorWriteBack(editor);
+        // Earliest reliable point the editor exists: the drop insert must not
+        // depend on the scroll-sync attach pass having run.
+        EnsureEditorDropWiring(editor);
 
         var newText = text ?? string.Empty;
         var currentText = editor.Document?.Text;
@@ -359,6 +365,148 @@ public partial class EditWorkspaceView : UserControl
             ?? string.Empty;
     }
 
+    // Subscribe the file-drop insert exactly once per TextEditor instance
+    // (idempotent via the ReferenceEquals check), mirroring EnsureEditorWriteBack.
+    //
+    // Ownership: the drop target is THIS view's templated source editor, so the
+    // wiring lives here. It previously lived in the Applicate edit-PREVIEW view,
+    // which fished the whole visual tree for a `TextBox` named "EditorTextBox";
+    // f1d18a9 replaced that TextBox with this `TextEditor` named
+    // "EditorTextEditor", so the lookup missed on BOTH name and type, returned
+    // null, and silently disabled the feature. Resolving our own templated child
+    // removes that failure class: a rename here breaks the same FindControl the
+    // scroll-sync/undo paths already depend on, rather than one distant lookup.
+    private void EnsureEditorDropWiring(TextEditor editor)
+    {
+        if (ReferenceEquals(_dropWiredEditor, editor))
+        {
+            return;
+        }
+
+        TeardownEditorDropWiring();
+
+        _dropWiredEditor = editor;
+        // AllowDrop already inherits true from MainWindow.axaml; set it
+        // explicitly so this view does not depend on an ancestor's value.
+        DragDrop.SetAllowDrop(editor, true);
+        // Bubble is the only strategy DragDrop's events declare (verified against
+        // Avalonia 12.0.2). Registering on the TextEditor means AvaloniaEdit's own
+        // TextArea handler runs first; for a FILE drop its GetEffect returns None
+        // without marking the event handled (it only handles DataFormat.Text), so
+        // the event reaches us intact and our DragEffects wins as the later handler.
+        editor.AddHandler(DragDrop.DragOverEvent, OnEditorDragOver);
+        editor.AddHandler(DragDrop.DropEvent, OnEditorDrop);
+    }
+
+    private void TeardownEditorDropWiring()
+    {
+        if (_dropWiredEditor is null)
+        {
+            return;
+        }
+
+        _dropWiredEditor.RemoveHandler(DragDrop.DragOverEvent, OnEditorDragOver);
+        _dropWiredEditor.RemoveHandler(DragDrop.DropEvent, OnEditorDrop);
+        _dropWiredEditor = null;
+    }
+
+    private void OnEditorDragOver(object? sender, DragEventArgs e)
+    {
+        if (EditorDropInsert.IsInsertableFile(TryGetFirstFilePath(e)))
+        {
+            e.DragEffects = DragDropEffects.Copy;
+            e.Handled = true;
+        }
+    }
+
+    private async void OnEditorDrop(object? sender, DragEventArgs e)
+    {
+        if (_boundSession is null || _dropWiredEditor is null)
+        {
+            return;
+        }
+
+        var path = TryGetFirstFilePath(e);
+        if (!EditorDropInsert.IsInsertableFile(path))
+        {
+            return;
+        }
+
+        // Mark handled BEFORE the await so the routed event does not bubble to
+        // MainWindow's OnDrop. Avalonia routes synchronously, so by the time the
+        // await resumes routing has finished and the window would already have
+        // opened the dropped .md as an extra tab on top of the in-place insert.
+        e.Handled = true;
+
+        try
+        {
+            var insertText = await EditorDropInsert
+                .BuildInsertTextAsync(path!, _boundSession.CurrentPath)
+                .ConfigureAwait(true);
+            if (string.IsNullOrEmpty(insertText))
+            {
+                return;
+            }
+
+            InsertAtEditorCaret(insertText);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            // Unreadable source or an images/ directory we cannot write: the drop
+            // no-ops and the user can retry. Anything else is a real defect and
+            // must not be swallowed here.
+            StartupDiag.DiagMs("editor-drop", "insert-failed", $"kind={ex.GetType().Name}");
+        }
+    }
+
+    private void InsertAtEditorCaret(string insertText)
+    {
+        var editor = _dropWiredEditor;
+        if (editor?.Document is not { } document)
+        {
+            return;
+        }
+
+        var caret = EditorDropInsert.ClampCaret(document.Text, editor.CaretOffset);
+        var finalText = EditorDropInsert.BuildCaretInsertText(document.Text, caret, insertText);
+
+        // Route through the single-writer path: a zero-length Replace on the
+        // LIVE document keeps the insert on the editor's native undo stack and
+        // lets the normal TextChanged write-back mirror it into the session.
+        // Assigning session.SourceText instead would round-trip through
+        // ApplySourceTextToEditor's whole-Document swap and drop the undo stack.
+        if (!ApplyEditModeSourceEdit(caret, 0, finalText))
+        {
+            return;
+        }
+
+        editor.CaretOffset = Math.Min(caret + finalText.Length, editor.Document?.TextLength ?? 0);
+        editor.Focus();
+    }
+
+    private static string? TryGetFirstFilePath(DragEventArgs e)
+    {
+        var files = e.DataTransfer.TryGetFiles();
+        if (files is null)
+        {
+            return null;
+        }
+
+        foreach (var item in files)
+        {
+            if (item is IStorageFile file)
+            {
+                var path = file.TryGetLocalPath();
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    return path;
+                }
+            }
+        }
+
+        return null;
+    }
+
     private void AttachFirstVisualLinesProbe(TextEditor editor)
     {
         if (_firstVisualLinesLogged)
@@ -431,6 +579,15 @@ public partial class EditWorkspaceView : UserControl
             .OfType<ScrollViewer>()
             .FirstOrDefault();
 
+        // Wire the file drop as soon as the EDITOR resolves — deliberately above
+        // the gate below. The drop target needs only the TextEditor, whereas that
+        // gate also demands both ScrollViewers and a preview; making the drop wait
+        // on them would silently disable it whenever scroll-sync cannot attach.
+        if (_editorTextEditor is not null)
+        {
+            EnsureEditorDropWiring(_editorTextEditor);
+        }
+
         if (_editorTextEditor is null
             || _editorScrollViewer is null
             || _previewScrollViewer is null
@@ -496,6 +653,7 @@ public partial class EditWorkspaceView : UserControl
     private void DetachScrollSynchronization()
     {
         DetachScrollBarDragHandlers();
+        TeardownEditorDropWiring();
 
         if (_editorScrollViewer is not null)
         {

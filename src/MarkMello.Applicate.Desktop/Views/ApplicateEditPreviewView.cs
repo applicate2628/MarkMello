@@ -1,9 +1,6 @@
 using System;
 using System.ComponentModel;
-using System.IO;
-using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -11,7 +8,6 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
-using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using AvaloniaEdit;
@@ -68,7 +64,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
     private EditorSessionViewModel? _session;
     private ScrollViewer? _hostScrollViewer;
     private ScrollBarVisibility? _hostScrollViewerVerticalMode;
-    private TextBox? _dropTargetTextBox;
     private MainWindowViewModel? _viewModel;
     private bool _isAttachedToHost;
     private bool _hostEventsWired;
@@ -301,288 +296,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         _syncEnabled = _syncToggle.IsChecked == true;
     }
 
-    private static readonly string[] MarkdownInsertExtensions =
-        new[] { ".md", ".markdown", ".mdown", ".markdn", ".txt" };
-
-    private static readonly string[] ImageInsertExtensions =
-        new[] { ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg" };
-
-    private void EnsureEditorDropWiring()
-    {
-        if (_dropTargetTextBox is not null)
-        {
-            return;
-        }
-
-        var topLevel = TopLevel.GetTopLevel(this);
-        if (topLevel is null)
-        {
-            return;
-        }
-
-        var textBox = topLevel.GetVisualDescendants()
-            .OfType<TextBox>()
-            .FirstOrDefault(static tb => string.Equals(tb.Name, "EditorTextBox", StringComparison.Ordinal));
-        if (textBox is null)
-        {
-            return;
-        }
-
-        DragDrop.SetAllowDrop(textBox, true);
-        textBox.AddHandler(DragDrop.DragOverEvent, OnEditorDragOver);
-        textBox.AddHandler(DragDrop.DropEvent, OnEditorDrop);
-        _dropTargetTextBox = textBox;
-    }
-
-    private void TeardownEditorDropWiring()
-    {
-        if (_dropTargetTextBox is null)
-        {
-            return;
-        }
-
-        _dropTargetTextBox.RemoveHandler(DragDrop.DragOverEvent, OnEditorDragOver);
-        _dropTargetTextBox.RemoveHandler(DragDrop.DropEvent, OnEditorDrop);
-        _dropTargetTextBox = null;
-    }
-
-    private void OnEditorDragOver(object? sender, DragEventArgs e)
-    {
-        if (TryGetFirstFilePath(e) is { Length: > 0 } path
-            && IsInsertableFile(path))
-        {
-            e.DragEffects = DragDropEffects.Copy;
-            e.Handled = true;
-        }
-    }
-
-    private async void OnEditorDrop(object? sender, DragEventArgs e)
-    {
-        if (_session is null || _dropTargetTextBox is null)
-        {
-            return;
-        }
-
-        var path = TryGetFirstFilePath(e);
-        if (string.IsNullOrEmpty(path) || !IsInsertableFile(path))
-        {
-            return;
-        }
-
-        // Mark handled BEFORE the await so the routed event does not bubble
-        // to the window-level OnDrop. Avalonia processes routed events
-        // synchronously, but this handler is async void — by the time the
-        // await resumes, the event has already finished routing and the
-        // window's OnDrop would have opened the dropped .md as a new tab
-        // in addition to the in-place insert.
-        e.Handled = true;
-
-        try
-        {
-            var insertText = await BuildInsertTextAsync(path, _session.CurrentPath).ConfigureAwait(true);
-            if (string.IsNullOrEmpty(insertText))
-            {
-                return;
-            }
-            InsertAtCaret(insertText);
-        }
-        catch
-        {
-            // Best-effort: an unreadable file just no-ops; user can retry.
-        }
-    }
-
-    private static string? TryGetFirstFilePath(DragEventArgs e)
-    {
-        var files = e.DataTransfer.TryGetFiles();
-        if (files is null)
-        {
-            return null;
-        }
-
-        foreach (var item in files)
-        {
-            if (item is IStorageFile file)
-            {
-                var path = file.TryGetLocalPath();
-                if (!string.IsNullOrWhiteSpace(path))
-                {
-                    return path;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static bool IsInsertableFile(string path)
-    {
-        var ext = Path.GetExtension(path).ToLowerInvariant();
-        return MarkdownInsertExtensions.Contains(ext) || ImageInsertExtensions.Contains(ext);
-    }
-
-    private static Task<string?> BuildInsertTextAsync(string sourcePath, string? currentDocumentPath)
-    {
-        var ext = Path.GetExtension(sourcePath).ToLowerInvariant();
-
-        if (ImageInsertExtensions.Contains(ext))
-        {
-            return BuildImageInsertAsync(sourcePath, currentDocumentPath, ext)!;
-        }
-
-        if (MarkdownInsertExtensions.Contains(ext))
-        {
-            var displayName = Path.GetFileNameWithoutExtension(sourcePath);
-            var target = BuildRelativeLinkTarget(sourcePath, currentDocumentPath);
-            return Task.FromResult<string?>($"[{displayName}]({target})");
-        }
-
-        return Task.FromResult<string?>(null);
-    }
-
-    private static string BuildRelativeLinkTarget(string sourcePath, string? currentDocumentPath)
-    {
-        var hostDir = string.IsNullOrWhiteSpace(currentDocumentPath)
-            ? null
-            : Path.GetDirectoryName(currentDocumentPath);
-
-        if (string.IsNullOrWhiteSpace(hostDir))
-        {
-            return EncodeMarkdownLinkTarget(sourcePath);
-        }
-
-        try
-        {
-            var relative = Path.GetRelativePath(hostDir, sourcePath).Replace('\\', '/');
-            return EncodeMarkdownLinkTarget(relative);
-        }
-        catch (ArgumentException)
-        {
-            return EncodeMarkdownLinkTarget(sourcePath);
-        }
-    }
-
-    private static string EncodeMarkdownLinkTarget(string target)
-    {
-        if (target.Contains(' ') || target.Contains('(') || target.Contains(')'))
-        {
-            return "<" + target + ">";
-        }
-        return target;
-    }
-
-    private static async Task<string> BuildImageInsertAsync(
-        string sourcePath,
-        string? currentDocumentPath,
-        string ext)
-    {
-        var altText = Path.GetFileNameWithoutExtension(sourcePath);
-        var documentDirectory = string.IsNullOrWhiteSpace(currentDocumentPath)
-            ? null
-            : Path.GetDirectoryName(currentDocumentPath);
-
-        if (!string.IsNullOrWhiteSpace(documentDirectory) && Directory.Exists(documentDirectory))
-        {
-            var imagesDir = Path.Combine(documentDirectory, "images");
-            Directory.CreateDirectory(imagesDir);
-
-            var fileName = Path.GetFileName(sourcePath);
-            var targetPath = Path.Combine(imagesDir, fileName);
-            var sourceBytes = await File.ReadAllBytesAsync(sourcePath).ConfigureAwait(true);
-
-            targetPath = await ReserveTargetPathAsync(targetPath, sourceBytes).ConfigureAwait(true);
-
-            if (!File.Exists(targetPath))
-            {
-                await File.WriteAllBytesAsync(targetPath, sourceBytes).ConfigureAwait(true);
-            }
-
-            var relative = "images/" + Path.GetFileName(targetPath).Replace('\\', '/');
-            return $"![{altText}]({EncodeMarkdownLinkTarget(relative)})";
-        }
-
-        var bytes = await File.ReadAllBytesAsync(sourcePath).ConfigureAwait(true);
-        var base64 = Convert.ToBase64String(bytes);
-        var mime = MimeTypeFromExtension(ext);
-        return $"![{altText}](data:{mime};base64,{base64})";
-    }
-
-    private static async Task<string> ReserveTargetPathAsync(string desiredPath, byte[] sourceBytes)
-    {
-        if (File.Exists(desiredPath))
-        {
-            var existing = await File.ReadAllBytesAsync(desiredPath).ConfigureAwait(true);
-            if (existing.AsSpan().SequenceEqual(sourceBytes))
-            {
-                return desiredPath;
-            }
-
-            var directory = Path.GetDirectoryName(desiredPath)!;
-            var nameOnly = Path.GetFileNameWithoutExtension(desiredPath);
-            var extension = Path.GetExtension(desiredPath);
-            for (var i = 1; i < 1000; i++)
-            {
-                var candidate = Path.Combine(directory, $"{nameOnly}-{i}{extension}");
-                if (!File.Exists(candidate))
-                {
-                    return candidate;
-                }
-                var candidateBytes = await File.ReadAllBytesAsync(candidate).ConfigureAwait(true);
-                if (candidateBytes.AsSpan().SequenceEqual(sourceBytes))
-                {
-                    return candidate;
-                }
-            }
-        }
-
-        return desiredPath;
-    }
-
-    private static string MimeTypeFromExtension(string ext) => ext switch
-    {
-        ".png" => "image/png",
-        ".jpg" or ".jpeg" => "image/jpeg",
-        ".gif" => "image/gif",
-        ".webp" => "image/webp",
-        ".bmp" => "image/bmp",
-        ".svg" => "image/svg+xml",
-        _ => "application/octet-stream",
-    };
-
-    private void InsertAtCaret(string insertText)
-    {
-        if (_session is null || _dropTargetTextBox is null)
-        {
-            return;
-        }
-
-        var caret = _dropTargetTextBox.CaretIndex;
-        var currentText = _session.SourceText;
-        if (caret < 0 || caret > currentText.Length)
-        {
-            caret = currentText.Length;
-        }
-
-        var charBefore = caret > 0 ? currentText[caret - 1] : '\n';
-        var charAfter = caret < currentText.Length ? currentText[caret] : '\n';
-        var leading = charBefore == '\n' ? string.Empty : "\n";
-        var trailing = charAfter == '\n' ? string.Empty : "\n";
-        var finalText = leading + insertText + trailing;
-
-        _session.SourceText = currentText.Insert(caret, finalText);
-
-        var newCaret = caret + finalText.Length;
-        Dispatcher.UIThread.Post(() =>
-        {
-            if (_dropTargetTextBox is null)
-            {
-                return;
-            }
-            _dropTargetTextBox.CaretIndex = SysMath.Min(newCaret, _dropTargetTextBox.Text?.Length ?? 0);
-            _dropTargetTextBox.Focus();
-        }, DispatcherPriority.Background);
-    }
-
     protected override void OnDataContextChanged(EventArgs e)
     {
         base.OnDataContextChanged(e);
@@ -618,7 +331,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
 
         AttachSession(DataContext as EditorSessionViewModel);
         UpdateHostScrollMode();
-        Dispatcher.UIThread.Post(EnsureEditorDropWiring, DispatcherPriority.Background);
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
@@ -628,7 +340,6 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         DetachedFromVisualTree -= OnAnyAttachmentChange;
         DetachAncestorVisibilityListeners();
         RestoreHostScrollMode();
-        TeardownEditorDropWiring();
         AttachViewModel(null);
         AttachSession(null);
         _webRenderTimer.Stop();
