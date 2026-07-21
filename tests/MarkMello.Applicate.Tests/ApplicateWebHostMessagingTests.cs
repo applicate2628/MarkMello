@@ -163,41 +163,25 @@ public sealed class ApplicateWebHostMessagingTests
     }
 
     [Fact]
-    public void RenderContextSurvivesCommitSoRetryWorksAfterAPostReadyCrash()
+    public void RetainedRenderContextDoesNotResurrectTheOldFailureScopedFieldNames()
     {
-        // A WebView2 process failure can land after a clean Commit. Retry is the
-        // only affordance a user who stays on the same document has, and it can
-        // only re-render a document whose render inputs the host still holds.
-        // Commit must therefore not destroy them.
+        // The RUNTIME behaviour that 2f78dda protects — the render context
+        // survives a real Commit, RetryRender re-issues from it, and it is
+        // captured on every RequestRender — is now pinned BEHAVIOURALLY against
+        // the real host in
+        // ApplicateSharedWebViewHostRealHostTests.RenderContextSurvivesCommitSoRetryReRendersTheDiedDocument.
+        // That behavioural pin catches a commit null-out even under a renamed
+        // field or on a different commit path, which a source-text match cannot.
+        //
+        // What remains here is the one property with NO runtime observable: the
+        // fields must not regress to the old failure-scoped names, whose very
+        // name asserted a lifetime the field never had (it is written on every
+        // RequestRender, not only on failures). A rename back is a source-only
+        // regression, so it keeps a source-only guard.
         var hostSource = File.ReadAllText(SharedWebViewHostSourcePath);
 
-        // The old name asserted a lifetime the field never had: it is written on
-        // every RequestRender, not only on failures.
         Assert.DoesNotContain("_failureSource", hostSource, StringComparison.Ordinal);
         Assert.DoesNotContain("_failureRequest", hostSource, StringComparison.Ordinal);
-
-        var commit = hostSource[
-            hostSource.IndexOf("private void Commit()", StringComparison.Ordinal)..
-            hostSource.IndexOf("public bool RevealNativeWebViewForCommittedTransaction", StringComparison.Ordinal)];
-
-        Assert.DoesNotContain("_lastRenderSource", commit, StringComparison.Ordinal);
-        Assert.DoesNotContain("_lastRenderRequest", commit, StringComparison.Ordinal);
-
-        // Retry must still re-render from the retained context.
-        var retry = hostSource[
-            hostSource.IndexOf("public void RetryRender()", StringComparison.Ordinal)..
-            hostSource.IndexOf("public void CommitInPlaceSourceSwap(", StringComparison.Ordinal)];
-
-        Assert.Contains("if (_lastRenderRequest is null)", retry, StringComparison.Ordinal);
-        Assert.Contains("RequestRender(_lastRenderSource, _lastRenderRequest);", retry, StringComparison.Ordinal);
-
-        // And the context must still be captured on every render request.
-        var requestRender = hostSource[
-            hostSource.IndexOf("private void RequestRender(", StringComparison.Ordinal)..
-            hostSource.IndexOf("public void RetryRender()", StringComparison.Ordinal)];
-
-        Assert.Contains("_lastRenderSource = source;", requestRender, StringComparison.Ordinal);
-        Assert.Contains("_lastRenderRequest = request;", requestRender, StringComparison.Ordinal);
     }
 
     [Fact]

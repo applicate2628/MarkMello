@@ -520,8 +520,12 @@ public sealed class ApplicateSharedWebViewHost :
     }
 
     /// <summary>
-    /// Test seam for raising the failure event without a real WebView2 fault.
-    /// Phase 4 uses this from <see cref="OnViewFallbackRequested"/> only.
+    /// Test seam for raising the failure event with a caller-supplied failure
+    /// context, without a real WebView2 fault. Production never routes through
+    /// here: <see cref="OnViewFallbackRequested"/> constructs its own
+    /// <see cref="ApplicateRendererFailureEvent"/> and raises
+    /// <see cref="RendererFailed"/> directly. Used by the real-host behavioural
+    /// tests to assert the event forwards a given failure verbatim.
     /// </summary>
     internal void RaiseRendererFailed(ApplicateRendererFailureEvent failure)
     {
@@ -797,6 +801,18 @@ public sealed class ApplicateSharedWebViewHost :
     internal long DebugGenerationForTesting => _activeGeneration;
 
     internal Panel? DebugCurrentParentForTesting => _currentParent;
+
+    // Observers over the retained render context (2f78dda). The context is the
+    // inputs of the most recent RequestRender; the fix is that it SURVIVES a
+    // successful Commit so a post-ready WebView2 crash's RetryRender still has a
+    // document to re-render. These make that survival behaviourally assertable on
+    // the real host (RaiseDocumentRenderedForTesting drives a real Commit, then
+    // DebugLastRenderSourceForTesting is still the committed document) — a
+    // guarantee no source-text mirror can prove, because a null-out under a
+    // renamed field or on a different code path would leave the source text green.
+    internal MarkdownSource? DebugLastRenderSourceForTesting => _lastRenderSource;
+
+    internal ApplicateWebRenderRequest? DebugLastRenderRequestForTesting => _lastRenderRequest;
 }
 
 /// <summary>
