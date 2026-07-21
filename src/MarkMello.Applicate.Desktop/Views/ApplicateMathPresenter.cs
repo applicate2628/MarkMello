@@ -19,8 +19,9 @@ namespace MarkMello.Applicate.Desktop.Views;
 /// the parse failure via <see cref="MathView"/>'s <c>ErrorMessage</c> (set
 /// synchronously by the <c>LaTeX</c> setter) and substitute a readable text
 /// approximation. Callers pass TeX ALREADY run through
-/// <c>NormalizeTexForRenderer</c>. Single owner for the three direct MathView call
-/// sites (TOC panel, wrapping math view, host markdown inline math).
+/// <c>NormalizeTexForRenderer</c>. Single owner for the direct MathView call
+/// sites; the TOC panel is the only remaining one since the native-renderer
+/// views (wrapping math view, host markdown inline math) were retired.
 /// </summary>
 internal static class ApplicateMathPresenter
 {
