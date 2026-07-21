@@ -1807,13 +1807,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         //
         // Mirror H7 (OnCoreProcessFailed): fault the latch so the awaiters unblock,
         // and raise FallbackRequested so the failure view owns recovery (replacing
-        // the blank surface). NOTE: _shellReady is never recreated (only ??=), so
-        // after a fault the latch stays completed — a later render re-navigates but
-        // its "wait for first document-ready" gate completes instantly, so that one
-        // recovery-path render's load-document can be lost until the next render
-        // re-arms on a fresh document-ready. This one-render recurrence is a
-        // pre-existing H7-mirrored residual; the proper fix (reset _shellReady=null
-        // in BOTH fault sites) is a separate tracked item, not this commit's scope.
+        // the blank surface). Both sites route through TryInvalidateShellReady,
+        // which DROPS the latch after completing it, so the recovery render's
+        // "wait for first document-ready" gate re-arms and genuinely waits instead
+        // of clearing instantly against a dead shell's completed latch.
         var shellReady = _shellReady;
         if (shellReady is not null
             && ShouldFaultShellReadyOnNavigationFailure(e.IsSuccess, shellReadyPending: !shellReady.Task.IsCompleted))
@@ -1827,6 +1824,44 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     // irrelevant, so it must not request fallback after the shell is alive.
     private bool TryFaultPendingShellReady()
     {
+        if (!TryInvalidateShellReady())
+        {
+            return false;
+        }
+
+        FallbackRequested?.Invoke(this, EventArgs.Empty);
+        return true;
+    }
+
+    // Single owner for "the shell that is currently navigated is dead": unblock
+    // every awaiter with false, then DROP the latch so the next shell navigation
+    // re-arms a fresh one through the ??= creations in QueueRenderShellAsync /
+    // EnsureShellReadyAsync.
+    //
+    // Dropping is the load-bearing part. The latch describes ONE shell page, so
+    // a recovery render that inherits the completed latch clears its "wait for
+    // the shell's first document-ready" gate INSTANTLY and posts load-document
+    // into a page that is still navigating. The document is then lost with no
+    // FallbackRequested to surface it (the latch is no longer pending, so the
+    // nav-fail branch cannot re-fault) and the retry has already dismissed the
+    // failure view -- a blank surface with no retry affordance left.
+    // Runtime-reproduced 2026-07-21: the recovery render's gate released in 1 ms
+    // against a 1631 ms healthy baseline, and the viewer stayed empty.
+    //
+    // Ordering is load-bearing: TrySetResult BEFORE the null-out, so an awaiter
+    // that already captured the old TCS still observes completion rather than
+    // hanging on an orphaned latch. Callers that must also surface the failure
+    // raise FallbackRequested themselves -- this method owns latch state only.
+    //
+    // _shellDocumentReadyConsumed is deliberately NOT reset here. Resetting the
+    // latch is only safe while that flag is false, and in every reachable fault
+    // path it is: the navigation failed (the page never loaded), the process
+    // crashed (it cannot post), or renderer.ts posted shell-init-failed, which
+    // its DOMContentLoaded handler only does while shellReadyPosted is false and
+    // whose synchronous body cannot be interleaved with an async error handler.
+    // So the fresh shell's first document-ready still resolves the new latch.
+    private bool TryInvalidateShellReady()
+    {
         var shellReady = _shellReady;
         if (shellReady is null || shellReady.Task.IsCompleted)
         {
@@ -1839,7 +1874,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return false;
         }
 
-        FallbackRequested?.Invoke(this, EventArgs.Empty);
+        _shellReady = null;
         return true;
     }
 
@@ -3986,12 +4021,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private void OnCoreProcessFailed(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedEventArgs e)
     {
         ApplicateTrace.DiagMs("pane-seq", "core-process-failed", $"kind={e.ProcessFailedKind}");
-        var shellReady = _shellReady;
-        if (shellReady is not null && !shellReady.Task.IsCompleted)
-        {
-            _shellNavigated = false;
-            shellReady.TrySetResult(false);
-        }
+        // Same failure class as the nav-fail site, so it must use the same latch
+        // idiom -- including the drop that lets the next navigation re-arm.
+        // FallbackRequested stays unconditional here (below): a crash AFTER the
+        // shell went ready leaves the latch completed, so TryInvalidateShellReady
+        // is a no-op, but the failure view must still be surfaced.
+        TryInvalidateShellReady();
 
         FailPendingFullRenderRequestsForProcessFailure(e.ProcessFailedKind.ToString());
 
