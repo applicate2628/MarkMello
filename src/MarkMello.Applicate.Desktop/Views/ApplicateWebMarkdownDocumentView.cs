@@ -2830,7 +2830,10 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         completion.TrySetResult(result);
     }
 
-    private void CompleteAllPendingFullRenderRequests(ApplicateFullRenderResult result)
+    // Returns true when at least one request was actually pending and has now
+    // been failed. OnCoreProcessFailed uses that to decide whether the failure
+    // broke anything the caller was waiting on.
+    private bool CompleteAllPendingFullRenderRequests(ApplicateFullRenderResult result)
     {
         TaskCompletionSource<ApplicateFullRenderResult>[] completions;
         lock (_fullRenderRequestGate)
@@ -2843,17 +2846,24 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             completion.TrySetResult(result);
         }
+
+        return completions.Length > 0;
     }
 
-    private void FailPendingFullRenderRequestsForProcessFailure(string reason)
+    // Returns true when this failure actually aborted in-flight render work.
+    private bool FailPendingFullRenderRequestsForProcessFailure(string reason)
     {
-        CompleteAllPendingFullRenderRequests(new ApplicateFullRenderResult(
+        var failedFullRenders = CompleteAllPendingFullRenderRequests(new ApplicateFullRenderResult(
             ApplicateFullRenderStatus.ProcessFailed,
             Reason: reason));
-        CompleteAllPendingRenderedHtmlCaptures(new ApplicateRenderedHtmlCaptureResult(
+        var failedCaptures = CompleteAllPendingRenderedHtmlCaptures(new ApplicateRenderedHtmlCaptureResult(
             ExportStatus.ProcessCrashed,
             FailureId: "HTMLX-PROCESS-FAILED",
             Reason: "HTMLX-PROCESS-FAILED"));
+
+        // Both sides run unconditionally: || would short-circuit the capture
+        // completion and strand its awaiters.
+        return failedFullRenders || failedCaptures;
     }
 
     private bool IsFullRenderRequestPending(string requestId)
@@ -3084,7 +3094,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         return true;
     }
 
-    private void CompleteAllPendingRenderedHtmlCaptures(ApplicateRenderedHtmlCaptureResult result)
+    // Returns true when at least one capture was actually pending. See
+    // CompleteAllPendingFullRenderRequests for why the caller needs this.
+    private bool CompleteAllPendingRenderedHtmlCaptures(ApplicateRenderedHtmlCaptureResult result)
     {
         string[] requestIds;
         lock (_fullRenderRequestGate)
@@ -3096,6 +3108,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             CompleteRenderedHtmlCaptureRequest(requestId, result);
         }
+
+        return requestIds.Length > 0;
     }
 
     private bool IsRenderedHtmlCapturePending(string requestId)
@@ -4126,9 +4140,6 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ApplicateTrace.DiagMs("pane-seq", "core-process-failed", $"kind={e.ProcessFailedKind}");
         // Same failure class as the nav-fail site, so it must use the same latch
         // idiom -- including the drop that lets the next navigation re-arm.
-        // FallbackRequested stays unconditional here (below): the failure view
-        // must be surfaced for every crash, including the kinds that leave the
-        // shell state alone, so recovery is never swallowed.
         //
         // The latch idiom alone is NOT enough after the shell has gone ready: the
         // latch is completed by then, so TryInvalidateShellReady no-ops and the
@@ -4136,6 +4147,8 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         // that case; it is gated on the kinds that actually kill the main frame
         // so a healthy shell is never torn down by an auto-recovering GPU or
         // utility process exit.
+        var shellInvalidatedForDeadPage = false;
+        var pendingShellReadyFaulted = false;
         if (ShouldInvalidateShellForProcessFailure(e.ProcessFailedKind))
         {
             ApplicateTrace.DiagMs(
@@ -4143,15 +4156,93 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 "shell-invalidated-for-dead-page",
                 $"kind={e.ProcessFailedKind}");
             InvalidateShellForDeadPage();
+            shellInvalidatedForDeadPage = true;
         }
         else
         {
-            TryInvalidateShellReady();
+            // True only when a latch was still PENDING and has now been faulted,
+            // i.e. somebody was waiting on a shell that will never go ready.
+            pendingShellReadyFaulted = TryInvalidateShellReady();
         }
 
-        FailPendingFullRenderRequestsForProcessFailure(e.ProcessFailedKind.ToString());
+        var pendingRenderWorkFailed =
+            FailPendingFullRenderRequestsForProcessFailure(e.ProcessFailedKind.ToString());
 
-        FallbackRequested?.Invoke(this, EventArgs.Empty);
+        if (ShouldRaiseFallbackForProcessFailure(
+                shellInvalidatedForDeadPage,
+                pendingShellReadyFaulted,
+                pendingRenderWorkFailed))
+        {
+            FallbackRequested?.Invoke(this, EventArgs.Empty);
+        }
+        else
+        {
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "core-process-failed-no-fallback",
+                $"kind={e.ProcessFailedKind}");
+        }
+    }
+
+    // Single owner of "does this process failure need the failure view?".
+    //
+    // The predicate is the OUTCOME of the failure, not the kind. That is the
+    // idiom the other three FallbackRequested raise sites already use: the two
+    // catch blocks raise because a render actually threw, and
+    // TryFaultPendingShellReady raises only when TryInvalidateShellReady
+    // reported that it really faulted a pending latch. This site was the only
+    // one raising on the bare event, so a kind that broke nothing -- an
+    // auto-recovering GPU/utility/sandbox/PPAPI exit, a subframe-only
+    // FrameRenderProcessExited, or RenderProcessUnresponsive, which is not an
+    // exit at all and repeats every few seconds on a merely busy machine --
+    // surfaced a full failure view over a document that never stopped working.
+    //
+    // Kind-gating this directly would have been the wrong fix: it would have
+    // swallowed a genuine pre-ready failure whose kind happens to be
+    // auto-recovering but which nonetheless faulted a pending shell-ready latch
+    // or aborted an in-flight export. Each term below names something that
+    // measurably broke, so nothing currently surfaced is lost:
+    //
+    //   shellInvalidatedForDeadPage - the main frame died; the page is a corpse
+    //                                 and the shell state was just torn down.
+    //   pendingShellReadyFaulted    - awaiters were unblocked with false; the
+    //                                 shell they waited for will never arrive.
+    //   pendingRenderWorkFailed     - in-flight full-render / HTML-capture
+    //                                 requests were completed as failed.
+    //
+    // All three false means the event changed nothing observable: the page is
+    // alive, nobody was waiting, no work was aborted. Staying silent there is
+    // the fix.
+    private static bool ShouldRaiseFallbackForProcessFailure(
+        bool shellInvalidatedForDeadPage,
+        bool pendingShellReadyFaulted,
+        bool pendingRenderWorkFailed)
+        => shellInvalidatedForDeadPage || pendingShellReadyFaulted || pendingRenderWorkFailed;
+
+    // Test seam mirroring OnCoreProcessFailed's composition across the WebView2
+    // SDK boundary (the test project cannot reference the SDK, so the kind
+    // crosses as its enum NAME). shellReadyLatchPending models whether
+    // TryInvalidateShellReady would find a pending latch to fault; the fatal
+    // branch does not consult it because InvalidateShellForDeadPage runs
+    // instead. Pairs with IsKnownProcessFailureKindForTesting so a misspelled
+    // name cannot silently pass as "no fallback".
+    internal static bool ShouldRaiseFallbackForProcessFailureForTesting(
+        string kindName,
+        bool shellReadyLatchPending,
+        bool pendingRenderWorkFailed)
+    {
+        if (!Enum.TryParse<Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind>(
+                kindName,
+                out var kind))
+        {
+            return false;
+        }
+
+        var fatal = ShouldInvalidateShellForProcessFailure(kind);
+        return ShouldRaiseFallbackForProcessFailure(
+            shellInvalidatedForDeadPage: fatal,
+            pendingShellReadyFaulted: !fatal && shellReadyLatchPending,
+            pendingRenderWorkFailed: pendingRenderWorkFailed);
     }
 
     private void SendThemeFromThemeVariantChange()

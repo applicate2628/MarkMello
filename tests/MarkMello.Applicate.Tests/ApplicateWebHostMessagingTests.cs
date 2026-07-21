@@ -114,6 +114,93 @@ public sealed class ApplicateWebHostMessagingTests
     }
 
     [Fact]
+    public void ProcessFailureRaisesFallbackThroughTheOutcomeGateNotUnconditionally()
+    {
+        // Pins the CALL SITE, not the decision seam. A predicate that is correct
+        // in isolation proves nothing if OnCoreProcessFailed still raises the
+        // event unconditionally next to it, so assert the handler actually
+        // routes the raise through the gate and actually captures the two
+        // outcome signals it feeds in.
+        var viewSource = File.ReadAllText(WebDocumentViewSourcePath);
+        var handler = viewSource[
+            viewSource.IndexOf("private void OnCoreProcessFailed(", StringComparison.Ordinal)..
+            viewSource.IndexOf("private static bool ShouldRaiseFallbackForProcessFailure(", StringComparison.Ordinal)];
+
+        var gateIndex = handler.IndexOf("if (ShouldRaiseFallbackForProcessFailure(", StringComparison.Ordinal);
+        var raiseIndex = handler.IndexOf("FallbackRequested?.Invoke(", StringComparison.Ordinal);
+
+        Assert.True(gateIndex >= 0, "OnCoreProcessFailed must route the raise through ShouldRaiseFallbackForProcessFailure.");
+        Assert.True(raiseIndex >= 0, "OnCoreProcessFailed must still be able to raise FallbackRequested.");
+        Assert.True(
+            gateIndex < raiseIndex,
+            "FallbackRequested must be raised inside the outcome gate, not before it.");
+
+        // The gate is only meaningful if the outcomes are really observed: the
+        // pending-latch fault result must be captured from TryInvalidateShellReady
+        // and the aborted-work result from the full-render failure sweep.
+        Assert.Contains("pendingShellReadyFaulted = TryInvalidateShellReady();", handler, StringComparison.Ordinal);
+        Assert.Contains("shellInvalidatedForDeadPage = true;", handler, StringComparison.Ordinal);
+        Assert.Contains("var pendingRenderWorkFailed =", handler, StringComparison.Ordinal);
+        Assert.Contains(
+            "FailPendingFullRenderRequestsForProcessFailure(e.ProcessFailedKind.ToString());",
+            handler,
+            StringComparison.Ordinal);
+
+        // The sweep must report whether anything was actually pending; a void
+        // return would silently collapse the third term to a constant.
+        Assert.Contains(
+            "private bool FailPendingFullRenderRequestsForProcessFailure(string reason)",
+            viewSource,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "private bool CompleteAllPendingFullRenderRequests(ApplicateFullRenderResult result)",
+            viewSource,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "private bool CompleteAllPendingRenderedHtmlCaptures(ApplicateRenderedHtmlCaptureResult result)",
+            viewSource,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RenderContextSurvivesCommitSoRetryWorksAfterAPostReadyCrash()
+    {
+        // A WebView2 process failure can land after a clean Commit. Retry is the
+        // only affordance a user who stays on the same document has, and it can
+        // only re-render a document whose render inputs the host still holds.
+        // Commit must therefore not destroy them.
+        var hostSource = File.ReadAllText(SharedWebViewHostSourcePath);
+
+        // The old name asserted a lifetime the field never had: it is written on
+        // every RequestRender, not only on failures.
+        Assert.DoesNotContain("_failureSource", hostSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("_failureRequest", hostSource, StringComparison.Ordinal);
+
+        var commit = hostSource[
+            hostSource.IndexOf("private void Commit()", StringComparison.Ordinal)..
+            hostSource.IndexOf("public bool RevealNativeWebViewForCommittedTransaction", StringComparison.Ordinal)];
+
+        Assert.DoesNotContain("_lastRenderSource", commit, StringComparison.Ordinal);
+        Assert.DoesNotContain("_lastRenderRequest", commit, StringComparison.Ordinal);
+
+        // Retry must still re-render from the retained context.
+        var retry = hostSource[
+            hostSource.IndexOf("public void RetryRender()", StringComparison.Ordinal)..
+            hostSource.IndexOf("public void CommitInPlaceSourceSwap(", StringComparison.Ordinal)];
+
+        Assert.Contains("if (_lastRenderRequest is null)", retry, StringComparison.Ordinal);
+        Assert.Contains("RequestRender(_lastRenderSource, _lastRenderRequest);", retry, StringComparison.Ordinal);
+
+        // And the context must still be captured on every render request.
+        var requestRender = hostSource[
+            hostSource.IndexOf("private void RequestRender(", StringComparison.Ordinal)..
+            hostSource.IndexOf("public void RetryRender()", StringComparison.Ordinal)];
+
+        Assert.Contains("_lastRenderSource = source;", requestRender, StringComparison.Ordinal);
+        Assert.Contains("_lastRenderRequest = request;", requestRender, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TransactionalSettleProbeFastPathKeepsRendererAckBoundary()
     {
         var source = File.ReadAllText(SharedWebViewHostSourcePath);

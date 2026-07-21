@@ -89,6 +89,71 @@ public sealed class ApplicateWebMarkdownDocumentViewShellModeTests
     }
 
     [Theory]
+    // OnCoreProcessFailed used to raise FallbackRequested on the bare event, for
+    // every kind and regardless of whether anything broke. The other three raise
+    // sites already condition on an outcome (a render actually threw;
+    // TryInvalidateShellReady actually faulted a pending latch), so this one was
+    // the outlier -- and an auto-recovering GPU/utility exit, a subframe-only
+    // FrameRenderProcessExited, or RenderProcessUnresponsive (not an exit at
+    // all; repeats every few seconds on a busy machine) put a full failure view
+    // over a document that never stopped working.
+    //
+    // The gate is the OUTCOME, not the kind. A naive kind gate would swallow a
+    // genuine failure whose kind is auto-recovering but which still faulted a
+    // pending shell-ready latch or aborted an in-flight export -- rows 3 and 4
+    // below pin exactly that.
+    //
+    // Kind reference (BrowserProcessExited / RenderProcessExited kill the main
+    // frame; the rest auto-recover, are subframe-only, or are not exits):
+    // learn.microsoft.com/dotnet/api/microsoft.web.webview2.core.corewebview2processfailedkind
+    // (webview2-dotnet-1.0.4022.49), read 2026-07-21.
+    //
+    // 1. Fatal kinds always surface, even with nothing pending. This is the
+    //    post-ready crash d718bce fixed; gating it away would re-break recovery.
+    [InlineData("RenderProcessExited", false, false, true)]
+    [InlineData("BrowserProcessExited", false, false, true)]
+    // 2. Non-fatal kinds with nothing pending must stay SILENT. The page is
+    //    alive, nobody is waiting, no work was aborted -- this is the defect.
+    [InlineData("RenderProcessUnresponsive", false, false, false)]
+    [InlineData("FrameRenderProcessExited", false, false, false)]
+    [InlineData("GpuProcessExited", false, false, false)]
+    [InlineData("UtilityProcessExited", false, false, false)]
+    [InlineData("SandboxHelperProcessExited", false, false, false)]
+    [InlineData("PpapiPluginProcessExited", false, false, false)]
+    [InlineData("PpapiBrokerProcessExited", false, false, false)]
+    [InlineData("UnknownProcessExited", false, false, false)]
+    // 3. Non-fatal kind that nonetheless faulted a PENDING shell-ready latch:
+    //    awaiters were unblocked with false and the shell will never arrive, so
+    //    the failure must still surface.
+    [InlineData("GpuProcessExited", true, false, true)]
+    [InlineData("RenderProcessUnresponsive", true, false, true)]
+    [InlineData("UnknownProcessExited", true, false, true)]
+    // 4. Non-fatal kind that aborted in-flight full-render / HTML-capture work.
+    [InlineData("GpuProcessExited", false, true, true)]
+    [InlineData("FrameRenderProcessExited", false, true, true)]
+    // 5. Both outcomes at once still surfaces exactly once.
+    [InlineData("UtilityProcessExited", true, true, true)]
+    public void FallbackIsRaisedOnlyWhenTheProcessFailureActuallyBrokeSomething(
+        string kindName,
+        bool shellReadyLatchPending,
+        bool pendingRenderWorkFailed,
+        bool expectedRaise)
+    {
+        // Guard the string seam: a misspelled kind would parse-fail and
+        // masquerade as a passing "no fallback" case.
+        Assert.True(
+            ApplicateWebMarkdownDocumentView.IsKnownProcessFailureKindForTesting(kindName),
+            $"'{kindName}' is not a CoreWebView2ProcessFailedKind member.");
+
+        Assert.Equal(
+            expectedRaise,
+            ApplicateWebMarkdownDocumentView.ShouldRaiseFallbackForProcessFailureForTesting(
+                kindName,
+                shellReadyLatchPending,
+                pendingRenderWorkFailed));
+    }
+
+    [Theory]
     [InlineData("related.md#details")]
     [InlineData("related.md?plain=1")]
     public void LocalMarkdownLinkResolverIgnoresFragmentAndQueryWhenCheckingFileExtension(string href)

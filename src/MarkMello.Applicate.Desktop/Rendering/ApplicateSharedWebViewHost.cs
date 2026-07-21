@@ -35,8 +35,15 @@ public sealed class ApplicateSharedWebViewHost :
     private bool _activeTransactionSkipsRendererFrameSettle;
     private long _minimapSettledTransactionGeneration;
     private long _rendererSettledTransactionGeneration;
-    private MarkdownSource? _failureSource;
-    private ApplicateWebRenderRequest? _failureRequest;
+    // The inputs of the most recent RequestRender — the context that reproduces
+    // whatever this host was last asked to show. Written on EVERY render (not
+    // only failing ones) and superseded by the next request; never destroyed by
+    // success. Retry is the consumer that makes the lifetime load-bearing: a
+    // WebView2 process failure can land AFTER a clean Commit, and Retry can only
+    // re-render a document it still has the inputs for. Destroying this on
+    // commit therefore disables Retry for exactly the post-ready-crash case.
+    private MarkdownSource? _lastRenderSource;
+    private ApplicateWebRenderRequest? _lastRenderRequest;
     private ApplicateMode _currentMode = ApplicateMode.Edit;
     private long _transactionNativeRevealGeneration;
     private bool _transactionNativeRevealPending;
@@ -225,7 +232,7 @@ public sealed class ApplicateSharedWebViewHost :
 
         // State machine: always SWITCHING after AttachTo. The next
         // RequestRender → DocumentRendered → Commit cycle clears it back to
-        // COMMITTED and refreshes failure-retry context.
+        // COMMITTED and refreshes the render context.
         _state = HostState.Switching;
 
         // If the previous parent was a consumer slot (not the warmup), restore
@@ -274,8 +281,8 @@ public sealed class ApplicateSharedWebViewHost :
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        _failureSource = source;
-        _failureRequest = request;
+        _lastRenderSource = source;
+        _lastRenderRequest = request;
         _activeTransactionGeneration = transactionGeneration;
         _minimapSettledTransactionGeneration = 0;
         _rendererSettledTransactionGeneration = 0;
@@ -309,8 +316,8 @@ public sealed class ApplicateSharedWebViewHost :
                 _hasEverCommitted));
 
         // State machine always transitions through SWITCHING so the next
-        // DocumentRendered commits cleanly (clears failure-retry context,
-        // bumps _hasEverCommitted). Visibility is decoupled from state above.
+        // DocumentRendered commits cleanly (bumps _hasEverCommitted).
+        // Visibility is decoupled from state above.
         _state = HostState.Switching;
 
         ApplicateTrace.ModeToggle(
@@ -358,24 +365,28 @@ public sealed class ApplicateSharedWebViewHost :
 
     public void RetryRender()
     {
-        if (_failureRequest is null)
+        // Null only before this host has ever been asked to render anything.
+        // After a post-ready process failure the context still describes the
+        // document that died, which is exactly what Retry must re-render.
+        if (_lastRenderRequest is null)
         {
+            ApplicateTrace.ModeToggle("SharedHost.RetryRender skipped=no-render-context");
             return;
         }
 
         ApplicateTrace.ModeToggle(
-            $"SharedHost.RetryRender source={(_failureSource?.Path ?? "(null)")}");
-        RequestRender(_failureSource, _failureRequest);
+            $"SharedHost.RetryRender source={(_lastRenderSource?.Path ?? "(null)")}");
+        RequestRender(_lastRenderSource, _lastRenderRequest);
     }
 
     public void CommitInPlaceSourceSwap(MarkdownSource source)
     {
-        // Keep a pending RetryRender truthful: if the failure snapshot is the
+        // Keep a pending RetryRender truthful: if the retained context is the
         // same document, a later retry must render the just-written content.
-        if (_failureSource is not null
-            && string.Equals(_failureSource.Path, source.Path, StringComparison.OrdinalIgnoreCase))
+        if (_lastRenderSource is not null
+            && string.Equals(_lastRenderSource.Path, source.Path, StringComparison.OrdinalIgnoreCase))
         {
-            _failureSource = source;
+            _lastRenderSource = source;
         }
 
         View.CommitInPlaceSourceSwap(source);
@@ -660,10 +671,16 @@ public sealed class ApplicateSharedWebViewHost :
         // sees the previous committed content during the navigate gap.
         _hasEverCommitted = true;
 
-        // Render success clears the failure-retry context — a clean commit
-        // means the previous failure is now resolved.
-        _failureSource = null;
-        _failureRequest = null;
+        // The render context deliberately SURVIVES a successful commit. It
+        // describes the document now on screen, and a WebView2 process failure
+        // can land after this point (kind=RenderProcessExited on a live page),
+        // at which time Retry is the only affordance a user who stays on the
+        // same document has. Nulling here made that Retry a no-op at its null
+        // guard -- the button was present and inert. Nothing resurrects a
+        // failure surface from the retained value: RendererFailed is raised
+        // only by the View pushing FallbackRequested, never derived from this
+        // state, and RetryRender is reachable only from a displayed failure
+        // view's retry button. The next RequestRender supersedes it.
 
         ApplicateTrace.ModeToggle(
             $"SharedHost.Commit gen={_activeGeneration} slot={(_currentParent is null ? "(null)" : _currentParent.GetType().Name)} revealGate={armRevealGate}");
@@ -750,7 +767,7 @@ public sealed class ApplicateSharedWebViewHost :
 
     private TimeSpan CurrentModeSwitchDuration()
     {
-        var preferences = _failureRequest?.ReadingPreferences ?? ReadingPreferences.Default;
+        var preferences = _lastRenderRequest?.ReadingPreferences ?? ReadingPreferences.Default;
         return ApplicateMotion.ModeSwitchDuration(preferences);
     }
 
@@ -761,11 +778,11 @@ public sealed class ApplicateSharedWebViewHost :
         // slot's child to a failure view per design D3.
         var failure = new ApplicateRendererFailureEvent(
             Kind: ApplicateRendererFailureKind.DocumentRenderFailed,
-            DocumentPath: _failureSource?.Path,
+            DocumentPath: _lastRenderSource?.Path,
             Timestamp: DateTime.UtcNow,
             Exception: null);
         ApplicateTrace.ModeToggle(
-            $"SharedHost.OnViewFallbackRequested doc={(_failureSource?.Path ?? "(null)")}");
+            $"SharedHost.OnViewFallbackRequested doc={(_lastRenderSource?.Path ?? "(null)")}");
         RendererFailed?.Invoke(this, failure);
     }
 
