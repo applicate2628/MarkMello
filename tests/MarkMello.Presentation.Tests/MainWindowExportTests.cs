@@ -284,6 +284,74 @@ public sealed class MainWindowExportTests
         Assert.True(harness.ViewModel.PrintCommand.CanExecute(null));
     }
 
+    /// <summary>
+    /// The root cause in one assertion. PrepareForExportAsync registers its
+    /// cancellation callback ONLY when <c>cancellationToken.CanBeCanceled</c>, so
+    /// the menu path's former <c>CancellationToken.None</c> registered nothing and
+    /// left the renderer barrier with no bound whatsoever. A commit that reasons
+    /// "an unsettleable render is user-cancellable" is relying on exactly this.
+    /// </summary>
+    [Fact]
+    public async Task MenuExportHandsTheExporterATokenThatCanActuallyBeCancelled()
+    {
+        var harness = await CreateHarnessWithDocumentAsync();
+        harness.FilePicker.GenericSavePath = Path.Combine("exports", "token.pdf");
+
+        await harness.ViewModel.ExportPdfCommand.ExecuteAsync(null);
+
+        Assert.True(harness.Exporter.LastToken.CanBeCanceled);
+    }
+
+    /// <summary>
+    /// The filed defect end to end: an export whose barrier never settles on its
+    /// own. Pins BOTH directions -- the latch must still hold (and still disable
+    /// the export actions) while the export is genuinely in flight, and it must
+    /// release once the user cancels. Also pins that the panel carrying the cancel
+    /// affordance stays reachable while busy, since a cancel the user cannot reach
+    /// is not a bound at all.
+    /// </summary>
+    [Fact]
+    public async Task CancellingANeverSettlingExportReleasesTheLatchAndReportsCancelled()
+    {
+        var harness = await CreateHarnessWithDocumentAsync();
+        harness.FilePicker.GenericSavePath = Path.Combine("exports", "hung.pdf");
+        var neverSettles = new TaskCompletionSource<ExportResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Exporter.NextTask = neverSettles.Task;
+
+        var export = harness.ViewModel.ExportPdfCommand.ExecuteAsync(null);
+        await harness.Exporter.CallStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Still latched during a genuine in-flight export: no re-entrancy hole.
+        Assert.True(harness.ViewModel.IsExportBusy);
+        AssertExportCommandsCanExecute(harness.ViewModel, expected: false);
+        // ...but the escape hatch is reachable, which is the whole point.
+        Assert.True(harness.ViewModel.OpenAppExportCommand.CanExecute(null));
+        Assert.True(harness.ViewModel.CancelExportCommand.CanExecute(null));
+
+        harness.ViewModel.CancelExportCommand.Execute(null);
+        await export.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(harness.ViewModel.IsExportBusy);
+        AssertExportCommandsCanExecute(harness.ViewModel, expected: true);
+        Assert.False(harness.ViewModel.CancelExportCommand.CanExecute(null));
+        // Only-forward: a cancelled export still REPORTS. Releasing the latch must
+        // not buy silence -- the user is told nothing was saved.
+        Assert.True(harness.ViewModel.IsExportFailureNoticeVisible);
+        Assert.Contains("cancelled", harness.ViewModel.ExportFailureNoticeGuidance, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CancelExportIsInertWhenNoExportIsRunning()
+    {
+        var harness = CreateHarness();
+
+        Assert.False(harness.ViewModel.CancelExportCommand.CanExecute(null));
+        harness.ViewModel.CancelExportCommand.Execute(null);
+
+        Assert.False(harness.ViewModel.IsExportBusy);
+    }
+
     [Fact]
     public async Task ExportCommandsTrackDocumentAndReadingModeState()
     {
@@ -358,6 +426,7 @@ public sealed class MainWindowExportTests
         public List<ExportCall> Calls { get; } = [];
         public ExportResult NextResult { get; set; } = new(ExportStatus.Success);
         public Task<ExportResult>? NextTask { get; set; }
+        public CancellationToken LastToken { get; private set; }
         public TaskCompletionSource CallStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -365,26 +434,50 @@ public sealed class MainWindowExportTests
             string destinationPath,
             string markdownSource,
             CancellationToken cancellationToken = default)
-            => Record(new ExportCall("html", destinationPath, markdownSource));
+            => Record(new ExportCall("html", destinationPath, markdownSource), cancellationToken);
 
         public Task<ExportResult> ExportPdfAsync(
             string destinationPath,
             CancellationToken cancellationToken = default)
-            => Record(new ExportCall("pdf", destinationPath, null));
+            => Record(new ExportCall("pdf", destinationPath, null), cancellationToken);
 
         public Task<ExportResult> ExportPngAsync(
             string destinationPath,
             CancellationToken cancellationToken = default)
-            => Record(new ExportCall("png", destinationPath, null));
+            => Record(new ExportCall("png", destinationPath, null), cancellationToken);
 
         public Task<ExportResult> ShowPrintDialogAsync(CancellationToken cancellationToken = default)
-            => Record(new ExportCall("print", null, null));
+            => Record(new ExportCall("print", null, null), cancellationToken);
 
-        private Task<ExportResult> Record(ExportCall call)
+        private Task<ExportResult> Record(ExportCall call, CancellationToken cancellationToken)
         {
             Calls.Add(call);
+            LastToken = cancellationToken;
             CallStarted.TrySetResult();
-            return NextTask ?? Task.FromResult(NextResult);
+            if (NextTask is null)
+            {
+                return Task.FromResult(NextResult);
+            }
+
+            // Mirror ExportPdfCoreAsync/ShowPrintDialogCoreAsync: a cancelled
+            // export surfaces as an ExportStatus.Cancelled RESULT rather than a
+            // thrown OperationCanceledException. Honouring the token here is what
+            // lets a gated task stand in for a renderer barrier that never settles
+            // on its own -- the shape of the filed defect.
+            var settled = new TaskCompletionSource<ExportResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var registration = cancellationToken.Register(
+                () => settled.TrySetResult(new ExportResult(ExportStatus.Cancelled)));
+            _ = NextTask.ContinueWith(
+                completed =>
+                {
+                    registration.Dispose();
+                    settled.TrySetResult(completed.Result);
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnRanToCompletion,
+                TaskScheduler.Default);
+            return settled.Task;
         }
     }
 

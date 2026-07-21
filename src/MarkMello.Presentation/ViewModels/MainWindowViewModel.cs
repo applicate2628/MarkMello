@@ -2581,6 +2581,7 @@ public partial class MainWindowViewModel : ObservableObject
         ExportPdfCommand.NotifyCanExecuteChanged();
         ExportHtmlCommand.NotifyCanExecuteChanged();
         PrintCommand.NotifyCanExecuteChanged();
+        CancelExportCommand.NotifyCanExecuteChanged();
 
         OnPropertyChanged(nameof(CanCheckForUpdates));
         OnPropertyChanged(nameof(CanDownloadAvailableUpdate));

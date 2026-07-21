@@ -7,6 +7,20 @@ public partial class MainWindowViewModel
 {
     private int _exportOperationActive;
 
+    // The live export's cancellation source, non-null exactly while
+    // _exportOperationActive is 1. This is the ONLY bound on the export barrier,
+    // and it has to be a real one: PrepareForExportAsync registers its
+    // cancellation callback only when cancellationToken.CanBeCanceled, so the
+    // menu path's former CancellationToken.None registered NOTHING. A renderer
+    // barrier that never settled then pinned _exportOperationActive -- and with
+    // it every export command -- until navigation, disposal or process exit.
+    //
+    // Deliberately NOT a timeout. A deadline cannot stop the renderer's work
+    // (the same reason the Mermaid race was deleted in b2eaf82); it can only
+    // convert a slow export into a fabricated failure. Only the user knows
+    // whether a slow export is still worth waiting for, so the user is the bound.
+    private CancellationTokenSource? _exportCancellation;
+
     // The last failed export verdict, or null when there is nothing to report.
     // The RESULT is stored rather than a pre-formatted string so a language
     // switch re-formats the message from the same evidence -- the idiom
@@ -73,17 +87,35 @@ public partial class MainWindowViewModel
             _ => "ExportFailureGuidanceDefault",
         };
 
-    private bool CanExportDocument()
+    // Opening the export PANEL is deliberately NOT gated on !IsExportBusy. The
+    // panel is where CancelExport lives, so gating it on "no export running"
+    // would hide the cancel affordance behind the very condition it exists to
+    // escape -- the reported symptom was precisely that the whole export menu
+    // goes dead while an export hangs. The three export ACTIONS stay gated.
+    private bool CanOpenExportPanel()
         => _documentExporter is not null
            && Document is not null
            && State == ViewState.Viewing
-           && ShowsAppMenuControl
-           && !IsExportBusy;
+           && ShowsAppMenuControl;
 
-    [RelayCommand(CanExecute = nameof(CanExportDocument))]
+    private bool CanExportDocument() => CanOpenExportPanel() && !IsExportBusy;
+
+    private bool CanCancelExport() => IsExportBusy;
+
+    /// <summary>
+    /// The user's decision to stop waiting. This is the export barrier's only
+    /// bound (see <see cref="_exportCancellation"/>): it trips the token that
+    /// PrepareForExportAsync registered against, which settles the pending
+    /// full-render request as cancelled, unwinds the awaited operation, and lets
+    /// <see cref="RunExportOperationAsync"/>'s finally release the busy latch.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanCancelExport))]
+    private void CancelExport() => _exportCancellation?.Cancel();
+
+    [RelayCommand(CanExecute = nameof(CanOpenExportPanel))]
     private void OpenAppExport()
     {
-        if (!CanExportDocument())
+        if (!CanOpenExportPanel())
         {
             CloseAppOverlayCore();
             return;
@@ -147,6 +179,13 @@ public partial class MainWindowViewModel
             return;
         }
 
+        // Linked, so an external caller's token still cancels, while the menu
+        // path -- which supplies none -- gets a token that CAN be cancelled.
+        // CanBeCanceled is what PrepareForExportAsync branches on, so a plain
+        // CancellationToken.None silently disabled the entire cancellation path.
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _exportCancellation = cancellation;
+
         CloseAppOverlayCore();
         // A fresh attempt supersedes the previous verdict: retire the old notice
         // before running so the user never sees a stale failure next to a
@@ -156,14 +195,24 @@ public partial class MainWindowViewModel
 
         try
         {
-            var result = await operation(document, cancellationToken).ConfigureAwait(true);
+            var result = await operation(document, cancellation.Token).ConfigureAwait(true);
             if (result is not null && result.Status != ExportStatus.Success)
             {
                 PresentExportFailure(result);
             }
         }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            // Reachable only now that the token can actually be tripped: the file
+            // picker and any exporter leg may surface cancellation as an exception
+            // rather than as an ExportStatus. Report it exactly as the barrier
+            // path already reports its own cancellation, so the user gets one
+            // consistent "cancelled, nothing was saved" verdict either way.
+            PresentExportFailure(new ExportResult(ExportStatus.Cancelled));
+        }
         finally
         {
+            _exportCancellation = null;
             Volatile.Write(ref _exportOperationActive, 0);
             NotifyExportStateChanged();
         }

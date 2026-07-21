@@ -41,7 +41,26 @@
 
       <Border Classes="mm-settings-body-shell">
         <StackPanel Spacing="0">
+          <!-- The export barrier waits on the renderer with no deadline, so the
+               user is its only bound. This row is that bound: while an export is
+               in flight it replaces the export actions (which are disabled
+               anyway) with the one action that can still make progress. It is
+               NOT shown otherwise, so a fast export never flashes it. -->
           <Button Classes="mm-menu-item"
+                  IsVisible="{Binding IsExportBusy}"
+                  AutomationProperties.Name="{Binding ExportCancelLabel}"
+                  Command="{Binding CancelExportCommand}">
+            <StackPanel Spacing="2"
+                        HorizontalAlignment="Left">
+              <TextBlock Classes="mm-setting-label"
+                         Text="{Binding ExportCancelLabel}" />
+              <TextBlock Classes="mm-setting-hint"
+                         Text="{Binding ExportCancelHint}" />
+            </StackPanel>
+          </Button>
+
+          <Button Classes="mm-menu-item"
+                  IsVisible="{Binding !IsExportBusy}"
                   AutomationProperties.Name="{Binding ExportPdfLabel}"
                   Command="{Binding ExportPdfCommand}">
             <Grid ColumnDefinitions="*,Auto"
@@ -61,10 +80,12 @@
           </Button>
 
           <Line Classes="mm-setting-divider"
+                IsVisible="{Binding !IsExportBusy}"
                 StartPoint="0,0.5"
                 EndPoint="1,0.5" />
 
           <Button Classes="mm-menu-item"
+                  IsVisible="{Binding !IsExportBusy}"
                   AutomationProperties.Name="{Binding ExportHtmlLabel}"
                   Command="{Binding ExportHtmlCommand}">
             <Grid ColumnDefinitions="*,Auto"

@@ -107,6 +107,8 @@ public partial class MainWindowViewModel
         nameof(OverlayCloseMenu),
         nameof(OverlayCloseSettings),
         nameof(OverlayCloseUpdates),
+        nameof(ExportCancelLabel),
+        nameof(ExportCancelHint),
         nameof(ExportPdfLabel),
         nameof(ExportPdfHint),
         nameof(ExportHtmlLabel),
@@ -240,6 +242,8 @@ public partial class MainWindowViewModel
     public string OverlayCloseMenu => _localization["OverlayCloseMenu"];
     public string OverlayCloseSettings => _localization["OverlayCloseSettings"];
     public string OverlayCloseUpdates => _localization["OverlayCloseUpdates"];
+    public string ExportCancelLabel => _localization["ExportCancelLabel"];
+    public string ExportCancelHint => _localization["ExportCancelHint"];
     public string ExportPdfLabel => _localization["ExportPdfLabel"];
     public string ExportPdfHint => _localization["ExportPdfHint"];
     public string ExportHtmlLabel => _localization["ExportHtmlLabel"];
