@@ -1810,7 +1810,6 @@
   var firstPrefsBootstrapSuppressedByLoadGeneration = null;
   var postReadyEnhancementsCompleted = false;
   var currentController = null;
-  var MERMAID_WATCHDOG_MS = 15e3;
   var MERMAID_EAGER_VIEWPORT_MARGIN_PX = 700;
   var MERMAID_LAZY_ROOT_MARGIN_PX = 1400;
   var THEME_MERMAID_REFRESH_DELAY_MS = 160;
@@ -2295,17 +2294,9 @@
     });
     installLazyMermaidObserver(lazyNodes, generation, mermaid);
     if (eagerNodes.length === 0) return;
-    let eagerBudgetExpired = false;
-    const watchdog = window.setTimeout(() => {
-      eagerBudgetExpired = true;
-    }, MERMAID_WATCHDOG_MS);
-    try {
-      for (const node of eagerNodes) {
-        await trackMermaidRenderCall(node, generation, mermaid);
-        if (eagerBudgetExpired || generation !== mermaidRenderGeneration) return;
-      }
-    } finally {
-      window.clearTimeout(watchdog);
+    for (const node of eagerNodes) {
+      await trackMermaidRenderCall(node, generation, mermaid);
+      if (generation !== mermaidRenderGeneration) return;
     }
   }
   async function renderMermaid() {

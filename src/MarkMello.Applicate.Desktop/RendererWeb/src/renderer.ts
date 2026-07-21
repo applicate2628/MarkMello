@@ -200,7 +200,6 @@ let initialRenderPipelineCompleted = false;
 let firstPrefsBootstrapSuppressedByLoadGeneration: number | null = null;
 let postReadyEnhancementsCompleted = false;
 let currentController: MathReadinessController | null = null;
-const MERMAID_WATCHDOG_MS = 15_000;
 const MERMAID_EAGER_VIEWPORT_MARGIN_PX = 700;
 const MERMAID_LAZY_ROOT_MARGIN_PX = 1400;
 const THEME_MERMAID_REFRESH_DELAY_MS = 160;
@@ -845,28 +844,35 @@ async function renderMermaidNodes(
   installLazyMermaidObserver(lazyNodes, generation, mermaid);
   if (eagerNodes.length === 0) return;
 
-  // Budget the EAGER batch's wall-clock. When it expires we stop starting new
-  // eager renders — but we must NOT bump mermaidRenderGeneration. The lazy
-  // IntersectionObserver installed just above holds THIS generation; bumping it
-  // makes every not-yet-scrolled lazy diagram abort as stale in
-  // enqueueLazyMermaidRender, so a document whose eager batch is slow (watchdog
-  // fires) would silently never render its lazy diagrams. A local flag stops the
-  // eager loop from STARTING further renders while leaving the lazy generation
-  // intact. An in-flight render is never abandoned: mermaid offers no cancellation
-  // handle, so abandoning one would not reclaim any work — it would only throw away
-  // an SVG that was still on its way. Each render therefore runs to its own settle.
-  let eagerBudgetExpired = false;
-  const watchdog = window.setTimeout(() => {
-    eagerBudgetExpired = true;
-  }, MERMAID_WATCHDOG_MS);
-
-  try {
-    for (const node of eagerNodes) {
-      await trackMermaidRenderCall(node, generation, mermaid);
-      if (eagerBudgetExpired || generation !== mermaidRenderGeneration) return;
-    }
-  } finally {
-    window.clearTimeout(watchdog);
+  // The eager batch is bounded by its own work, never by a clock. It used to carry a
+  // 15s budget that stopped the loop from STARTING further renders; that budget was
+  // removed because it could only ever cost, never protect:
+  //
+  //  - It bought nothing against the case it was written for. The flag was read only
+  //    AFTER the await below returned, so a render that never settles parks the loop
+  //    on the await and the flag is never reached at all.
+  //  - What it did do was strand the tail. installLazyMermaidObserver above receives
+  //    ONLY lazyNodes, the complement of the eager set, so an eager node the loop
+  //    never starts sits in no observer, carries no queue marker, and stays a raw
+  //    <pre> showing its own source text for the rest of the viewing session — until
+  //    some unrelated full re-render (theme change, document swap, the export
+  //    barrier's own :not(.is-rendered) sweep) happens to pick it up.
+  //  - Measured mermaid.render cost is 4-10s for an ordinary 250-340 node diagram, so
+  //    two of them crossed that budget on everyday content, not on a corner case.
+  //
+  // Abandoning an in-flight render would reclaim nothing either: mermaid exposes no
+  // cancellation handle (see mermaidRender.ts), so a deadline could only discard an
+  // SVG that was still on its way. Each render therefore runs to its own settle.
+  // Staleness stays decided by `generation`, which a document swap bumps — a state
+  // signal, not elapsed time.
+  //
+  // The one caller that awaits this is runPostReadyEnhancements, whose completion
+  // signals the host reveal gate. That gate is not left unbounded: it has its own
+  // host-side cover fallback (ApplicateAirspaceCompositor StartupRevealSession), and
+  // the watchdog never bounded it against a hung render anyway, for the reason above.
+  for (const node of eagerNodes) {
+    await trackMermaidRenderCall(node, generation, mermaid);
+    if (generation !== mermaidRenderGeneration) return;
   }
 }
 
