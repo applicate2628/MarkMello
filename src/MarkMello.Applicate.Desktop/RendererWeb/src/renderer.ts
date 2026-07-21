@@ -5626,6 +5626,27 @@ function wireHostShortcuts(): void {
 
         keepEditModeShortcutHeld();
       }
+      // Settle the focused cell BEFORE the shortcut leaves. preventDefault does
+      // not move focus, so without this the cell keeps the caret and its typed
+      // text — which reaches the host ONLY via `table-cell-edit` (blur/Enter) —
+      // while the host acts on a document that never received it. For ctrl+s
+      // that is data loss: SaveCommand persists EditorSession.SourceText and
+      // reports success, with the typed text absent from the saved file.
+      //
+      // General by construction, not per-combo: every combo that gets here
+      // means "act on the document", so all of them must carry the cell's text.
+      // The exempt set above returns before this point precisely because those
+      // combos mean something INSIDE the cell (Escape reverts; ctrl+z/ctrl+y
+      // drive the native undo stack with the caret still in place), so they
+      // must keep NOT committing. Ordering needs no timer: this rides the same
+      // FIFO postMessage channel ahead of the shortcut, and the host handles
+      // `table-cell-edit` synchronously while `host-shortcut` costs a
+      // Dispatcher turn. A later blur re-posts nothing — postTableCellEdit's
+      // lastSubmittedText guard already dedupes it.
+      const pendingCell = editableTableCellFromEventTarget(event.target);
+      if (pendingCell) {
+        postTableCellEdit(pendingCell);
+      }
       postHostMessage({ type: "host-shortcut", combo });
     },
     { capture: true }

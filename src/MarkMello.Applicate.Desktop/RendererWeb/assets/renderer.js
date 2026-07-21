@@ -5780,6 +5780,10 @@
           }
           keepEditModeShortcutHeld();
         }
+        const pendingCell = editableTableCellFromEventTarget(event.target);
+        if (pendingCell) {
+          postTableCellEdit(pendingCell);
+        }
         postHostMessage({ type: "host-shortcut", combo });
       },
       { capture: true }
