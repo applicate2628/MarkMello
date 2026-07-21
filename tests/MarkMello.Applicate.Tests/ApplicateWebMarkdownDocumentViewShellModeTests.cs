@@ -48,6 +48,47 @@ public sealed class ApplicateWebMarkdownDocumentViewShellModeTests
     }
 
     [Theory]
+    // A crash AFTER the shell went ready leaves the latch COMPLETED, so
+    // TryInvalidateShellReady no-ops and _shellNavigated / _shellReady /
+    // _shellDocumentReadyConsumed / _hasLoadedDocument keep describing the page
+    // that just died — the next render skips re-navigation and posts
+    // load-document into a corpse (runtime-reproduced 2026-07-21 by killing the
+    // viewer's msedgewebview2 renderer child: kind=RenderProcessExited, then
+    // "Web.RenderShell start"/"wait-shell-ready"/"shell-ready" in the same
+    // millisecond with no "navigate-shell", against 2451 ms / 7849 ms healthy
+    // baselines).
+    //
+    // Only the two kinds that actually kill the main frame may invalidate the
+    // shell. Resetting on an auto-recovering kind would force a needless full
+    // re-navigation of a live shell — and RenderProcessUnresponsive is raised
+    // every few seconds on a merely busy machine, so treating it as fatal would
+    // tear the shell down repeatedly under load.
+    [InlineData("RenderProcessExited", true)]         // the reproduced case
+    [InlineData("BrowserProcessExited", true)]        // WebView moves to Closed
+    [InlineData("RenderProcessUnresponsive", false)]  // not an exit; page still alive
+    [InlineData("FrameRenderProcessExited", false)]   // subframe only
+    [InlineData("GpuProcessExited", false)]           // auto-recovered
+    [InlineData("UtilityProcessExited", false)]       // auto-recovered
+    [InlineData("SandboxHelperProcessExited", false)]
+    [InlineData("PpapiPluginProcessExited", false)]
+    [InlineData("PpapiBrokerProcessExited", false)]
+    [InlineData("UnknownProcessExited", false)]       // never tear down on unknown
+    public void ShellIsInvalidatedOnlyForProcessFailuresThatKillTheMainFrame(
+        string kindName,
+        bool expectedInvalidate)
+    {
+        // Guard the string seam: a misspelled kind would otherwise parse-fail and
+        // masquerade as a passing "not fatal" case.
+        Assert.True(
+            ApplicateWebMarkdownDocumentView.IsKnownProcessFailureKindForTesting(kindName),
+            $"'{kindName}' is not a CoreWebView2ProcessFailedKind member.");
+
+        Assert.Equal(
+            expectedInvalidate,
+            ApplicateWebMarkdownDocumentView.ShouldInvalidateShellForProcessFailureForTesting(kindName));
+    }
+
+    [Theory]
     [InlineData("related.md#details")]
     [InlineData("related.md?plain=1")]
     public void LocalMarkdownLinkResolverIgnoresFragmentAndQueryWhenCheckingFileExtension(string href)

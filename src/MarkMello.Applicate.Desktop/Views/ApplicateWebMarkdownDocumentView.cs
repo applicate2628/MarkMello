@@ -1854,12 +1854,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     // raise FallbackRequested themselves -- this method owns latch state only.
     //
     // _shellDocumentReadyConsumed is deliberately NOT reset here. Resetting the
-    // latch is only safe while that flag is false, and in every reachable fault
-    // path it is: the navigation failed (the page never loaded), the process
-    // crashed (it cannot post), or renderer.ts posted shell-init-failed, which
-    // its DOMContentLoaded handler only does while shellReadyPosted is false and
-    // whose synchronous body cannot be interleaved with an async error handler.
-    // So the fresh shell's first document-ready still resolves the new latch.
+    // latch is only safe while that flag is false, and in every fault path THIS
+    // method owns it is: the navigation failed (the page never loaded), the
+    // process crashed before ready (it cannot post), or renderer.ts posted
+    // shell-init-failed, which its DOMContentLoaded handler only does while
+    // shellReadyPosted is false and whose synchronous body cannot be interleaved
+    // with an async error handler. So the fresh shell's first document-ready
+    // still resolves the new latch.
+    //
+    // The post-READY crash path is the one exception and does NOT come through
+    // here (the completed-latch guard below returns false for it). It owns its
+    // own flag reset in InvalidateShellForDeadPage -- see the hang described
+    // there.
     private bool TryInvalidateShellReady()
     {
         var shellReady = _shellReady;
@@ -1877,6 +1883,103 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _shellReady = null;
         return true;
     }
+
+    // Single owner for "the shell page this view is bound to is DEAD". This is a
+    // different operation from TryInvalidateShellReady, which owns "fault a latch
+    // that is still PENDING" and by design no-ops once the latch has completed.
+    // A crash AFTER the shell went ready is exactly the mirror case: nothing is
+    // pending, yet _shellNavigated / _shellReady / _hasLoadedDocument all still
+    // describe the page that just died. QueueRenderShellAsync then skips the
+    // re-navigation (the _shellNavigated guard), clears its "wait for the shell's
+    // first document-ready" gate instantly against the dead page's completed
+    // latch, and posts load-document into a corpse.
+    //
+    // Runtime-reproduced 2026-07-21 by killing the viewer's msedgewebview2
+    // renderer child after ready (ProcessFailed kind=RenderProcessExited): the
+    // next render logged "Web.RenderShell start" -> "wait-shell-ready" ->
+    // "shell-ready" in the SAME millisecond with NO "navigate-shell" in between,
+    // the renderer answered nothing (no mm-doc-loaded, no document-first-paint),
+    // and the document-switch reveal cover gave up 8 s later on its idle
+    // fallback. Healthy baselines that same run: 2451 ms and 7849 ms of genuine
+    // navigate-and-wait.
+    //
+    // _shellDocumentReadyConsumed MUST be reset here, unlike in
+    // TryInvalidateShellReady. It is TRUE by definition after a post-ready crash
+    // (the dead shell posted and consumed its document-ready). Left set, the
+    // fresh shell's first document-ready falls through the
+    // "!_shellDocumentReadyConsumed" branch in OnWebMessageReceived, so it never
+    // calls _shellReady.TrySetResult(true) and instead mis-files the empty shell
+    // page as a user document -- turning "posts into a dead view" into "hangs on
+    // wait-shell-ready forever". Verified by mutation: dropping this one line
+    // reproduces exactly that hang.
+    private void InvalidateShellForDeadPage()
+    {
+        // Pending-latch case: complete-then-drop so awaiters unblock rather than
+        // hang on an orphan. No-ops when the latch already completed.
+        TryInvalidateShellReady();
+
+        // Post-ready case: the state above is untouched by that call, so clear it
+        // unconditionally. The next render re-navigates and genuinely waits.
+        _shellNavigated = false;
+        _shellReady = null;
+        _shellDocumentReadyConsumed = false;
+        _hasLoadedDocument = false;
+    }
+
+    // Decision seam for InvalidateShellForDeadPage (unit-tested via
+    // ShouldInvalidateShellForProcessFailureForTesting). Only the two kinds that
+    // actually kill the main frame invalidate the shell state; per the WebView2
+    // contract the rest either recover automatically or never touched the main
+    // document, so resetting on them would force a needless full re-navigation of
+    // a perfectly live shell.
+    //
+    //   BrowserProcessExited    - "The WebView automatically moves to the Closed
+    //                             state. The app has to recreate a new WebView."
+    //                             Re-navigating cannot succeed, but the state is
+    //                             still stale, and the attempt fails loudly
+    //                             through QueueRenderShellAsync's catch ->
+    //                             FallbackRequested rather than silently posting
+    //                             into a corpse.
+    //   RenderProcessExited     - "A new render process is created automatically
+    //                             and navigated to an error page. You can use the
+    //                             Reload method to try to recover." The
+    //                             CoreWebView2 stays valid, so a fresh shell
+    //                             navigation is a supported recovery. This is the
+    //                             kind the 2026-07-21 repro produced.
+    //   RenderProcessUnresponsive - not an exit at all; raised every few seconds
+    //                             while a script runs long or the machine is
+    //                             busy. The page is alive.
+    //   FrameRenderProcessExited  - subframe only; "does not affect the top-level
+    //                             document".
+    //   Gpu/Utility/SandboxHelper/PpapiPlugin/PpapiBroker - documented
+    //                             auto-recovering; "your application does not
+    //                             need to handle recovery".
+    //   UnknownProcessExited    - unspecified kind; left alone so an unknown
+    //                             failure cannot tear down a healthy shell.
+    //
+    // Source: CoreWebView2ProcessFailedKind reference,
+    // learn.microsoft.com/dotnet/api/microsoft.web.webview2.core.corewebview2processfailedkind
+    // (webview2-dotnet-1.0.4022.49), read 2026-07-21.
+    private static bool ShouldInvalidateShellForProcessFailure(
+        Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind kind)
+        => kind is Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.BrowserProcessExited
+                or Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.RenderProcessExited;
+
+    // Test seam. The test project deliberately cannot reference the WebView2 SDK
+    // (the Desktop csproj pins it PrivateAssets="all" to keep the metapackage's
+    // WPF/WinForms flavor DLLs out of consumers), so the kind crosses the
+    // boundary as its enum NAME -- the same string-based idiom the existing
+    // WebView2 contract tests in this suite already use. Pairs with
+    // IsKnownProcessFailureKindForTesting so a misspelled name in a test cannot
+    // silently pass as "not fatal".
+    internal static bool ShouldInvalidateShellForProcessFailureForTesting(string kindName)
+        => Enum.TryParse<Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind>(
+               kindName,
+               out var kind)
+           && ShouldInvalidateShellForProcessFailure(kind);
+
+    internal static bool IsKnownProcessFailureKindForTesting(string kindName)
+        => Enum.TryParse<Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind>(kindName, out _);
 
     // Bug #7 decision seam (unit-tested via ShouldFaultShellReadyOnNavigationFailureForTesting):
     // fault the shell-ready latch on a navigation that FAILED (IsSuccess=false)
@@ -4023,10 +4126,28 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ApplicateTrace.DiagMs("pane-seq", "core-process-failed", $"kind={e.ProcessFailedKind}");
         // Same failure class as the nav-fail site, so it must use the same latch
         // idiom -- including the drop that lets the next navigation re-arm.
-        // FallbackRequested stays unconditional here (below): a crash AFTER the
-        // shell went ready leaves the latch completed, so TryInvalidateShellReady
-        // is a no-op, but the failure view must still be surfaced.
-        TryInvalidateShellReady();
+        // FallbackRequested stays unconditional here (below): the failure view
+        // must be surfaced for every crash, including the kinds that leave the
+        // shell state alone, so recovery is never swallowed.
+        //
+        // The latch idiom alone is NOT enough after the shell has gone ready: the
+        // latch is completed by then, so TryInvalidateShellReady no-ops and the
+        // stale shell state survives the page. InvalidateShellForDeadPage owns
+        // that case; it is gated on the kinds that actually kill the main frame
+        // so a healthy shell is never torn down by an auto-recovering GPU or
+        // utility process exit.
+        if (ShouldInvalidateShellForProcessFailure(e.ProcessFailedKind))
+        {
+            ApplicateTrace.DiagMs(
+                "pane-seq",
+                "shell-invalidated-for-dead-page",
+                $"kind={e.ProcessFailedKind}");
+            InvalidateShellForDeadPage();
+        }
+        else
+        {
+            TryInvalidateShellReady();
+        }
 
         FailPendingFullRenderRequestsForProcessFailure(e.ProcessFailedKind.ToString());
 
