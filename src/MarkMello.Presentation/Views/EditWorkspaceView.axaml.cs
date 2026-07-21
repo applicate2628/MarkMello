@@ -51,6 +51,11 @@ public partial class EditWorkspaceView : UserControl
     // session -> editor Document rebuild so it does not echo back.
     private TextEditor? _writeBackEditor;
     private bool _suppressEditorWriteBack;
+    // The bound session's DocumentGeneration as of the last text we applied. A
+    // change in it means the next SourceText we receive belongs to a DIFFERENT
+    // document, so the editor's undo stack must not carry across. Kept in
+    // lockstep with the session by updating it on every SourceText event.
+    private int _appliedDocumentGeneration;
     // The TextEditor whose file-drop handlers we own; see EnsureEditorDropWiring.
     private TextEditor? _dropWiredEditor;
 
@@ -152,7 +157,10 @@ public partial class EditWorkspaceView : UserControl
         _boundSession = session;
         session.PropertyChanged += OnBoundSessionPropertyChanged;
 
-        ApplySourceTextToEditor(session.SourceText);
+        // Binding a session is unconditionally a document swap: whatever the
+        // editor held belonged to a previous session (or to nothing).
+        _appliedDocumentGeneration = session.DocumentGeneration;
+        ApplySourceTextToEditor(session.SourceText, isDocumentSwap: true);
     }
 
     private void OnBoundSessionPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -162,7 +170,16 @@ public partial class EditWorkspaceView : UserControl
             return;
         }
 
-        ApplySourceTextToEditor(_boundSession.SourceText);
+        // This one channel carries both kinds of external write. A tab switch in
+        // edit mode and a reload from disk mutate the bound session IN PLACE
+        // (MainWindowViewModel.ApplyLoadedDocument), so DataContext never changes
+        // and they arrive here alongside health repairs and reading-mode cell
+        // commits. Only the session's generation counter separates them.
+        var generation = _boundSession.DocumentGeneration;
+        var isDocumentSwap = generation != _appliedDocumentGeneration;
+        _appliedDocumentGeneration = generation;
+
+        ApplySourceTextToEditor(_boundSession.SourceText, isDocumentSwap);
     }
 
     /// <summary>
@@ -228,7 +245,7 @@ public partial class EditWorkspaceView : UserControl
         return true;
     }
 
-    private void ApplySourceTextToEditor(string? text)
+    private void ApplySourceTextToEditor(string? text, bool isDocumentSwap)
     {
         var editor = _editorTextEditor ?? this.FindControl<TextEditor>("EditorTextEditor");
         if (editor is null)
@@ -251,20 +268,30 @@ public partial class EditWorkspaceView : UserControl
             return;
         }
 
-        // Surgical single-char delta (in-place task-toggle channel, edit mode):
-        // an external buffer change that flips exactly one char (TryFlipMarker's
-        // shape) is applied as a 1-char Document.Replace. Preserves caret,
-        // scroll, selection, and undo — the editor's ScrollViewer offset never
-        // moves, so the always-on preview scroll-sync never drags the preview
-        // to line 0. The invariant is general: a minimal external buffer delta
-        // must not destroy editor view/undo state, whoever produced it.
-        if (currentText is not null
-            && TryGetSingleCharDelta(currentText, newText, out var deltaOffset))
+        // Surgical minimal delta — the path for EVERY external CONTENT edit of
+        // the document that is already open: the reading-mode task-toggle and
+        // table-cell channels, a realtime in-document undo/redo, and the
+        // document-health repair. Trimming the common prefix and suffix and
+        // replacing only the differing middle on the LIVE document preserves the
+        // caret, the scroll offset, the selection, and — the point of this path —
+        // the editor's undo stack, so the user's earlier typing stays reachable
+        // through Ctrl+Z after an external write lands on top of it. The
+        // ScrollViewer offset never moves either, so the always-on preview
+        // scroll-sync is not dragged to line 0.
+        //
+        // The invariant is general: a minimal external buffer delta must not
+        // destroy editor view/undo state, whoever produced it. This used to be
+        // restricted to a single changed char, which met the invariant only for
+        // the task-toggle channel and let every wider external write fall into
+        // the whole-Document swap below.
+        if (!isDocumentSwap
+            && currentText is not null
+            && TryGetMinimalDelta(currentText, newText, out var deltaOffset, out var removedLength, out var inserted))
         {
             _suppressEditorWriteBack = true;
             try
             {
-                editor.Document!.Replace(deltaOffset, 1, newText[deltaOffset].ToString());
+                editor.Document!.Replace(deltaOffset, removedLength, inserted);
             }
             finally
             {
@@ -274,11 +301,14 @@ public partial class EditWorkspaceView : UserControl
             return;
         }
 
-        // Replace whole Document — fallback for genuine document swaps (load,
-        // tab switch, discard, external multi-char change). Preserves
-        // AvaloniaEdit virtualization semantics and avoids partial-text-change
-        // events. Suppress the write-back so this session -> editor push does
-        // not bounce back.
+        // Replace whole Document — reserved for genuine document SWAPS (bind,
+        // load, reload from disk, edit-mode tab switch, discard). Dropping the
+        // undo stack is the CORRECT behavior here and the reason the swap keeps
+        // its own branch: carrying history across would let Ctrl+Z rewrite the
+        // new document with the previous one's text. Also preserves AvaloniaEdit
+        // virtualization semantics and avoids partial-text-change events.
+        // Suppress the write-back so this session -> editor push does not bounce
+        // back.
         _suppressEditorWriteBack = true;
         try
         {
@@ -293,43 +323,71 @@ public partial class EditWorkspaceView : UserControl
     }
 
     /// <summary>
-    /// True when <paramref name="newText"/> differs from <paramref name="oldText"/>
-    /// by exactly one char at one offset (equal lengths) — the shape the
-    /// task-toggle channel produces. Wider or length-changing edits return
-    /// false (full rebuild).
+    /// Reduces a whole-buffer external change to the narrowest single
+    /// replacement that produces it: trims the longest common prefix and the
+    /// longest common suffix, and reports the differing middle. Applying
+    /// <c>Replace(offset, removedLength, inserted)</c> to <paramref name="oldText"/>
+    /// yields exactly <paramref name="newText"/>, by construction, for any pair
+    /// of strings — including length-changing edits.
+    /// <para>
+    /// The narrower the span, the more editor state survives: text outside it is
+    /// never touched, so caret, selection and scroll anchors on either side hold,
+    /// and the change lands as ONE undoable step on top of the existing stack
+    /// instead of discarding it.
+    /// </para>
+    /// <para>
+    /// Returns false only for identical inputs, which the caller's equality guard
+    /// already owns. Boundaries are nudged off surrogate pairs so a replacement
+    /// never starts or ends inside one; that only ever widens the span, so the
+    /// reconstruction identity above is unaffected.
+    /// </para>
     /// </summary>
-    internal static bool TryGetSingleCharDelta(string oldText, string newText, out int offset)
+    internal static bool TryGetMinimalDelta(
+        string oldText,
+        string newText,
+        out int offset,
+        out int removedLength,
+        out string inserted)
     {
         offset = -1;
-        if (oldText.Length != newText.Length)
+        removedLength = 0;
+        inserted = string.Empty;
+
+        var maxCommon = Math.Min(oldText.Length, newText.Length);
+        var prefix = 0;
+        while (prefix < maxCommon && oldText[prefix] == newText[prefix])
         {
-            return false;
+            prefix++;
         }
 
-        var first = -1;
-        for (var i = 0; i < oldText.Length; i++)
-        {
-            if (oldText[i] != newText[i])
-            {
-                first = i;
-                break;
-            }
-        }
-
-        if (first < 0)
+        if (prefix == oldText.Length && prefix == newText.Length)
         {
             return false; // identical — the caller's equality guard owns this case
         }
 
-        for (var i = oldText.Length - 1; i > first; i--)
+        var suffix = 0;
+        while (suffix < maxCommon - prefix
+            && oldText[oldText.Length - 1 - suffix] == newText[newText.Length - 1 - suffix])
         {
-            if (oldText[i] != newText[i])
-            {
-                return false;
-            }
+            suffix++;
         }
 
-        offset = first;
+        // A high surrogate immediately before the start boundary, or a low
+        // surrogate at the start of the retained suffix, means the boundary sits
+        // inside a surrogate pair. Backing off one char is always safe.
+        if (prefix > 0 && char.IsHighSurrogate(oldText[prefix - 1]))
+        {
+            prefix--;
+        }
+
+        if (suffix > 0 && char.IsLowSurrogate(oldText[oldText.Length - suffix]))
+        {
+            suffix--;
+        }
+
+        offset = prefix;
+        removedLength = oldText.Length - prefix - suffix;
+        inserted = newText.Substring(prefix, newText.Length - prefix - suffix);
         return true;
     }
 

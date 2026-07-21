@@ -24,6 +24,8 @@ public sealed class EditorSessionViewModel : ObservableObject
     private ReadingPreferences _readingPreferences;
     private RenderedMarkdownDocument _renderedPreview;
     private string _statusMessage;
+    // Counts buffer REPLACEMENTS, as opposed to buffer edits. See DocumentGeneration.
+    private int _documentGeneration;
     private readonly Stack<RealtimeInDocumentEditHistoryEntry> _realtimeUndoHistory = new();
     private readonly Stack<RealtimeInDocumentEditHistoryEntry> _realtimeRedoHistory = new();
     // True while RenderedPreview is intentionally out of step with SourceText:
@@ -245,6 +247,30 @@ public sealed class EditorSessionViewModel : ObservableObject
 
     public bool IsDirty => !string.Equals(SourceText, LastPersistedSource, StringComparison.Ordinal);
 
+    /// <summary>
+    /// Distinguishes a buffer REPLACEMENT from a buffer EDIT for observers that
+    /// hold state derived from the buffer's identity — chiefly the source
+    /// editor's undo stack, which must survive an external content edit but must
+    /// NOT survive a swap to a different document.
+    /// <para>
+    /// The distinction is not visible in the change notification itself: an
+    /// edit-mode tab switch and a reload-from-disk both reach
+    /// <see cref="ApplyLoadedDocument"/> on the session instance that is ALREADY
+    /// bound to the view (MainWindowViewModel.ApplyLoadedDocument mutates it in
+    /// place rather than swapping the reference), so they raise exactly the same
+    /// <see cref="SourceText"/> event that a health repair or a table-cell commit
+    /// raises. This counter is the discriminator; a change in it means "the text
+    /// underneath you is a different document now, discard what you derived".
+    /// </para>
+    /// <para>
+    /// Bumped ONLY when the accompanying assignment actually raises
+    /// <see cref="SourceText"/>. An observer caches this value each time it
+    /// handles that event, so a silent bump would desynchronize the two and
+    /// misclassify the NEXT content edit as a replacement.
+    /// </para>
+    /// </summary>
+    internal int DocumentGeneration => _documentGeneration;
+
     internal bool CanUndoRealtimeEdits => _realtimeUndoHistory.Count > 0;
 
     internal bool CanRedoRealtimeEdits => _realtimeRedoHistory.Count > 0;
@@ -261,6 +287,14 @@ public sealed class EditorSessionViewModel : ObservableObject
     public void ApplyLoadedDocument(MarkdownSource source)
     {
         ArgumentNullException.ThrowIfNull(source);
+
+        // A load REPLACES the buffer: initial open, reload from disk (F5), and
+        // edit-mode tab switch all land here. See DocumentGeneration for why the
+        // notification alone cannot tell an observer that apart from an edit.
+        if (!string.Equals(SourceText, source.Content, StringComparison.Ordinal))
+        {
+            _documentGeneration++;
+        }
 
         CurrentPath = source.Path;
         FileName = source.FileName;
@@ -379,6 +413,15 @@ public sealed class EditorSessionViewModel : ObservableObject
 
     public void DiscardChanges()
     {
+        // Discard REPLACES the buffer with the persisted baseline. The user has
+        // just confirmed a prompt to throw the unsaved text away, so re-offering
+        // it through the editor's Ctrl+Z would defeat the command; this counts as
+        // a replacement, not an edit.
+        if (IsDirty)
+        {
+            _documentGeneration++;
+        }
+
         SourceText = LastPersistedSource;
         StatusMessage = string.Empty;
     }
