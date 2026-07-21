@@ -58,7 +58,98 @@
     };
   }
 
+  // RendererWeb/src/mermaidCostGuard.ts
+  var MERMAID_MAX_LAYOUT_ELEMENTS = 500;
+  var RELATION_TYPE_PREFIXES = [
+    "classdiagram",
+    "erdiagram",
+    "statediagram",
+    "requirement",
+    // requirement | requirementDiagram
+    "flowchart",
+    // flowchart | flowchart-elk
+    "graph"
+  ];
+  var HIERARCHY_TYPE_PREFIXES = ["mindmap"];
+  var EDGE_CONNECTOR = /-->|---|--o|--\*|--\||<\|--|\*--|o--|\.\.>|\.\.\||<\.\.|\|\|--|\}o|o\{|\}\||\|\{|==>|===|-\.->|-\.-|-\.|->|<-|--|\.\./;
+  var FRONT_MATTER_FENCE = /^\s*---\s*$/;
+  var COMMENT_OR_DIRECTIVE = /^\s*%%/;
+  function meaningfulLines(source) {
+    let lines = source.split(/\r?\n/);
+    let start = 0;
+    while (start < lines.length && lines[start].trim() === "") start++;
+    if (start < lines.length && FRONT_MATTER_FENCE.test(lines[start])) {
+      let end = start + 1;
+      while (end < lines.length && !FRONT_MATTER_FENCE.test(lines[end])) end++;
+      lines = lines.slice(end < lines.length ? end + 1 : end);
+    } else if (start > 0) {
+      lines = lines.slice(start);
+    }
+    return lines.filter((line) => !COMMENT_OR_DIRECTIVE.test(line));
+  }
+  function classify(header) {
+    for (const prefix of RELATION_TYPE_PREFIXES) {
+      if (header.startsWith(prefix)) return "relation";
+    }
+    for (const prefix of HIERARCHY_TYPE_PREFIXES) {
+      if (header.startsWith(prefix)) return "hierarchy";
+    }
+    return "other";
+  }
+  function assessMermaidRenderCost(source, limit = MERMAID_MAX_LAYOUT_ELEMENTS) {
+    const lines = meaningfulLines(source);
+    let headerIndex = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trim() !== "") {
+        headerIndex = i;
+        break;
+      }
+    }
+    if (headerIndex === -1) {
+      return { refuse: false, count: 0, limit, kind: "none", diagramType: "" };
+    }
+    const diagramType = lines[headerIndex].trim().toLowerCase().split(/\s+/)[0] ?? "";
+    const family = classify(diagramType);
+    const body = lines.slice(headerIndex + 1);
+    if (family === "relation") {
+      let count = 0;
+      for (const line of body) {
+        if (EDGE_CONNECTOR.test(line)) count++;
+      }
+      return { refuse: count > limit, count, limit, kind: "edges", diagramType };
+    }
+    if (family === "hierarchy") {
+      let count = 0;
+      for (const line of body) {
+        if (line.trim() !== "") count++;
+      }
+      return { refuse: count > limit, count, limit, kind: "nodes", diagramType };
+    }
+    return { refuse: false, count: 0, limit, kind: "none", diagramType };
+  }
+
   // RendererWeb/src/mermaidRender.ts
+  function renderOversizePlaceholder(node, source, verdict) {
+    let host = node.nextElementSibling;
+    if (!host || !host.classList.contains("mm-mermaid-svg")) {
+      host = document.createElement("div");
+      host.className = "mm-mermaid-svg";
+      node.after(host);
+    }
+    host.classList.add("mm-mermaid-oversize");
+    host.replaceChildren();
+    const noun = verdict.kind === "nodes" ? "nodes" : "elements";
+    const note = document.createElement("div");
+    note.className = "mm-mermaid-oversize-note";
+    note.setAttribute("role", "note");
+    note.textContent = `Diagram too large to render safely (${verdict.count} ${noun}, limit ${verdict.limit}). Rendering it would freeze the app, so the source is shown instead.`;
+    const src = document.createElement("pre");
+    src.className = "mm-mermaid-oversize-source";
+    const code = document.createElement("code");
+    code.textContent = source;
+    src.appendChild(code);
+    host.append(note, src);
+  }
   function isMermaidNodeNearViewport(node, viewportHeight, marginPx) {
     const rect = node.getBoundingClientRect();
     return rect.bottom >= -marginPx && rect.top <= viewportHeight + marginPx;
@@ -67,6 +158,14 @@
     const codeEl = node.querySelector("code[data-mm-mermaid]");
     if (!codeEl) return;
     const source = codeEl.textContent ?? "";
+    const cost = assessMermaidRenderCost(source);
+    if (cost.refuse) {
+      const wasRendered = node.classList.contains("is-rendered");
+      renderOversizePlaceholder(node, source, cost);
+      node.classList.add("is-rendered");
+      if (!wasRendered) onLayoutBoxChange?.();
+      return;
+    }
     try {
       const id = `mm-mermaid-${generation}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const { svg } = await mermaid.render(id, source);

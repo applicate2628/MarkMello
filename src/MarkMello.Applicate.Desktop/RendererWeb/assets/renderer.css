@@ -785,6 +785,37 @@ pre.mm-mermaid.is-rendered {
   height: auto;
 }
 
+/* Placeholder shown when a diagram is refused before render because its layout would
+ * freeze the renderer thread (see mermaidCostGuard.ts). Theme-aware via the document
+ * variables, and export-safe: plain text + borders only, no external resources. */
+.mm-mermaid-svg.mm-mermaid-oversize {
+  border: 1px solid color-mix(in srgb, var(--mm-document-text) 22%, transparent);
+  border-radius: 6px;
+  background: var(--mm-document-code-background);
+  padding: 12px 14px;
+  overflow-x: hidden;
+}
+
+.mm-mermaid-oversize-note {
+  color: color-mix(in srgb, var(--mm-document-text) 78%, transparent);
+  font-size: 0.9em;
+  line-height: 1.45;
+  margin-bottom: 10px;
+}
+
+.mm-mermaid-oversize-source {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.mm-mermaid-oversize-source code {
+  padding: 0;
+  background: transparent;
+}
+
 :root {
   --mm-minimap-heading-1: rgba(60, 60, 60, 0.9);
   --mm-minimap-heading-2: rgba(80, 80, 80, 0.85);
