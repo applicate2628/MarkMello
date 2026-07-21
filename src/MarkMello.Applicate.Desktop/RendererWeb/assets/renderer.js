@@ -63,17 +63,13 @@
     const rect = node.getBoundingClientRect();
     return rect.bottom >= -marginPx && rect.top <= viewportHeight + marginPx;
   }
-  async function renderMermaidNode(node, generation, getCurrentGeneration, mermaid, perDiagramTimeoutMs, onLayoutBoxChange) {
+  async function renderMermaidNode(node, generation, getCurrentGeneration, mermaid, onLayoutBoxChange) {
     const codeEl = node.querySelector("code[data-mm-mermaid]");
     if (!codeEl) return;
     const source = codeEl.textContent ?? "";
-    let timeoutHandle;
     try {
       const id = `mm-mermaid-${generation}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const timeoutPromise = new Promise((_, reject) => {
-        timeoutHandle = setTimeout(() => reject(new Error("mermaid render timeout")), perDiagramTimeoutMs);
-      });
-      const { svg } = await Promise.race([mermaid.render(id, source), timeoutPromise]);
+      const { svg } = await mermaid.render(id, source);
       if (getCurrentGeneration() !== generation) return;
       let svgHost = node.nextElementSibling;
       if (!svgHost || !svgHost.classList.contains("mm-mermaid-svg")) {
@@ -92,8 +88,6 @@
       const sibling = node.nextElementSibling;
       if (sibling?.classList.contains("mm-mermaid-svg")) sibling.remove();
       if (wasRendered) onLayoutBoxChange?.();
-    } finally {
-      if (timeoutHandle !== void 0) clearTimeout(timeoutHandle);
     }
   }
 
@@ -1816,7 +1810,6 @@
   var firstPrefsBootstrapSuppressedByLoadGeneration = null;
   var postReadyEnhancementsCompleted = false;
   var currentController = null;
-  var MERMAID_PER_DIAGRAM_TIMEOUT_MS = 3e3;
   var MERMAID_WATCHDOG_MS = 15e3;
   var MERMAID_EAGER_VIEWPORT_MARGIN_PX = 700;
   var MERMAID_LAZY_ROOT_MARGIN_PX = 1400;
@@ -2255,7 +2248,6 @@
       generation,
       () => mermaidRenderGeneration,
       mermaid,
-      MERMAID_PER_DIAGRAM_TIMEOUT_MS,
       invalidateTopVisibleBlockIndexCache
     ));
     activeMermaidRenderCalls.add(renderCall);

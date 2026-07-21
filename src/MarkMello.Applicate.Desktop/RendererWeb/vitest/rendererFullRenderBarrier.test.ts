@@ -273,6 +273,64 @@ describe("prepare-for-export full-render barrier", () => {
     expect(observers.every(observer => !observer.elements.has(alreadyRendered))).toBe(true);
   });
 
+  it("exports a slow diagram that outlives every former deadline while still counting a broken one", async () => {
+    vi.useFakeTimers();
+    try {
+      let finishSlowRender!: (value: { svg: string }) => void;
+      const mermaidRender = vi.fn(async (_id: string, source: string) => {
+        if (source === "bad") throw new Error("bad diagram");
+        return await new Promise<{ svg: string }>(resolve => { finishSlowRender = resolve; });
+      });
+      (window as unknown as {
+        mermaid: { initialize: (config: unknown) => void; render: typeof mermaidRender };
+      }).mermaid = { initialize: vi.fn(), render: mermaidRender };
+
+      const { drainAnimationFrames, messages, send } = await loadRenderer();
+      send({
+        type: "load-document",
+        html: [
+          '<pre class="mm-mermaid"><code data-mm-mermaid>slow</code></pre>',
+          '<pre class="mm-mermaid"><code data-mm-mermaid>bad</code></pre>',
+        ].join(""),
+        renderId: 53,
+        hasMermaid: false,
+        hasHljs: false,
+      });
+      await drainAnimationFrames();
+
+      send({ type: "prepare-for-export", requestId: "export-53" });
+      await drainAnimationFrames();
+
+      // The slow diagram is mid-render. Push the clock far past the 3000 ms budget
+      // this path used to race against - and past any "more generous" number a
+      // future session might be tempted to reach for. A clock must not be able to
+      // decide the export's outcome, so the barrier still owes an answer here.
+      await vi.advanceTimersByTimeAsync(120_000);
+      await drainAnimationFrames();
+      expect(messages.some(message => message.requestId === "export-53")).toBe(false);
+      expect(mermaidRender.mock.calls.map(call => call[1])).toEqual(["slow"]);
+
+      finishSlowRender({ svg: "<svg>slow</svg>" });
+      await drainAnimationFrames();
+
+      // Forward direction: the slow-but-valid diagram exported instead of being
+      // rejected. Opposite direction: the genuinely broken one is still an error,
+      // so the host still refuses a document that truly did not render.
+      expect(mermaidRender.mock.calls.map(call => call[1])).toEqual(["slow", "bad"]);
+      expect(messages).toContainEqual({
+        type: "full-render-complete",
+        requestId: "export-53",
+        mermaidErrorCount: 1,
+      });
+      const nodes = document.querySelectorAll<HTMLElement>("pre.mm-mermaid");
+      expect(nodes[0]!.classList.contains("is-rendered")).toBe(true);
+      expect(nodes[0]!.nextElementSibling?.innerHTML).toBe("<svg>slow</svg>");
+      expect(nodes[1]!.classList.contains("is-rendered")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("posts a correlated failure when the barrier driver cannot find the document root", async () => {
     const { drainAnimationFrames, messages, send } = await loadRenderer("");
 
@@ -304,6 +362,25 @@ describe("prepare-for-export full-render barrier", () => {
     expect(barrier).not.toContain("setTimeout");
     expect(barrier).not.toContain("setInterval");
     expect(cacheOwner).toContain('node.classList.remove("mm-warmed")');
+
+    // Asserting on the barrier's own body alone is what let a timer sit on this
+    // path unnoticed: the barrier called trackMermaidRenderCall, which handed a
+    // 3000 ms budget to renderMermaidNode, which raced it against the render. Walk
+    // the callees the barrier actually reaches, not just its own text.
+    const trackerStart = source.indexOf("function trackMermaidRenderCall(");
+    const trackerEnd = source.indexOf("async function drainActiveMermaidRenderCalls(", trackerStart);
+    const tracker = source.slice(trackerStart, trackerEnd);
+    expect(trackerStart).toBeGreaterThanOrEqual(0);
+    expect(trackerEnd).toBeGreaterThan(trackerStart);
+    expect(tracker).toContain("renderMermaidNode(");
+    expect(tracker).not.toContain("setTimeout");
+    expect(tracker).not.toContain("TIMEOUT");
+
+    const mermaidHelper = readFileSync("RendererWeb/src/mermaidRender.ts", "utf8");
+    expect(mermaidHelper).toContain("await mermaid.render(id, source)");
+    expect(mermaidHelper).not.toContain("setTimeout");
+    expect(mermaidHelper).not.toContain("setInterval");
+    expect(mermaidHelper).not.toContain("Promise.race");
   });
 
   it("MermaidSequentialPrepareReplay retains the terminal count and starts zero new work", async () => {

@@ -20,7 +20,7 @@ describe("renderMermaidNode", () => {
     const api: MermaidApiLike = {
       render: async () => ({ svg: "<svg>OK</svg>" })
     };
-    await renderMermaidNode(node, 1, () => 1, api, 1000, onLayoutBoxChange);
+    await renderMermaidNode(node, 1, () => 1, api, onLayoutBoxChange);
 
     expect(node.classList.contains("is-rendered")).toBe(true);
     expect(node.nextElementSibling?.className).toBe("mm-mermaid-svg");
@@ -34,7 +34,7 @@ describe("renderMermaidNode", () => {
     const api: MermaidApiLike = {
       render: async () => { throw new Error("syntax"); }
     };
-    await renderMermaidNode(node, 1, () => 1, api, 1000, onLayoutBoxChange);
+    await renderMermaidNode(node, 1, () => 1, api, onLayoutBoxChange);
 
     expect(node.classList.contains("is-rendered")).toBe(false);
     expect(node.nextElementSibling).toBeNull();
@@ -52,22 +52,61 @@ describe("renderMermaidNode", () => {
       render: async () => { throw new Error("syntax"); }
     };
 
-    await renderMermaidNode(node, 1, () => 1, api, 1000, onLayoutBoxChange);
+    await renderMermaidNode(node, 1, () => 1, api, onLayoutBoxChange);
 
     expect(node.classList.contains("is-rendered")).toBe(false);
     expect(node.nextElementSibling).toBeNull();
     expect(onLayoutBoxChange).toHaveBeenCalledTimes(1);
   });
 
-  it("on timeout leaves pre/code visible", async () => {
-    const node = makeNode("hangs");
-    const api: MermaidApiLike = {
-      render: () => new Promise(() => { /* never resolves */ })
-    };
-    await renderMermaidNode(node, 1, () => 1, api, 50);
+  it("waits for a slow render to settle instead of failing it on a deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const node = makeNode("slow but valid");
+      let finishRender!: (value: { svg: string }) => void;
+      const api: MermaidApiLike = {
+        render: () => new Promise(resolve => { finishRender = resolve; })
+      };
 
-    expect(node.classList.contains("is-rendered")).toBe(false);
-    expect(node.nextElementSibling).toBeNull();
+      const pending = renderMermaidNode(node, 1, () => 1, api);
+
+      // Far past every deadline this helper ever carried. No clock may decide the
+      // outcome: the diagram is still rendering, so it is neither done nor failed.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(node.classList.contains("is-rendered")).toBe(false);
+      expect(node.nextElementSibling).toBeNull();
+
+      finishRender({ svg: "<svg>SLOW</svg>" });
+      await pending;
+
+      expect(node.classList.contains("is-rendered")).toBe(true);
+      expect(node.nextElementSibling?.className).toBe("mm-mermaid-svg");
+      expect(node.nextElementSibling?.innerHTML).toBe("<svg>SLOW</svg>");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("arms no timer at all while a render is in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const node = makeNode("slow but valid");
+      let finishRender!: (value: { svg: string }) => void;
+      const api: MermaidApiLike = {
+        render: () => new Promise(resolve => { finishRender = resolve; })
+      };
+
+      const pending = renderMermaidNode(node, 1, () => 1, api);
+      await Promise.resolve();
+
+      expect(vi.getTimerCount()).toBe(0);
+
+      finishRender({ svg: "<svg>SLOW</svg>" });
+      await pending;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stale generation does not mutate DOM after late resolve", async () => {
@@ -77,7 +116,7 @@ describe("renderMermaidNode", () => {
       render: () => new Promise((resolve) => { resolveRender = resolve; })
     };
     let currentGen = 1;
-    const promise = renderMermaidNode(node, 1, () => currentGen, api, 5000);
+    const promise = renderMermaidNode(node, 1, () => currentGen, api);
 
     currentGen = 2;
     resolveRender!({ svg: "<svg>STALE</svg>" });

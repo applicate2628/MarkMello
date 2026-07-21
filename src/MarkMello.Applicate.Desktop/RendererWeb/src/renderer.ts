@@ -200,7 +200,6 @@ let initialRenderPipelineCompleted = false;
 let firstPrefsBootstrapSuppressedByLoadGeneration: number | null = null;
 let postReadyEnhancementsCompleted = false;
 let currentController: MathReadinessController | null = null;
-const MERMAID_PER_DIAGRAM_TIMEOUT_MS = 3000;
 const MERMAID_WATCHDOG_MS = 15_000;
 const MERMAID_EAGER_VIEWPORT_MARGIN_PX = 700;
 const MERMAID_LAZY_ROOT_MARGIN_PX = 1400;
@@ -771,7 +770,6 @@ function trackMermaidRenderCall(
     generation,
     () => mermaidRenderGeneration,
     mermaid,
-    MERMAID_PER_DIAGRAM_TIMEOUT_MS,
     invalidateTopVisibleBlockIndexCache
   ));
   activeMermaidRenderCalls.add(renderCall);
@@ -833,8 +831,10 @@ async function renderMermaidNodes(
   // makes every not-yet-scrolled lazy diagram abort as stale in
   // enqueueLazyMermaidRender, so a document whose eager batch is slow (watchdog
   // fires) would silently never render its lazy diagrams. A local flag stops the
-  // eager loop while leaving the lazy generation — and any in-flight render,
-  // already bounded by its own per-diagram timeout — intact.
+  // eager loop from STARTING further renders while leaving the lazy generation
+  // intact. An in-flight render is never abandoned: mermaid offers no cancellation
+  // handle, so abandoning one would not reclaim any work — it would only throw away
+  // an SVG that was still on its way. Each render therefore runs to its own settle.
   let eagerBudgetExpired = false;
   const watchdog = window.setTimeout(() => {
     eagerBudgetExpired = true;
