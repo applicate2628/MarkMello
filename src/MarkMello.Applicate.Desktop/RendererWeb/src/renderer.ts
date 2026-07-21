@@ -509,18 +509,7 @@ function startDocumentReveal(durationMs: unknown): void {
     hasShield: documentRevealShield !== null,
     shieldConnected: documentRevealShield?.isConnected ?? false,
   });
-  const duration = clampModeRevealDuration(durationMs);
-  if (duration <= 0) {
-    clearDocumentRevealShield();
-    return;
-  }
-
-  if (documentRevealShield) {
-    void documentRevealShield.offsetWidth;
-    documentRevealShield.style.transition = `opacity ${duration}ms ${MODE_REVEAL_EASING}`;
-    documentRevealShield.style.opacity = "0";
-  }
-  window.setTimeout(clearDocumentRevealShield, duration);
+  clearDocumentRevealShield();
 }
 
 function prepareModeReveal(durationMs: unknown): void {
