@@ -203,12 +203,24 @@ const BOOL: IpcFieldDescriptor = { kind: "boolean" };
 const STR_OPT: IpcFieldDescriptor = { kind: "string", optional: true };
 const NUM_OPT: IpcFieldDescriptor = { kind: "number", optional: true };
 const BOOL_OPT: IpcFieldDescriptor = { kind: "boolean", optional: true };
-// renderId on layout-ready / post-ready-enhancements-complete / document-cache-miss:
-// optional in TS and the host DROPS the message when it is absent or non-numeric
-// (renderId-mandatory-in-C#). Encoded optional+nullable here so the contract
-// DOCUMENTS the mismatch (terra revision 5); the behavioral fix is the filed bug
-// work-items/bugs/2026-07-17-ipc-latent-drift-findings.md, pinned by
-// IpcContractTests.RenderIdOptionalInContractButDroppedOnMissingByHost.
+// renderId POLARITY — the host has TWO gate families and they behave OPPOSITELY
+// on an absent/non-numeric renderId. Do not group them (an earlier revision of
+// this comment did, and was wrong about layout-ready):
+//   FAIL-CLOSED — host DROPS the message: post-ready-enhancements-complete,
+//     document-cache-miss, document-first-paint (ApplicateWebMarkdownDocumentView
+//     HandlePostReadyEnhancementsComplete / HandleDocumentCacheMissMessage /
+//     HandleDocumentFirstPaintMessage).
+//   FAIL-OPEN — host SKIPS the currency check and ACCEPTS the message:
+//     layout-ready, task-toggle, table-cell-edit.
+// Encoded optional+nullable here so the contract DOCUMENTS the mismatch (terra
+// revision 5). Verified 2026-07-21: the renderer stamps every message the shipped
+// host can act on, so the fail-closed drop is NOT reachable for a live document;
+// the only unstamped emission belongs to the empty shell, whose gate is not armed.
+// See work-items/bugs/2026-07-17-ipc-latent-drift-findings.md for the trace and for
+// why the fail-OPEN polarity must not be flipped without removing legacy non-shell
+// render mode first. Pinned by
+// IpcContractTests.RenderIdOptionalInContractButDroppedOnMissingByHost (the drop)
+// and RendererWeb/vitest/revealGateRenderIdStamp.test.ts (the cold-load stamp).
 const NUM_OPT_NULLABLE: IpcFieldDescriptor = { kind: "number", optional: true, nullable: true };
 const STR_OPT_NULLABLE: IpcFieldDescriptor = { kind: "string", optional: true, nullable: true };
 
