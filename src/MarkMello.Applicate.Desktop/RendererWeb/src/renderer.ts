@@ -785,6 +785,26 @@ async function drainActiveMermaidRenderCalls(): Promise<void> {
   }
 }
 
+// Stop tracking every in-flight Mermaid render, and reset the lazy chain that
+// serializes them. Sole caller: the cancel path. Both are POISON ANCHORS for a
+// render that never settles -- trackMermaidRenderCall removes from the Set in a
+// .finally that never runs, and enqueueLazyMermaidRender awaits the same call
+// inside mermaidLazyRenderQueue, which .catch() cannot rescue because the promise
+// never settles at all. drainActiveMermaidRenderCalls and the lazy-queue await are
+// the FIRST two things settleMermaidBarrierWork does, so leaving either poisoned
+// re-parks every future barrier, including one built for a different document.
+//
+// This is not a cancellation of the render -- Mermaid offers no such handle, and
+// the abandoned call keeps running inside Mermaid's own queue. It is a statement
+// that WE no longer wait on it. A call that does eventually settle finds itself
+// already evicted; Set.delete on a missing member is a no-op, so late settling
+// stays harmless. Clearing is also the only timer-free choice: which promise is
+// stuck is undecidable without a clock.
+function releaseAbandonedMermaidRenderCalls(): void {
+  activeMermaidRenderCalls.clear();
+  mermaidLazyRenderQueue = Promise.resolve();
+}
+
 function establishNormalMermaidOwnerAfterBodyMutation(): void {
   const identity = ++documentIdentity;
   mermaidLifecycleState = { owner: "normal", identity };
@@ -1052,7 +1072,20 @@ let warmupRunning = false;
 let warmupWaiters: Array<{ resolve: () => void; reject: (reason: unknown) => void }> = [];
 let progressiveAppendFinalPromise: Promise<void> = Promise.resolve();
 let resolveProgressiveAppendFinal: (() => void) | null = null;
-let activeFullRenderBarrier: { identity: number; promise: Promise<number> } | null = null;
+// requestIds: every export currently awaiting THIS barrier. It is a set because
+// handlePrepareForExport re-attaches a second request to a live barrier rather
+// than building a new one. It is also the cancel message's identity gate --
+// membership is checked EXACTLY, so a stale or unknown requestId cancels nothing.
+// cancel: rejects the barrier from OUTSIDE. driveFullRenderBarrier is an async
+// function, so its own returned promise cannot be settled by anyone else; the
+// barrier promise is therefore a race between the drive and a deferred that only
+// a host cancel rejects. Not a deadline -- nothing else can ever settle it.
+let activeFullRenderBarrier: {
+  identity: number;
+  promise: Promise<number>;
+  requestIds: Set<string>;
+  cancel: (reason: Error) => void;
+} | null = null;
 const WARMUP_BLOCKS_PER_SLICE = 60;
 
 function setProgressiveAppendPending(pending: boolean): void {
@@ -1281,9 +1314,10 @@ async function handlePrepareForExport(
     || mermaidLifecycleState.owner !== "barrier"
   ) {
     acquireMermaidBarrierOwner(identity);
-    activeFullRenderBarrier = { identity, promise: driveFullRenderBarrier(identity) };
+    activeFullRenderBarrier = createFullRenderBarrier(identity);
   }
   const barrier = activeFullRenderBarrier;
+  barrier.requestIds.add(message.requestId);
   try {
     const mermaidErrorCount = await barrier.promise;
     postHostMessage({
@@ -1299,10 +1333,69 @@ async function handlePrepareForExport(
       reason: reason instanceof Error ? reason.message : String(reason),
     });
   } finally {
+    barrier.requestIds.delete(message.requestId);
     if (activeFullRenderBarrier === barrier) {
       activeFullRenderBarrier = null;
     }
   }
+}
+
+const FULL_RENDER_CANCELLED_REASON = "export cancelled";
+
+// The barrier promise every attached export awaits. driveFullRenderBarrier is an
+// async function: its returned promise is settleable only by its own body, so an
+// interruption has to come from a SECOND promise raced against it. The deferred
+// below has exactly one settler -- cancelFullRenderBarrier -- and no timer, no
+// deadline, and no other caller can reach it.
+//
+// Only-forward: when nobody cancels, Promise.race adopts the drive's own outcome
+// unchanged, so a normal export still resolves with its mermaidErrorCount and a
+// genuinely failed diagram is still counted. The unresolved deferred is inert and
+// is dropped with the barrier record.
+function createFullRenderBarrier(identity: number): NonNullable<typeof activeFullRenderBarrier> {
+  let cancel!: (reason: Error) => void;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    cancel = reject;
+  });
+
+  return {
+    identity,
+    promise: Promise.race([driveFullRenderBarrier(identity), cancelled]),
+    requestIds: new Set<string>(),
+    cancel,
+  };
+}
+
+// The user stopped waiting. The host has already settled its own side as
+// Cancelled (14fefe1); this unwinds the RENDERER, which that commit could not
+// reach from the host alone.
+//
+// The gate is exact membership in the live barrier's requestIds -- an unknown,
+// stale, or already-settled requestId cancels nothing. There is no wildcard and
+// no absent-stamp branch, so this cannot fail open the way a null renderId gate
+// would.
+//
+// ORDER IS LOAD-BEARING and is the opposite of the intuitive one: the poison must
+// be released BEFORE the rejection is raised. The rejection lands in
+// handlePrepareForExport's catch, which awaits recoverMermaidBarrierFailure --
+// and recoverMermaidBarrierFailure itself awaits the lazy queue and then drains
+// activeMermaidRenderCalls. Reject first and the recovery path parks on the very
+// promise the cancel exists to escape: no ownership restored, no full-render-failed
+// posted, no finally reached. Releasing first makes both awaits return immediately.
+function cancelFullRenderBarrier(
+  message: Extract<HostMessage, { type: "cancel-full-render" }>
+): void {
+  if (typeof message.requestId !== "string" || message.requestId.length === 0) {
+    return;
+  }
+
+  const barrier = activeFullRenderBarrier;
+  if (!barrier || !barrier.requestIds.has(message.requestId)) {
+    return;
+  }
+
+  releaseAbandonedMermaidRenderCalls();
+  barrier.cancel(new Error(FULL_RENDER_CANCELLED_REASON));
 }
 
 const HTML_SNAPSHOT_DOCTYPE = "<!DOCTYPE html>\n";
@@ -4302,6 +4395,11 @@ function handleHostMessage(raw: unknown): void {
 
   if (message.type === "prepare-for-export") {
     void handlePrepareForExport(message);
+    return;
+  }
+
+  if (message.type === "cancel-full-render") {
+    cancelFullRenderBarrier(message);
     return;
   }
 

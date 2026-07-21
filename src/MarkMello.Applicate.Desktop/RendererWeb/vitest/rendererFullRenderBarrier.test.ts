@@ -632,6 +632,145 @@ describe("prepare-for-export full-render barrier", () => {
     });
   });
 
+  it("CancelledExportUnwindsTheRendererSoALaterDocumentStillExports", async () => {
+    // A render that never settles. Not "slow" - there is no value to deliver and
+    // no rejection to catch, which is exactly what makes .finally cleanup and
+    // Promise.allSettled useless against it.
+    const neverSettles = new Promise<{ svg: string }>(() => undefined);
+    const render = vi.fn(() => neverSettles);
+    (window as unknown as { mermaid: MermaidApiForTesting }).mermaid = { initialize: vi.fn(), render };
+    const { drainAnimationFrames, messages, rendererModule, send } = await loadRenderer();
+    const internals = requireRendererInternals(rendererModule);
+
+    send({
+      type: "load-document",
+      html: '<pre class="mm-mermaid"><code data-mm-mermaid>stuck</code></pre>',
+      renderId: 81,
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await drainAnimationFrames();
+    send({ type: "prepare-for-export", requestId: "export-stuck" });
+    await drainAnimationFrames();
+
+    const parked = internals.getMermaidLifecycleSnapshotForTesting();
+    expect(parked.owner).toBe("barrier");
+    expect(parked.activeRenderCount).toBe(1);
+    expect(messages.some(message => message.requestId === "export-stuck")).toBe(false);
+
+    send({ type: "cancel-full-render", requestId: "export-stuck" });
+    await drainAnimationFrames();
+
+    // The barrier answered instead of holding its requester forever, and gave the
+    // Mermaid lifecycle back to the normal owner, so renderMermaid /
+    // initMermaidWithTheme / scheduleCachedMermaidResume stop being no-ops.
+    const recovered = internals.getMermaidLifecycleSnapshotForTesting();
+    expect(recovered.owner).toBe("normal");
+    expect(recovered.activeRenderCount).toBe(0);
+    expect(messages).toContainEqual({
+      type: "full-render-failed",
+      requestId: "export-stuck",
+      reason: "export cancelled",
+    });
+
+    // The decisive assertion, and the filed symptom: the abandoned promise used to
+    // stay in activeMermaidRenderCalls, so the NEXT barrier - even one built for a
+    // different document, after a document change - re-parked on it and export was
+    // dead for the whole WebView lifetime. A later export must now complete.
+    send({
+      type: "load-document",
+      html: "<p>a different document, no diagrams</p>",
+      renderId: 82,
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await drainAnimationFrames();
+    send({ type: "prepare-for-export", requestId: "export-after-cancel" });
+    await drainAnimationFrames();
+
+    expect(messages).toContainEqual({
+      type: "full-render-complete",
+      requestId: "export-after-cancel",
+      mermaidErrorCount: 0,
+    });
+  });
+
+  it("CancelIsExactlyCorrelatedAndLeavesAnUnnamedBarrierRunning", async () => {
+    const neverSettles = new Promise<{ svg: string }>(() => undefined);
+    const render = vi.fn(() => neverSettles);
+    (window as unknown as { mermaid: MermaidApiForTesting }).mermaid = { initialize: vi.fn(), render };
+    const { drainAnimationFrames, messages, rendererModule, send } = await loadRenderer();
+    const internals = requireRendererInternals(rendererModule);
+
+    send({
+      type: "load-document",
+      html: '<pre class="mm-mermaid"><code data-mm-mermaid>stuck</code></pre>',
+      renderId: 83,
+      hasMermaid: false,
+      hasHljs: false,
+    });
+    await drainAnimationFrames();
+    send({ type: "prepare-for-export", requestId: "export-live" });
+    await drainAnimationFrames();
+    expect(internals.getMermaidLifecycleSnapshotForTesting().owner).toBe("barrier");
+
+    // A cancel is a destructive unwind, so its gate is exact membership in the
+    // live barrier's attached requests. A stale generation, a request from another
+    // WebView, or an empty stamp must cancel NOTHING - the failure mode a gate that
+    // fell back to "no id means cancel whatever is running" would introduce is
+    // worse than not being able to cancel at all.
+    send({ type: "cancel-full-render", requestId: "export-somebody-else" });
+    send({ type: "cancel-full-render", requestId: "" });
+    await drainAnimationFrames();
+
+    const untouched = internals.getMermaidLifecycleSnapshotForTesting();
+    expect(untouched.owner).toBe("barrier");
+    expect(untouched.activeRenderCount).toBe(1);
+    expect(messages.some(message => message.requestId === "export-live")).toBe(false);
+
+    send({ type: "cancel-full-render", requestId: "export-live" });
+    await drainAnimationFrames();
+
+    expect(internals.getMermaidLifecycleSnapshotForTesting().owner).toBe("normal");
+    expect(messages).toContainEqual({
+      type: "full-render-failed",
+      requestId: "export-live",
+      reason: "export cancelled",
+    });
+  });
+
+  it("keeps the cancel path event-driven with no clock of its own", () => {
+    const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+    const cancelStart = source.indexOf("function cancelFullRenderBarrier(");
+    const cancelEnd = source.indexOf("\n}", cancelStart);
+    const cancel = source.slice(cancelStart, cancelEnd);
+    const factoryStart = source.indexOf("function createFullRenderBarrier(");
+    const factoryEnd = source.indexOf("\n}", factoryStart);
+    const factory = source.slice(factoryStart, factoryEnd);
+    const releaseStart = source.indexOf("function releaseAbandonedMermaidRenderCalls(");
+    const releaseEnd = source.indexOf("\n}", releaseStart);
+    const release = source.slice(releaseStart, releaseEnd);
+
+    expect(cancelStart).toBeGreaterThanOrEqual(0);
+    expect(factoryStart).toBeGreaterThanOrEqual(0);
+    expect(releaseStart).toBeGreaterThanOrEqual(0);
+    for (const body of [cancel, factory, release]) {
+      expect(body).not.toContain("setTimeout");
+      expect(body).not.toContain("setInterval");
+      expect(body).not.toContain("Date.now");
+      expect(body).not.toContain("performance.now");
+    }
+
+    // Order is load-bearing: recoverMermaidBarrierFailure - which the rejection
+    // routes through - itself awaits the lazy queue and drains
+    // activeMermaidRenderCalls. Rejecting before releasing them parks the recovery
+    // on the very promise the cancel exists to escape.
+    expect(cancel.indexOf("releaseAbandonedMermaidRenderCalls()"))
+      .toBeLessThan(cancel.indexOf("barrier.cancel("));
+    expect(release).toContain("activeMermaidRenderCalls.clear()");
+    expect(release).toContain("mermaidLazyRenderQueue = Promise.resolve()");
+  });
+
   it("MermaidTerminalResetOnPostMutationLoadAndClear advances once only after successful writes", async () => {
     const { applyLoadDocument, clearDocumentState } = await import("../src/loadDocument");
     let mutationCount = 0;

@@ -57,7 +57,8 @@ public sealed class IpcContractTests
         "clear-document", "invalidate-document-cache-key", "set-task-checkbox", "table-cell-updated", "scroll-to-heading",
         "scroll-to-source-line", "open-find-bar", "host-scrollbar", "mode-settle-probe",
         "minimap-settle-probe", "host-shortcuts-reset", "mode-reveal-prepare", "mode-reveal-start",
-        "document-reveal-prepare", "document-reveal-start", "prepare-for-export", "capture-rendered-html",
+        "document-reveal-prepare", "document-reveal-start", "prepare-for-export", "cancel-full-render",
+        "capture-rendered-html",
     ];
 
     private static readonly string[] KnownRendererMessageTypes =
@@ -214,6 +215,102 @@ public sealed class IpcContractTests
         Assert.Equal("prepare-for-export", TypeValue(payload));
         Assert.Equal("export-17", payload.GetProperty("requestId").GetString());
         Assert.Empty(CollectViolations(payload, LoadContract().Host["prepare-for-export"], "prepare-for-export"));
+    }
+
+    [Fact]
+    public void CancelFullRenderHostSenderUsesExactRequestShape()
+    {
+        var builder = typeof(ApplicateWebMarkdownDocumentView).GetMethod(
+            "BuildCancelFullRenderMessage",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(builder);
+
+        var payload = Serialize(builder!.Invoke(null, ["export-17"])!);
+        // Exactly type + requestId: the renderer's cancel gate is an exact
+        // requestId match against the live barrier, so nothing else is on the wire
+        // and there is no optional stamp for the gate to fail open on.
+        Assert.True(ObjectKeys(payload).SetEquals(["requestId", "type"]));
+        Assert.Equal("cancel-full-render", TypeValue(payload));
+        Assert.Equal("export-17", payload.GetProperty("requestId").GetString());
+        Assert.Empty(CollectViolations(
+            payload,
+            LoadContract().Host["cancel-full-render"],
+            "cancel-full-render"));
+    }
+
+    [Fact]
+    public void CancellingAPendingFullRenderRequestSendsTheRendererACorrelatedUnwind()
+    {
+        var posted = new List<string>();
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: payload =>
+                {
+                    posted.Add(payload);
+                    return true;
+                },
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                using var cancellation = new CancellationTokenSource();
+                var request = view.PrepareForExportAsync(cancellation.Token);
+                var requestId = Assert.Single(PendingFullRenderRequestIds(view));
+                Assert.Single(posted);
+                Assert.Contains("\"prepare-for-export\"", posted[0], StringComparison.Ordinal);
+
+                cancellation.Cancel();
+
+                // The host settling its own side is 14fefe1's guarantee and must
+                // survive. What this pins is the SECOND thing: the renderer is told
+                // to unwind, correlated to the same requestId, so its barrier and
+                // its abandoned Mermaid tracking do not outlive the export.
+                Assert.Equal(2, posted.Count);
+                var cancel = JsonDocument.Parse(posted[1]).RootElement;
+                Assert.Equal("cancel-full-render", cancel.GetProperty("type").GetString());
+                Assert.Equal(requestId, cancel.GetProperty("requestId").GetString());
+                Assert.Empty(CollectViolations(
+                    cancel,
+                    LoadContract().Host["cancel-full-render"],
+                    "cancel-full-render"));
+
+                Assert.True(request.Wait(TimeSpan.FromSeconds(5)));
+                Assert.Equal(
+                    ApplicateFullRenderStatus.Cancelled,
+                    request.Result.Status);
+                Assert.Empty(PendingFullRenderRequestIds(view));
+            });
+    }
+
+    [Fact]
+    public void CompletingAFullRenderRequestSendsNoCancelUnwind()
+    {
+        var posted = new List<string>();
+        RunOnView(
+            new ApplicateFullRenderDeliveryHooks(
+                Serialize: message => JsonSerializer.Serialize(message),
+                TryPostNative: payload =>
+                {
+                    posted.Add(payload);
+                    return true;
+                },
+                InvokeRaw: _ => throw new Xunit.Sdk.XunitException("raw fallback must not run")),
+            view =>
+            {
+                using var cancellation = new CancellationTokenSource();
+                var request = view.PrepareForExportAsync(cancellation.Token);
+                var requestId = Assert.Single(PendingFullRenderRequestIds(view));
+                CompleteFullRenderRequestFromRenderer(view, requestId, succeeded: true);
+                Assert.True(request.Wait(TimeSpan.FromSeconds(5)));
+                Assert.Equal(ApplicateFullRenderStatus.Completed, request.Result.Status);
+
+                // A cancel arriving after the export already finished must not put a
+                // stray unwind on the wire: the request is gone, so there is nothing
+                // to cancel and a later export must not inherit one.
+                cancellation.Cancel();
+                Assert.Single(posted);
+                Assert.Contains("\"prepare-for-export\"", posted[0], StringComparison.Ordinal);
+            });
     }
 
     [Fact]

@@ -436,6 +436,14 @@
         "kind": "string"
       }
     },
+    "cancel-full-render": {
+      "type": {
+        "kind": "string"
+      },
+      "requestId": {
+        "kind": "string"
+      }
+    },
     "capture-rendered-html": {
       "type": {
         "kind": "string"

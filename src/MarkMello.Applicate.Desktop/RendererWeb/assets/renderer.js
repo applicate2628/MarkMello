@@ -2261,6 +2261,10 @@
       await Promise.allSettled(Array.from(activeMermaidRenderCalls));
     }
   }
+  function releaseAbandonedMermaidRenderCalls() {
+    activeMermaidRenderCalls.clear();
+    mermaidLazyRenderQueue = Promise.resolve();
+  }
   function establishNormalMermaidOwnerAfterBodyMutation() {
     const identity = ++documentIdentity;
     mermaidLifecycleState = { owner: "normal", identity };
@@ -2635,9 +2639,10 @@
     }
     if (!activeFullRenderBarrier || activeFullRenderBarrier.identity !== identity || mermaidLifecycleState.owner !== "barrier") {
       acquireMermaidBarrierOwner(identity);
-      activeFullRenderBarrier = { identity, promise: driveFullRenderBarrier(identity) };
+      activeFullRenderBarrier = createFullRenderBarrier(identity);
     }
     const barrier = activeFullRenderBarrier;
+    barrier.requestIds.add(message.requestId);
     try {
       const mermaidErrorCount = await barrier.promise;
       postHostMessage({
@@ -2653,10 +2658,35 @@
         reason: reason instanceof Error ? reason.message : String(reason)
       });
     } finally {
+      barrier.requestIds.delete(message.requestId);
       if (activeFullRenderBarrier === barrier) {
         activeFullRenderBarrier = null;
       }
     }
+  }
+  var FULL_RENDER_CANCELLED_REASON = "export cancelled";
+  function createFullRenderBarrier(identity) {
+    let cancel;
+    const cancelled = new Promise((_resolve, reject) => {
+      cancel = reject;
+    });
+    return {
+      identity,
+      promise: Promise.race([driveFullRenderBarrier(identity), cancelled]),
+      requestIds: /* @__PURE__ */ new Set(),
+      cancel
+    };
+  }
+  function cancelFullRenderBarrier(message) {
+    if (typeof message.requestId !== "string" || message.requestId.length === 0) {
+      return;
+    }
+    const barrier = activeFullRenderBarrier;
+    if (!barrier || !barrier.requestIds.has(message.requestId)) {
+      return;
+    }
+    releaseAbandonedMermaidRenderCalls();
+    barrier.cancel(new Error(FULL_RENDER_CANCELLED_REASON));
   }
   var HTML_SNAPSHOT_DOCTYPE = "<!DOCTYPE html>\n";
   var HTML_SNAPSHOT_CHROME_SELECTORS = [
@@ -4877,6 +4907,10 @@
     }
     if (message.type === "prepare-for-export") {
       void handlePrepareForExport(message);
+      return;
+    }
+    if (message.type === "cancel-full-render") {
+      cancelFullRenderBarrier(message);
       return;
     }
     if (message.type === "capture-rendered-html") {

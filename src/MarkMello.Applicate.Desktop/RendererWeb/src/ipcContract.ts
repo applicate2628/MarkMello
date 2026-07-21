@@ -165,6 +165,23 @@ export type HostMessage =
   | { type: "document-reveal-prepare"; durationMs?: number; theme?: RendererTheme }
   | { type: "document-reveal-start"; durationMs?: number }
   | { type: "prepare-for-export"; requestId: string }
+  // Host-sent unwind for an in-flight prepare-for-export barrier (2026-07-21).
+  // 14fefe1 made a stuck export cancellable on the HOST side only; nothing
+  // reached the renderer, so a Mermaid render that never settles left
+  // activeMermaidRenderCalls holding a promise whose removal lives in a .finally
+  // that never runs. Every LATER barrier -- including a fresh one after a
+  // document change -- re-parked on that dead promise, so export died for the
+  // whole WebView lifetime across all documents.
+  //
+  // requestId is the identity discriminator and is REQUIRED + NON-nullable on
+  // purpose. The standing hazard in 2026-07-17-ipc-latent-drift-findings is a
+  // currency gate that fails OPEN on a null stamp; a cancel landing on the wrong
+  // generation would be worse than no cancel, so this message has no absent-stamp
+  // state to fail open on. The renderer matches it EXACTLY against the set of
+  // requestIds attached to the live barrier and no-ops on anything else -- there
+  // is no wildcard, and renderId is deliberately NOT used (prepare-for-export
+  // carries none, so the barrier never recorded one to check against).
+  | { type: "cancel-full-render"; requestId: string }
   | { type: "capture-rendered-html"; requestId: string };
 
 // --- Recursive wire-shape descriptors (the enforced canon) --------------------
@@ -345,6 +362,9 @@ export const HOST_MESSAGE_SHAPES = {
   "document-reveal-prepare": { type: STR, durationMs: NUM_OPT, theme: STR_OPT },
   "document-reveal-start": { type: STR, durationMs: NUM_OPT },
   "prepare-for-export": { type: STR, requestId: STR },
+  // requestId REQUIRED and NON-nullable -- see the union comment: this gate must
+  // not have an absent-stamp state it could fail open on.
+  "cancel-full-render": { type: STR, requestId: STR },
   "capture-rendered-html": { type: STR, requestId: STR },
 } satisfies {
   [K in HostMessage["type"]]: { readonly [F in keyof Extract<HostMessage, { type: K }>]-?: IpcFieldDescriptor };

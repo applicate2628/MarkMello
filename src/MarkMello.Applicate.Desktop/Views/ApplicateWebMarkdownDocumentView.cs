@@ -2328,10 +2328,19 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             _fullRenderDeliverySupervisions.Add(requestId, supervision);
         }
 
+        // Unwind the RENDERER before settling the host side. 14fefe1 wired this
+        // registration and gave the user a cancel button, but nothing crossed the
+        // boundary, so the renderer stayed parked on a barrier whose abandoned
+        // Mermaid promise then poisoned every later export and every later diagram
+        // in this WebView -- for all documents, until the app was restarted.
         var cancellationRegistration = cancellationToken.CanBeCanceled
-            ? cancellationToken.Register(() => CompleteFullRenderRequest(
-                requestId,
-                new ApplicateFullRenderResult(ApplicateFullRenderStatus.Cancelled)))
+            ? cancellationToken.Register(() =>
+            {
+                PostCancelFullRender(requestId);
+                CompleteFullRenderRequest(
+                    requestId,
+                    new ApplicateFullRenderResult(ApplicateFullRenderStatus.Cancelled));
+            })
             : default;
 
         supervision.Start();
@@ -2577,6 +2586,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     internal static object BuildPrepareForExportMessage(string requestId)
         => new { type = "prepare-for-export", requestId };
 
+    internal static object BuildCancelFullRenderMessage(string requestId)
+        => new { type = "cancel-full-render", requestId };
+
     internal static object BuildCaptureRenderedHtmlMessage(string requestId)
         => new { type = "capture-rendered-html", requestId };
 
@@ -2760,6 +2772,38 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             {
                 _fullRenderDeliverySupervisions.Remove(requestId);
             }
+        }
+    }
+
+    // Fire-and-forget on the same delivery seam prepare-for-export uses, because
+    // the cancel has no reply to correlate: the renderer's own full-render-failed
+    // lands after CompleteFullRenderRequest has already removed the request, and
+    // is dropped there. Sending is best-effort BY DESIGN, not by neglect -- this
+    // runs inside a CancellationTokenRegistration callback, so an escaping
+    // exception would surface out of CancelExportCommand and break the very
+    // affordance 14fefe1 added. A delivery fault is reported on the class's
+    // existing diagnostic channel rather than swallowed.
+    private void PostCancelFullRender(string requestId)
+    {
+        if (!IsFullRenderRequestPending(requestId))
+        {
+            return;
+        }
+
+        try
+        {
+            var payload = _serializeFullRenderMessage(BuildCancelFullRenderMessage(requestId));
+            if (_tryPostFullRenderMessageNative(payload))
+            {
+                return;
+            }
+
+            ObserveLateFullRenderDeliveryFault(
+                _invokeFullRenderMessageRaw($"window.postMessage({payload},'*');"));
+        }
+        catch (Exception ex)
+        {
+            _fullRenderDeliveryObserved?.Invoke(ex);
         }
     }
 
