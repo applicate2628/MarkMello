@@ -7,6 +7,7 @@ using MarkMello.Domain.Diagnostics;
 using MarkMello.Infrastructure.Markdown;
 using MarkMello.Presentation.Localization;
 using MarkMello.Presentation.ViewModels;
+using System.Diagnostics;
 using System.Globalization;
 
 namespace MarkMello.Presentation.Tests;
@@ -1096,6 +1097,32 @@ public sealed class MainWindowViewModelTests
         Assert.False(harness.ViewModel.IsUpdateBusy);
         Assert.Equal(0.0, harness.ViewModel.UpdateBusyIndicatorOpacity);
         Assert.Equal("Check now", harness.ViewModel.CheckForUpdatesLabel);
+    }
+
+    [Fact]
+    public async Task CheckForUpdatesCommandRevealsResultImmediatelyWithoutBusyDwellTimer()
+    {
+        var harness = CreateHarness();
+        var package = CreateUpdatePackage();
+        harness.UpdateService.NextCheckResult = new UpdateCheckResult.UpdateAvailable(package);
+
+        var stopwatch = Stopwatch.StartNew();
+        await harness.ViewModel.CheckForUpdatesCommand.ExecuteAsync(null);
+        stopwatch.Stop();
+
+        // A completed check reveals its ViewModel state at once — no control-flow dwell
+        // withholds it. The removed MinUpdateBusyMilliseconds floor (600 ms) held these
+        // back; re-introducing any such delay blows the budget below (mutation check).
+        // This asserts the ABSENCE of a delay: pass ≈ 0 ms, the 600 ms mutation ≈ 600 ms,
+        // so the 300 ms threshold is deterministic in both directions (no flaky window).
+        Assert.False(harness.ViewModel.IsCheckingForUpdates);
+        Assert.False(harness.ViewModel.IsUpdateBusy);
+        Assert.Equal("Update 1.2.3 available", harness.ViewModel.UpdateStatusTitle);
+        Assert.Equal("Available", harness.ViewModel.UpdateStateBadge);
+        Assert.True(harness.ViewModel.IsHeaderUpdateNoticeVisible);
+        Assert.True(
+            stopwatch.ElapsedMilliseconds < 300,
+            $"Expected the update check to reveal its result without an artificial busy dwell, but the command took {stopwatch.ElapsedMilliseconds} ms.");
     }
 
     [Fact]

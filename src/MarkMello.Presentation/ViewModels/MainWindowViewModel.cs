@@ -1208,37 +1208,24 @@ public partial class MainWindowViewModel : ObservableObject
         CloseOverlayCore();
     }
 
-    // Minimum time the update-check busy indicator stays visible, so a fast check
-    // (cached result / quick failure) fades smoothly instead of flashing the bar.
-    private const int MinUpdateBusyMilliseconds = 600;
-
     [RelayCommand(CanExecute = nameof(CanCheckForUpdates))]
-    private Task CheckForUpdatesAsync() => CheckForUpdatesCoreAsync(minBusyDelay: true);
+    private Task CheckForUpdatesAsync() => CheckForUpdatesCoreAsync();
 
-    private async Task CheckForUpdatesCoreAsync(bool minBusyDelay)
+    private async Task CheckForUpdatesCoreAsync()
     {
         IsCheckingForUpdates = true;
         IsDownloadingUpdate = false;
         SetUpdateStatus(new UpdateStatusSnapshot.CheckingState());
         UpdateCommandStates();
 
-        var busyStartTick = Environment.TickCount64;
         try
         {
+            // Reveal the result the moment the check completes — no minimum-dwell timer
+            // withholds it. A control-flow delay here gated ViewModel state (status text,
+            // badge, available-package, header notice) on wall-clock time, which the
+            // no-timers law forbids. The busy indicator's minimum-visible fade is a
+            // rendering concern owned by AppUpdatesPanelView.axaml (Opacity transitions).
             var result = await _updateService.CheckForUpdatesAsync().ConfigureAwait(true);
-
-            // Hold the "checking" status text and spinner together for a minimum span
-            // before revealing the result, but only for a user-initiated check (the
-            // visible panel spinner). The background startup check shows no spinner,
-            // so it reveals its result immediately — tests rely on that.
-            if (minBusyDelay)
-            {
-                var elapsedMs = Environment.TickCount64 - busyStartTick;
-                if (elapsedMs < MinUpdateBusyMilliseconds)
-                {
-                    await Task.Delay((int)(MinUpdateBusyMilliseconds - elapsedMs)).ConfigureAwait(true);
-                }
-            }
 
             switch (result)
             {
@@ -1337,7 +1324,7 @@ public partial class MainWindowViewModel : ObservableObject
     {
         try
         {
-            await CheckForUpdatesCoreAsync(minBusyDelay: false).ConfigureAwait(true);
+            await CheckForUpdatesCoreAsync().ConfigureAwait(true);
         }
         catch (System.Exception ex)
         {
