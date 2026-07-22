@@ -1459,4 +1459,260 @@ public sealed class ApplicateAirspaceCompositorTests
             }
         }
     }
+
+    // ---- Mode-toggle priority-boost WORKAROUND: composition wiring ----
+    // The compositor injects ONE shared priority writer-owner into the mode
+    // reveal session; these tests prove the mode session arms at admission and
+    // closes on every terminal through that one instance.
+
+    [Fact]
+    public void ModeSessionArmsAndClosesInjectedPriorityScopeOnSuccessfulToggle()
+    {
+        var state = new FakeDocumentRevealState();
+        var slotAdapter = new FakeModeSlotAdapter();
+        var host = new FakeModeHostRevealIntents(slotAdapter.RevealSnapshot);
+        var covers = new FakeCoverFactory();
+        var scheduler = new FakeAirspaceScheduler();
+        var priorityScope = new RecordingModeTogglePriorityScope();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            new FakePaintGate(),
+            scheduler,
+            priorityScope);
+        using var modeSession = compositor.RegisterModeSession(
+            host,
+            slotAdapter,
+            () => ReadingPreferences.Default);
+
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        scheduler.Flush();
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        var generation = slotAdapter.EditGeneration;
+        Assert.True(generation > 0);
+
+        host.RaiseCommitCompleted(generation, ApplicateMode.Edit);
+        host.RaiseMinimapSettledNotApplicable(generation);
+        host.RaiseRendererSettled(generation);
+        scheduler.Flush();
+
+        var armIndex = priorityScope.Calls.IndexOf($"arm:{generation}:Edit");
+        var closeIndex = priorityScope.Calls.IndexOf($"close:{generation}:success");
+        Assert.True(armIndex >= 0, $"expected arm; calls=[{string.Join(",", priorityScope.Calls)}]");
+        Assert.True(closeIndex >= 0, $"expected success close; calls=[{string.Join(",", priorityScope.Calls)}]");
+        Assert.True(armIndex < closeIndex, "arm must precede terminal close");
+    }
+
+    [Fact]
+    public void ModeSessionClosesInjectedPriorityScopeOnRollbackWhenNativeRevealRejected()
+    {
+        var state = new FakeDocumentRevealState();
+        var slotAdapter = new FakeModeSlotAdapter();
+        var host = new FakeModeHostRevealIntents(slotAdapter.RevealSnapshot)
+        {
+            RejectReveals = true,
+        };
+        var covers = new FakeCoverFactory();
+        var scheduler = new FakeAirspaceScheduler();
+        var priorityScope = new RecordingModeTogglePriorityScope();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            new FakePaintGate(),
+            scheduler,
+            priorityScope);
+        using var modeSession = compositor.RegisterModeSession(
+            host,
+            slotAdapter,
+            () => ReadingPreferences.Default);
+
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        scheduler.Flush();
+        Assert.True(modeSession.TryReconcile(ApplicateMode.Edit, modeSlotSwitch: true));
+        var generation = slotAdapter.EditGeneration;
+
+        host.RaiseCommitCompleted(generation, ApplicateMode.Edit);
+        host.RaiseMinimapSettledNotApplicable(generation);
+        host.RaiseRendererSettled(generation);
+        scheduler.Flush();
+
+        Assert.Contains($"arm:{generation}:Edit", priorityScope.Calls);
+        Assert.Contains($"close:{generation}:rollback:rejected-reveal", priorityScope.Calls);
+    }
+
+    [Fact]
+    public void ModeSessionDisposeInvokesUnconditionalPriorityScopeBackstop()
+    {
+        var state = new FakeDocumentRevealState();
+        var slotAdapter = new FakeModeSlotAdapter();
+        var host = new FakeModeHostRevealIntents(slotAdapter.RevealSnapshot);
+        var covers = new FakeCoverFactory();
+        var scheduler = new FakeAirspaceScheduler();
+        var priorityScope = new RecordingModeTogglePriorityScope();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            new FakePaintGate(),
+            scheduler,
+            priorityScope);
+        var modeSession = compositor.RegisterModeSession(
+            host,
+            slotAdapter,
+            () => ReadingPreferences.Default);
+
+        modeSession.Dispose();
+
+        Assert.Contains("closeany:mode-session-dispose", priorityScope.Calls);
+    }
+
+    private sealed class RecordingModeTogglePriorityScope : IApplicateModeTogglePriorityScope
+    {
+        public List<string> Calls { get; } = [];
+
+        public void Arm(long generation, ApplicateMode target)
+            => Calls.Add($"arm:{generation}:{target}");
+
+        public void BeginAfterFinalHide(long generation, int? browserProcessId)
+            => Calls.Add($"begin:{generation}:{browserProcessId?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null"}");
+
+        public void ReapplyAfterKnownHide(string trigger, int? browserProcessId)
+            => Calls.Add($"reapply:{trigger}:{browserProcessId?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null"}");
+
+        public void Close(long generation, string reason)
+            => Calls.Add($"close:{generation}:{reason}");
+
+        public void CloseAny(string reason)
+            => Calls.Add($"closeany:{reason}");
+
+        public void Dispose()
+            => Calls.Add("dispose");
+    }
+
+    [Fact]
+    public void HostRevealSessionRequestsBumpAtFinalHideAndReBumpsAtEarlierTransactionalHides()
+    {
+        var scheduler = new FakeAirspaceScheduler();
+        var priorityScope = new RecordingModeTogglePriorityScope();
+        var covers = new FakeCoverFactory();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            new FakeDocumentRevealState(),
+            covers.Create,
+            new FakePaintGate(),
+            scheduler,
+            priorityScope);
+        var host = new FakeCommitHostRevealIntents();
+        compositor.RegisterHostRevealSession(host, () => 4242);
+
+        // Transactional callback order: the three earlier hides re-bump (no-op
+        // until elevated), the final hide begins.
+        host.RaiseAttachStarting(isTransactional: true);
+        host.RaiseAttachCompleted(isTransactional: true, hasEverCommitted: true);
+        host.RaiseRenderStarting(isTransactional: true);
+        host.RaiseCommitPreparing(isTransactional: true, transactionGeneration: 9);
+
+        var expected = new List<string>
+        {
+            "reapply:attach-starting:4242",
+            "reapply:attach-completed:4242",
+            "reapply:render-starting:4242",
+            "begin:9:4242",
+        };
+        Assert.Equal(expected, priorityScope.Calls);
+    }
+
+    [Fact]
+    public void HostRevealSessionMakesNoPriorityCallsForNonTransactionalReveal()
+    {
+        var scheduler = new FakeAirspaceScheduler();
+        var priorityScope = new RecordingModeTogglePriorityScope();
+        var covers = new FakeCoverFactory();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            new FakeDocumentRevealState(),
+            covers.Create,
+            new FakePaintGate(),
+            scheduler,
+            priorityScope);
+        var host = new FakeCommitHostRevealIntents();
+        compositor.RegisterHostRevealSession(host, () => 4242);
+
+        host.RaiseAttachStarting(isTransactional: false);
+        host.RaiseRenderStarting(isTransactional: false);
+        host.RaiseCommitPreparing(isTransactional: false, transactionGeneration: 0, hasEverCommitted: false);
+
+        Assert.Empty(priorityScope.Calls);
+    }
+
+    private sealed class FakeCommitHostRevealIntents : IApplicateHostRevealIntents
+    {
+        public TimeSpan RendererSettleFallbackTimeout => ApplicateAirspaceCompositor.HostRendererSettleFallbackTimeout;
+
+        public event EventHandler<ApplicateHostAttachStartingEventArgs>? AttachStarting;
+
+        public event EventHandler<ApplicateHostAttachCompletedEventArgs>? AttachCompleted;
+
+        public event EventHandler<ApplicateHostRenderStartingEventArgs>? RenderStarting;
+
+        public event EventHandler<ApplicateHostCommitPreparingEventArgs>? CommitPreparing;
+
+        public event EventHandler? DocumentRenderVisualReady { add { } remove { } }
+
+        public event EventHandler? RendererRevealSettled { add { } remove { } }
+
+        public event EventHandler<ApplicateTransactionRendererSettleProbeEventArgs>? TransactionRendererSettleProbeReady { add { } remove { } }
+
+        public event EventHandler<ApplicateRendererFailureEvent>? RendererFailed { add { } remove { } }
+
+        public event EventHandler<ApplicateMinimapSettledEventArgs>? MinimapSettled { add { } remove { } }
+
+        public event EventHandler<ApplicateCommitCompletedEventArgs>? CommitCompleted { add { } remove { } }
+
+        public event EventHandler<ApplicateRendererSettledEventArgs>? RendererSettled { add { } remove { } }
+
+        public void SuppressOutgoingNativeRenderer(ApplicateMode displayedMode) { }
+
+        public void RestoreOutgoingNativeRenderer(ApplicateMode displayedMode) { }
+
+        public bool RevealNativeRendererForCommittedTransaction(long transactionGeneration) => true;
+
+        public void ParkNativeWebViewForReparent() { }
+
+        public void SetNativeWebViewVisibility(bool isVisible) { }
+
+        public void PrepareNativeWebViewHiddenPaint() { }
+
+        public void CompleteNativeWebViewHiddenPaint() { }
+
+        public void PrepareModeRendererReveal(TimeSpan duration) { }
+
+        public void StartModeRendererReveal(TimeSpan duration) { }
+
+        public void PrepareDocumentRendererReveal(TimeSpan duration) { }
+
+        public void StartDocumentRendererReveal(TimeSpan duration) { }
+
+        public void RequestRendererSettleProbe() { }
+
+        public void RequestTransactionRendererSettleProbe(long transactionGeneration, bool skipFrameWait) { }
+
+        public void RaiseAttachStarting(bool isTransactional)
+            => AttachStarting?.Invoke(this, new ApplicateHostAttachStartingEventArgs(new Panel(), isTransactional));
+
+        public void RaiseAttachCompleted(bool isTransactional, bool hasEverCommitted)
+            => AttachCompleted?.Invoke(this, new ApplicateHostAttachCompletedEventArgs(new Panel(), isTransactional, hasEverCommitted));
+
+        public void RaiseRenderStarting(bool isTransactional)
+            => RenderStarting?.Invoke(
+                this,
+                new ApplicateHostRenderStartingEventArgs(null, null, null, null, false, isTransactional, false, false));
+
+        public void RaiseCommitPreparing(bool isTransactional, long transactionGeneration, bool hasEverCommitted = false)
+            => CommitPreparing?.Invoke(
+                this,
+                new ApplicateHostCommitPreparingEventArgs(null, null, isTransactional, transactionGeneration, hasEverCommitted, TimeSpan.Zero));
+    }
 }

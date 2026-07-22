@@ -32,17 +32,26 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
     private readonly List<DocumentRevealSession> _documentSessions = [];
     private readonly List<IDisposable> _themeSessions = [];
     private readonly List<IApplicateModeRevealSession> _modeSessions = [];
+    // Priority-boost WORKAROUND: one shared writer-owner for renderer process
+    // priority across all host reveal sessions (post-hide bump / re-bump) and the
+    // single mode reveal session (arm + terminal close). Injected from the
+    // composition root; NoOp when the gate is off or the platform is unsupported.
+    private readonly IApplicateModeTogglePriorityScope _priorityScope;
     private bool _disposed;
 
     internal static readonly TimeSpan HostRendererSettleFallbackTimeout = TimeSpan.FromMilliseconds(500);
 
-    public ApplicateAirspaceCompositor(Control coverHost, MainWindowViewModel viewModel)
+    public ApplicateAirspaceCompositor(
+        Control coverHost,
+        MainWindowViewModel viewModel,
+        IApplicateModeTogglePriorityScope? priorityScope = null)
         : this(
             coverHost,
             new MainWindowDocumentRevealState(viewModel),
             static () => new ModeRevealCoverPresenter(new ApplicateModeRevealCoverWindow()),
             new AvaloniaTwoFramePaintGate(),
-            new DispatcherAirspaceScheduler())
+            new DispatcherAirspaceScheduler(),
+            priorityScope)
     {
     }
 
@@ -51,13 +60,15 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
         IApplicateDocumentRevealState documentState,
         Func<IApplicateAirspaceCoverPresenter> coverFactory,
         IApplicateAirspacePaintGate paintGate,
-        IApplicateAirspaceScheduler? scheduler = null)
+        IApplicateAirspaceScheduler? scheduler = null,
+        IApplicateModeTogglePriorityScope? priorityScope = null)
     {
         _coverHost = coverHost ?? throw new ArgumentNullException(nameof(coverHost));
         _documentState = documentState ?? throw new ArgumentNullException(nameof(documentState));
         _coverFactory = coverFactory ?? throw new ArgumentNullException(nameof(coverFactory));
         _paintGate = paintGate ?? throw new ArgumentNullException(nameof(paintGate));
         _scheduler = scheduler ?? new DispatcherAirspaceScheduler();
+        _priorityScope = priorityScope ?? ApplicateModeToggleRendererPriorityScope.NoOp;
     }
 
     internal IDisposable RegisterStartupSession(
@@ -91,12 +102,17 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
     }
 
     internal IDisposable RegisterHostRevealSession(
-        IApplicateHostRevealIntents hostRevealIntents)
+        IApplicateHostRevealIntents hostRevealIntents,
+        Func<int?>? browserProcessIdAccessor = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(hostRevealIntents);
 
-        var session = new HostRevealSession(hostRevealIntents, _scheduler);
+        var session = new HostRevealSession(
+            hostRevealIntents,
+            _scheduler,
+            _priorityScope,
+            browserProcessIdAccessor);
         _hostRevealSessions.Add(session);
         return session;
     }
@@ -164,7 +180,8 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             slotAdapter,
             _coverFactory(),
             _scheduler,
-            getReadingPreferences);
+            getReadingPreferences,
+            _priorityScope);
         _modeSessions.Add(session);
         return session;
     }
@@ -206,12 +223,19 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             session.Dispose();
         }
         _modeSessions.Clear();
+
+        // Dispose the shared priority writer-owner AFTER every mode session so the
+        // mode session's terminal close/backstop runs first; the scope's Dispose
+        // is an unconditional restore-and-close backstop for any leaked lease.
+        _priorityScope.Dispose();
     }
 
     private sealed class HostRevealSession : IDisposable
     {
         private readonly IApplicateHostRevealIntents _hostRevealIntents;
         private readonly IApplicateAirspaceTimer _rendererSettleFallbackTimer;
+        private readonly IApplicateModeTogglePriorityScope _priorityScope;
+        private readonly Func<int?>? _browserProcessIdAccessor;
         private bool _reparentedThisCycle;
         private bool _rendererSettleArmed;
         private bool _documentRevealPending;
@@ -222,9 +246,13 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
 
         public HostRevealSession(
             IApplicateHostRevealIntents hostRevealIntents,
-            IApplicateAirspaceScheduler scheduler)
+            IApplicateAirspaceScheduler scheduler,
+            IApplicateModeTogglePriorityScope priorityScope,
+            Func<int?>? browserProcessIdAccessor)
         {
             _hostRevealIntents = hostRevealIntents;
+            _priorityScope = priorityScope;
+            _browserProcessIdAccessor = browserProcessIdAccessor;
             _rendererSettleFallbackTimer = scheduler.CreateTimer(
                 hostRevealIntents.RendererSettleFallbackTimeout,
                 OnRendererSettleFallbackTick);
@@ -246,6 +274,13 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
 
             ReleaseRendererSettleWait();
             _hostRevealIntents.ParkNativeWebViewForReparent();
+
+            if (e.IsTransactional)
+            {
+                // Known transactional hide: re-bump if already elevated (no-op
+                // before the initial post-final-hide begin). Event-driven only.
+                _priorityScope.ReapplyAfterKnownHide("attach-starting", ResolveBrowserProcessId());
+            }
         }
 
         private void OnAttachCompleted(object? sender, ApplicateHostAttachCompletedEventArgs e)
@@ -262,6 +297,7 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             }
 
             _hostRevealIntents.SetNativeWebViewVisibility(false);
+            _priorityScope.ReapplyAfterKnownHide("attach-completed", ResolveBrowserProcessId());
         }
 
         private void OnRenderStarting(object? sender, ApplicateHostRenderStartingEventArgs e)
@@ -293,6 +329,7 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             if (e.IsTransactional)
             {
                 _hostRevealIntents.SetNativeWebViewVisibility(false);
+                _priorityScope.ReapplyAfterKnownHide("render-starting", ResolveBrowserProcessId());
             }
         }
 
@@ -322,6 +359,11 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
                     "pane-seq",
                     "host-commit-waiting-bridge-native-reveal",
                     $"transactionGeneration={e.TransactionGeneration}");
+                // Priority-boost WORKAROUND initial bump: after the final
+                // transactional false-visibility write, before the reveal-wait
+                // returns. A later hide rewrites an existing bump to Idle, so this
+                // is the earliest placement that holds through the wait.
+                _priorityScope.BeginAfterFinalHide(e.TransactionGeneration, ResolveBrowserProcessId());
                 return;
             }
 
@@ -414,6 +456,20 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             }
 
             _rendererSettleArmed = false;
+        }
+
+        private int? ResolveBrowserProcessId()
+        {
+            try
+            {
+                return _browserProcessIdAccessor?.Invoke();
+            }
+            catch
+            {
+                // The browser-PID accessor is best-effort; any failure falls
+                // through to the shipped unbumped reveal.
+                return null;
+            }
         }
 
         private static void PrepareTargetForReveal(Panel target)
@@ -1516,6 +1572,7 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
         private readonly IApplicateAirspaceCoverPresenter _cover;
         private readonly IApplicateAirspaceScheduler _scheduler;
         private readonly Func<ReadingPreferences> _getReadingPreferences;
+        private readonly IApplicateModeTogglePriorityScope _priorityScope;
         private readonly ApplicateModeTransitionController _modeTransitionController = new(ApplicateMode.Viewer);
         private int _modeRevealCoverContinuationPending;
         private bool _modeRevealCoverArmed;
@@ -1535,7 +1592,8 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             IApplicateModeTransitionSlotAdapter slotAdapter,
             IApplicateAirspaceCoverPresenter cover,
             IApplicateAirspaceScheduler scheduler,
-            Func<ReadingPreferences> getReadingPreferences)
+            Func<ReadingPreferences> getReadingPreferences,
+            IApplicateModeTogglePriorityScope priorityScope)
         {
             _coverHost = coverHost;
             _hostRevealIntents = hostRevealIntents;
@@ -1543,6 +1601,7 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
             _cover = cover;
             _scheduler = scheduler;
             _getReadingPreferences = getReadingPreferences;
+            _priorityScope = priorityScope;
 
             _hostRevealIntents.CommitCompleted += OnTransactionCommitCompleted;
             _hostRevealIntents.MinimapSettled += OnTransactionMinimapSettled;
@@ -1643,6 +1702,11 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
                 _activeModeTransactionGeneration = generation;
                 _activeModeTransactionTarget = requestedMode.Value;
                 _slotAdapter.ApplyTransactionGenerationContext(requestedMode.Value, generation);
+                // Priority-boost WORKAROUND: record the positive generation before
+                // outgoing suppression. A different existing generation is closed
+                // first so two generations never own handles at once. No renderer
+                // is elevated yet (the bump happens after the final hide).
+                _priorityScope.Arm(generation, requestedMode.Value);
                 SuppressOutgoingNativeRendererForActiveTransaction(
                     generation,
                     outgoingMode,
@@ -1919,6 +1983,13 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
                         $"generation={generation} outgoing={outgoingMode?.ToString() ?? "(null)"} target={targetMode?.ToString() ?? "(null)"} reason={reason}");
                 }
 
+                // Priority-boost WORKAROUND terminal (rollback): restore every
+                // surviving renderer to Normal and close handles in the outer
+                // finally, before the cover hide, on every rollback route (rapid
+                // toggle, cancel, renderer failure, reconcile/commit-slot failure,
+                // rejected reveal, dispose). Never skips the outgoing-native
+                // restore ordering above it.
+                _priorityScope.Close(generation, "rollback:" + reason);
                 HideModeRevealCover();
             }
         }
@@ -2038,6 +2109,10 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
                 "pane-seq",
                 "host-hwnd-shown",
                 $"path=bridge-transaction transactionGeneration={generation}");
+            // Priority-boost WORKAROUND terminal (success): restore every surviving
+            // renderer to Normal and close handles before active state is cleared
+            // and before the cover animation.
+            _priorityScope.Close(generation, "success");
             _modeTransitionController.ResetDisplayedMode(mode);
             _activeModeTransactionGeneration = 0;
             _activeModeTransactionTarget = null;
@@ -2145,6 +2220,12 @@ internal sealed partial class ApplicateAirspaceCompositor : IDisposable
                     committedRollbackMode: null,
                     applyOutgoingSlotState: false);
             }
+
+            // Priority-boost WORKAROUND: unconditional close backstop. The
+            // rollback above already closed the scope for any active generation;
+            // this covers a scope left armed/elevated without an active
+            // transaction. The compositor disposes the scope itself afterwards.
+            _priorityScope.CloseAny("mode-session-dispose");
 
             _disposed = true;
             _hostRevealIntents.CommitCompleted -= OnTransactionCommitCompleted;

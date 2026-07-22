@@ -1557,17 +1557,29 @@ public sealed class ApplicateMainWindow : MainWindow
         // and edit-preview visuals, because those constructors can synchronously
         // attach the shared WebView host.
         _airspaceCompositor?.Dispose();
-        var airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel);
+        // Mode-toggle priority-boost WORKAROUND (opt-out; default enabled). The
+        // composition root resolves the gate + platform once and injects the
+        // resolved writer-owner; disabled or non-Windows composition uses the
+        // inert NoOp scope (zero native calls). Root cause (unfixed): Chromium's
+        // Idle-demotion of the hidden renderer under load — see
+        // work-items/bugs/2026-07-21-mode-toggle-circular-hidden-renderer-wait.md.
+        IApplicateModeTogglePriorityScope priorityScope =
+            ApplicateModeTogglePriorityBoostMode.IsEnabled && OperatingSystem.IsWindows()
+                ? new ApplicateModeToggleRendererPriorityScope(new WindowsWebViewRendererPriorityNative())
+                : ApplicateModeToggleRendererPriorityScope.NoOp;
+        var airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel, priorityScope);
         _airspaceCompositor = airspaceCompositor;
         if (viewerHostForMode is not null)
         {
             airspaceCompositor.RegisterHostRevealSession(
-                new SharedWebViewHostRevealIntents(viewerHostForMode));
+                new SharedWebViewHostRevealIntents(viewerHostForMode),
+                () => viewerHostForMode.View.WebViewBrowserProcessId);
         }
         if (editHost is not null && !ReferenceEquals(editHost, viewerHostForMode))
         {
             airspaceCompositor.RegisterHostRevealSession(
-                new SharedWebViewHostRevealIntents(editHost));
+                new SharedWebViewHostRevealIntents(editHost),
+                () => editHost.View.WebViewBrowserProcessId);
         }
 
         // GFM task-list checkbox clicks: the renderer posts task-toggle, the view

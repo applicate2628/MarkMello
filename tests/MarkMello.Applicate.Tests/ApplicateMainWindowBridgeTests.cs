@@ -457,7 +457,7 @@ public sealed class ApplicateMainWindowBridgeTests
         var removedType = "ApplicateThemeSwitchReveal" + "Coordinator";
 
         Assert.Contains("bool skipInitialViewerDocumentSwitchCover = false", codeBehind, StringComparison.Ordinal);
-        Assert.Contains("var airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel);", installSiblingViews, StringComparison.Ordinal);
+        Assert.Contains("var airspaceCompositor = new ApplicateAirspaceCompositor(siblingPanel, viewModel, priorityScope);", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("_airspaceCompositor = airspaceCompositor;", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("airspaceCompositor.RegisterDocumentSession(", installSiblingViews, StringComparison.Ordinal);
         Assert.Contains("viewerHostForMode,", installSiblingViews, StringComparison.Ordinal);

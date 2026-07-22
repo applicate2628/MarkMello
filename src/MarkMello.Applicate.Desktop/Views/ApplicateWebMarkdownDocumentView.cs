@@ -4095,6 +4095,44 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         TryApplyNativeUiColorScheme();
     }
 
+    // Best-effort, read-only browser-process id for the mode-toggle
+    // priority-boost WORKAROUND (ApplicateModeToggleRendererPriorityScope).
+    // The scope resolves the browser process to its --type=renderer children and
+    // bumps their OS priority for the bounded reveal-wait window. Root cause
+    // (unfixed): Chromium's Idle-demotion of the hidden renderer under load; see
+    // work-items/bugs/2026-07-21-mode-toggle-circular-hidden-renderer-wait.md.
+    //
+    // Null / unavailable COM state / disposal / access exceptions produce
+    // "unavailable" and NEVER escape into the reveal transaction — an
+    // unavailable id falls through to the shipped unbumped reveal.
+    public int? WebViewBrowserProcessId
+    {
+        get
+        {
+            try
+            {
+                var core = _nativeUiCore;
+                if (core is null)
+                {
+                    if (_webView.TryGetPlatformHandle() is not IWindowsWebView2PlatformHandle platformHandle
+                        || platformHandle.CoreWebView2 == IntPtr.Zero)
+                    {
+                        return null;
+                    }
+
+                    core = Microsoft.Web.WebView2.Core.CoreWebView2.CreateFromComICoreWebView2(platformHandle.CoreWebView2);
+                }
+
+                var browserProcessId = core.BrowserProcessId;
+                return browserProcessId == 0 ? null : (int)browserProcessId;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+    }
+
     // Themes the WebView2 native UI surfaces (context menu, print dialog) via
     // the official managed SDK: wrap the native ICoreWebView2 pointer Avalonia
     // exposes as a raw nint (CreateFromComICoreWebView2) and set
