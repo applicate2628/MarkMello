@@ -123,16 +123,9 @@
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
-        <Button Content="{Binding RecentClearLabel}"
-                Command="{Binding ClearRecentFilesCommand}"
-                Background="Transparent"
-                BorderThickness="0"
-                Padding="10,6"
-                HorizontalAlignment="Left"
-                HorizontalContentAlignment="Left"
-                FontSize="11"
-                Foreground="{DynamicResource MmTextFaintBrush}"
-                Cursor="Hand" />
+        <Button Classes="mm-recent-clear"
+                Content="{Binding RecentClearLabel}"
+                Command="{Binding ClearRecentFilesCommand}" />
       </StackPanel>
 
     </StackPanel>

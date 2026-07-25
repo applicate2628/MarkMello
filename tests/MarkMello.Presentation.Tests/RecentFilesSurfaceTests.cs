@@ -116,6 +116,35 @@ public sealed class RecentFilesSurfaceTests
     private static string ReadWelcomeViewSource()
         => ReadSource("src", "MarkMello.Presentation", "Views", "WelcomeView.axaml");
 
+    /// <summary>
+    /// Every interactive control on the welcome screen must carry a style class. A class-less Button
+    /// keeps the stock Fluent control theme, whose <c>:pointerover</c> state paints its own chrome over
+    /// the app palette AND overrides a locally-set Foreground -- measured: the label jumped to plain
+    /// black/white on hover while every neighbour used MmSurfaceHoverBrush. The clear-recent button
+    /// shipped exactly that way and no test saw it, which is why this guard exists.
+    /// </summary>
+    [Fact]
+    public void WelcomeClearControlIsStyledByClassNotByBareLocalSetters()
+    {
+        var welcome = ReadWelcomeViewSource();
+
+        var clearIndex = welcome.IndexOf("Command=\"{Binding ClearRecentFilesCommand}\"", StringComparison.Ordinal);
+        Assert.True(clearIndex >= 0, "Expected the welcome clear-recent button.");
+
+        var classesIndex = welcome.LastIndexOf("Classes=\"mm-recent-clear\"", clearIndex, StringComparison.Ordinal);
+        Assert.True(
+            classesIndex >= 0 && clearIndex - classesIndex < 200,
+            "The welcome clear-recent button must carry Classes=\"mm-recent-clear\"; without a class it "
+            + "inherits the stock Fluent hover template and its local Foreground is discarded on hover.");
+
+        var controls = ReadSource("src", "MarkMello.Presentation", "Themes", "Controls.axaml");
+        Assert.Contains("Selector=\"Button.mm-recent-clear\"", controls, StringComparison.Ordinal);
+        Assert.Contains(
+            "Selector=\"Button.mm-recent-clear:pointerover /template/ ContentPresenter\"",
+            controls,
+            StringComparison.Ordinal);
+    }
+
     private static string ReadSource(params string[] pathParts)
         => File.ReadAllText(Path.Combine(
             [AppContext.BaseDirectory, "..", "..", "..", "..", "..", .. pathParts]));

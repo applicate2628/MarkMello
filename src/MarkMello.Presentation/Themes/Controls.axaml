@@ -239,6 +239,25 @@
   <Style Selector="Button.mm-recent-remove:focus">
     <Setter Property="Opacity" Value="1" />
   </Style>
+  <!-- Welcome "clear recent" action. Needs its own class rather than bare local setters:
+       a class-less Button keeps the stock Fluent :pointerover template, which paints its own
+       chrome over the app palette AND overrides a locally-set Foreground, so the label jumped
+       to plain black/white on hover. Every other button on this screen carries a class for
+       exactly this reason. The cascade panel's clear item uses mm-menu-item and is unaffected. -->
+  <Style Selector="Button.mm-recent-clear">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="10,6" />
+    <Setter Property="HorizontalAlignment" Value="Left" />
+    <Setter Property="HorizontalContentAlignment" Value="Left" />
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="Foreground" Value="{DynamicResource MmTextFaintBrush}" />
+    <Setter Property="Cursor" Value="Hand" />
+  </Style>
+  <Style Selector="Button.mm-recent-clear:pointerover /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource MmSurfaceHoverBrush}" />
+    <Setter Property="TextElement.Foreground" Value="{DynamicResource MmTextBrush}" />
+  </Style>
 
   <!-- Keyboard hint pill -->
   <Style Selector="Border.kbd">
