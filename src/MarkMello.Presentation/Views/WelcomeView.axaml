@@ -82,29 +82,57 @@
         <ItemsControl ItemsSource="{Binding RecentFiles}">
           <ItemsControl.ItemTemplate>
             <DataTemplate x:DataType="vm:RecentFileItem">
-              <Button Classes="welcome-recent"
-                      HorizontalAlignment="Stretch"
-                      HorizontalContentAlignment="Left"
-                      Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).OpenRecentFileCommand}"
-                      CommandParameter="{Binding Path}"
-                      ToolTip.Tip="{Binding Path}">
-                <StackPanel Orientation="Horizontal" Spacing="8">
-                  <TextBlock Text="{Binding FileName}"
-                             FontFamily="{DynamicResource MmDocumentSerifFontFamily}"
-                             FontSize="13"
-                             Foreground="{DynamicResource MmTextBrush}"
-                             TextTrimming="CharacterEllipsis" />
-                  <TextBlock Text="{Binding DirectoryLabel}"
-                             FontFamily="{DynamicResource MmDocumentSansFontFamily}"
-                             FontSize="11"
-                             Foreground="{DynamicResource MmTextFaintBrush}"
-                             TextTrimming="CharacterEllipsis"
-                             VerticalAlignment="Center" />
-                </StackPanel>
-              </Button>
+              <Grid Classes="mm-recent-row"
+                    Background="Transparent"
+                    ColumnDefinitions="*,Auto">
+                <Button Grid.Column="0"
+                        Classes="welcome-recent"
+                        HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Left"
+                        Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).OpenRecentFileCommand}"
+                        CommandParameter="{Binding Path}"
+                        ToolTip.Tip="{Binding Path}">
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Text="{Binding FileName}"
+                               FontFamily="{DynamicResource MmDocumentSerifFontFamily}"
+                               FontSize="13"
+                               Foreground="{DynamicResource MmTextBrush}"
+                               TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding DirectoryLabel}"
+                               FontFamily="{DynamicResource MmDocumentSansFontFamily}"
+                               FontSize="11"
+                               Foreground="{DynamicResource MmTextFaintBrush}"
+                               TextTrimming="CharacterEllipsis"
+                               VerticalAlignment="Center" />
+                  </StackPanel>
+                </Button>
+                <Button Grid.Column="1"
+                        Classes="mm-recent-remove"
+                        Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).RemoveRecentFileCommand}"
+                        CommandParameter="{Binding Path}"
+                        ToolTip.Tip="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).RecentRemoveEntryTooltip}"
+                        AutomationProperties.Name="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).RecentRemoveEntryTooltip}">
+                  <Path Data="M0,0 L8,8 M8,0 L0,8"
+                        Width="8"
+                        Height="8"
+                        Stroke="{DynamicResource MmTextFaintBrush}"
+                        StrokeThickness="1.4"
+                        StrokeLineCap="Round" />
+                </Button>
+              </Grid>
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
+        <Button Content="{Binding RecentClearLabel}"
+                Command="{Binding ClearRecentFilesCommand}"
+                Background="Transparent"
+                BorderThickness="0"
+                Padding="10,6"
+                HorizontalAlignment="Left"
+                HorizontalContentAlignment="Left"
+                FontSize="11"
+                Foreground="{DynamicResource MmTextFaintBrush}"
+                Cursor="Hand" />
       </StackPanel>
 
     </StackPanel>
