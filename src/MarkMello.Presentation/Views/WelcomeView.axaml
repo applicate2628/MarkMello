@@ -69,17 +69,23 @@
                    VerticalAlignment="Center" />
       </StackPanel>
 
-      <!-- D11 Recent files: shown only when the persisted recent list is non-empty. -->
+      <!-- D11 Recent files: section shown whenever storage has ANY entry (HasStoredRecentFiles),
+           even if every stored path is currently unavailable; otherwise the clear affordance
+           below becomes unreachable while entries stay in applicate-session.json forever (see
+           work-items/bugs/2026-07-26-recent-clear-unreachable-when-all-paths-unavailable.md). The
+           row list itself stays gated on HasRecentFiles (the display-pruned subset) so nothing
+           renders for an unavailable entry. -->
       <StackPanel Spacing="2"
                   Margin="0,30,0,0"
-                  IsVisible="{Binding HasRecentFiles}">
+                  IsVisible="{Binding HasStoredRecentFiles}">
         <TextBlock Text="{Binding RecentFilesHeader}"
                    FontFamily="{DynamicResource MmDocumentSansFontFamily}"
                    FontSize="11"
                    FontWeight="SemiBold"
                    Foreground="{DynamicResource MmTextFaintBrush}"
                    Margin="10,0,0,4" />
-        <ItemsControl ItemsSource="{Binding RecentFiles}">
+        <ItemsControl ItemsSource="{Binding RecentFiles}"
+                      IsVisible="{Binding HasRecentFiles}">
           <ItemsControl.ItemTemplate>
             <DataTemplate x:DataType="vm:RecentFileItem">
               <Grid Classes="mm-recent-row"

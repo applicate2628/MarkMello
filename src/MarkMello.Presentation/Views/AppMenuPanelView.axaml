@@ -53,11 +53,15 @@
                     EndPoint="1,0.5" />
 
               <!-- D11 Recent-files cascade entry: mirrors the Export row exactly, gated on
-                   HasRecentFiles (both the row and its own divider) so a zero-entry list
-                   leaves no orphan divider gap. Opens the AppRecent sub-column via the
-                   same cascade mechanism as Export/Settings/Updates. -->
+                   HasStoredRecentFiles (both the row and its own divider) so a zero-entry
+                   STORED list leaves no orphan divider gap, but a stored-non-empty list
+                   with every entry currently unavailable still shows this row, since it is
+                   the ONLY route into the AppRecent cascade that hosts "Clear recent files"
+                   (work-items/bugs/2026-07-26-recent-clear-unreachable-when-all-paths-unavailable.md).
+                   Opens the AppRecent sub-column via the same cascade mechanism as
+                   Export/Settings/Updates. -->
               <Button Classes="mm-menu-item"
-                      IsVisible="{Binding HasRecentFiles}"
+                      IsVisible="{Binding HasStoredRecentFiles}"
                       AutomationProperties.Name="{Binding AppMenuRecentHeader}"
                       Command="{Binding OpenAppRecentCommand}">
                 <Grid ColumnDefinitions="*,Auto"
@@ -77,7 +81,7 @@
               </Button>
 
               <Line Classes="mm-setting-divider"
-                    IsVisible="{Binding HasRecentFiles}"
+                    IsVisible="{Binding HasStoredRecentFiles}"
                     StartPoint="0,0.5"
                     EndPoint="1,0.5" />
 

@@ -22,6 +22,20 @@ public partial class MainWindowViewModel
 
     public bool HasRecentFiles => RecentFiles.Count > 0;
 
+    /// <summary>
+    /// True when the host's persisted recent-path list had ANY entry on the last
+    /// <see cref="SetRecentFiles"/> push, regardless of whether that entry is currently available
+    /// on disk. Distinct from <see cref="HasRecentFiles"/> (the display-pruned subset): gates
+    /// section/row VISIBILITY so the clear affordance stays reachable even when every stored path
+    /// is temporarily unavailable
+    /// (work-items/bugs/2026-07-26-recent-clear-unreachable-when-all-paths-unavailable.md).
+    /// Derived from the <c>paths</c> argument <see cref="SetRecentFiles"/> already receives -- the
+    /// host's existing mirror push already carries the full stored list before display-pruning --
+    /// never by having the VM read storage itself (ownership decision d11).
+    /// </summary>
+    [ObservableProperty]
+    private bool _hasStoredRecentFiles;
+
     public string RecentFilesHeader => _localization["WelcomeRecentHeader"];
 
     /// <summary>Intent-only: forget one entry. The host (subscribed) owns removal + persist.</summary>
@@ -37,6 +51,8 @@ public partial class MainWindowViewModel
     public void SetRecentFiles(IReadOnlyList<string> paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
+
+        HasStoredRecentFiles = paths.Count > 0;
 
         var items = new List<RecentFileItem>();
         foreach (var path in paths)
@@ -54,12 +70,15 @@ public partial class MainWindowViewModel
 
         RecentFiles = new ObservableCollection<RecentFileItem>(items);
 
-        // F9: the Recent cascade has nothing left to show once the mirrored list goes empty --
-        // header/divider/clear button would keep rendering with no reachable entries and no
-        // effective clear target, a dead end for a user mid-clear/mid-remove. Fall back to the
-        // parent app-menu column instead of closing the whole menu (settled UX: remove/clear
-        // never close the menu). Guarded on the cascade actually being open so this never fires
-        // for the welcome screen or any other overlay state.
+        // F9: the Recent cascade has nothing left to show in its row list once the mirrored
+        // display goes empty -- fall back to the parent app-menu column instead of closing the
+        // whole menu (settled UX: remove/clear never close the menu). This is a UX preference,
+        // not a reachability requirement: the clear button stays functional either way (it acts
+        // on stored paths, not the display), and the AppMenu row that reopens this cascade is
+        // gated on HasStoredRecentFiles, which only turns false once storage itself is empty too
+        // -- see work-items/bugs/2026-07-26-recent-clear-unreachable-when-all-paths-unavailable.md.
+        // Guarded on the cascade actually being open so this never fires for the welcome screen or
+        // any other overlay state.
         if (RecentFiles.Count == 0 && ShellOverlay == ShellOverlayKind.AppRecent)
         {
             ShellOverlay = ShellOverlayKind.AppMenu;
@@ -99,8 +118,8 @@ public partial class MainWindowViewModel
     /// <summary>
     /// Opens the Recent sub-column beside the app menu, mirroring <c>OpenAppExport</c>
     /// (<c>MainWindowViewModel.Export.cs</c>). The menu row that invokes this is itself
-    /// gated on <see cref="HasRecentFiles"/>, so there is no separate CanExecute guard here
-    /// -- matching the unconditional Settings/Updates/About menu entries rather than
+    /// gated on <see cref="HasStoredRecentFiles"/>, so there is no separate CanExecute guard
+    /// here -- matching the unconditional Settings/Updates/About menu entries rather than
     /// Export's document-dependent one.
     /// </summary>
     [RelayCommand]

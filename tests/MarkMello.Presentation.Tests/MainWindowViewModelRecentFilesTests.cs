@@ -96,6 +96,87 @@ public sealed class MainWindowViewModelRecentFilesTests : IDisposable
         Assert.Equal(existingPath, displayed.Path);
     }
 
+    /// <summary>
+    /// The confirmed defect (work-items/bugs/2026-07-26-recent-clear-unreachable-when-all-paths-unavailable.md):
+    /// the F9 test below only ever exercised SetRecentFiles([]) -- an EMPTY input -- and never a
+    /// NON-EMPTY persisted list filtered to an empty display, which is exactly what happens when
+    /// every stored path is temporarily unavailable. HasStoredRecentFiles must stay true (the
+    /// clear affordance's gating predicate) even though HasRecentFiles (the display subset) is
+    /// false -- the two predicates must NOT collapse into one, or the section/row hides again
+    /// with entries still in storage and no way to reach clear.
+    /// </summary>
+    [Fact]
+    public void SetRecentFilesWithOnlyUnavailablePathsKeepsStoredTrueButDisplayFalse()
+    {
+        var harness = CreateHarness();
+        var missingPath = Path.Combine(
+            Path.GetTempPath(),
+            "MarkMello.Tests.RecentFiles",
+            Guid.NewGuid().ToString("N") + "-missing.md");
+
+        harness.ViewModel.SetRecentFiles([missingPath]);
+
+        Assert.True(
+            harness.ViewModel.HasStoredRecentFiles,
+            "Storage has one entry (even though it is unavailable), so the clear affordance's gating predicate must be true.");
+        Assert.False(harness.ViewModel.HasRecentFiles, "No entry is available on disk, so the display list must stay empty.");
+        Assert.Empty(harness.ViewModel.RecentFiles);
+    }
+
+    /// <summary>
+    /// Negative guard for the same fix: genuinely empty storage must still hide the section --
+    /// HasStoredRecentFiles is not a permanently-true escape hatch, it tracks the actual last
+    /// pushed list.
+    /// </summary>
+    [Fact]
+    public void SetRecentFilesWithNoStoredPathsHidesTheStoredSection()
+    {
+        var harness = CreateHarness();
+
+        harness.ViewModel.SetRecentFiles([]);
+
+        Assert.False(harness.ViewModel.HasStoredRecentFiles);
+        Assert.False(harness.ViewModel.HasRecentFiles);
+    }
+
+    /// <summary>
+    /// End-to-end proof (not just gating) that clear actually WORKS in the defect's exact
+    /// scenario: storage non-empty, display empty. Wires <see cref="MainWindowViewModel.RecentFilesClearRequested"/>
+    /// with the same mirror-then-persist contract the real host (<c>ApplicateMainWindow.InstallActiveDocumentBridge</c>)
+    /// uses, so this is not merely asserting the command raises an event -- it proves the
+    /// simulated stored list is actually emptied and re-mirrored, and that HasStoredRecentFiles
+    /// then correctly flips back to false.
+    /// </summary>
+    [Fact]
+    public void ClearIsReachableAndFunctionalWhenStorageNonEmptyButDisplayIsEmpty()
+    {
+        var harness = CreateHarness();
+        var missingPath = Path.Combine(
+            Path.GetTempPath(),
+            "MarkMello.Tests.RecentFiles",
+            Guid.NewGuid().ToString("N") + "-missing.md");
+        var simulatedStorage = new List<string> { missingPath };
+        harness.ViewModel.SetRecentFiles(simulatedStorage);
+
+        Assert.True(harness.ViewModel.HasStoredRecentFiles);
+        Assert.False(harness.ViewModel.HasRecentFiles);
+
+        var persistCalls = 0;
+        harness.ViewModel.RecentFilesClearRequested += (_, _) =>
+        {
+            simulatedStorage.Clear();
+            harness.ViewModel.SetRecentFiles(simulatedStorage);
+            persistCalls++;
+        };
+
+        harness.ViewModel.ClearRecentFilesCommand.Execute(null);
+
+        Assert.Equal(1, persistCalls);
+        Assert.Empty(simulatedStorage);
+        Assert.False(harness.ViewModel.HasStoredRecentFiles);
+        Assert.False(harness.ViewModel.HasRecentFiles);
+    }
+
     [Fact]
     public async Task OpenRecentFileClosesAppMenuOverlayAndLoadsTheDocument()
     {

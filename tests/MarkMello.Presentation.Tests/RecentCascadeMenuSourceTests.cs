@@ -14,8 +14,16 @@ namespace MarkMello.Presentation.Tests;
 /// </summary>
 public sealed class RecentCascadeMenuSourceTests
 {
+    /// <summary>
+    /// UPDATED for the 2026-07-26 fix
+    /// (work-items/bugs/2026-07-26-recent-clear-unreachable-when-all-paths-unavailable.md): this
+    /// row is the ONLY route into the AppRecent cascade that hosts "Clear recent files", so it
+    /// (and its divider) must gate on HasStoredRecentFiles ("is anything stored") rather than the
+    /// old HasRecentFiles ("is anything displayable") -- otherwise a fully-unavailable stored list
+    /// hides the row and the clear affordance behind it becomes unreachable.
+    /// </summary>
     [Fact]
-    public void AppMenuRowOpensRecentCascadeGatedOnHasRecentFiles()
+    public void AppMenuRowAndDividerOpenRecentCascadeGatedOnHasStoredRecentFiles()
     {
         var appMenu = ReadSource("src", "MarkMello.Presentation", "Views", "AppMenuPanelView.axaml");
 
@@ -27,7 +35,16 @@ public sealed class RecentCascadeMenuSourceTests
         var buttonEnd = appMenu.IndexOf('>', rowIndex);
         var buttonOpenTag = appMenu[buttonStart..buttonEnd];
 
-        Assert.Contains("IsVisible=\"{Binding HasRecentFiles}\"", buttonOpenTag, StringComparison.Ordinal);
+        Assert.Contains("IsVisible=\"{Binding HasStoredRecentFiles}\"", buttonOpenTag, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsVisible=\"{Binding HasRecentFiles}\"", buttonOpenTag, StringComparison.Ordinal);
+
+        var dividerIndex = appMenu.IndexOf("mm-setting-divider", buttonEnd, StringComparison.Ordinal);
+        Assert.True(dividerIndex > buttonEnd, "Expected the divider following the Recent row.");
+        var dividerVisibleIndex = appMenu.IndexOf("IsVisible=\"{Binding HasStoredRecentFiles}\"", dividerIndex, StringComparison.Ordinal);
+        Assert.True(
+            dividerVisibleIndex > dividerIndex && dividerVisibleIndex < dividerIndex + 100,
+            "The divider following the Recent row must gate on the same HasStoredRecentFiles "
+            + "predicate as the row, so a zero-STORED list leaves no orphan divider gap.");
     }
 
     /// <summary>

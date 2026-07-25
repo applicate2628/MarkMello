@@ -49,15 +49,39 @@ public sealed class RecentFilesSurfaceTests
         Assert.Equal("RecentFiles", match.Groups[1].Value);
     }
 
+    /// <summary>
+    /// UPDATED for the 2026-07-26 fix
+    /// (work-items/bugs/2026-07-26-recent-clear-unreachable-when-all-paths-unavailable.md): the
+    /// outer section (header + row list + clear button) used to gate on HasRecentFiles alone, so
+    /// a fully-unavailable stored list collapsed the WHOLE block including the clear button,
+    /// leaving no way to ever clear it. The section now gates on HasStoredRecentFiles ("is
+    /// anything stored") while the row list underneath keeps the OLD HasRecentFiles gate ("is
+    /// anything displayable") -- two distinct predicates, not one. This test pins both halves so a
+    /// future edit cannot silently re-collapse them back into a single gate.
+    /// </summary>
     [Fact]
-    public void WelcomeRecentBlockStaysGatedOnHasRecentFiles()
+    public void WelcomeRecentSectionGatedOnStoredWhileRowListStaysGatedOnDisplay()
     {
         var welcome = ReadWelcomeViewSource();
 
         var recentBlockIndex = welcome.IndexOf("D11 Recent files", StringComparison.Ordinal);
         Assert.True(recentBlockIndex >= 0, "The recent-files block comment should still mark the block.");
-        var visibleIndex = welcome.IndexOf("IsVisible=\"{Binding HasRecentFiles}\"", recentBlockIndex, StringComparison.Ordinal);
-        Assert.True(visibleIndex > recentBlockIndex, "The recent-files block must stay gated on HasRecentFiles.");
+
+        var sectionVisibleIndex = welcome.IndexOf("IsVisible=\"{Binding HasStoredRecentFiles}\"", recentBlockIndex, StringComparison.Ordinal);
+        Assert.True(
+            sectionVisibleIndex > recentBlockIndex,
+            "The recent-files SECTION must stay gated on HasStoredRecentFiles, so the clear "
+            + "affordance stays reachable even when every stored path is unavailable.");
+
+        var itemsSourceIndex = welcome.IndexOf("ItemsSource=\"{Binding RecentFiles}\"", sectionVisibleIndex, StringComparison.Ordinal);
+        Assert.True(itemsSourceIndex > sectionVisibleIndex, "Expected the recent-files ItemsControl after the section gate.");
+
+        var rowListVisibleIndex = welcome.IndexOf("IsVisible=\"{Binding HasRecentFiles}\"", itemsSourceIndex, StringComparison.Ordinal);
+        Assert.True(
+            rowListVisibleIndex > itemsSourceIndex && rowListVisibleIndex < itemsSourceIndex + 100,
+            "The row LIST itself must stay gated on HasRecentFiles (the display-pruned subset), "
+            + "distinct from the section's HasStoredRecentFiles gate -- collapsing both "
+            + "predicates into one would silently reintroduce the unreachable-clear defect.");
     }
 
     [Fact]
