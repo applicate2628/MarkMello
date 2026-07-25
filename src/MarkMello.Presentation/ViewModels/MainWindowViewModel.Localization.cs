@@ -73,6 +73,7 @@ public partial class MainWindowViewModel
         nameof(AppMenuOpenFileLabel),
         nameof(AppMenuPrintHint),
         nameof(AppMenuPrintLabel),
+        nameof(AppMenuRecentHeader),
         nameof(AppMenuSettingsHint),
         nameof(AppMenuSettingsLabel),
         nameof(AppMenuTocHint),
@@ -163,6 +164,9 @@ public partial class MainWindowViewModel
         nameof(ReadingWidthMedium),
         nameof(ReadingWidthNarrow),
         nameof(ReadingWidthWide),
+        nameof(RecentClearHint),
+        nameof(RecentClearLabel),
+        nameof(RecentRemoveEntryTooltip),
         nameof(ResetSettingsHint),
         nameof(ResetSettingsLabel),
         nameof(StatusOpen),
@@ -208,6 +212,7 @@ public partial class MainWindowViewModel
     public string AppMenuOpenFileLabel => _localization["AppMenuOpenFileLabel"];
     public string AppMenuPrintHint => _localization["AppMenuPrintHint"];
     public string AppMenuPrintLabel => _localization["AppMenuPrintLabel"];
+    public string AppMenuRecentHeader => _localization["AppMenuRecentHeader"];
     public string AppMenuSettingsHint => _localization["AppMenuSettingsHint"];
     public string AppMenuSettingsLabel => _localization["AppMenuSettingsLabel"];
     public string AppMenuTocHint => _localization["AppMenuTocHint"];
@@ -293,6 +298,9 @@ public partial class MainWindowViewModel
     public string ReadingWidthMedium => _localization["ReadingWidthMedium"];
     public string ReadingWidthNarrow => _localization["ReadingWidthNarrow"];
     public string ReadingWidthWide => _localization["ReadingWidthWide"];
+    public string RecentClearHint => _localization["RecentClearHint"];
+    public string RecentClearLabel => _localization["RecentClearLabel"];
+    public string RecentRemoveEntryTooltip => _localization["RecentRemoveEntryTooltip"];
     public string ResetSettingsHint => _localization["ResetSettingsHint"];
     public string ResetSettingsLabel => _localization["ResetSettingsLabel"];
     public string StatusOpen => _localization["StatusOpen"];
