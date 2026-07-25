@@ -192,6 +192,7 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(IsSettingsOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppMenuOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppExportOpen))]
+    [NotifyPropertyChangedFor(nameof(IsAppRecentOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppSettingsOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppAboutOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppUpdatesOpen))]
@@ -226,6 +227,7 @@ public partial class MainWindowViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(ShowsAppMenuControl))]
     [NotifyPropertyChangedFor(nameof(IsAppMenuOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppExportOpen))]
+    [NotifyPropertyChangedFor(nameof(IsAppRecentOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppSettingsOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppAboutOpen))]
     [NotifyPropertyChangedFor(nameof(IsAppUpdatesOpen))]
@@ -326,6 +328,8 @@ public partial class MainWindowViewModel : ObservableObject
 
     public bool IsAppExportOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppExport;
 
+    public bool IsAppRecentOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppRecent;
+
     public bool IsAppSettingsOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppSettings;
 
     public bool IsAppAboutOpen => ShowsAppMenuControl && ShellOverlay == ShellOverlayKind.AppAbout;
@@ -336,6 +340,7 @@ public partial class MainWindowViewModel : ObservableObject
         && ShellOverlay is
             ShellOverlayKind.AppMenu
             or ShellOverlayKind.AppExport
+            or ShellOverlayKind.AppRecent
             or ShellOverlayKind.AppSettings
             or ShellOverlayKind.AppAbout
             or ShellOverlayKind.AppUpdates;
@@ -1548,6 +1553,7 @@ public partial class MainWindowViewModel : ObservableObject
         OnPropertyChanged(nameof(CanShowTopLevelUpdateNotification));
         OnPropertyChanged(nameof(IsAppMenuOpen));
         OnPropertyChanged(nameof(IsAppExportOpen));
+        OnPropertyChanged(nameof(IsAppRecentOpen));
         OnPropertyChanged(nameof(IsAppSettingsOpen));
         OnPropertyChanged(nameof(IsAppAboutOpen));
         OnPropertyChanged(nameof(IsAppUpdatesOpen));
@@ -2644,6 +2650,7 @@ public partial class MainWindowViewModel : ObservableObject
         if (ShellOverlay is
             ShellOverlayKind.AppMenu
             or ShellOverlayKind.AppExport
+            or ShellOverlayKind.AppRecent
             or ShellOverlayKind.AppSettings
             or ShellOverlayKind.AppAbout
             or ShellOverlayKind.AppUpdates)

@@ -4,7 +4,9 @@ namespace MarkMello.Presentation.Tests;
 /// Recent-files DELTA (P4): the welcome-screen row gains a per-entry remove affordance and a
 /// clear-all control beside the existing open affordance. Source-text checks only -- no Avalonia
 /// headless host is available in this project, matching the sibling <c>ExportMenuSourceTests</c>
-/// convention. P5 extends this file with the app-menu inline section's equivalent checks.
+/// convention. P5 (REPLACED) mirrors the Export cascade instead of an inline app-menu section
+/// (see <c>RecentCascadeMenuSourceTests</c>); this file keeps the welcome-only checks plus two
+/// regression guards that protect the hover-reveal mechanism BOTH surfaces reuse.
 /// </summary>
 public sealed class RecentFilesSurfaceTests
 {
@@ -68,16 +70,53 @@ public sealed class RecentFilesSurfaceTests
         Assert.Contains("Content=\"{Binding RecentClearLabel}\"", welcome, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Regression guard: the hover-reveal mechanism is diff-invisible to every other test here
+    /// (all three selectors could be deleted from Controls.axaml and every remaining assertion
+    /// in this file, and in the cascade, would still pass -- the `x` would just never appear).
+    /// Pins the three P4 selectors so a future edit cannot silently drop them.
+    /// </summary>
+    [Fact]
+    public void RecentRemoveHoverRevealSelectorsArePresentInControlsAxaml()
+    {
+        var controls = ReadSource("src", "MarkMello.Presentation", "Themes", "Controls.axaml");
+
+        Assert.Contains("Selector=\"Button.mm-recent-remove\"", controls, StringComparison.Ordinal);
+        Assert.Contains(
+            "Selector=\"Grid.mm-recent-row:pointerover Button.mm-recent-remove\"",
+            controls,
+            StringComparison.Ordinal);
+        Assert.Contains("Selector=\"Button.mm-recent-remove:focus\"", controls, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Regression guard: an Avalonia Grid/Panel/Border with no Background does not participate
+    /// in hit-testing, so the pointer would pass through and ":pointerover" would never activate
+    /// on Grid.mm-recent-row -- silently disabling the hover reveal without touching any
+    /// selector. Both surfaces that host the row (welcome screen, app-menu cascade) must declare
+    /// Background="Transparent" on that row container.
+    /// </summary>
+    [Fact]
+    public void RecentRowContainersDeclareTransparentBackgroundForHitTesting()
+    {
+        var welcome = ReadWelcomeViewSource();
+        var cascadePanel = ReadSource("src", "MarkMello.Presentation", "Views", "AppRecentPanelView.axaml");
+
+        foreach (var source in new[] { welcome, cascadePanel })
+        {
+            var rowIndex = source.IndexOf("Classes=\"mm-recent-row\"", StringComparison.Ordinal);
+            Assert.True(rowIndex >= 0, "Expected a Classes=\"mm-recent-row\" row container.");
+            var backgroundIndex = source.IndexOf("Background=\"Transparent\"", rowIndex, StringComparison.Ordinal);
+            Assert.True(
+                backgroundIndex > rowIndex && backgroundIndex < rowIndex + 120,
+                "The mm-recent-row container must declare Background=\"Transparent\" right beside its Classes, or :pointerover never hit-tests.");
+        }
+    }
+
     private static string ReadWelcomeViewSource()
+        => ReadSource("src", "MarkMello.Presentation", "Views", "WelcomeView.axaml");
+
+    private static string ReadSource(params string[] pathParts)
         => File.ReadAllText(Path.Combine(
-            AppContext.BaseDirectory,
-            "..",
-            "..",
-            "..",
-            "..",
-            "..",
-            "src",
-            "MarkMello.Presentation",
-            "Views",
-            "WelcomeView.axaml"));
+            [AppContext.BaseDirectory, "..", "..", "..", "..", "..", .. pathParts]));
 }

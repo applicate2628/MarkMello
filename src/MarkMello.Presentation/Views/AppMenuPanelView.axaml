@@ -52,6 +52,35 @@
                     StartPoint="0,0.5"
                     EndPoint="1,0.5" />
 
+              <!-- D11 Recent-files cascade entry: mirrors the Export row exactly, gated on
+                   HasRecentFiles (both the row and its own divider) so a zero-entry list
+                   leaves no orphan divider gap. Opens the AppRecent sub-column via the
+                   same cascade mechanism as Export/Settings/Updates. -->
+              <Button Classes="mm-menu-item"
+                      IsVisible="{Binding HasRecentFiles}"
+                      AutomationProperties.Name="{Binding AppMenuRecentHeader}"
+                      Command="{Binding OpenAppRecentCommand}">
+                <Grid ColumnDefinitions="*,Auto"
+                      ColumnSpacing="12">
+                  <StackPanel Grid.Column="0"
+                              Spacing="2"
+                              HorizontalAlignment="Left">
+                    <TextBlock Classes="mm-setting-label"
+                               Text="{Binding AppMenuRecentHeader}" />
+                    <TextBlock Classes="mm-setting-hint"
+                               Text="{Binding AppMenuRecentHint}" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1"
+                             Classes="mm-setting-meta"
+                             Text="{Binding MetaOpen}" />
+                </Grid>
+              </Button>
+
+              <Line Classes="mm-setting-divider"
+                    IsVisible="{Binding HasRecentFiles}"
+                    StartPoint="0,0.5"
+                    EndPoint="1,0.5" />
+
               <Button Classes="mm-menu-item"
                       Command="{Binding CloseFileCommand}">
                 <Grid ColumnDefinitions="*,Auto"

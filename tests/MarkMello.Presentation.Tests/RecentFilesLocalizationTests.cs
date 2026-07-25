@@ -6,16 +6,20 @@ using MarkMello.Presentation.ViewModels;
 namespace MarkMello.Presentation.Tests;
 
 /// <summary>
-/// Recent-files DELTA (P3): the four new localization keys must resolve in both languages,
-/// be exposed as a public read-only VM property of the same name, and be registered in
-/// <c>LocalizedBindingPropertyNames</c> -- an unregistered property renders stale after a
-/// language switch (the P4/P5 welcome and app-menu consumers bind these properties).
+/// Recent-files DELTA (P3, extended by the P5 cascade replacement): every localization key this
+/// delta adds must resolve in both languages, be exposed as a public read-only VM property of the
+/// same name, and be registered in <c>LocalizedBindingPropertyNames</c> -- an unregistered
+/// property renders stale after a language switch (the welcome row and the app-menu cascade
+/// panel bind these properties).
 /// </summary>
 public sealed class RecentFilesLocalizationTests
 {
     private static readonly string[] RecentFilesLocalizationProperties =
     [
         "AppMenuRecentHeader",
+        "AppMenuRecentHint",
+        "AppRecentHeader",
+        "OverlayCloseRecent",
         "RecentClearLabel",
         "RecentClearHint",
         "RecentRemoveEntryTooltip",

@@ -125,6 +125,25 @@ public sealed class MainWindowViewModelRecentFilesTests : IDisposable
         Assert.Null(clearException);
     }
 
+    /// <summary>
+    /// Regression guard: <c>CloseAppOverlayCore</c> (the handler <c>OnIsEditModeChanged</c> uses
+    /// to auto-close the app menu on entering edit mode) enumerates every App* ShellOverlayKind
+    /// member by name. Adding AppRecent to the enum without adding it to that enumeration would
+    /// leave ShellOverlay stuck at AppRecent -- silently -- the moment edit mode starts while the
+    /// cascade is open, since none of Export/Settings/About/Updates exercise this path either.
+    /// </summary>
+    [Fact]
+    public void EnteringEditModeClosesTheOpenRecentCascade()
+    {
+        var harness = CreateHarness();
+        harness.ViewModel.OpenAppRecentCommand.Execute(null);
+        Assert.Equal(ShellOverlayKind.AppRecent, harness.ViewModel.ShellOverlay);
+
+        harness.ViewModel.IsEditMode = true;
+
+        Assert.Equal(ShellOverlayKind.None, harness.ViewModel.ShellOverlay);
+    }
+
     [Fact]
     public void SetRecentFilesBodyNeverReferencesHostStorage()
     {

@@ -1,0 +1,112 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:MarkMello.Presentation.ViewModels"
+             mc:Ignorable="d"
+             x:Class="MarkMello.Presentation.Views.AppRecentPanelView"
+             x:DataType="vm:MainWindowViewModel">
+  <Border Classes="mm-settings-panel mm-popover-left mm-app-recent-panel"
+          Width="320">
+    <StackPanel>
+      <Border Classes="mm-settings-head-shell">
+        <Grid ColumnDefinitions="Auto,*,Auto"
+              ColumnSpacing="12">
+          <Button Grid.Column="0"
+                  Classes="mm-settings-close"
+                  Command="{Binding ReturnToAppMenuCommand}"
+                  ToolTip.Tip="{Binding OverlayBackToMenu}">
+            <Path Data="M9.5,1.5 L2.5,5.5 L9.5,9.5"
+                  Stroke="{DynamicResource MmTextFaintBrush}"
+                  StrokeThickness="1.4"
+                  StrokeLineCap="Round"
+                  StrokeJoin="Round"
+                  Fill="Transparent" />
+          </Button>
+          <TextBlock Grid.Column="1"
+                     Classes="mm-settings-title"
+                     VerticalAlignment="Center"
+                     Text="{Binding AppRecentHeader}" />
+          <Button Grid.Column="2"
+                  Classes="mm-settings-close"
+                  Command="{Binding CloseOverlayCommand}"
+                  ToolTip.Tip="{Binding OverlayCloseRecent}">
+            <Path Data="M0,0 L10,10 M10,0 L0,10"
+                  Stroke="{DynamicResource MmTextFaintBrush}"
+                  StrokeThickness="1.4"
+                  StrokeLineCap="Round" />
+          </Button>
+        </Grid>
+      </Border>
+
+      <Border Classes="mm-settings-body-shell">
+        <StackPanel Spacing="0">
+          <!-- Row shape proven on the welcome screen (P4): open button + hover-revealed
+               remove button as SIBLINGS in a 2-column grid, never nested (a Button nested
+               inside a Button swallows the outer click). Background="Transparent" on the
+               row Grid is required for :pointerover to hit-test at all: an Avalonia Grid
+               with no Background does not participate in hit-testing. Reuses the three
+               P4 selectors in Themes/Controls.axaml (Button.mm-recent-remove,
+               Grid.mm-recent-row:pointerover Button.mm-recent-remove,
+               Button.mm-recent-remove:focus); no duplicate selectors added here. Text
+               uses the mm-setting-label/mm-setting-hint idiom (vertical StackPanel), not
+               a horizontal StackPanel of raw TextBlocks: a horizontal StackPanel measures
+               children with infinite width, so TextTrimming never fires and long
+               filenames/paths get hard-clipped by this panel's ClipToBounds. -->
+          <ItemsControl ItemsSource="{Binding RecentFiles}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:RecentFileItem">
+                <Grid Classes="mm-recent-row"
+                      Background="Transparent"
+                      ColumnDefinitions="*,Auto">
+                  <Button Grid.Column="0"
+                          Classes="mm-menu-item"
+                          Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).OpenRecentFileCommand}"
+                          CommandParameter="{Binding Path}"
+                          ToolTip.Tip="{Binding Path}">
+                    <StackPanel Spacing="2"
+                                HorizontalAlignment="Left">
+                      <TextBlock Classes="mm-setting-label"
+                                 Text="{Binding FileName}" />
+                      <TextBlock Classes="mm-setting-hint"
+                                 Text="{Binding DirectoryLabel}" />
+                    </StackPanel>
+                  </Button>
+                  <Button Grid.Column="1"
+                          Classes="mm-recent-remove"
+                          Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).RemoveRecentFileCommand}"
+                          CommandParameter="{Binding Path}"
+                          ToolTip.Tip="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).RecentRemoveEntryTooltip}"
+                          AutomationProperties.Name="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).RecentRemoveEntryTooltip}">
+                    <Path Data="M0,0 L8,8 M8,0 L0,8"
+                          Width="8"
+                          Height="8"
+                          Stroke="{DynamicResource MmTextFaintBrush}"
+                          StrokeThickness="1.4"
+                          StrokeLineCap="Round" />
+                  </Button>
+                </Grid>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+
+          <Line Classes="mm-setting-divider"
+                StartPoint="0,0.5"
+                EndPoint="1,0.5" />
+
+          <Button Classes="mm-menu-item"
+                  AutomationProperties.Name="{Binding RecentClearLabel}"
+                  Command="{Binding ClearRecentFilesCommand}">
+            <StackPanel Spacing="2"
+                        HorizontalAlignment="Left">
+              <TextBlock Classes="mm-setting-label"
+                         Text="{Binding RecentClearLabel}" />
+              <TextBlock Classes="mm-setting-hint"
+                         Text="{Binding RecentClearHint}" />
+            </StackPanel>
+          </Button>
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </Border>
+</UserControl>

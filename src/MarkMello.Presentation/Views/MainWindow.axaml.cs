@@ -42,6 +42,7 @@ public partial class MainWindow : Window
     private WindowPlacement? _lastNormalWindowPlacement;
     private AppMenuPanelView? _appMenuPanelView;
     private AppExportPanelView? _appExportPanelView;
+    private AppRecentPanelView? _appRecentPanelView;
     private AppSettingsPanelView? _appSettingsPanelView;
     private AppAboutPanelView? _appAboutPanelView;
     private AppUpdatesPanelView? _appUpdatesPanelView;
@@ -367,6 +368,7 @@ public partial class MainWindow : Window
     {
         ShellOverlayKind.AppSettings => _appSettingsPanelView ??= new AppSettingsPanelView(),
         ShellOverlayKind.AppExport => _appExportPanelView ??= new AppExportPanelView(),
+        ShellOverlayKind.AppRecent => _appRecentPanelView ??= new AppRecentPanelView(),
         ShellOverlayKind.AppAbout => _appAboutPanelView ??= new AppAboutPanelView(),
         ShellOverlayKind.AppUpdates => _appUpdatesPanelView ??= new AppUpdatesPanelView(),
         _ => null,
@@ -661,6 +663,7 @@ public partial class MainWindow : Window
             or nameof(MainWindowViewModel.IsSettingsOpen)
             or nameof(MainWindowViewModel.IsAppMenuOpen)
             or nameof(MainWindowViewModel.IsAppExportOpen)
+            or nameof(MainWindowViewModel.IsAppRecentOpen)
             or nameof(MainWindowViewModel.IsAppSettingsOpen)
             or nameof(MainWindowViewModel.IsAppAboutOpen)
             or nameof(MainWindowViewModel.IsAppUpdatesOpen)
@@ -998,6 +1001,7 @@ public partial class MainWindow : Window
         // app-overlay state, not only when the overlay sits at the menu root.
         Classes.Set("mm-app-overlay-open", _viewModel.IsAppOverlayOpen);
         Classes.Set("mm-app-export-open", _viewModel.IsAppExportOpen);
+        Classes.Set("mm-app-recent-open", _viewModel.IsAppRecentOpen);
         Classes.Set("mm-app-settings-open", _viewModel.IsAppSettingsOpen);
         Classes.Set("mm-app-about-open", _viewModel.IsAppAboutOpen);
         Classes.Set("mm-app-updates-open", _viewModel.IsAppUpdatesOpen);

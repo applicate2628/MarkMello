@@ -74,6 +74,7 @@ public partial class MainWindowViewModel
         nameof(AppMenuPrintHint),
         nameof(AppMenuPrintLabel),
         nameof(AppMenuRecentHeader),
+        nameof(AppMenuRecentHint),
         nameof(AppMenuSettingsHint),
         nameof(AppMenuSettingsLabel),
         nameof(AppMenuTocHint),
@@ -85,6 +86,7 @@ public partial class MainWindowViewModel
         nameof(MetaToggle),
         nameof(AppSettingsHeader),
         nameof(AppExportHeader),
+        nameof(AppRecentHeader),
         nameof(DirtyPromptCancel),
         nameof(DirtyPromptDiscard),
         nameof(DirtyPromptSave),
@@ -103,6 +105,7 @@ public partial class MainWindowViewModel
         nameof(MetaReset),
         nameof(OverlayBackToMenu),
         nameof(OverlayCloseExport),
+        nameof(OverlayCloseRecent),
         nameof(OverlayBackToSettings),
         nameof(OverlayCloseAbout),
         nameof(OverlayCloseMenu),
@@ -213,6 +216,7 @@ public partial class MainWindowViewModel
     public string AppMenuPrintHint => _localization["AppMenuPrintHint"];
     public string AppMenuPrintLabel => _localization["AppMenuPrintLabel"];
     public string AppMenuRecentHeader => _localization["AppMenuRecentHeader"];
+    public string AppMenuRecentHint => _localization["AppMenuRecentHint"];
     public string AppMenuSettingsHint => _localization["AppMenuSettingsHint"];
     public string AppMenuSettingsLabel => _localization["AppMenuSettingsLabel"];
     public string AppMenuTocHint => _localization["AppMenuTocHint"];
@@ -224,6 +228,7 @@ public partial class MainWindowViewModel
     public string MetaToggle => _localization["MetaToggle"];
     public string AppSettingsHeader => _localization["AppSettingsHeader"];
     public string AppExportHeader => _localization["AppExportHeader"];
+    public string AppRecentHeader => _localization["AppRecentHeader"];
     public string DirtyPromptCancel => _localization["DirtyPromptCancel"];
     public string DirtyPromptDiscard => _localization["DirtyPromptDiscard"];
     public string DirtyPromptSave => _localization["DirtyPromptSave"];
@@ -242,6 +247,7 @@ public partial class MainWindowViewModel
     public string MetaReset => _localization["MetaReset"];
     public string OverlayBackToMenu => _localization["OverlayBackToMenu"];
     public string OverlayCloseExport => _localization["OverlayCloseExport"];
+    public string OverlayCloseRecent => _localization["OverlayCloseRecent"];
     public string OverlayBackToSettings => _localization["OverlayBackToSettings"];
     public string OverlayCloseAbout => _localization["OverlayCloseAbout"];
     public string OverlayCloseMenu => _localization["OverlayCloseMenu"];

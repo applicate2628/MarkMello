@@ -84,6 +84,26 @@ public partial class MainWindowViewModel
     {
         RecentFilesClearRequested?.Invoke(this, EventArgs.Empty);
     }
+
+    /// <summary>
+    /// Opens the Recent sub-column beside the app menu, mirroring <c>OpenAppExport</c>
+    /// (<c>MainWindowViewModel.Export.cs</c>). The menu row that invokes this is itself
+    /// gated on <see cref="HasRecentFiles"/>, so there is no separate CanExecute guard here
+    /// -- matching the unconditional Settings/Updates/About menu entries rather than
+    /// Export's document-dependent one.
+    /// </summary>
+    [RelayCommand]
+    private void OpenAppRecent()
+    {
+        if (!ShowsAppMenuControl)
+        {
+            CloseAppOverlayCore();
+            return;
+        }
+
+        MarkSecondaryFeaturesReady();
+        ShellOverlay = ToggleAppOverlayPanel(ShellOverlayKind.AppRecent, ShellOverlayKind.AppMenu);
+    }
 }
 
 /// <summary>One recent-file row: the full path (used to re-open) plus display parts.</summary>
