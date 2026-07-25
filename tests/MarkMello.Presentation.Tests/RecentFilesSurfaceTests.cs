@@ -113,6 +113,38 @@ public sealed class RecentFilesSurfaceTests
         }
     }
 
+    /// <summary>
+    /// F10 regression guard: an adversarial gate measured the directory label rendering up to
+    /// 296px outside its own column (identical at 1280px and 640px window width) because the
+    /// row's inner container was a horizontal StackPanel, which measures children with infinite
+    /// width -- so TextTrimming="CharacterEllipsis" (present on both TextBlocks) never fires. The
+    /// ratified fix is shape-preserving: replace the inner StackPanel with a
+    /// Grid ColumnDefinitions="Auto,*" (filename auto-sized, directory in the constrained star
+    /// column) so the row stays the flat layout the user approved while the directory label
+    /// actually measures under constraint. Mirrors
+    /// <c>AppRecentPanelUsesTrimmingSettingLabelIdiomNotRawHorizontalTextBlocks</c> in
+    /// <c>RecentCascadeMenuSourceTests</c>. Honest limit: this is a source-text assertion of
+    /// SHAPE (no horizontal StackPanel, a Grid with the expected column split) -- it proves the
+    /// row is structurally capable of trimming, not that a given string actually trims at
+    /// runtime (that needs a rendered/measured layout pass this test project cannot host).
+    /// </summary>
+    [Fact]
+    public void WelcomeRecentRowInnerContainerIsNotAHorizontalStackPanel()
+    {
+        var welcome = ReadWelcomeViewSource();
+
+        var fileNameIndex = welcome.IndexOf("Text=\"{Binding FileName}\"", StringComparison.Ordinal);
+        Assert.True(fileNameIndex >= 0, "Expected the recent-row filename TextBlock.");
+        var containerStart = welcome.LastIndexOf('<', fileNameIndex);
+        containerStart = welcome.LastIndexOf('<', containerStart - 1);
+        var containerOpenTag = welcome[containerStart..welcome.IndexOf('>', containerStart)];
+
+        Assert.DoesNotContain("StackPanel", containerOpenTag, StringComparison.Ordinal);
+        Assert.DoesNotContain("Orientation=\"Horizontal\"", containerOpenTag, StringComparison.Ordinal);
+        Assert.Contains("<Grid", containerOpenTag, StringComparison.Ordinal);
+        Assert.Contains("ColumnDefinitions=\"Auto,*\"", containerOpenTag, StringComparison.Ordinal);
+    }
+
     private static string ReadWelcomeViewSource()
         => ReadSource("src", "MarkMello.Presentation", "Views", "WelcomeView.axaml");
 
