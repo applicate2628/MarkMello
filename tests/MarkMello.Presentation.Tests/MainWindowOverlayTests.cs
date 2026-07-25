@@ -603,7 +603,12 @@ public sealed class MainWindowOverlayTests
 
         Assert.True(compositorStart >= 0, "document-switch reveal compositor should be wired.");
         var compositorBlock = applicateWindowCode[compositorStart..];
-        Assert.Contains("new ApplicateAirspaceCompositor(siblingPanel, viewModel)", compositorBlock, StringComparison.Ordinal);
+        // Deliberately unterminated: what this test owns is the compositor's SCOPE — it must be
+        // constructed over siblingPanel (the document area) and not over the TOC grid. The exact
+        // argument COUNT is incidental, and pinning it here breaks this suite every time an
+        // unrelated argument is appended in the Applicate tree, which no compiler or project
+        // reference can warn about (this file reads that source off disk by path).
+        Assert.Contains("new ApplicateAirspaceCompositor(siblingPanel, viewModel", compositorBlock, StringComparison.Ordinal);
         Assert.DoesNotContain("_tocContentGrid,", compositorBlock, StringComparison.Ordinal);
     }
 }
