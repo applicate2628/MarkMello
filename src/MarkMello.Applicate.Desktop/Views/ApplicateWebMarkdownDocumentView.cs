@@ -3427,6 +3427,13 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 : new DocumentHeading(id, level, text, indent));
         }
 
+        // toc-seq diagnostic (2026-07-25 bug: TOC intermittently empty on
+        // open). Temporary — swept in the same commit cycle as the eventual
+        // fix (ApplicateTrace.cs Diag facility contract).
+        ApplicateTrace.DiagMs(
+            "toc-seq",
+            "ingress-headings",
+            $"wire={headingsArray.GetArrayLength()} kept={headings.Count}");
         HeadingsChanged?.Invoke(this, headings);
     }
 

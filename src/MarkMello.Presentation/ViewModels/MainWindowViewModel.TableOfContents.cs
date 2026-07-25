@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MarkMello.Domain;
+using MarkMello.Presentation.Diagnostics;
 
 namespace MarkMello.Presentation.ViewModels;
 
@@ -179,6 +180,18 @@ public partial class MainWindowViewModel
         // ObservableCollection per heading makes the panel handle N
         // CollectionChanged events and rebuild all rows on every item.
         DocumentHeadings = new ObservableCollection<DocumentHeading>(headings);
+        // toc-seq diagnostic (2026-07-25 bug: TOC intermittently empty on
+        // open). Emitted via StartupDiag (this project's existing thin
+        // wrapper around the shared StartupMarkEmitter) rather than
+        // ApplicateTrace directly — Presentation has no reference to
+        // Applicate.Desktop and must not gain one (assembly direction:
+        // Applicate -> Presentation -> Domain). Both sides land in the same
+        // `[group HH:mm:ss.fff] event ms=<elapsed> ...` log shape. Temporary
+        // — swept in the same commit cycle as the eventual fix.
+        StartupDiag.DiagMs(
+            "toc-seq",
+            "vm-updated",
+            $"count={headings.Count} isViewer={IsViewer} preferred={IsTocPreferredVisible} isTocVisible={IsTocVisible}");
         // Keep a valid active row across document switches. Clearing on every
         // replacement makes the TOC visibly blink "active -> none -> active"
         // while the renderer's active-heading observer is still settling.

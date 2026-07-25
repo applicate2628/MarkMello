@@ -576,8 +576,24 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         var viewModel = _viewModel;
         if (!_isAttachedToHost || viewModel is null)
         {
+            // toc-seq diagnostic (2026-07-25 bug: TOC intermittently empty on
+            // open). Temporary — swept in the same commit cycle as the
+            // eventual fix (ApplicateTrace.cs Diag facility contract).
+            ApplicateTrace.DiagMs(
+                "toc-seq",
+                "consumer-gate-dropped",
+                $"surface=viewer attached={_isAttachedToHost} vmNull={viewModel is null} count={headings.Count} renderedFlag={_documentRenderedForCurrentRequest}");
             return;
         }
+        // vmNull hardcoded False: the guard above already proved viewModel
+        // non-null here; re-testing "viewModel is null" un-narrows it for
+        // the compiler's nullable-flow analysis (reproduced CS8604 on the
+        // _headingUpdater.Apply(viewModel) call below — empirically
+        // confirmed, not assumed).
+        ApplicateTrace.DiagMs(
+            "toc-seq",
+            "consumer-gate-passed",
+            $"surface=viewer attached={_isAttachedToHost} vmNull=False count={headings.Count} renderedFlag={_documentRenderedForCurrentRequest}");
         _headingUpdater.Apply(
             headings,
             viewModel,

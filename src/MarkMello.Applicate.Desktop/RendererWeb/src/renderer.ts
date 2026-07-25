@@ -3078,6 +3078,9 @@ function extractHeadingSegments(root: HTMLElement): HeadingSegmentPayload[] {
 function extractAndPostHeadings(): void {
   const main = document.querySelector<HTMLElement>("main.mm-document");
   if (!main) {
+    // toc-seq diagnostic (2026-07-25 bug: TOC intermittently empty on open).
+    // Temporary — swept in the same commit cycle as the eventual fix.
+    postPerfMark("toc-seq-headings-post", { path: "no-main", count: 0 });
     postHostMessage({ type: "headings-updated", headings: [] });
     lastExtractedHeadings = [];
     lastPostedActiveHeadingId = null;
@@ -3107,6 +3110,12 @@ function extractAndPostHeadings(): void {
     .filter((h): h is HeadingPayload => h !== null);
 
   lastExtractedHeadings = headings.map(cloneHeadingPayload);
+  // toc-seq diagnostic (2026-07-25 bug: TOC intermittently empty on open).
+  // found = h1..h6 elements matched before the falsy-`id` filter; kept =
+  // survivors after it. found>0 && kept==0 is the R2 discriminator — it
+  // means anchor slugging had not assigned `id`s yet when this ran.
+  // Temporary — swept in the same commit cycle as the eventual fix.
+  postPerfMark("toc-seq-headings-post", { path: "live", count: headings.length, found: nodes.length, kept: headings.length });
   postHostMessage({ type: "headings-updated", headings });
   rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
 }
@@ -3123,6 +3132,9 @@ function postCachedHeadings(): void {
 
   const headings = cachedHeadings.map(cloneHeadingPayload);
   lastExtractedHeadings = headings.map(cloneHeadingPayload);
+  // toc-seq diagnostic (2026-07-25 bug: TOC intermittently empty on open).
+  // Temporary — swept in the same commit cycle as the eventual fix.
+  postPerfMark("toc-seq-headings-post", { path: "cached", count: headings.length });
   postHostMessage({ type: "headings-updated", headings });
   if (activeHeadingObserver) {
     activeHeadingObserver.disconnect();
