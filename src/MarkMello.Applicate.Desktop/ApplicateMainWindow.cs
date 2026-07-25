@@ -2463,6 +2463,35 @@ public sealed class ApplicateMainWindow : MainWindow
         return null;
     }
 
+    /// <summary>
+    /// Drop one entry from the recent-files list (case-insensitive, matching
+    /// <see cref="ApplicateSession.BuildRecentPaths"/>'s dedup contract), then mirror the
+    /// mutated list to the VM and persist -- in that fixed order, always exactly once each,
+    /// even when <paramref name="path"/> matches nothing. <paramref name="recentPaths"/>
+    /// stays the single writer-owner: this mutates it in place rather than replacing it.
+    /// </summary>
+    internal static void RemoveRecentPathAndCommit(
+        List<string> recentPaths,
+        string? path,
+        Action<IReadOnlyList<string>> mirror,
+        Action persist)
+    {
+        recentPaths.RemoveAll(p => string.Equals(p, path, System.StringComparison.OrdinalIgnoreCase));
+        mirror(recentPaths);
+        persist();
+    }
+
+    /// <summary>Forget every recent entry. Same mirror-then-persist contract as <see cref="RemoveRecentPathAndCommit"/>.</summary>
+    internal static void ClearRecentPathsAndCommit(
+        List<string> recentPaths,
+        Action<IReadOnlyList<string>> mirror,
+        Action persist)
+    {
+        recentPaths.Clear();
+        mirror(recentPaths);
+        persist();
+    }
+
     private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)
     {
         var openDocs = App.Services?.GetService<IOpenDocumentsService>();
@@ -3351,6 +3380,13 @@ public sealed class ApplicateMainWindow : MainWindow
             recentPaths.AddRange(updated);
             viewModel.SetRecentFiles(recentPaths);
         }
+
+        // Explicit user-initiated storage writers (distinct from the auto-fold above): the
+        // VM raises intent only, so the host performs the mutation, mirror, and persist.
+        viewModel.RecentFileRemoveRequested += (_, path) =>
+            RemoveRecentPathAndCommit(recentPaths, path, viewModel.SetRecentFiles, SaveSession);
+        viewModel.RecentFilesClearRequested += (_, _) =>
+            ClearRecentPathsAndCommit(recentPaths, viewModel.SetRecentFiles, SaveSession);
 
         ((INotifyCollectionChanged)openDocs.OpenDocuments).CollectionChanged += (_, e) =>
         {

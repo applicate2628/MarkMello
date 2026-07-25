@@ -81,6 +81,29 @@ public sealed class JsonApplicateSessionStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ClearedRecentPathsRoundtripsWithoutDisturbingOpenPathsOrActivePath()
+    {
+        // Recent-files DELTA (P2): clearing the recent list writes RecentPaths=[] -- this must
+        // not perturb the unrelated OpenPaths/ActivePath fields SaveSession also owns.
+        var store = new JsonApplicateSessionStore(_tempRoot);
+        var session = new ApplicateSession
+        {
+            OpenPaths = new List<string> { @"C:\a\one.md", @"C:\a\two.md" },
+            ActivePath = @"C:\a\one.md",
+            RecentPaths = new List<string>(),
+        };
+
+        await store.SaveAsync(session);
+        var loaded = await store.LoadAsync();
+
+        Assert.Empty(loaded.RecentPaths);
+        Assert.Equal(2, loaded.OpenPaths.Count);
+        Assert.Equal(@"C:\a\one.md", loaded.OpenPaths[0]);
+        Assert.Equal(@"C:\a\two.md", loaded.OpenPaths[1]);
+        Assert.Equal(@"C:\a\one.md", loaded.ActivePath);
+    }
+
+    [Fact]
     public void StartupDocumentPathPrefersActivePathThenFirstOpenPath()
     {
         var session = new ApplicateSession
