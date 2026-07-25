@@ -537,6 +537,152 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
         });
     }
 
+    // G-F1 -- gate finding F1 (2026-07-26): _lastHeadingsSource alone is a
+    // RECEIVER-state stamp (Source's current value at arrival), not a
+    // message-borne currency token. This drives DocB through TWO separate
+    // page generations for the SAME Source value (DocB -> DocA -> DocB
+    // again, mirroring a same-Source page recreation such as a WebView2
+    // crash+retry or legacy MARKMELLO_RENDERER_SHELL_MODE=0's per-render
+    // Navigate) and leaves the SECOND DocB generation without its own fresh
+    // headings-updated. Source-equality alone cannot tell the two DocB
+    // generations apart (both are literally the same MarkdownSource), so
+    // the OLD code re-emits the FIRST generation's retained payload for the
+    // SECOND generation's no-op reload -- a genuinely superseded page's
+    // payload leaking forward. The render-id stamp added by F1 CAN tell
+    // them apart, because _activeRevealRenderId bumps on every QueueRender
+    // even when Source itself reads the same both times.
+    [Fact]
+    public void NoOpReloadSkipsARetainedPayloadFromASupersededPageGeneration()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            // DocB's FIRST page generation: loads, paints, and gets its own
+            // real headings.
+            host.RequestRender(DocB, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostHeadings(host.View, "b-first-generation");
+            Assert.True(host.View.HasLoadedDocumentForSource(DocB));
+
+            // An intervening different document -- a real render, so Source
+            // moves away from DocB and _activeRevealRenderId bumps.
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+
+            // DocB is reopened -- Source changes DocA -> DocB again, so this
+            // IS a real render (sourceChanged=true), a NEW page generation
+            // for the SAME MarkdownSource value. Deliberately do NOT post a
+            // fresh headings-updated for this second generation, so the
+            // retained payload is still the FIRST generation's if nothing
+            // guards against it.
+            host.RequestRender(DocB, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            Assert.True(host.View.HasLoadedDocumentForSource(DocB));
+
+            var fireCount = 0;
+            host.View.HeadingsChanged += (_, _) => fireCount++;
+
+            // A genuine no-op reload of the SECOND DocB generation.
+            host.RequestRender(DocB, Request());
+
+            Assert.Equal(0, fireCount);
+        });
+    }
+
+    // G-F2/I3 -- gate findings F2 and I3 (2026-07-26): the fast path in
+    // ApplicateSharedWebViewHost.RequestRender is entered whenever
+    // HasLoadedDocumentForSource is true, which covers BOTH a genuine no-op
+    // reload (action=None) AND a pure reading-preference change
+    // (action=ApplyLivePreferences, e.g. a width drag or a font-size step).
+    // Before F2, headings were re-emitted on every such fast-path call --
+    // proven behaviourally by the gate via a width-only change and,
+    // separately, a font-size-only change. Each re-emit runs the consumer's
+    // UpdateDocumentHeadings, which unconditionally replaces the
+    // ObservableCollection (I3: a visible TOC rebuild with nothing to
+    // refresh) and resets _pendingScrollToHeadingId. This is the REAL I3
+    // guard G5 could not give (G5 only proves the VIEW hands out the SAME
+    // list instance across repeats -- it says nothing about how many times
+    // a consumer would have been asked to rebuild from it). Counting
+    // HeadingsChanged fires here is a direct, sufficient proxy for consumer
+    // rebuild count: the production wiring (ApplicateViewerView /
+    // ApplicateEditPreviewView's OnHost*HeadingsChanged) applies synchronously
+    // and unconditionally to a small non-empty retained list, so each fire
+    // maps 1:1 to one ObservableCollection replacement.
+    [Fact]
+    public void FastPathRequestRenderWithOnlyAWidthChangeDoesNotReemitHeadings()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostHeadings(host.View, "intro");
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            var fireCount = 0;
+            host.View.HeadingsChanged += (_, _) => fireCount++;
+
+            // Each request changes ONLY AvailableContentWidth relative to the
+            // previous one (Request() uses 800; none of these repeat it or
+            // each other), so Source/ImageSourceResolver/ReadingPreferences
+            // never change -- UpdateInputs must return ApplyLivePreferences
+            // every time, never None and never Render.
+            for (var width = 700.0; width <= 780.0; width += 20.0)
+            {
+                host.RequestRender(
+                    DocA,
+                    new ApplicateWebRenderRequest(ReadingPreferences.Default, ImageSourceResolver: null, AvailableContentWidth: width));
+            }
+
+            Assert.Equal(0, fireCount);
+        });
+    }
+
+    private static readonly int[] DistinctFontSizesForNoReemitTest = [20, 22, 24];
+
+    [Fact]
+    public void FastPathRequestRenderWithOnlyAFontSizeChangeDoesNotReemitHeadings()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostHeadings(host.View, "intro");
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            var fireCount = 0;
+            host.View.HeadingsChanged += (_, _) => fireCount++;
+
+            // Each request changes ONLY the reading preferences' FontSize
+            // (Source/AvailableContentWidth/ImageSourceResolver held fixed),
+            // so UpdateInputs must return ApplyLivePreferences every time.
+            foreach (var fontSize in DistinctFontSizesForNoReemitTest)
+            {
+                host.RequestRender(
+                    DocA,
+                    new ApplicateWebRenderRequest(
+                        ReadingPreferences.Default with { FontSize = fontSize },
+                        ImageSourceResolver: null,
+                        AvailableContentWidth: 800));
+            }
+
+            Assert.Equal(0, fireCount);
+        });
+    }
+
     // ----- Parking test doubles -------------------------------------------------
     // Both return never-completing tasks so the host's fire-and-forget QueueRender
     // parks at its first await, before any _webView.Navigate. The synchronous

@@ -226,7 +226,7 @@ public sealed class ApplicateViewerViewTests
     [InlineData(true, true, false)]
     public void ShouldDeferLargeTocHeadingUpdatesMatchesAllFourInputCombinations(
         bool documentRenderedForCurrentRequest,
-        bool hasLoadedDocumentForCurrentSource,
+        bool hasLoadedAndPaintedDocument,
         bool expectedDefer)
     {
         // Behavioural guard for Part D (design 2026-07-25-toc-empty-on-open
@@ -235,13 +235,21 @@ public sealed class ApplicateViewerViewTests
         // truth table. The (false, true) row is the one this design adds --
         // a same-source no-op reload never sets _documentRenderedForCurrentRequest
         // (no fresh DocumentRendered fires), but the document is already
-        // loaded AND painted for the current source, so a >=250-heading
-        // reopen must NOT defer or it parks forever.
+        // loaded AND painted, so a >=250-heading reopen must NOT defer or
+        // it parks forever.
+        //
+        // Gate finding F4 (2026-07-26): the predicate itself moved to
+        // ApplicateDeferredHeadingUpdater (the policy owner) so both
+        // consumer surfaces (viewer + edit-preview) share ONE implementation
+        // instead of a byte-identical duplicate each. This single table
+        // replaces the two that used to pin each surface's own copy --
+        // collapsed per the gate's disposition, since both copies were
+        // always identical and there is now only one owner to test.
         Assert.Equal(
             expectedDefer,
-            ApplicateViewerView.ShouldDeferLargeTocHeadingUpdates(
+            ApplicateDeferredHeadingUpdater.ShouldDeferLargeTocHeadingUpdates(
                 documentRenderedForCurrentRequest,
-                hasLoadedDocumentForCurrentSource));
+                hasLoadedAndPaintedDocument));
     }
 
     [Fact]

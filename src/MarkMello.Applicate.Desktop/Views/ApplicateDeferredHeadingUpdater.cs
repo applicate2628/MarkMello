@@ -60,6 +60,37 @@ internal sealed class ApplicateDeferredHeadingUpdater
     private static bool ShouldDefer(IReadOnlyList<DocumentHeading> headings)
         => headings.Count == 0 || headings.Count >= LargeHeadingUpdateThreshold;
 
+    // Gate finding F4 (2026-07-26 architecture-reviewer, bf9d3be): this predicate
+    // used to be duplicated byte-identically on both consumer surfaces
+    // (ApplicateViewerView, ApplicateEditPreviewView) -- a C1 single-owner
+    // violation caused by the design's own must-not-touch freeze on this file,
+    // which mandated the predicate "on both consumer surfaces" while leaving no
+    // seam here to host it. The freeze is relaxed for EXACTLY this one purpose;
+    // everything else in this file (LargeHeadingUpdateThreshold, the pre-existing
+    // 80 ms LargeHeadingFlushDelay / ScheduleApply timer, Apply/FlushPending)
+    // stays untouched. This file already owns LargeHeadingUpdateThreshold and
+    // ShouldDefer, so it is the natural single owner of this policy too.
+    //
+    // Part D (design work-items/active/2026-07-25-toc-empty-on-open/design.md
+    // §2/§9 H2): a same-source no-op reload re-emits the retained heading list
+    // synchronously (ApplicateSharedWebViewHost.RequestRender ->
+    // RaiseDocumentHeadingsForLoadedSource) with no fresh DocumentRendered to
+    // ever flush a parked >=250-heading payload -- documentRenderedForCurrentRequest
+    // stays false for the whole no-op reload (no new render, so the consumer's
+    // "rendered" handler never fires), so the explicit-flush trigger never
+    // arrives and the TOC would park forever. The second input recognises that
+    // case: the document is already loaded AND painted (NOT specifically "for
+    // the current source" -- gate finding F3 corrected that overstatement; see
+    // each consumer's hasLoadedAndPaintedDocument computation), so there is
+    // nothing left to wait for even though this specific request never
+    // rendered anything. Pure predicate (repo idiom, mirrors
+    // ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait) so all four input
+    // combinations are synchronously unit-testable without a live shared host.
+    internal static bool ShouldDeferLargeTocHeadingUpdates(
+        bool documentRenderedForCurrentRequest,
+        bool hasLoadedAndPaintedDocument)
+        => !documentRenderedForCurrentRequest && !hasLoadedAndPaintedDocument;
+
     public void FlushPending()
     {
         var version = _pendingVersion;

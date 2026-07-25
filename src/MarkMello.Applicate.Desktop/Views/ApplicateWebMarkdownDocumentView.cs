@@ -127,6 +127,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     // without asking the renderer again — see RaiseDocumentHeadingsForLoadedSource.
     private IReadOnlyList<DocumentHeading> _lastHeadings = [];
     private MarkdownSource? _lastHeadingsSource;
+    // Gate finding F1 (2026-07-26 architecture-reviewer, bf9d3be): _lastHeadingsSource
+    // alone is a RECEIVER-state stamp (Source's CURRENT value at arrival), not a
+    // message-borne currency token, so a payload that arrives while a superseded
+    // page's document is still nominally "current" gets mislabeled with whatever
+    // Source now is. _activeRevealRenderId changes on every QueueRender (including
+    // a same-Source page recreation, e.g. after a WebView2 crash+retry, or every
+    // render in legacy MARKMELLO_RENDERER_SHELL_MODE=0), so stamping it too and
+    // requiring a match at re-emit distinguishes a superseded page's payload from
+    // the currently active one even when Source itself reads the same both times.
+    // Host-local token; no wire-contract change (the wire gap on headings-updated
+    // itself stays open, see design §11 adjacent findings).
+    private long _lastHeadingsRenderId;
     private bool _hasLayoutReady;
     private bool _hasMinimapState;
     private bool _lastLayoutReadyWasCached;
@@ -409,12 +421,16 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     // (_lastHeadings / _lastHeadingsSource, written in
     // HandleHeadingsUpdatedMessage) instead of asking the renderer again:
     // synchronous, so it cannot arrive late, and the renderer already holds
-    // nothing new to say for this document. Three guards, three distinct
+    // nothing new to say for this document. Four guards, four distinct
     // skip reasons -- each is a permanent diag-gate marker (design §7): a
     // future regression that only ever hits "not-loaded" is benign (a real
     // Render will still deliver); one that hits "source-mismatch" is a
-    // retention-ordering defect; one that hits "no-retained-payload" is
-    // correct for a heading-less document but a bug signal for any other.
+    // retention-ordering defect; one that hits "renderid-mismatch" (gate
+    // finding F1) means the retained payload was captured during a
+    // SUPERSEDED page generation for this same Source and must not be
+    // trusted even though Source itself still matches; one that hits
+    // "no-retained-payload" is correct for a heading-less document but a
+    // bug signal for any other.
     internal void RaiseDocumentHeadingsForLoadedSource(MarkdownSource? source)
     {
         if (!HasLoadedDocumentForSource(source))
@@ -432,6 +448,15 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 "diag-gate",
                 "headings-reemit-skipped-source-mismatch",
                 $"path={source?.Path ?? "(null)"} retainedPath={_lastHeadingsSource?.Path ?? "(null)"}");
+            return;
+        }
+
+        if (_lastHeadingsRenderId != _activeRevealRenderId)
+        {
+            ApplicateTrace.DiagMs(
+                "diag-gate",
+                "headings-reemit-skipped-renderid-mismatch",
+                $"path={source?.Path ?? "(null)"} retainedRenderId={_lastHeadingsRenderId} activeRenderId={_activeRevealRenderId}");
             return;
         }
 
@@ -3489,8 +3514,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         // Retain at ingress, BEFORE the consumer gate below (deliberate and
         // load-bearing: the payload must survive even when live delivery is
         // dropped by a consumer's !_isAttachedToHost guard). Single writer.
+        // _lastHeadingsRenderId stamps the CURRENT render generation (gate
+        // finding F1) alongside Source -- both are receiver-side state, but
+        // unlike Source, the render id also changes on a same-Source page
+        // recreation, so it distinguishes a superseded page's payload where
+        // Source-equality alone cannot.
         _lastHeadings = headings;
         _lastHeadingsSource = Source;
+        _lastHeadingsRenderId = _activeRevealRenderId;
         HeadingsChanged?.Invoke(this, headings);
     }
 

@@ -583,11 +583,18 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         // the compiler's nullable-flow analysis (reproduced CS8604 on the
         // _headingUpdater.Apply(viewModel) call below — empirically
         // confirmed, not assumed).
-        var hasLoadedDocumentForCurrentSource =
+        //
+        // Gate finding F3 (2026-07-26): named hasLoadedAndPaintedDocument, NOT
+        // hasLoadedDocumentForCurrentSource -- passing View.Source as the
+        // argument to HasLoadedDocumentForSource(source) makes its own
+        // Equals(Source, source) conjunct trivially true, so this reduces to
+        // exactly _hasLoadedDocument && !_awaitingLayoutReady. It does NOT
+        // check against this consumer's own _viewModel.Document.
+        var hasLoadedAndPaintedDocument =
             _sharedHost is not null && _sharedHost.View.HasLoadedDocumentForSource(_sharedHost.View.Source);
-        var deferLargeUntilExplicitFlush = ShouldDeferLargeTocHeadingUpdates(
+        var deferLargeUntilExplicitFlush = ApplicateDeferredHeadingUpdater.ShouldDeferLargeTocHeadingUpdates(
             _documentRenderedForCurrentRequest,
-            hasLoadedDocumentForCurrentSource);
+            hasLoadedAndPaintedDocument);
         // Permanent (design §7): lets a future regression be distinguished
         // from a normal apply -- defer=true alongside a >=250 count with no
         // later flush is the parked-forever class Part D exists to close;
@@ -596,33 +603,13 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         ApplicateTrace.DiagMs(
             "diag-gate",
             "headings-consumer-apply",
-            $"surface=viewer count={headings.Count} defer={deferLargeUntilExplicitFlush} rendered={_documentRenderedForCurrentRequest} loadedForSource={hasLoadedDocumentForCurrentSource}");
+            $"surface=viewer count={headings.Count} defer={deferLargeUntilExplicitFlush} rendered={_documentRenderedForCurrentRequest} loadedForSource={hasLoadedAndPaintedDocument}");
         _headingUpdater.Apply(
             headings,
             viewModel,
             () => _isAttachedToHost && ReferenceEquals(_viewModel, viewModel),
             deferLargeUntilExplicitFlush: deferLargeUntilExplicitFlush);
     }
-
-    // Part D (design work-items/active/2026-07-25-toc-empty-on-open/design.md
-    // §2/§9 H2): a same-source no-op reload re-emits the retained heading
-    // list synchronously (ApplicateSharedWebViewHost.RequestRender ->
-    // RaiseDocumentHeadingsForLoadedSource) with no fresh DocumentRendered to
-    // ever flush a parked >=250-heading payload -- _documentRenderedForCurrentRequest
-    // stays false for the whole no-op reload (no new render, so
-    // OnHostDocumentRendered never fires), so the deferred updater's
-    // explicit-flush trigger never arrives and the TOC would park forever.
-    // The additional conjunct recognises that case: the document is already
-    // loaded AND painted for the current source, so there is nothing left to
-    // wait for even though this specific request never rendered anything.
-    // Pure predicate (repo idiom, mirrors
-    // ApplicateSharedWebViewHost.ShouldSkipRendererFrameWait) so all four
-    // input combinations are synchronously unit-testable without a live
-    // shared host.
-    internal static bool ShouldDeferLargeTocHeadingUpdates(
-        bool documentRenderedForCurrentRequest,
-        bool hasLoadedDocumentForCurrentSource)
-        => !documentRenderedForCurrentRequest && !hasLoadedDocumentForCurrentSource;
 
     private void OnHostActiveHeadingChanged(object? sender, string id)
     {

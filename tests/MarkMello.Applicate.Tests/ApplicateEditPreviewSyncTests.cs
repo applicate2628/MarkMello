@@ -85,26 +85,14 @@ public sealed class ApplicateEditPreviewSyncTests
         Assert.Contains("ShouldDeferLargeTocHeadingUpdates(", handler, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData(false, false, true)]
-    [InlineData(false, true, false)]
-    [InlineData(true, false, false)]
-    [InlineData(true, true, false)]
-    public void EditPreviewShouldDeferLargeTocHeadingUpdatesMatchesAllFourInputCombinations(
-        bool documentRenderedForCurrentRequest,
-        bool hasLoadedDocumentForCurrentSource,
-        bool expectedDefer)
-    {
-        // Behavioural guard mirroring ApplicateViewerViewTests' equivalent --
-        // the (false, true) row is the one Part D adds so a >=250-heading
-        // no-op-reload reopen on the edit-preview surface does not park
-        // forever either.
-        Assert.Equal(
-            expectedDefer,
-            ApplicateEditPreviewView.ShouldDeferLargeTocHeadingUpdates(
-                documentRenderedForCurrentRequest,
-                hasLoadedDocumentForCurrentSource));
-    }
+    // Gate finding F4 (2026-07-26): the per-surface four-row theory that used
+    // to live here (EditPreviewShouldDeferLargeTocHeadingUpdatesMatchesAllFourInputCombinations)
+    // is COLLAPSED into ApplicateViewerViewTests.ShouldDeferLargeTocHeadingUpdatesMatchesAllFourInputCombinations,
+    // which now exercises the single shared owner
+    // (ApplicateDeferredHeadingUpdater.ShouldDeferLargeTocHeadingUpdates) that
+    // both this surface and the viewer call into. The wiring pin above
+    // (EditPreviewDefersLargeTocHeadingUpdatesBehindRendererReveal) still
+    // proves THIS surface's call site wires the shared predicate in.
 
     [Fact]
     public void EditPreviewForwardsShellTocScrollRequestsToRenderer()

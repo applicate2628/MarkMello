@@ -324,7 +324,7 @@ public sealed class ApplicateSharedWebViewHost :
             $"SharedHost.RequestRender gen={newGeneration} source={(source?.Path ?? "(null)")} slot={(_currentParent is null ? "(null)" : _currentParent.GetType().Name)}");
 
         var skipRendererFrameWait = ShouldSkipRendererFrameWait(source, transactionGeneration);
-        View.UpdateInputs(
+        var inputUpdateAction = View.UpdateInputs(
             source: source,
             readingPreferences: request.ReadingPreferences,
             imageSourceResolver: request.ImageSourceResolver,
@@ -364,7 +364,23 @@ public sealed class ApplicateSharedWebViewHost :
                 // ownership): a same-source no-op reload produces no fresh
                 // headings-updated from the renderer, so without this the
                 // TOC stays whatever ClearDocumentHeadings left it at.
-                View.RaiseDocumentHeadingsForLoadedSource(source);
+                //
+                // Gate finding F2 (2026-07-26): narrowed to action==None only.
+                // The fast path above (HasLoadedDocumentForSource) is entered
+                // for EITHER None or ApplyLivePreferences -- a pure
+                // reading-preference change (width drag, font-size step) also
+                // lands here, but it loses no headings, so there is nothing
+                // to re-deliver. Re-emitting anyway forced every consumer's
+                // UpdateDocumentHeadings to replace the ObservableCollection
+                // and reset _pendingScrollToHeadingId on every such call, not
+                // only on a genuine no-op reload. RaiseDocumentRevealReadyForLoadedSource
+                // is unaffected -- it is not repeat-triggered debt, and its
+                // side effects are a plain event re-notification, not a
+                // consumer-side rebuild.
+                if (inputUpdateAction == ApplicateWebInputUpdateAction.None)
+                {
+                    View.RaiseDocumentHeadingsForLoadedSource(source);
+                }
             }
         }
     }
