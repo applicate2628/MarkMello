@@ -144,6 +144,43 @@ public sealed class MainWindowViewModelRecentFilesTests : IDisposable
         Assert.Equal(ShellOverlayKind.None, harness.ViewModel.ShellOverlay);
     }
 
+    /// <summary>
+    /// F9 regression guard: an adversarial gate measured that clearing the last recent entry (or
+    /// removing the last remaining one) while the Recent cascade is open left ShellOverlay stuck
+    /// at AppRecent -- a dead end where the cascade keeps rendering a header/divider/clear button
+    /// that can no longer act, while the menu row that opened it disappears. The ratified fix
+    /// falls back to the parent AppMenu column instead of closing the whole menu.
+    /// </summary>
+    [Fact]
+    public void SetRecentFilesEmptyWhileCascadeOpenFallsBackToAppMenu()
+    {
+        var harness = CreateHarness();
+        harness.ViewModel.OpenAppRecentCommand.Execute(null);
+        Assert.Equal(ShellOverlayKind.AppRecent, harness.ViewModel.ShellOverlay);
+
+        harness.ViewModel.SetRecentFiles([]);
+
+        Assert.Equal(ShellOverlayKind.AppMenu, harness.ViewModel.ShellOverlay);
+        Assert.True(harness.ViewModel.IsAppMenuOpen);
+    }
+
+    /// <summary>
+    /// F9 negative guard: the fallback must be scoped to the cascade actually being open --
+    /// SetRecentFiles is the single mirror-push entry point and fires on every host mutation,
+    /// including ones with no overlay open at all (e.g. session restore). It must never move
+    /// ShellOverlay in that case.
+    /// </summary>
+    [Fact]
+    public void SetRecentFilesEmptyWhileCascadeClosedDoesNotChangeShellOverlay()
+    {
+        var harness = CreateHarness();
+        Assert.Equal(ShellOverlayKind.None, harness.ViewModel.ShellOverlay);
+
+        harness.ViewModel.SetRecentFiles([]);
+
+        Assert.Equal(ShellOverlayKind.None, harness.ViewModel.ShellOverlay);
+    }
+
     [Fact]
     public void SetRecentFilesBodyNeverReferencesHostStorage()
     {

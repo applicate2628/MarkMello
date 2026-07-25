@@ -53,6 +53,17 @@ public partial class MainWindowViewModel
         }
 
         RecentFiles = new ObservableCollection<RecentFileItem>(items);
+
+        // F9: the Recent cascade has nothing left to show once the mirrored list goes empty --
+        // header/divider/clear button would keep rendering with no reachable entries and no
+        // effective clear target, a dead end for a user mid-clear/mid-remove. Fall back to the
+        // parent app-menu column instead of closing the whole menu (settled UX: remove/clear
+        // never close the menu). Guarded on the cascade actually being open so this never fires
+        // for the welcome screen or any other overlay state.
+        if (RecentFiles.Count == 0 && ShellOverlay == ShellOverlayKind.AppRecent)
+        {
+            ShellOverlay = ShellOverlayKind.AppMenu;
+        }
     }
 
     [RelayCommand]
