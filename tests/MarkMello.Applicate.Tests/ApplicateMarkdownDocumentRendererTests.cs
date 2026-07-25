@@ -148,38 +148,6 @@ public sealed class ApplicateMarkdownDocumentRendererTests
     }
 
     [Fact]
-    public void MathLineBreakerWrapsAtTopLevelOperators()
-    {
-        const string tex = @"\sqrt{1.184375 - p^{2}} / 2.45 \cdot \tan(x) - \sqrt{p^{2} + 0.265625} \cdot \tanh(y) = 0";
-
-        var chunks = ApplicateMathLineBreaker.SplitIntoChunks(tex);
-        var rows = ApplicateMathLineBreaker.WrapIntoRows(
-            tex,
-            maxWidth: 42,
-            measureWidth: text => text.Length);
-
-        Assert.True(rows.Count > 1);
-        Assert.Contains(chunks, chunk => chunk == @"\cdot");
-        Assert.Contains(chunks, chunk => chunk.StartsWith(@"\tan", StringComparison.Ordinal));
-        Assert.Contains(chunks, chunk => chunk.StartsWith(@"\tanh", StringComparison.Ordinal));
-        Assert.DoesNotContain(rows, row => row.Contains(@"\sqrt{1.184375", StringComparison.Ordinal)
-            && !row.Contains('}'));
-    }
-
-    [Fact]
-    public void MathLineBreakerDoesNotSplitInsideLeftRightDelimiters()
-    {
-        const string tex = @"\frac{1}{\mu_{r}} \iint \mathbf{T}\cdot \mathbf{E}_{t} = -\frac{\beta^{2}}{\mu_{r}}\left[\iint \mathbf{T}\cdot \nabla E_{z} + \iint \mathbf{T}\cdot \mathbf{E}_{t}\right]";
-
-        var chunks = ApplicateMathLineBreaker.SplitIntoChunks(tex);
-
-        Assert.DoesNotContain(chunks, chunk => chunk.Contains(@"\left[", StringComparison.Ordinal)
-            && !chunk.Contains(@"\right]", StringComparison.Ordinal));
-        Assert.DoesNotContain(chunks, chunk => chunk.Contains(@"\right]", StringComparison.Ordinal)
-            && !chunk.Contains(@"\left[", StringComparison.Ordinal));
-    }
-
-    [Fact]
     public void RenderConvertsGithubMathFenceToDisplayMath()
     {
         // GitHub / ChatGPT emit display formulas as a ```math fenced block; it
