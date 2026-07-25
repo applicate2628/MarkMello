@@ -122,6 +122,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _isLoadingGeneratedDocument;
     private bool _hasLoadedDocument;
     private bool _awaitingLayoutReady;
+    // Retained at ingress (HandleHeadingsUpdatedMessage, single writer) so a
+    // same-source no-op reload can re-deliver the last-known heading list
+    // without asking the renderer again — see RaiseDocumentHeadingsForLoadedSource.
+    private IReadOnlyList<DocumentHeading> _lastHeadings = [];
+    private MarkdownSource? _lastHeadingsSource;
     private bool _hasLayoutReady;
     private bool _hasMinimapState;
     private bool _lastLayoutReadyWasCached;
@@ -390,6 +395,60 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             $"path={source?.Path ?? "(null)"}");
         DocumentRevealReady?.Invoke(this, EventArgs.Empty);
         DocumentFirstPaint?.Invoke(this, EventArgs.Empty);
+    }
+
+    // Re-emit HeadingsChanged for the same no-op reload handled by
+    // RaiseDocumentRevealReadyForLoadedSource above -- headings are the third
+    // member of that re-emit set (design decision
+    // 2026-07-26-noop-reload-signal-reemit-ownership). A value-equal reload
+    // yields UpdateInputs action=None/ApplyLivePreferences -> no QueueRender
+    // -> ensureChromeNodes never re-runs in the renderer -> no fresh
+    // headings-updated is ever posted, so a TOC emptied by a prior
+    // Document=null transition (ClearDocumentHeadings) never gets refilled
+    // for a byte-identical reopen. Re-emits the payload retained at ingress
+    // (_lastHeadings / _lastHeadingsSource, written in
+    // HandleHeadingsUpdatedMessage) instead of asking the renderer again:
+    // synchronous, so it cannot arrive late, and the renderer already holds
+    // nothing new to say for this document. Three guards, three distinct
+    // skip reasons -- each is a permanent diag-gate marker (design §7): a
+    // future regression that only ever hits "not-loaded" is benign (a real
+    // Render will still deliver); one that hits "source-mismatch" is a
+    // retention-ordering defect; one that hits "no-retained-payload" is
+    // correct for a heading-less document but a bug signal for any other.
+    internal void RaiseDocumentHeadingsForLoadedSource(MarkdownSource? source)
+    {
+        if (!HasLoadedDocumentForSource(source))
+        {
+            ApplicateTrace.DiagMs(
+                "diag-gate",
+                "headings-reemit-skipped-not-loaded",
+                $"path={source?.Path ?? "(null)"}");
+            return;
+        }
+
+        if (!Equals(_lastHeadingsSource, source))
+        {
+            ApplicateTrace.DiagMs(
+                "diag-gate",
+                "headings-reemit-skipped-source-mismatch",
+                $"path={source?.Path ?? "(null)"} retainedPath={_lastHeadingsSource?.Path ?? "(null)"}");
+            return;
+        }
+
+        if (_lastHeadings.Count == 0)
+        {
+            ApplicateTrace.DiagMs(
+                "diag-gate",
+                "headings-reemit-skipped-no-retained-payload",
+                $"path={source?.Path ?? "(null)"}");
+            return;
+        }
+
+        ApplicateTrace.DiagMs(
+            "diag-gate",
+            "headings-reemit",
+            $"path={source?.Path ?? "(null)"} count={_lastHeadings.Count}");
+        HeadingsChanged?.Invoke(this, _lastHeadings);
     }
 
     internal bool LastLayoutReadyWasCached => _lastLayoutReadyWasCached;
@@ -3427,13 +3486,11 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 : new DocumentHeading(id, level, text, indent));
         }
 
-        // toc-seq diagnostic (2026-07-25 bug: TOC intermittently empty on
-        // open). Temporary — swept in the same commit cycle as the eventual
-        // fix (ApplicateTrace.cs Diag facility contract).
-        ApplicateTrace.DiagMs(
-            "toc-seq",
-            "ingress-headings",
-            $"wire={headingsArray.GetArrayLength()} kept={headings.Count}");
+        // Retain at ingress, BEFORE the consumer gate below (deliberate and
+        // load-bearing: the payload must survive even when live delivery is
+        // dropped by a consumer's !_isAttachedToHost guard). Single writer.
+        _lastHeadings = headings;
+        _lastHeadingsSource = Source;
         HeadingsChanged?.Invoke(this, headings);
     }
 

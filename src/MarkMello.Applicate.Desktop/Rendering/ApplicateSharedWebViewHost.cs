@@ -359,6 +359,12 @@ public sealed class ApplicateSharedWebViewHost :
             if (transactionGeneration == 0)
             {
                 View.RaiseDocumentRevealReadyForLoadedSource(source);
+                // Headings are the third member of the no-op-reload re-emit
+                // set (design decision 2026-07-26-noop-reload-signal-reemit-
+                // ownership): a same-source no-op reload produces no fresh
+                // headings-updated from the renderer, so without this the
+                // TOC stays whatever ClearDocumentHeadings left it at.
+                View.RaiseDocumentHeadingsForLoadedSource(source);
             }
         }
     }

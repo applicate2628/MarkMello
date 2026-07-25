@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Avalonia.Threading;
-using MarkMello.Applicate.Desktop.Diagnostics;
 using MarkMello.Presentation.ViewModels;
 
 namespace MarkMello.Applicate.Desktop.Views;
@@ -39,16 +38,6 @@ internal sealed class ApplicateDeferredHeadingUpdater
 
         if (!ShouldDefer(headings))
         {
-            // toc-seq diagnostic (2026-07-25 bug: TOC intermittently empty on
-            // open). Proves the immediate branch was actually taken rather
-            // than assumed (research.md already ruled this class out for the
-            // reporting user's file sizes, but the assumption itself needs a
-            // runtime witness). Temporary — swept in the same commit cycle
-            // as the eventual fix (ApplicateTrace.cs Diag facility contract).
-            ApplicateTrace.DiagMs(
-                "toc-seq",
-                "updater-decision",
-                $"decision=immediate count={headings.Count} defer={deferLargeUntilExplicitFlush} version={version}");
             ClearPending();
             viewModel.UpdateDocumentHeadings(headings);
             return;
@@ -57,10 +46,6 @@ internal sealed class ApplicateDeferredHeadingUpdater
         var snapshot = headings.ToArray();
         if (!deferLargeUntilExplicitFlush && headings.Count >= LargeHeadingUpdateThreshold)
         {
-            ApplicateTrace.DiagMs(
-                "toc-seq",
-                "updater-decision",
-                $"decision=scheduled count={headings.Count} defer={deferLargeUntilExplicitFlush} version={version}");
             ClearPending();
             ScheduleApply(version, snapshot, viewModel, canApply);
             return;
@@ -70,10 +55,6 @@ internal sealed class ApplicateDeferredHeadingUpdater
         _pendingHeadings = snapshot;
         _pendingViewModel = viewModel;
         _pendingCanApply = canApply;
-        ApplicateTrace.DiagMs(
-            "toc-seq",
-            "updater-decision",
-            $"decision=parked count={headings.Count} defer={deferLargeUntilExplicitFlush} version={version}");
     }
 
     private static bool ShouldDefer(IReadOnlyList<DocumentHeading> headings)

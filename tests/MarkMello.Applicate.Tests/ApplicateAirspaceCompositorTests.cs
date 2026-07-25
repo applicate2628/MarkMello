@@ -344,6 +344,65 @@ public sealed class ApplicateAirspaceCompositorTests
         Assert.Equal(1.0, Assert.Single(startupShell.OpacityAssignments));
     }
 
+    // G7 (design work-items/active/2026-07-25-toc-empty-on-open/design.md §6,
+    // I4 "startup reveal gate must not release on an unearned reason"). The
+    // airspace compositor's startup session is the THIRD, previously
+    // unnoted, consumer of HeadingsChanged (design §0.1) and has no
+    // _isAttachedToHost-style gate -- any new emission reaches it. The
+    // toc-empty-on-open fix adds a SECOND producer of HeadingsChanged (the
+    // no-op-reload re-emit), so a repeated report for an already-released
+    // startup session is now a real production scenario, not just a
+    // hypothetical. TryRelease/ReleaseAfterPaint are already
+    // idempotent (their own _released guard) -- this test proves that
+    // structurally, rather than leaving it an unverified assumption.
+    [Fact]
+    public void StartupSessionToleratesARepeatedHeadingsReportAfterAlreadyReleased()
+    {
+        var state = new FakeDocumentRevealState
+        {
+            Document = Source("heavy.md"),
+            IsTocPreferredVisible = true,
+            HasDocumentHeadings = false
+        };
+        var startupSignals = new FakeStartupSignals();
+        var startupShell = new FakeStartupShell();
+        var covers = new FakeCoverFactory();
+        var paintGate = new FakePaintGate();
+        var scheduler = new FakeAirspaceScheduler();
+        using var compositor = new ApplicateAirspaceCompositor(
+            new Panel(),
+            state,
+            covers.Create,
+            paintGate,
+            scheduler);
+        compositor.RegisterStartupSession(startupShell, startupSignals, state);
+        var cover = Assert.Single(covers.Created);
+
+        startupShell.RaiseOpened();
+        scheduler.Flush();
+        startupSignals.RaiseDocumentRevealReady();
+        scheduler.Flush();
+        // A small document: ShouldSkipRendererFrameWait is false, so
+        // TryRelease goes straight to ReleaseAfterPaint (no renderer-settle
+        // arming needed) -- mirrors StartupSessionFallbacksAndRendererFailureReleaseWithoutPaintGate's
+        // small-doc setup above, not the heavy-doc renderer-settle test.
+        startupSignals.RaiseHeadingsChanged([new DocumentHeading("intro", 1, "Intro", 0)]);
+        scheduler.Flush();
+        paintGate.Flush();
+        scheduler.Flush();
+
+        Assert.Equal(1, cover.HideImmediateCount);
+
+        // Same headings re-reported (this design's no-op-reload re-emit is
+        // exactly this: the SAME retained list re-delivered) after the
+        // session already released.
+        startupSignals.RaiseHeadingsChanged([new DocumentHeading("intro", 1, "Intro", 0)]);
+        scheduler.Flush();
+
+        Assert.Equal(1, cover.HideImmediateCount);
+        Assert.Equal(1.0, Assert.Single(startupShell.OpacityAssignments));
+    }
+
     [Fact]
     public void StartupSessionFallbacksAndRendererFailureReleaseWithoutPaintGate()
     {

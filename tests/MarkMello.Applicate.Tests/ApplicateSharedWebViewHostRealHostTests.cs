@@ -1,12 +1,16 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using MarkMello.Applicate.Desktop.Rendering;
+using MarkMello.Applicate.Desktop.Views;
 using MarkMello.Application.Abstractions;
 using MarkMello.Domain;
+using MarkMello.Presentation.ViewModels;
 using Xunit;
 
 namespace MarkMello.Applicate.Tests;
@@ -321,6 +325,215 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
 
             Assert.Equal(1, count);
             Assert.Same(failure, received);
+        });
+    }
+
+    // ----- Headings no-op-reload re-emit (design work-items/active/2026-07-25-
+    // toc-empty-on-open/design.md, G1/G2/G3/G5/G8) ------------------------------
+    // Feeds the real IPC message sequence a genuine renderer would produce for a
+    // fresh document load directly into the REAL View via HandleWebMessageBody --
+    // the same injection seam IpcContractTests uses. No live WebView2 needed:
+    // QueueRenderShellAsync parks at the ParkingShellAssetFactory await, but
+    // _hasLoadedDocument / _awaitingLayoutReady / _activeRevealRenderId are all
+    // set synchronously inside QueueRender before that await, so feeding
+    // document-ready / minimap-state / layout-ready afterward drives the real
+    // gates for real.
+    //
+    // Shell mode is the process default here (ApplicateRendererShellMode.IsEnabled
+    // defaults true, and NewHost() always supplies a non-null shellAssetFactory),
+    // so the FIRST document-ready is the shell's own empty-page ready (consumed
+    // silently) and a SECOND is required to promote _hasLoadedDocument -- design
+    // §8.4 flags this exact message count as an ASSUMPTION (UNVERIFIED); it is
+    // resolved here by asserting HasLoadedDocumentForSource as an explicit
+    // precondition rather than assuming the recipe worked.
+
+    private static void DriveViewToLoadedAndPainted(ApplicateWebMarkdownDocumentView view)
+    {
+        if (!view.HasLoadedDocumentForReveal)
+        {
+            view.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "document-ready" }));
+        }
+        if (!view.HasLoadedDocumentForReveal)
+        {
+            view.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "document-ready" }));
+        }
+        view.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "minimap-state", visible = false }));
+        view.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "layout-ready", cached = false }));
+    }
+
+    private static void PostHeadings(ApplicateWebMarkdownDocumentView view, params string[] headingIds)
+    {
+        var headings = new List<object>();
+        foreach (var id in headingIds)
+        {
+            headings.Add(new { id, level = 1, text = id });
+        }
+
+        view.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "headings-updated", headings }));
+    }
+
+    // G1 -- the end-to-end guard. Per design §8 this must be RED at 1d191f8,
+    // GREEN after the fix, and RED again when the single new
+    // View.RaiseDocumentHeadingsForLoadedSource(source) call line in
+    // ApplicateSharedWebViewHost.RequestRender is deleted -- verified manually
+    // as the mandatory mutation check, not encoded here.
+    [Fact]
+    public void NoOpReloadReemitsRetainedHeadingsForTheSameSource()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostHeadings(host.View, "intro", "body");
+
+            // Explicit precondition (design §8.4) -- prove the document is
+            // actually loaded AND painted for DocA before relying on it.
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            IReadOnlyList<DocumentHeading>? reemitted = null;
+            var fireCount = 0;
+            host.View.HeadingsChanged += (_, headings) =>
+            {
+                reemitted = headings;
+                fireCount++;
+            };
+
+            // Same source, same content -> UpdateInputs returns
+            // None/ApplyLivePreferences, not Render -- exactly the no-op
+            // reload this design's root names (DetermineInputUpdateAction).
+            host.RequestRender(DocA, Request());
+
+            Assert.Equal(1, fireCount);
+            Assert.NotNull(reemitted);
+            Assert.Equal(2, reemitted!.Count);
+            Assert.Equal("intro", reemitted[0].Id);
+            Assert.Equal("body", reemitted[1].Id);
+        });
+    }
+
+    // G2 -- no stale overwrite. Part A's retain-at-ingress is a single writer:
+    // a second headings-updated for the SAME source (e.g. a live split-editor
+    // content update that keeps the document path identical) must replace the
+    // retained payload, not accumulate alongside it.
+    [Fact]
+    public void NoOpReloadReemitsTheLatestRetainedHeadingsNotAStaleEarlierList()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostHeadings(host.View, "first");
+            PostHeadings(host.View, "second-a", "second-b");
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            IReadOnlyList<DocumentHeading>? reemitted = null;
+            host.View.HeadingsChanged += (_, headings) => reemitted = headings;
+
+            host.RequestRender(DocA, Request());
+
+            Assert.NotNull(reemitted);
+            Assert.Equal(2, reemitted!.Count);
+            Assert.Equal("second-a", reemitted[0].Id);
+            Assert.Equal("second-b", reemitted[1].Id);
+        });
+    }
+
+    // G3 -- I1: an empty retained payload (a heading-less document; the
+    // renderer's extractAndPostHeadings posts headings: [] when there is no
+    // main.mm-document or no surviving heading) must never reach the TOC via
+    // the re-emit path -- the "no-retained-payload" guard suppresses it.
+    [Fact]
+    public void NoOpReloadSuppressesReemitWhenRetainedPayloadIsEmpty()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostHeadings(host.View);
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            var fireCount = 0;
+            host.View.HeadingsChanged += (_, _) => fireCount++;
+
+            host.RequestRender(DocA, Request());
+
+            Assert.Equal(0, fireCount);
+        });
+    }
+
+    // G5 -- I3: a no-op reload must not visibly rebuild the TOC column. The
+    // re-emit hands out the SAME retained list instance on every repeated
+    // no-op reload for the same document -- no derived/rebuilt list, so
+    // UpdateDocumentHeadings' consumers see identical contents each time.
+    [Fact]
+    public void RepeatedNoOpReloadsReemitTheSameRetainedHeadingListInstance()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostHeadings(host.View, "intro", "body");
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            var observed = new List<IReadOnlyList<DocumentHeading>>();
+            host.View.HeadingsChanged += (_, headings) => observed.Add(headings);
+
+            host.RequestRender(DocA, Request());
+            host.RequestRender(DocA, Request());
+            host.RequestRender(DocA, Request());
+
+            Assert.Equal(3, observed.Count);
+            Assert.Same(observed[0], observed[1]);
+            Assert.Same(observed[0], observed[2]);
+        });
+    }
+
+    // G8 -- I5: mode-toggle reveal ordering stays bridge-owned. Part C's
+    // headings re-emit is gated the same way as its
+    // RaiseDocumentRevealReadyForLoadedSource sibling: only fires when
+    // transactionGeneration == 0. A transactional RequestRender (Ctrl+E
+    // mode-toggle path) must not re-emit.
+    [Fact]
+    public void TransactionalRequestRenderDoesNotReemitHeadings()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostHeadings(host.View, "intro");
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            var fireCount = 0;
+            host.View.HeadingsChanged += (_, _) => fireCount++;
+
+            host.RequestRender(DocA, Request(), transactionGeneration: 1);
+
+            Assert.Equal(0, fireCount);
         });
     }
 

@@ -1,3 +1,4 @@
+using MarkMello.Applicate.Desktop.Views;
 using Xunit;
 
 namespace MarkMello.Applicate.Tests;
@@ -75,6 +76,34 @@ public sealed class ApplicateEditPreviewSyncTests
         Assert.Contains("ReferenceEquals(_viewModel, viewModel)", handler, StringComparison.Ordinal);
         Assert.Contains("_headingUpdater.FlushPending();", rendered, StringComparison.Ordinal);
         Assert.Contains("_headingUpdater.Invalidate();", unwireSharedHostEvents, StringComparison.Ordinal);
+        // Part D (design 2026-07-25-toc-empty-on-open §2/§9 H2): mirrors the
+        // viewer surface's strengthened defer predicate.
+        Assert.Contains(
+            "deferLargeUntilExplicitFlush: deferLargeUntilExplicitFlush",
+            handler,
+            StringComparison.Ordinal);
+        Assert.Contains("ShouldDeferLargeTocHeadingUpdates(", handler, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, false)]
+    public void EditPreviewShouldDeferLargeTocHeadingUpdatesMatchesAllFourInputCombinations(
+        bool documentRenderedForCurrentRequest,
+        bool hasLoadedDocumentForCurrentSource,
+        bool expectedDefer)
+    {
+        // Behavioural guard mirroring ApplicateViewerViewTests' equivalent --
+        // the (false, true) row is the one Part D adds so a >=250-heading
+        // no-op-reload reopen on the edit-preview surface does not park
+        // forever either.
+        Assert.Equal(
+            expectedDefer,
+            ApplicateEditPreviewView.ShouldDeferLargeTocHeadingUpdates(
+                documentRenderedForCurrentRequest,
+                hasLoadedDocumentForCurrentSource));
     }
 
     [Fact]

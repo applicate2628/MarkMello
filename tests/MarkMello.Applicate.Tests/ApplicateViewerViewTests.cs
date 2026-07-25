@@ -204,8 +204,44 @@ public sealed class ApplicateViewerViewTests
         Assert.Contains("viewModel.UpdateDocumentHeadings(snapshot);", updater, StringComparison.Ordinal);
         Assert.Contains("bool deferLargeUntilExplicitFlush", updater, StringComparison.Ordinal);
         Assert.Contains("ScheduleApply(", updater, StringComparison.Ordinal);
-        Assert.Contains("deferLargeUntilExplicitFlush: !_documentRenderedForCurrentRequest", handler, StringComparison.Ordinal);
+        // Strengthened by Part D (design 2026-07-25-toc-empty-on-open §2/§9
+        // H2): defer is no longer solely "!_documentRenderedForCurrentRequest"
+        // -- a same-source no-op reload re-emits headings with NO fresh
+        // DocumentRendered to ever flip that flag, so a >=250-heading no-op
+        // reopen would defer forever without the additional conjunct. See
+        // ShouldDeferLargeTocHeadingUpdatesMatchesAllFourInputCombinations
+        // below for the behavioural guard this source-text pin cannot give.
+        Assert.Contains(
+            "deferLargeUntilExplicitFlush: deferLargeUntilExplicitFlush",
+            handler,
+            StringComparison.Ordinal);
+        Assert.Contains("ShouldDeferLargeTocHeadingUpdates(", handler, StringComparison.Ordinal);
         Assert.Contains("_documentRenderedForCurrentRequest = true;", rendered, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false, false, true)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, false)]
+    public void ShouldDeferLargeTocHeadingUpdatesMatchesAllFourInputCombinations(
+        bool documentRenderedForCurrentRequest,
+        bool hasLoadedDocumentForCurrentSource,
+        bool expectedDefer)
+    {
+        // Behavioural guard for Part D (design 2026-07-25-toc-empty-on-open
+        // §2/§9 H2): the source-text pin above can only prove the call site
+        // wires this predicate in; it cannot prove the predicate's own
+        // truth table. The (false, true) row is the one this design adds --
+        // a same-source no-op reload never sets _documentRenderedForCurrentRequest
+        // (no fresh DocumentRendered fires), but the document is already
+        // loaded AND painted for the current source, so a >=250-heading
+        // reopen must NOT defer or it parks forever.
+        Assert.Equal(
+            expectedDefer,
+            ApplicateViewerView.ShouldDeferLargeTocHeadingUpdates(
+                documentRenderedForCurrentRequest,
+                hasLoadedDocumentForCurrentSource));
     }
 
     [Fact]

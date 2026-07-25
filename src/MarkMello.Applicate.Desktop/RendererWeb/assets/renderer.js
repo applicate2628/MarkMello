@@ -4102,7 +4102,6 @@
   function extractAndPostHeadings() {
     const main = document.querySelector("main.mm-document");
     if (!main) {
-      postPerfMark("toc-seq-headings-post", { path: "no-main", count: 0 });
       postHostMessage({ type: "headings-updated", headings: [] });
       lastExtractedHeadings = [];
       lastPostedActiveHeadingId = null;
@@ -4126,7 +4125,6 @@
       return { id, level, text, segments };
     }).filter((h) => h !== null);
     lastExtractedHeadings = headings.map(cloneHeadingPayload);
-    postPerfMark("toc-seq-headings-post", { path: "live", count: headings.length, found: nodes.length, kept: headings.length });
     postHostMessage({ type: "headings-updated", headings });
     rebuildActiveHeadingObserver(nodes.filter((n) => !!n.id));
   }
@@ -4140,7 +4138,6 @@
     }
     const headings = cachedHeadings.map(cloneHeadingPayload);
     lastExtractedHeadings = headings.map(cloneHeadingPayload);
-    postPerfMark("toc-seq-headings-post", { path: "cached", count: headings.length });
     postHostMessage({ type: "headings-updated", headings });
     if (activeHeadingObserver) {
       activeHeadingObserver.disconnect();

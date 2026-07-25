@@ -874,6 +874,35 @@ public sealed class MainWindowViewModelTests
         Assert.False(harness.ViewModel.CloseFileCommand.CanExecute(null));
     }
 
+    // G6 (design work-items/active/2026-07-25-toc-empty-on-open/design.md §6,
+    // I2 "no collapse flash on viewer->viewer"): OnDocumentChanged clears the
+    // TOC ONLY when Document becomes null. This half proves the clear DOES
+    // fire on close (Document -> null); the non-null-switch half is already
+    // pinned by OpeningDifferentDocumentSelectsFirstNewHeadingUntilRendererReportsActiveHeading
+    // above, which asserts the PREVIOUS document's headings survive a
+    // viewer->viewer OpenPathAsync untouched. This file is read-only for the
+    // toc-empty-on-open fix (Must-NOT-touch list) -- this test is a
+    // regression-safety net for the design's re-emit path, which routes back
+    // through this exact clear/replace contract via UpdateDocumentHeadings.
+    [Fact]
+    public async Task ClosingTheActiveDocumentClearsDocumentHeadings()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "toc-close.md");
+        harness.Loader.Sources[path] = CreateSource(path, "# Intro");
+
+        await harness.ViewModel.OpenPathAsync(path);
+        harness.ViewModel.UpdateDocumentHeadings([
+            new DocumentHeading("intro", 1, "Intro", 0),
+        ]);
+        Assert.True(harness.ViewModel.HasDocumentHeadings);
+
+        await harness.ViewModel.CloseFileCommand.ExecuteAsync(null);
+
+        Assert.Empty(harness.ViewModel.DocumentHeadings);
+        Assert.False(harness.ViewModel.HasDocumentHeadings);
+    }
+
     [Fact]
     public async Task CloseFileCommandWhenDirtyDraftPromptsAndDiscardReturnsToWelcome()
     {
