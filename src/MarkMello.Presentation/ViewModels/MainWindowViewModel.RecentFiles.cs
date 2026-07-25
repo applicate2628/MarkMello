@@ -24,6 +24,12 @@ public partial class MainWindowViewModel
 
     public string RecentFilesHeader => _localization["WelcomeRecentHeader"];
 
+    /// <summary>Intent-only: forget one entry. The host (subscribed) owns removal + persist.</summary>
+    public event EventHandler<string>? RecentFileRemoveRequested;
+
+    /// <summary>Intent-only: forget every entry. Same contract as <see cref="RecentFileRemoveRequested"/>.</summary>
+    public event EventHandler? RecentFilesClearRequested;
+
     /// <summary>
     /// Replace the displayed recent list from the host's persisted paths (already most-recent-first,
     /// deduplicated). Entries whose file no longer exists are dropped from the DISPLAY only.
@@ -52,12 +58,31 @@ public partial class MainWindowViewModel
     [RelayCommand]
     private async Task OpenRecentFileAsync(string? path)
     {
+        CloseOverlayCore();
+
         if (string.IsNullOrWhiteSpace(path))
         {
             return;
         }
 
         await OpenPathAsync(path).ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private void RemoveRecentFile(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        RecentFileRemoveRequested?.Invoke(this, path);
+    }
+
+    [RelayCommand]
+    private void ClearRecentFiles()
+    {
+        RecentFilesClearRequested?.Invoke(this, EventArgs.Empty);
     }
 }
 
