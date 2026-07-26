@@ -25,7 +25,10 @@ describe("shell initialization failure reporting", () => {
     const originalAddEventListener = window.addEventListener;
     let errorInjected = false;
     let rejectionInjected = false;
-    window.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions) => {
+    // Production only ever calls addEventListener with a real listener (never
+    // null — that's a removeEventListener-only affordance), so the intercept
+    // matches the DOM lib's actual (non-nullable) addEventListener signature.
+    window.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
       originalAddEventListener.call(window, type, listener, options);
       if (type === "error" && !errorInjected) {
         errorInjected = true;

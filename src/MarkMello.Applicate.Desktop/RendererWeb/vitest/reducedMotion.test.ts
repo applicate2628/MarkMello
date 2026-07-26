@@ -184,7 +184,7 @@ describe("D12 reduced-motion policy (JS smooth-scroll gate)", () => {
     load({ type: "scroll-to-heading", id: "target-heading" });
 
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
-    expect(scrollIntoView.mock.calls[0][0]).toMatchObject({ behavior: "instant", block: "start" });
+    expect(scrollIntoView.mock.calls[0]![0]).toMatchObject({ behavior: "instant", block: "start" });
   });
 
   it("keeps the smooth TOC scroll byte-identical for everyone else", () => {
@@ -193,6 +193,6 @@ describe("D12 reduced-motion policy (JS smooth-scroll gate)", () => {
     load({ type: "scroll-to-heading", id: "target-heading" });
 
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
-    expect(scrollIntoView.mock.calls[0][0]).toMatchObject({ behavior: "smooth", block: "start" });
+    expect(scrollIntoView.mock.calls[0]![0]).toMatchObject({ behavior: "smooth", block: "start" });
   });
 });

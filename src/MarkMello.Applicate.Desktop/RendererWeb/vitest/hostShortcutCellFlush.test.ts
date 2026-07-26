@@ -88,7 +88,7 @@ describe("host shortcut flushes a pending editable-cell edit", () => {
       cell.focus();
       cell.textContent = `Pending for ${combo}`;
 
-      pressCombo(cell, { combo, key, shift });
+      pressCombo(cell, { combo, key, ...(shift !== undefined ? { shift } : {}) });
 
       expect(messages.map((message) => message.type)).toEqual([
         "table-cell-edit",

@@ -84,7 +84,7 @@ describe("renderer math observer performance marker", () => {
     });
 
     postedHostMessages = [];
-    const hostWindow = window as MathPerfWindow;
+    const hostWindow = window as unknown as MathPerfWindow;
     hostWindow.katex = { render: vi.fn() };
     hostWindow.chrome = {
       webview: {
@@ -95,7 +95,7 @@ describe("renderer math observer performance marker", () => {
   });
 
   afterEach(() => {
-    const hostWindow = window as MathPerfWindow;
+    const hostWindow = window as unknown as MathPerfWindow;
     hostWindow.__mmRendererLoad?.({ type: "clear-document" });
     delete hostWindow.__mmMathObserverPerfEnabled;
     delete hostWindow.katex;
@@ -106,7 +106,7 @@ describe("renderer math observer performance marker", () => {
   });
 
   function mathObserverMarks(): Array<{ name: string; detail?: unknown }> {
-    return (window as MathPerfWindow).__mmPerfReport().marks.filter(
+    return (window as unknown as MathPerfWindow).__mmPerfReport().marks.filter(
       mark => mark.name === "mm-math-observer-window"
     );
   }
@@ -138,7 +138,7 @@ describe("renderer math observer performance marker", () => {
   }
 
   it("emits only while the dynamic renderer-window flag is exactly true", () => {
-    const hostWindow = window as MathPerfWindow;
+    const hostWindow = window as unknown as MathPerfWindow;
     hostWindow.__mmRendererLoad({
       type: "reading-preferences",
       fontFamily: "serif",
@@ -170,7 +170,7 @@ describe("renderer math observer performance marker", () => {
   });
 
   it("posts minimap viewport timing only while the telemetry flag is exactly true", () => {
-    const hostWindow = window as MathPerfWindow;
+    const hostWindow = window as unknown as MathPerfWindow;
     postedHostMessages = [];
 
     runScrollFrame();

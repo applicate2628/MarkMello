@@ -68,7 +68,14 @@ function captureTerminal(
   try {
     run(rendererInternals());
   } finally {
-    rendererWindow.invokeCSharpAction = previousInvoke;
+    // `invokeCSharpAction` is an optional property (present ⇒ typed function,
+    // never explicitly `undefined`), so restoring "was absent" means deleting
+    // it rather than assigning `undefined` back onto it.
+    if (previousInvoke === undefined) {
+      delete rendererWindow.invokeCSharpAction;
+    } else {
+      rendererWindow.invokeCSharpAction = previousInvoke;
+    }
     rendererWindow.chrome = previousChrome;
   }
   return captured;
@@ -271,7 +278,7 @@ describe("rendered HTML snapshot", () => {
     });
 
     expect(terminals).toHaveLength(1);
-    expect(Object.keys(terminals[0]).sort()).toEqual(["reason", "requestId", "type"]);
+    expect(Object.keys(terminals[0]!).sort()).toEqual(["reason", "requestId", "type"]);
     expect(terminals[0]).toEqual({
       type: "rendered-html-failed",
       requestId: CAPTURE_REQUEST_ID,

@@ -501,7 +501,7 @@ describe("prepare-for-export full-render barrier", () => {
     internals.installLazyMermaidObserver([lazy], generationBeforeSuppressedStarters, mermaid);
     internals.enqueueLazyMermaidRender(lazy, generationBeforeSuppressedStarters, mermaid);
     staleObserver.callback([
-      { isIntersecting: true, target: lazy } as IntersectionObserverEntry,
+      { isIntersecting: true, target: lazy } as Pick<IntersectionObserverEntry, "target" | "isIntersecting"> as IntersectionObserverEntry,
     ], {} as IntersectionObserver);
     await flushMicrotasks();
     const suppressedSnapshot = internals.getMermaidLifecycleSnapshotForTesting();
@@ -534,7 +534,7 @@ describe("prepare-for-export full-render barrier", () => {
     internals.installLazyMermaidObserver([lazy], terminalSnapshot.generation, mermaid);
     internals.enqueueLazyMermaidRender(lazy, terminalSnapshot.generation, mermaid);
     staleObserver.callback([
-      { isIntersecting: true, target: lazy } as IntersectionObserverEntry,
+      { isIntersecting: true, target: lazy } as Pick<IntersectionObserverEntry, "target" | "isIntersecting"> as IntersectionObserverEntry,
     ], {} as IntersectionObserver);
     await flushMicrotasks();
     expect(initialize).not.toHaveBeenCalled();
@@ -578,7 +578,7 @@ describe("prepare-for-export full-render barrier", () => {
 
     const recoveryObserver = observers.at(-1)!;
     recoveryObserver.callback([
-      { isIntersecting: true, target: node } as IntersectionObserverEntry,
+      { isIntersecting: true, target: node } as Pick<IntersectionObserverEntry, "target" | "isIntersecting"> as IntersectionObserverEntry,
     ], {} as IntersectionObserver);
     await flushMicrotasks();
     expect(render).toHaveBeenCalledTimes(2);

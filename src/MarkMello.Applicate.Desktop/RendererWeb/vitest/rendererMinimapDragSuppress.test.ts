@@ -82,7 +82,7 @@ describe("renderer minimap panning suppression", () => {
     vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver as unknown as typeof IntersectionObserver);
 
     postedHostMessages = [];
-    const hostWindow = window as DragPerfWindow;
+    const hostWindow = window as unknown as DragPerfWindow;
     hostWindow.katex = { render: vi.fn() };
     hostWindow.chrome = {
       webview: {
@@ -98,8 +98,8 @@ describe("renderer minimap panning suppression", () => {
       document.dispatchEvent(new Event("scroll"));
     });
 
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
-      const element = this as HTMLElement;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const element = this;
       if (element.classList.contains("mm-minimap")) {
         return rect(0, 0, 80, 300);
       }
@@ -123,7 +123,7 @@ describe("renderer minimap panning suppression", () => {
   });
 
   afterEach(() => {
-    const hostWindow = window as DragPerfWindow;
+    const hostWindow = window as unknown as DragPerfWindow;
     hostWindow.__mmRendererLoad?.({ type: "clear-document" });
     delete hostWindow.__mmMathObserverPerfEnabled;
     delete hostWindow.katex;
@@ -134,7 +134,7 @@ describe("renderer minimap panning suppression", () => {
   });
 
   function load(message: unknown): void {
-    (window as DragPerfWindow).__mmRendererLoad(message);
+    (window as unknown as DragPerfWindow).__mmRendererLoad(message);
   }
 
   function flushQueuedRafs(limit = 40): void {
@@ -217,7 +217,7 @@ describe("renderer minimap panning suppression", () => {
 
   it("suppresses intermediate panning work and flushes it once at the final scroll position", async () => {
     const minimap = await prepareDetailedMinimap();
-    const hostWindow = window as DragPerfWindow;
+    const hostWindow = window as unknown as DragPerfWindow;
     hostWindow.__mmMathObserverPerfEnabled = true;
     postedHostMessages.length = 0;
     liveBlockLayoutReadCount = 0;
@@ -265,7 +265,7 @@ describe("renderer minimap panning suppression", () => {
   });
 
   function countMathScrollMarks(): number {
-    return (window as DragPerfWindow).__mmPerfReport().marks.filter(mark =>
+    return (window as unknown as DragPerfWindow).__mmPerfReport().marks.filter(mark =>
       mark.name === "mm-math-observer-window"
       && typeof mark.detail === "object"
       && mark.detail !== null

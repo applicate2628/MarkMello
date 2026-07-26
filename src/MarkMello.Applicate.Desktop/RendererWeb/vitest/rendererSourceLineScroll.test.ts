@@ -124,8 +124,8 @@ describe("renderer source-line scroll sync", () => {
 
     expect(() => dispatchScroll()).not.toThrow();
 
-    expect(messages.some((message: { type?: string } | null) =>
-      message?.type === "preview-source-line")).toBe(false);
+    expect(messages.some((message) =>
+      (message as { type?: string } | null)?.type === "preview-source-line")).toBe(false);
   });
 
   it("keeps preview source-line sampling enabled for edit preview", () => {

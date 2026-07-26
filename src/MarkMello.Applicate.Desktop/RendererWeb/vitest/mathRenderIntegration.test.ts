@@ -1,7 +1,14 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 
+// Mirrors the (unexported) `KatexLike.render` signature in mathRenderInit.ts
+// so a mock katex object type-checks as an actual drop-in, not `any`.
+type FakeKatexRenderOpts = { throwOnError?: boolean; displayMode?: boolean; strict?: string; trust?: boolean };
+
 function installIntersectionObserverStub() {
-  type Obs = { cb: IntersectionObserverCallback; elements: Set<Element>; opts?: IntersectionObserverInit };
+  // `opts` carries `| undefined` explicitly: the constructor below always
+  // stores its (possibly-omitted) argument into this field, so the field's
+  // declared type must admit the value it is actually assigned.
+  type Obs = { cb: IntersectionObserverCallback; elements: Set<Element>; opts?: IntersectionObserverInit | undefined };
   const observers: Obs[] = [];
   const FakeIO = class {
     private elements = new Set<Element>();
@@ -120,13 +127,13 @@ describe("renderMath integration", () => {
     mockRect(para, 100, 200);
     vi.stubGlobal("innerHeight", 800);
     installIntersectionObserverStub();
-    (window as unknown as { katex: { render: ReturnType<typeof vi.fn> } }).katex = {
-      render: vi.fn(() => { throw new Error("bad latex"); }),
+    (window as unknown as { katex: { render: (tex: string, node: HTMLElement, opts: FakeKatexRenderOpts) => void } }).katex = {
+      render: vi.fn((_tex: string, _node: HTMLElement, _opts: FakeKatexRenderOpts) => { throw new Error("bad latex"); }),
     };
 
     const { renderMath } = await import("../src/mathRenderInit");
     const controller = renderMath({
-      katex: (window as unknown as { katex: { render: ReturnType<typeof vi.fn> } }).katex,
+      katex: (window as unknown as { katex: { render: (tex: string, node: HTMLElement, opts: FakeKatexRenderOpts) => void } }).katex,
       documentRoot: document,
     });
 

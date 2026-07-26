@@ -132,11 +132,18 @@ describe("Phase B trigger", () => {
 describe("schedulePhaseBRebuild (real renderer seam)", () => {
   it("calls refresh('B') when documentHeight changes after allMathRendered", async () => {
     vi.useFakeTimers();
-    const win = window as typeof window & {
+    // `Omit` strips the DOM lib's own (required, non-optional)
+    // `requestIdleCallback` declaration before re-adding it as optional --
+    // intersecting straight onto `typeof window` would keep it required
+    // (the real declaration wins), making it neither deletable nor safely
+    // unassignable under `exactOptionalPropertyTypes`.
+    const win = window as Omit<typeof window, "requestIdleCallback"> & {
       requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
     };
     const originalRequestIdleCallback = win.requestIdleCallback;
-    win.requestIdleCallback = undefined;
+    // Optional property (present ⇒ typed function, never explicitly
+    // `undefined`) — force the "absent" fallback path by deleting it.
+    delete win.requestIdleCallback;
     try {
       const refresh = vi.fn();
       const currentScrollHeight = 200;
@@ -159,7 +166,11 @@ describe("schedulePhaseBRebuild (real renderer seam)", () => {
       await phaseBReady;
       expect(refresh).toHaveBeenCalledWith("B");
     } finally {
-      win.requestIdleCallback = originalRequestIdleCallback;
+      if (originalRequestIdleCallback === undefined) {
+        delete win.requestIdleCallback;
+      } else {
+        win.requestIdleCallback = originalRequestIdleCallback;
+      }
       vi.useRealTimers();
     }
   });

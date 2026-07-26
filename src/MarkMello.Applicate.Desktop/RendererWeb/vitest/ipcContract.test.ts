@@ -34,7 +34,14 @@ function capture(run: () => void): CapturedMessage[] {
   try {
     run();
   } finally {
-    rendererWindow.invokeCSharpAction = previous;
+    // `invokeCSharpAction` is an optional property (present ⇒ typed function,
+    // never explicitly `undefined`), so restoring "was absent" means deleting
+    // it rather than assigning `undefined` back onto it.
+    if (previous === undefined) {
+      delete rendererWindow.invokeCSharpAction;
+    } else {
+      rendererWindow.invokeCSharpAction = previous;
+    }
     rendererWindow.chrome = previousChrome;
   }
   return captured;

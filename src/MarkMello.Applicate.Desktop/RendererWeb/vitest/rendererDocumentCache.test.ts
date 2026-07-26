@@ -690,7 +690,10 @@ describe("renderer document cache", () => {
     expect(observers.at(-1)?.elements.has(restoredMermaid!)).toBe(true);
 
     observers.at(-1)?.callback([
-      { target: restoredMermaid!, isIntersecting: true } as IntersectionObserverEntry
+      // Cast through the real interface's own Pick first (exact field match,
+      // zero risk), matching the established fake-IntersectionObserverEntry
+      // idiom in mathRenderInit.test.ts rather than a blind full-shape cast.
+      { target: restoredMermaid!, isIntersecting: true } as Pick<IntersectionObserverEntry, "target" | "isIntersecting"> as IntersectionObserverEntry
     ], {} as IntersectionObserver);
     await letPipelineSettle();
 

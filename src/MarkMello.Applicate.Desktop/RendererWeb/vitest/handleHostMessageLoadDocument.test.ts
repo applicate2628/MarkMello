@@ -30,7 +30,7 @@ describe("handleHostMessage(load-document)", () => {
     const load = (window as unknown as { __mmRendererLoad: HostBridge }).__mmRendererLoad;
     load({ type: "load-document", html: "<p>x</p>" });
     await new Promise(r => setTimeout(r, 50));
-    const documentReady = messages.find((m: { type?: string } | null) => m?.type === "document-ready");
+    const documentReady = messages.find((m) => (m as { type?: string } | null)?.type === "document-ready");
     expect(documentReady).toBeTruthy();
   });
 
@@ -187,9 +187,9 @@ describe("handleHostMessage(load-document)", () => {
 
     load({ type: "theme", theme: "dark", requestId: 42 });
 
-    expect(messages.some((message: { type?: string } | null) => message?.type === "theme-applied")).toBe(false);
+    expect(messages.some((message) => (message as { type?: string } | null)?.type === "theme-applied")).toBe(false);
     rafCallbacks.shift()?.(0);
-    expect(messages.some((message: { type?: string } | null) => message?.type === "theme-applied")).toBe(false);
+    expect(messages.some((message) => (message as { type?: string } | null)?.type === "theme-applied")).toBe(false);
     rafCallbacks.shift()?.(16);
 
     expect(messages).toContainEqual({ type: "theme-applied", theme: "dark", requestId: 42 });
@@ -264,10 +264,12 @@ describe("handleHostMessage(load-document)", () => {
       rafCallbacks.shift()?.(frame * 16);
     }
 
-    const settledIndex = messages.findIndex((message: { type?: string } | null) =>
-      message?.type === "mode-toggle-settled");
-    const chromeReadyIndex = messages.findIndex((message: { type?: string; name?: string } | null) =>
-      message?.type === "perf-mark" && message.name === "mm-mode-settle-chrome-ready");
+    const settledIndex = messages.findIndex((message) =>
+      (message as { type?: string } | null)?.type === "mode-toggle-settled");
+    const chromeReadyIndex = messages.findIndex((message) => {
+      const m = message as { type?: string; name?: string } | null;
+      return m?.type === "perf-mark" && m.name === "mm-mode-settle-chrome-ready";
+    });
 
     expect(settledIndex).toBeGreaterThanOrEqual(0);
     expect(chromeReadyIndex).toBeGreaterThanOrEqual(0);

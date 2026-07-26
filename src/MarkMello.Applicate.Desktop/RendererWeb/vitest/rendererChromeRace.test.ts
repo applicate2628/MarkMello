@@ -69,7 +69,7 @@ describe("renderer chrome race handling", () => {
     };
     vi.stubGlobal("requestAnimationFrame", rafStub);
 
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       if (this instanceof HTMLElement && this.classList.contains("mm-document")) {
         return {
           x: 120,
@@ -153,8 +153,15 @@ describe("renderer chrome race handling", () => {
     });
   }
 
+  // Host-message payloads cross the postMessage boundary as `unknown`; every
+  // predicate below narrows through this single shared shape instead of
+  // re-declaring (and re-trusting) the cast at each call site.
+  function messageShape(message: unknown): { type?: string; name?: string } | null {
+    return message as { type?: string; name?: string } | null;
+  }
+
   function findMessageIndex(type: string, messages: unknown[]): number {
-    return messages.findIndex((message: { type?: string } | null) => message?.type === type);
+    return messages.findIndex((message) => messageShape(message)?.type === type);
   }
 
   function countRendererMarks(name: string): number {
@@ -200,7 +207,7 @@ describe("renderer chrome race handling", () => {
   }
 
   async function settleInitialVisibleLayout(): Promise<void> {
-    load({ type: "reading-preferences", ...makePreferences(true) });
+    load({ ...makePreferences(true) });
     flushNextRaf();
 
     load({ type: "load-document", html: "<p>Loaded document</p>", hasMermaid: false });
@@ -216,7 +223,7 @@ describe("renderer chrome race handling", () => {
     expect(handle!.hidden).toBe(false);
     expect(document.documentElement.dataset.mmChrome).toBe("on");
 
-    load({ type: "reading-preferences", ...makePreferences(false) });
+    load({ ...makePreferences(false) });
 
     expect(handle!.hidden).toBe(true);
     expect(document.documentElement.dataset.mmChrome).toBe("off");
@@ -231,7 +238,7 @@ describe("renderer chrome race handling", () => {
       renderId: 21,
       cacheKey: "fresh-full",
     });
-    load({ type: "reading-preferences", ...makePreferences(true) });
+    load({ ...makePreferences(true) });
     flushQueuedRafs();
 
     expect(countRendererMarks("mm-render-math-start")).toBe(1);
@@ -249,7 +256,7 @@ describe("renderer chrome race handling", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    load({ type: "reading-preferences", ...makePreferences(true) });
+    load({ ...makePreferences(true) });
     flushQueuedRafs();
 
     expect(countRendererMarks("mm-render-math-start")).toBe(2);
@@ -366,7 +373,7 @@ describe("renderer chrome race handling", () => {
     };
     setDocumentMetrics(2400, 600);
 
-    load({ type: "reading-preferences", ...makePreferences(true, "auto") });
+    load({ ...makePreferences(true, "auto") });
     flushQueuedRafs();
     loadMinimapPolicy(1000);
     messages.length = 0;
@@ -386,7 +393,7 @@ describe("renderer chrome race handling", () => {
     expect(skippedRefreshMark?.detail).toContain('"reason":"auto-heavy"');
 
     messages.length = 0;
-    load({ type: "reading-preferences", ...makePreferences(true, "on") });
+    load({ ...makePreferences(true, "on") });
     flushQueuedRafs();
     load({ type: "minimap-settle-probe", transactionGeneration: 1 });
     flushQueuedRafs();
@@ -424,7 +431,7 @@ describe("renderer chrome race handling", () => {
     };
     setDocumentMetrics(2400, 600);
 
-    load({ type: "reading-preferences", ...makePreferences(true, "on") });
+    load({ ...makePreferences(true, "on") });
     flushQueuedRafs();
     loadMinimapPolicy(1000);
     load({
@@ -602,7 +609,7 @@ describe("renderer chrome race handling", () => {
     };
     setDocumentMetrics(2400, 600);
 
-    load({ type: "reading-preferences", ...makePreferences(true, "auto") });
+    load({ ...makePreferences(true, "auto") });
     flushQueuedRafs();
     loadMinimapPolicy(1000);
 
@@ -620,7 +627,7 @@ describe("renderer chrome race handling", () => {
       },
     });
 
-    load({ type: "reading-preferences", ...makePreferences(true, "auto"), maxWidth: 760 });
+    load({ ...makePreferences(true, "auto"), maxWidth: 760 });
     flushQueuedRafs();
     await vi.advanceTimersByTimeAsync(100);
 
@@ -698,33 +705,33 @@ describe("renderer chrome race handling", () => {
     await Promise.resolve();
     flushQueuedRafs();
 
-    load({ type: "reading-preferences", ...makePreferences(false, "on") });
+    load({ ...makePreferences(false, "on") });
     flushQueuedRafs();
     messages.length = 0;
 
     expect(document.body.classList.contains("mm-has-minimap")).toBe(false);
 
-    load({ type: "reading-preferences", ...makePreferences(true, "on") });
+    load({ ...makePreferences(true, "on") });
     load({ type: "mode-settle-probe" });
 
     // The stale preference rAF was queued before the probe consumed the
     // pending preferences synchronously.
     flushNextRaf();
-    expect(messages.some((message: { type?: string } | null) =>
-      message?.type === "mode-toggle-settled")).toBe(false);
+    expect(messages.some((message) =>
+      messageShape(message)?.type === "mode-toggle-settled")).toBe(false);
 
     flushNextRaf();
     expect(document.body.classList.contains("mm-has-minimap")).toBe(true);
-    expect(messages.some((message: { type?: string } | null) =>
-      message?.type === "mode-toggle-settled")).toBe(false);
+    expect(messages.some((message) =>
+      messageShape(message)?.type === "mode-toggle-settled")).toBe(false);
 
     flushNextRaf();
-    expect(messages.some((message: { type?: string } | null) =>
-      message?.type === "mode-toggle-settled")).toBe(false);
+    expect(messages.some((message) =>
+      messageShape(message)?.type === "mode-toggle-settled")).toBe(false);
 
     flushNextRaf();
-    expect(messages.some((message: { type?: string } | null) =>
-      message?.type === "mode-toggle-settled")).toBe(true);
+    expect(messages.some((message) =>
+      messageShape(message)?.type === "mode-toggle-settled")).toBe(true);
   });
 
   it("skip-frame settle probe applies preferences before ack without waiting for requestAnimationFrame", () => {
@@ -789,8 +796,10 @@ describe("renderer chrome race handling", () => {
       scrollHeight: 2400,
       clientHeight: 600,
     });
-    expect(messages.some((message: { type?: string; name?: string } | null) =>
-      message?.type === "perf-mark" && message.name === "mm-layout-ready-frame-wait-skipped")).toBe(true);
+    expect(messages.some((message) => {
+      const m = messageShape(message);
+      return m?.type === "perf-mark" && m.name === "mm-layout-ready-frame-wait-skipped";
+    })).toBe(true);
   });
 
   it("non-transactional load-document keeps layout-ready behind animation frames", async () => {
@@ -850,13 +859,15 @@ describe("renderer chrome race handling", () => {
     await vi.advanceTimersByTimeAsync(150);
 
     expect(findMessageIndex("layout-ready", messages)).toBeGreaterThanOrEqual(0);
-    expect(messages.some((message: { type?: string; name?: string } | null) =>
-      message?.type === "perf-mark" && message.name === "mm-layout-ready-frame-fallback")).toBe(true);
+    expect(messages.some((message) => {
+      const m = messageShape(message);
+      return m?.type === "perf-mark" && m.name === "mm-layout-ready-frame-fallback";
+    })).toBe(true);
     // The frame path and the fallback path are mutually exclusive (production's
     // single `posted` guard in scheduleLayoutReady) -- with manual frames
     // never flushed, only the fallback can fire, and it must fire exactly once.
-    const layoutReadyMessages = messages.filter((message: { type?: string } | null) =>
-      message?.type === "layout-ready");
+    const layoutReadyMessages = messages.filter((message) =>
+      messageShape(message)?.type === "layout-ready");
     expect(layoutReadyMessages).toHaveLength(1);
   });
 
@@ -879,7 +890,7 @@ describe("renderer chrome race handling", () => {
     await Promise.resolve();
     flushQueuedRafs();
 
-    load({ type: "reading-preferences", ...makePreferences(false, "on") });
+    load({ ...makePreferences(false, "on") });
     flushQueuedRafs();
     messages.length = 0;
 
@@ -891,8 +902,8 @@ describe("renderer chrome race handling", () => {
 
     expect(document.body.classList.contains("mm-has-minimap")).toBe(true);
     expect(document.documentElement.dataset.mmChrome).toBe("on");
-    expect(messages.some((message: { type?: string } | null) =>
-      message?.type === "mode-toggle-settled")).toBe(true);
+    expect(messages.some((message) =>
+      messageShape(message)?.type === "mode-toggle-settled")).toBe(true);
   });
 
   it("waits for the host-sized viewport before acking the settle probe", async () => {
@@ -929,8 +940,8 @@ describe("renderer chrome race handling", () => {
     flushNextRaf();
     flushNextRaf();
 
-    expect(messages.some((message: { type?: string } | null) =>
-      message?.type === "mode-toggle-settled")).toBe(false);
+    expect(messages.some((message) =>
+      messageShape(message)?.type === "mode-toggle-settled")).toBe(false);
 
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
@@ -938,8 +949,8 @@ describe("renderer chrome race handling", () => {
     });
     flushQueuedRafs();
 
-    expect(messages.some((message: { type?: string } | null) =>
-      message?.type === "mode-toggle-settled")).toBe(true);
+    expect(messages.some((message) =>
+      messageShape(message)?.type === "mode-toggle-settled")).toBe(true);
   });
 
   it("echoes transaction generation on tagged mode settle ack", () => {
