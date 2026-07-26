@@ -15,10 +15,10 @@ namespace MarkMello.Applicate.Tests;
 public sealed class ApplicateViewerViewTests
 {
     [Fact]
-    public void ConstructsWithoutSharedHostAndExposesEmptyWebSlot()
+    public async Task ConstructsWithoutSharedHostAndExposesEmptyWebSlot()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var view = new ApplicateViewerView();
 
@@ -430,10 +430,10 @@ public sealed class ApplicateViewerViewTests
     }
 
     [Fact]
-    public void TocPanelVirtualizedRowFactoryToleratesNullRecycleItem()
+    public async Task TocPanelVirtualizedRowFactoryToleratesNullRecycleItem()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var panel = new ApplicateTocPanel();
             var method = typeof(ApplicateTocPanel).GetMethod("BuildHeadingRow", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -479,10 +479,10 @@ public sealed class ApplicateViewerViewTests
     }
 
     [Fact]
-    public void TocPanelClearsPreviouslyActiveMaterializedRowsAfterNewActiveRow()
+    public async Task TocPanelClearsPreviouslyActiveMaterializedRowsAfterNewActiveRow()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var panel = new ApplicateTocPanel();
             var buildHeadingRow = typeof(ApplicateTocPanel).GetMethod(
@@ -517,10 +517,10 @@ public sealed class ApplicateViewerViewTests
     }
 
     [Fact]
-    public void TocPanelRendersMathHeadingSegmentsWithMathView()
+    public async Task TocPanelRendersMathHeadingSegmentsWithMathView()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var panel = new ApplicateTocPanel();
             var buildHeadingRow = typeof(ApplicateTocPanel).GetMethod(
@@ -554,10 +554,10 @@ public sealed class ApplicateViewerViewTests
     }
 
     [Fact]
-    public void TransactionGenerationContextInheritsToConsumerWebSlot()
+    public async Task TransactionGenerationContextInheritsToConsumerWebSlot()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var parent = new Avalonia.Controls.Grid();
             var child = new Avalonia.Controls.Panel();

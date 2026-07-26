@@ -84,10 +84,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void OpeningDocumentInReaderModeShowsViewerSlot()
+    public async Task OpeningDocumentInReaderModeShowsViewerSlot()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var vm = new FakeMainWindowVm();
             var viewerSlot = new ContentControl();
@@ -194,10 +194,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void BridgeInstallsOpacityTransitionsOnBothModeSlotsAndEditContent()
+    public async Task BridgeInstallsOpacityTransitionsOnBothModeSlotsAndEditContent()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var vm = new FakeMainWindowVm();
             var viewerSlot = new ContentControl();
@@ -213,10 +213,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void ModeSwitchAppliesFadeStateInBothDirections()
+    public async Task ModeSwitchAppliesFadeStateInBothDirections()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sessionRef = new object();
             var vm = new FakeMainWindowVm
@@ -901,10 +901,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void BridgeUsesModeSwitchSmoothPreferenceForOpacityTransitions()
+    public async Task BridgeUsesModeSwitchSmoothPreferenceForOpacityTransitions()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var vm = new FakeMainWindowVm
             {
@@ -932,10 +932,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void EnteringEditModeShowsEditSlotWithSessionContent()
+    public async Task EnteringEditModeShowsEditSlotWithSessionContent()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var vm = new FakeMainWindowVm
             {
@@ -960,10 +960,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void ExitingEditModeShowsViewerSlotButKeepsStickyContent()
+    public async Task ExitingEditModeShowsViewerSlotButKeepsStickyContent()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sessionRef = new object();
             var vm = new FakeMainWindowVm
@@ -992,10 +992,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void CloseFileFromEditModeHidesViewerWhenDocumentClearsBeforeIsViewerFalse()
+    public async Task CloseFileFromEditModeHidesViewerWhenDocumentClearsBeforeIsViewerFalse()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sessionRef = new object();
             var document = new object();
@@ -1067,10 +1067,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void NewSessionReplacesContentWhenEditorSessionRefChanges()
+    public async Task NewSessionReplacesContentWhenEditorSessionRefChanges()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var firstSession = new object();
             var vm = new FakeMainWindowVm
@@ -1229,10 +1229,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void BridgeAppliesTransactionGenerationContextToRequestedSlotOnly()
+    public async Task BridgeAppliesTransactionGenerationContextToRequestedSlotOnly()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var vm = new FakeMainWindowVm();
             var viewerSlot = new ContentControl();
@@ -1258,10 +1258,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void BridgeClearsTransactionGenerationContextForLegacyPath()
+    public async Task BridgeClearsTransactionGenerationContextForLegacyPath()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var vm = new FakeMainWindowVm();
             var viewerSlot = new ContentControl();
@@ -1279,10 +1279,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void BridgeModeSwitchPublishesTransactionGenerationContextThroughReconcile()
+    public async Task BridgeModeSwitchPublishesTransactionGenerationContextThroughReconcile()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sessionRef = new object();
             var vm = new FakeMainWindowVm
@@ -1606,10 +1606,10 @@ public sealed class ApplicateSiblingMountTests
     }
 
     [Fact]
-    public void TransactionalModeSwitchDisposeClearsSuppressionWhenRestoreThrows()
+    public async Task TransactionalModeSwitchDisposeClearsSuppressionWhenRestoreThrows()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var vm = new FakeMainWindowVm
             {

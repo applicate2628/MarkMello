@@ -43,10 +43,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void SetWarmupParentTransitionsToParkedAndAdoptsPanel()
+    public async Task SetWarmupParentTransitionsToParkedAndAdoptsPanel()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();
@@ -58,10 +58,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void AttachToTransitionsToSwitchingAndHidesTargetSlot()
+    public async Task AttachToTransitionsToSwitchingAndHidesTargetSlot()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();
@@ -77,10 +77,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void AttachToKeepsTargetTransparentUntilDocumentRendered()
+    public async Task AttachToKeepsTargetTransparentUntilDocumentRendered()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();
@@ -102,10 +102,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void RequestRenderBumpsGenerationAndHidesActiveSlot()
+    public async Task RequestRenderBumpsGenerationAndHidesActiveSlot()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();
@@ -126,10 +126,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void ApplyDocumentRenderedCommitsAndShowsSlot()
+    public async Task ApplyDocumentRenderedCommitsAndShowsSlot()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();
@@ -147,10 +147,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void StaleDocumentRenderedIsDropped()
+    public async Task StaleDocumentRenderedIsDropped()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();
@@ -178,10 +178,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void ModeToggleNeverShowsBothSlotsSimultaneously()
+    public async Task ModeToggleNeverShowsBothSlotsSimultaneously()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();
@@ -354,10 +354,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void TransactionalCommitWaitsForBridgeNativeReveal()
+    public async Task TransactionalCommitWaitsForBridgeNativeReveal()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();
@@ -381,10 +381,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void TransactionalAttachAndRequestRenderKeepBridgeOwnedSlotVisible()
+    public async Task TransactionalAttachAndRequestRenderKeepBridgeOwnedSlotVisible()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();
@@ -409,10 +409,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void TransactionGenerationTagsCommitCompletedEvent()
+    public async Task TransactionGenerationTagsCommitCompletedEvent()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();
@@ -435,10 +435,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void StaleRenderGenerationDoesNotRaiseCommitCompletedEvent()
+    public async Task StaleRenderGenerationDoesNotRaiseCommitCompletedEvent()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();
@@ -471,10 +471,10 @@ public sealed class ApplicateSharedWebViewHostStateMachineTests
     }
 
     [Fact]
-    public void FastPathRequestRenderRaisesCommitCompletedSynchronously()
+    public async Task FastPathRequestRenderRaisesCommitCompletedSynchronously()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var sm = new ApplicateSharedWebViewHostStateMachine();
             var warmup = new Panel();

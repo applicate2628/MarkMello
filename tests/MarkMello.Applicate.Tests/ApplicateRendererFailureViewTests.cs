@@ -51,10 +51,10 @@ public sealed class ApplicateRendererFailureViewTests
     }
 
     [Fact]
-    public void ConstructsHiddenWithDefaultDocumentRenderFailedKind()
+    public async Task ConstructsHiddenWithDefaultDocumentRenderFailedKind()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var view = new ApplicateRendererFailureView();
 
@@ -68,10 +68,10 @@ public sealed class ApplicateRendererFailureViewTests
     }
 
     [Fact]
-    public void RuntimeMissingKindHidesRetryAndUpdatesTitle()
+    public async Task RuntimeMissingKindHidesRetryAndUpdatesTitle()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var view = new ApplicateRendererFailureView();
             var renderFailedTitle = view.TitleTextForTesting;
@@ -85,10 +85,10 @@ public sealed class ApplicateRendererFailureViewTests
     }
 
     [Fact]
-    public void StaleNavigationKindHidesRetry()
+    public async Task StaleNavigationKindHidesRetry()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var view = new ApplicateRendererFailureView
             {
@@ -101,10 +101,10 @@ public sealed class ApplicateRendererFailureViewTests
     }
 
     [Fact]
-    public void DocumentPathSurfacesInDocumentLineAndDiagnostics()
+    public async Task DocumentPathSurfacesInDocumentLineAndDiagnostics()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var view = new ApplicateRendererFailureView
             {
@@ -123,10 +123,10 @@ public sealed class ApplicateRendererFailureViewTests
     }
 
     [Fact]
-    public void NullDocumentPathHidesDocumentLineAndOmitsFromDiagnostics()
+    public async Task NullDocumentPathHidesDocumentLineAndOmitsFromDiagnostics()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var view = new ApplicateRendererFailureView
             {
@@ -140,10 +140,10 @@ public sealed class ApplicateRendererFailureViewTests
     }
 
     [Fact]
-    public void DiagnosticsPayloadIncludesExceptionTypeAndMessageWhenProvided()
+    public async Task DiagnosticsPayloadIncludesExceptionTypeAndMessageWhenProvided()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var view = new ApplicateRendererFailureView
             {
@@ -159,10 +159,10 @@ public sealed class ApplicateRendererFailureViewTests
     }
 
     [Fact]
-    public void CopyDiagnosticsCallbackReceivesPayloadInsteadOfClipboardFallback()
+    public async Task CopyDiagnosticsCallbackReceivesPayloadInsteadOfClipboardFallback()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             string? captured = null;
             var view = new ApplicateRendererFailureView
@@ -184,10 +184,10 @@ public sealed class ApplicateRendererFailureViewTests
     }
 
     [Fact]
-    public void ShowFailureAppliesContextAndMakesViewVisible()
+    public async Task ShowFailureAppliesContextAndMakesViewVisible()
     {
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        session.Dispatch(() =>
+        await session.Dispatch(() =>
         {
             var view = new ApplicateRendererFailureView();
             var retryFired = 0;
