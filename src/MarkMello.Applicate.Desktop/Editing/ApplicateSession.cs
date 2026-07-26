@@ -23,7 +23,21 @@ public sealed class ApplicateSession
 
     public const int MaxRecentPaths = 10;
 
-    public static ApplicateSession Empty { get; } = new();
+    /// <summary>
+    /// A FRESH empty session per call -- deliberately not a cached singleton. `init` protects the
+    /// list REFERENCE, never its CONTENTS, so a shared instance would put a process-global mutable
+    /// `List&lt;string&gt;` behind every "no saved session" route in the store. One innocuous-looking
+    /// simplification at a consumer (`var recentPaths = saved.RecentPaths;` instead of a fresh list)
+    /// would then let a Clear/AddRange refill the global with one document's paths, and every later
+    /// empty load in the process -- including at startup -- would hand out that pollution, with no
+    /// exception, no log, and no failing test.
+    /// <para>
+    /// Reference identity is explicitly NOT a provenance signal: `IApplicateSessionStore.LoadAsync`
+    /// (d13 clause 3) forbids consumers re-deriving "was it observed" by comparing against this
+    /// value, which is precisely what makes per-call construction safe. Do not re-cache it.
+    /// </para>
+    /// </summary>
+    public static ApplicateSession Empty => new();
 
     /// <summary>
     /// Fold a just-opened path into a recent list: move-to-front, case-insensitive dedup, cap. Pure
