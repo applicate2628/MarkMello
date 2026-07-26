@@ -178,6 +178,14 @@ public sealed class ApplicateEditPreviewSyncTests
         // ApplicateViewerViewTests.ViewerPullsRetainedHeadingsForConsumerDebtAfterRequestRender
         // for the full rationale; this surface's production call site had the
         // same unpinned gap.
+        //
+        // Argument text updated by R5 (design §9.4): the inline
+        // _viewModel is not null && !_viewModel.HasDocumentHeadings &&
+        // !_failureView.IsVisible expression moved to the single-owner
+        // ApplicateDeferredHeadingUpdater.HasHeadingDebt predicate; this call
+        // site passes its own three inputs (null _viewModel preserved via
+        // the ?? false fallback -- hasViewModel: false already forces the
+        // predicate to false regardless).
         var codeBehind = ReadEditPreviewCodeBehind();
         var applyRender = ExtractMethodBody(codeBehind, "private void ApplyWebPreviewSource()");
 
@@ -186,15 +194,43 @@ public sealed class ApplicateEditPreviewSyncTests
             applyRender,
             StringComparison.Ordinal);
         Assert.Contains(
-            "consumerHasHeadingDebt: _viewModel is not null && !_viewModel.HasDocumentHeadings && !_failureView.IsVisible",
+            "consumerHasHeadingDebt: ApplicateDeferredHeadingUpdater.HasHeadingDebt(",
             applyRender,
             StringComparison.Ordinal);
+        Assert.Contains("hasViewModel: _viewModel is not null", applyRender, StringComparison.Ordinal);
+        Assert.Contains("consumerHasHeadings: _viewModel?.HasDocumentHeadings ?? false", applyRender, StringComparison.Ordinal);
+        Assert.Contains("failureViewVisible: _failureView.IsVisible", applyRender, StringComparison.Ordinal);
         Assert.True(
             applyRender.IndexOf(
                 "_sharedHost.RequestRender(source, request, transactionGeneration: transactionGeneration);",
                 StringComparison.Ordinal)
             < applyRender.IndexOf("TryRaiseRetainedHeadingsForConsumerDebt(", StringComparison.Ordinal),
             "The consumer-owned debt pull must run AFTER RequestRender (invariant I9, design D1.c) -- UpdateInputs may clear _hasLoadedDocument, which the pull's guard ladder depends on.");
+    }
+
+    [Fact]
+    public void EditPreviewRetryCurrentRenderPullsRetainedHeadingsForConsumerDebtAfterRetryRender()
+    {
+        // TEXT PIN (design work-items/active/2026-07-25-toc-empty-on-open/
+        // design.md §9.3/§9.5 D8) -- see
+        // ApplicateViewerViewTests.ViewerRetryCurrentRenderPullsRetainedHeadingsForConsumerDebtAfterRetryRender
+        // for the full rationale; this surface's RetryCurrentRender had the
+        // same gap.
+        var codeBehind = ReadEditPreviewCodeBehind();
+        var retryCurrentRender = ExtractMethodBody(codeBehind, "private void RetryCurrentRender()");
+
+        Assert.Contains(
+            "TryRaiseRetainedHeadingsForConsumerDebt(",
+            retryCurrentRender,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "consumerHasHeadingDebt: ApplicateDeferredHeadingUpdater.HasHeadingDebt(",
+            retryCurrentRender,
+            StringComparison.Ordinal);
+        Assert.True(
+            retryCurrentRender.IndexOf("_sharedHost?.RetryRender();", StringComparison.Ordinal)
+            < retryCurrentRender.IndexOf("TryRaiseRetainedHeadingsForConsumerDebt(", StringComparison.Ordinal),
+            "The consumer-owned debt pull must run AFTER RetryRender (invariant I9, design D8).");
     }
 
     [Fact]

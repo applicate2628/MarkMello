@@ -208,6 +208,67 @@ public sealed class ApplicateRendererFailureViewTests
             Assert.Equal(1, retryFired);
         }, CancellationToken.None);
     }
+
+    // G11 (D7, design work-items/active/2026-07-25-toc-empty-on-open/
+    // design.md §9.2/§9.5, claim 9): the overlay must dismiss itself on the
+    // retry it originates -- a same-document retry that resolves via the
+    // shared host's cache-hit fast path fires no DocumentRendered, so
+    // neither of the two consumer clear sites (document-identity change,
+    // OnHostDocumentRendered) ever runs, and the overlay used to latch
+    // visible forever (and, with D4, the TOC latched empty with it).
+    //
+    // MUST go through the click handler (ClickRetryForTesting -> the real
+    // OnRetryClick), not RetryCallback directly -- the existing tests above
+    // (e.g. ShowFailureAppliesContextAndMakesViewVisible) invoke
+    // RetryCallback?.Invoke() directly, bypassing OnRetryClick entirely,
+    // which is exactly the mistake that made the now-deleted
+    // ApplicateSharedWebViewHostRealHostTests G9 guard worthless.
+    [Fact]
+    public async Task RetryDismissesTheFailureViewBeforeInvokingTheCallback()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        await session.Dispatch(() =>
+        {
+            var failure = new ApplicateRendererFailureEvent(
+                Kind: ApplicateRendererFailureKind.DocumentRenderFailed,
+                DocumentPath: @"E:\Downloads\wave.md",
+                Timestamp: new DateTime(2026, 5, 19, 9, 0, 0, DateTimeKind.Utc));
+
+            // Part 1 -- an ordinary retry (the callback does not re-fail)
+            // must already have IsVisible == false by the time the callback
+            // observes it, and must stay hidden afterwards.
+            var view = new ApplicateRendererFailureView();
+            var retryFired = 0;
+            var wasVisibleInsideCallback = true;
+            view.ShowFailure(failure, retry: () =>
+            {
+                retryFired++;
+                wasVisibleInsideCallback = view.IsVisible;
+            });
+
+            view.ClickRetryForTesting();
+
+            Assert.Equal(1, retryFired);
+            Assert.False(
+                wasVisibleInsideCallback,
+                "OnRetryClick must set IsVisible=false BEFORE invoking RetryCallback (design D7 ordering).");
+            Assert.False(view.IsVisible);
+
+            // Part 2 -- the ordering assertion: a re-failure raised FROM
+            // INSIDE the retry callback (an immediate re-fail, exactly what
+            // ShowFailure being called again simulates) must win. ShowFailure
+            // sets IsVisible=true AFTER OnRetryClick's own dismiss runs, so
+            // the overlay ends up visible again, not latched hidden.
+            var refailingView = new ApplicateRendererFailureView();
+            refailingView.ShowFailure(failure, retry: () => refailingView.ShowFailure(failure));
+
+            refailingView.ClickRetryForTesting();
+
+            Assert.True(
+                refailingView.IsVisible,
+                "A ShowFailure issued from inside the retry callback must leave the overlay visible (ordering: dismiss happens before invoke).");
+        }, CancellationToken.None);
+    }
 }
 
 public sealed class ApplicateRendererFailureEventTests

@@ -165,7 +165,13 @@ public sealed class ApplicateViewerViewTests
         // left the whole 730-test Applicate suite green with no pin catching it.
         // This test catches removal, reordering, or a changed consumer-predicate
         // argument at the SOURCE-TEXT level only; it proves nothing about
-        // runtime behaviour (that is the job of the real-host guards above).
+        // runtime behaviour (that is the job of the real-host guards above and
+        // HasHeadingDebtMatchesAllInputCombinations below).
+        //
+        // Argument text updated by R5 (design §9.4): the inline
+        // !_viewModel.HasDocumentHeadings && !_failureView.IsVisible
+        // expression moved to the single-owner ApplicateDeferredHeadingUpdater.
+        // HasHeadingDebt predicate; this call site passes its own three inputs.
         var codeBehind = ReadViewerCodeBehind();
         var issueRender = ExtractMethodBody(codeBehind, "private void IssueRenderRequest()");
 
@@ -174,15 +180,47 @@ public sealed class ApplicateViewerViewTests
             issueRender,
             StringComparison.Ordinal);
         Assert.Contains(
-            "consumerHasHeadingDebt: !_viewModel.HasDocumentHeadings && !_failureView.IsVisible",
+            "consumerHasHeadingDebt: ApplicateDeferredHeadingUpdater.HasHeadingDebt(",
             issueRender,
             StringComparison.Ordinal);
+        Assert.Contains("hasViewModel: true", issueRender, StringComparison.Ordinal);
+        Assert.Contains("consumerHasHeadings: _viewModel.HasDocumentHeadings", issueRender, StringComparison.Ordinal);
+        Assert.Contains("failureViewVisible: _failureView.IsVisible", issueRender, StringComparison.Ordinal);
         Assert.True(
             issueRender.IndexOf(
                 "_sharedHost.RequestRender(_viewModel.Document, request, transactionGeneration: transactionGeneration);",
                 StringComparison.Ordinal)
             < issueRender.IndexOf("TryRaiseRetainedHeadingsForConsumerDebt(", StringComparison.Ordinal),
             "The consumer-owned debt pull must run AFTER RequestRender (invariant I9, design D1.c) -- UpdateInputs may clear _hasLoadedDocument, which the pull's guard ladder depends on.");
+    }
+
+    [Fact]
+    public void ViewerRetryCurrentRenderPullsRetainedHeadingsForConsumerDebtAfterRetryRender()
+    {
+        // TEXT PIN (design work-items/active/2026-07-25-toc-empty-on-open/
+        // design.md §9.3/§9.5 D8): a retry that resolves via the shared
+        // host's cache-hit fast path commits the document with
+        // DocumentHeadings still empty from the renderer-failure clear, and
+        // no other pull call site re-enters for it -- RetryCurrentRender must
+        // run the SAME consumer-owned debt pull IssueRenderRequest uses,
+        // after _sharedHost.RetryRender() (invariant I9: the pull runs after
+        // a RequestRender, and RetryRender's Commit() is the render event
+        // this pull settles for).
+        var codeBehind = ReadViewerCodeBehind();
+        var retryCurrentRender = ExtractMethodBody(codeBehind, "private void RetryCurrentRender()");
+
+        Assert.Contains(
+            "TryRaiseRetainedHeadingsForConsumerDebt(",
+            retryCurrentRender,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "consumerHasHeadingDebt: ApplicateDeferredHeadingUpdater.HasHeadingDebt(",
+            retryCurrentRender,
+            StringComparison.Ordinal);
+        Assert.True(
+            retryCurrentRender.IndexOf("_sharedHost?.RetryRender();", StringComparison.Ordinal)
+            < retryCurrentRender.IndexOf("TryRaiseRetainedHeadingsForConsumerDebt(", StringComparison.Ordinal),
+            "The consumer-owned debt pull must run AFTER RetryRender (invariant I9, design D8).");
     }
 
     [Fact]
@@ -287,6 +325,41 @@ public sealed class ApplicateViewerViewTests
             ApplicateDeferredHeadingUpdater.ShouldDeferLargeTocHeadingUpdates(
                 documentRenderedForCurrentRequest,
                 hasLoadedAndPaintedDocument));
+    }
+
+    [Theory]
+    [InlineData(false, false, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, true, true, false)]
+    [InlineData(true, false, false, true)]
+    [InlineData(true, false, true, false)]
+    [InlineData(true, true, false, false)]
+    [InlineData(true, true, true, false)]
+    public void HasHeadingDebtMatchesAllInputCombinations(
+        bool hasViewModel,
+        bool consumerHasHeadings,
+        bool failureViewVisible,
+        bool expectedDebt)
+    {
+        // P1 (design work-items/active/2026-07-25-toc-empty-on-open/
+        // design.md §9.4/§9.5/§9.7 claim 8): replaces claim 1's probe, the
+        // deleted G9 (ApplicateSharedWebViewHostRealHostTests), which never
+        // constructed a failure view anywhere in its body and could not go
+        // red on the failureViewVisible conjunct -- the same setup as G2,
+        // exercising only the pull's own `if (!consumerHasHeadingDebt) return
+        // false;` early return.
+        //
+        // Row (true, false, true) -> false is DEFECT-1: a stale TOC must NOT
+        // refill beside a live failure view even though the consumer's own
+        // collection is empty. Row (true, false, false) -> true is the only
+        // row real debt exists. Dropping the consumerHasHeadings conjunct
+        // turns row (true, true, false) red; dropping the failureViewVisible
+        // conjunct turns row (true, false, true) red; dropping the
+        // hasViewModel conjunct turns every all-false-input row red.
+        Assert.Equal(
+            expectedDebt,
+            ApplicateDeferredHeadingUpdater.HasHeadingDebt(hasViewModel, consumerHasHeadings, failureViewVisible));
     }
 
     [Fact]

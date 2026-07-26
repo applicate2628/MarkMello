@@ -716,7 +716,31 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
             retry: e.Kind == ApplicateRendererFailureKind.DocumentRenderFailed ? RetryCurrentRender : null);
     }
 
-    private void RetryCurrentRender() => _sharedHost?.RetryRender();
+    private void RetryCurrentRender()
+    {
+        // D8 (design work-items/active/2026-07-25-toc-empty-on-open/design.md
+        // §9.3): a retry that resolves via the shared host's cache-hit fast
+        // path commits the document with DocumentHeadings still empty from
+        // E2's clear, and nothing else re-enters a pull call site for it --
+        // so run the SAME consumer-owned debt pull ApplyWebPreviewSource
+        // uses, after RetryRender (invariant I9: the pull runs after a
+        // RequestRender, and RetryRender's Commit() is the one for this
+        // retry).
+        _sharedHost?.RetryRender();
+
+        if (_sharedHost is null)
+        {
+            return;
+        }
+
+        var source = BuildCurrentSource();
+        _sharedHost.View.TryRaiseRetainedHeadingsForConsumerDebt(
+            source,
+            consumerHasHeadingDebt: ApplicateDeferredHeadingUpdater.HasHeadingDebt(
+                hasViewModel: _viewModel is not null,
+                consumerHasHeadings: _viewModel?.HasDocumentHeadings ?? false,
+                failureViewVisible: _failureView.IsVisible));
+    }
 
     private void OnSharedViewerInteractionRequested(object? sender, EventArgs e)
     {
@@ -823,7 +847,10 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         // semantics as the prior _viewModel?.HasDocumentHeadings ?? true).
         _sharedHost.View.TryRaiseRetainedHeadingsForConsumerDebt(
             source,
-            consumerHasHeadingDebt: _viewModel is not null && !_viewModel.HasDocumentHeadings && !_failureView.IsVisible);
+            consumerHasHeadingDebt: ApplicateDeferredHeadingUpdater.HasHeadingDebt(
+                hasViewModel: _viewModel is not null,
+                consumerHasHeadings: _viewModel?.HasDocumentHeadings ?? false,
+                failureViewVisible: _failureView.IsVisible));
     }
 
     internal bool PrimeInactiveWebPreview(

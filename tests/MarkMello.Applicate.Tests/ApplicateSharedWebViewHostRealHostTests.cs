@@ -603,47 +603,6 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
         });
     }
 
-    // G9 (D4, design REVISION 4 §2/§3): DEFECT-1 -- a stale TOC reappears on
-    // top of the renderer-failure view. The consumer's own debt expression
-    // (ApplicateViewerView.IssueRenderRequest / ApplicateEditPreviewView.
-    // ApplyWebPreviewSource, D4.b/D4.c) is
-    // !_viewModel.HasDocumentHeadings && !_failureView.IsVisible -- when the
-    // failure view is visible the AND drives the whole expression to false
-    // regardless of whether the consumer's own collection is empty, so the
-    // pull must not fire even though a valid non-empty retained payload
-    // exists for this source (E2's deliberate clear left DocumentHeadings
-    // empty, but nothing here may refill it beside a failure view).
-    [Fact]
-    public void PullIsSuppressedWhileTheConsumerDisplaysTheFailureView()
-    {
-        RunOnHost(host =>
-        {
-            var warmup = new Panel();
-            var slot = new Panel { IsVisible = true };
-            host.SetWarmupParent(warmup);
-            host.AttachTo(slot, ViewerIntent());
-
-            host.RequestRender(DocA, Request());
-            DriveViewToLoadedAndPainted(host.View);
-            PostHeadings(host.View, "intro", "body");
-            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
-
-            var fireCount = 0;
-            host.View.HeadingsChanged += (_, _) => fireCount++;
-
-            // The consumer's own debt expression evaluates to false because
-            // the failure-view term is true (the renderer failed and the
-            // consumer is currently showing its failure view), even though
-            // the pull holds a valid non-empty retained payload for this
-            // source.
-            var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
-                DocA, consumerHasHeadingDebt: false);
-
-            Assert.False(pulled);
-            Assert.Equal(0, fireCount);
-        });
-    }
-
     // G10 (D6, design REVISION 4 §2/§3, INVERTED from
     // TransactionalRequestRenderDoesNotReemitHeadings): DEFECT-2 -- a mode
     // transaction cancels existing debt (Ctrl+E inside the 80ms defer window

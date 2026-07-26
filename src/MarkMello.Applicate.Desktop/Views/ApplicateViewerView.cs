@@ -501,7 +501,10 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         // own guard ladder depends on (invariant I9).
         _sharedHost.View.TryRaiseRetainedHeadingsForConsumerDebt(
             _viewModel.Document,
-            consumerHasHeadingDebt: !_viewModel.HasDocumentHeadings && !_failureView.IsVisible);
+            consumerHasHeadingDebt: ApplicateDeferredHeadingUpdater.HasHeadingDebt(
+                hasViewModel: true,
+                consumerHasHeadings: _viewModel.HasDocumentHeadings,
+                failureViewVisible: _failureView.IsVisible));
     }
 
     private void EnsureSharedHostMounted(bool force = false)
@@ -694,7 +697,30 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
             retry: e.Kind == ApplicateRendererFailureKind.DocumentRenderFailed ? RetryCurrentRender : null);
     }
 
-    private void RetryCurrentRender() => _sharedHost?.RetryRender();
+    private void RetryCurrentRender()
+    {
+        // D8 (design work-items/active/2026-07-25-toc-empty-on-open/design.md
+        // §9.3): a retry that resolves via the shared host's cache-hit fast
+        // path commits the document with DocumentHeadings still empty from
+        // E2's clear, and nothing else re-enters a pull call site for it --
+        // so run the SAME consumer-owned debt pull IssueRenderRequest uses,
+        // after RetryRender (invariant I9: the pull runs after a
+        // RequestRender, and RetryRender's Commit() is the one for this
+        // retry).
+        _sharedHost?.RetryRender();
+
+        if (_sharedHost is null || _viewModel is null)
+        {
+            return;
+        }
+
+        _sharedHost.View.TryRaiseRetainedHeadingsForConsumerDebt(
+            _viewModel.Document,
+            consumerHasHeadingDebt: ApplicateDeferredHeadingUpdater.HasHeadingDebt(
+                hasViewModel: true,
+                consumerHasHeadings: _viewModel.HasDocumentHeadings,
+                failureViewVisible: _failureView.IsVisible));
+    }
 
     private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)
     {

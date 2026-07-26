@@ -294,6 +294,19 @@ public sealed class ApplicateRendererFailureView : UserControl
 
     internal bool DocumentLineVisibleForTesting => _documentLine.IsVisible;
 
+    /// <summary>
+    /// Test seam — drives the retry button's click handler exactly as a real
+    /// pointer click would, instead of invoking <see cref="RetryCallback"/>
+    /// directly. Design D7 (work-items/active/2026-07-25-toc-empty-on-open/
+    /// design.md §9.2/§9.5): the dismiss-before-invoke ordering inside
+    /// <see cref="OnRetryClick"/> is only exercised through this seam — a
+    /// test that calls <c>RetryCallback</c> directly bypasses the ordering
+    /// entirely and proves nothing about it (the mistake that made the
+    /// now-deleted G9 guard worthless).
+    /// </summary>
+    internal void ClickRetryForTesting()
+        => OnRetryClick(this, new Avalonia.Interactivity.RoutedEventArgs());
+
     private void ApplyFailureKind()
     {
         switch (_failureKind)
@@ -345,6 +358,22 @@ public sealed class ApplicateRendererFailureView : UserControl
 
     private void OnRetryClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
+        // D7 (design work-items/active/2026-07-25-toc-empty-on-open/design.md
+        // §9.2): the widget already owns every OTHER transition it originates
+        // (ShowFailure sets IsVisible=true at :252, the constructor sets it
+        // false). A retry is a transition it originates too, and until now it
+        // was the one the widget never closed on itself -- neither consumer
+        // clear site (document-identity change, DocumentRendered) covers a
+        // same-document retry whose fast-path Commit() re-shows the document
+        // with no fresh DocumentRendered ever firing, so the overlay latched
+        // visible forever and, with D4, the TOC latched empty with it.
+        //
+        // Ordering is load-bearing: dismiss BEFORE invoking the callback, not
+        // after. An immediate re-failure re-enters ShowFailure synchronously
+        // from inside the callback and sets IsVisible=true again (:252) --
+        // reversing the order would let this dismiss win over that re-show
+        // instead of the other way around.
+        IsVisible = false;
         _retryCallback?.Invoke();
     }
 

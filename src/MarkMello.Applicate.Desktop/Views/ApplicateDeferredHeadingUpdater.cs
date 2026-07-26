@@ -94,6 +94,31 @@ internal sealed class ApplicateDeferredHeadingUpdater
         bool hasLoadedAndPaintedDocument)
         => !documentRenderedForCurrentRequest && !hasLoadedAndPaintedDocument;
 
+    // R5 blocking finding 2 (design work-items/active/2026-07-25-toc-empty-on-
+    // open/design.md §9.4): this consumer-side debt predicate used to be
+    // inlined at both call sites (ApplicateViewerView.IssueRenderRequest,
+    // ApplicateEditPreviewView.ApplyWebPreviewSource / RetryCurrentRender) --
+    // a C1 single-owner violation, and the reason the removed G9 test could
+    // never go red on the failure-view term: it lived in two files G9 never
+    // constructed. This file already owns the sibling consumer-side heading
+    // policy predicate for the same two views (ShouldDeferLargeTocHeadingUpdates
+    // above), so it is the natural single owner of this one too -- not the
+    // host's question (ApplicateWebMarkdownDocumentView), which only answers
+    // "do I hold a payload valid for this source", not "does the caller have
+    // debt at all".
+    //
+    // hasViewModel: false collapses the whole predicate to false regardless of
+    // consumerHasHeadings, preserving the edit-preview surface's prior null
+    // semantics (no bound ViewModel means no TOC surface to refill, so no
+    // debt). failureViewVisible: true also forces false -- a deliberate
+    // renderer-failure clear (E2) must never be mistaken for real debt (E1)
+    // and pulled back beside a still-visible failure overlay (DEFECT-1).
+    internal static bool HasHeadingDebt(
+        bool hasViewModel,
+        bool consumerHasHeadings,
+        bool failureViewVisible)
+        => hasViewModel && !consumerHasHeadings && !failureViewVisible;
+
     public void FlushPending()
     {
         var version = _pendingVersion;
