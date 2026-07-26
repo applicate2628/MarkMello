@@ -3844,8 +3844,9 @@ public sealed class ApplicateMainWindow : MainWindow
                     // EnsureLoadedAsync throws a type it does not catch, control reaches the convergence
                     // finally with ActiveDocument still null (the loop opened with activate: false) and
                     // lastActivePath null -- so the save would write ActivePath = null over a correct
-                    // on-disk value. SaveSession's existing PathIfStillOpen fallback then writes the right
-                    // path instead, and PathIfStillOpen already proves it is open. On the happy path the
+                    // on-disk value. ComposeSessionSnapshot's PathIfStillOpen fallback (which SaveSession
+                    // routes through) then writes the right path instead, and it already proves the path
+                    // is still open -- that policy lives in the composer, not here. On the happy path the
                     // Activate below overwrites this via ActiveDocumentChanged: zero behaviour change.
                     lastActivePath = toActivate.FilePath;
 
