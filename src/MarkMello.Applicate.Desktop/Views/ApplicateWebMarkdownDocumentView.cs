@@ -123,22 +123,33 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private bool _hasLoadedDocument;
     private bool _awaitingLayoutReady;
     // Retained at ingress (HandleHeadingsUpdatedMessage, single writer) so a
-    // same-source no-op reload can re-deliver the last-known heading list
-    // without asking the renderer again — see RaiseDocumentHeadingsForLoadedSource.
+    // consumer carrying state debt can pull the last-known heading list
+    // without asking the renderer again — see TryRaiseRetainedHeadingsForConsumerDebt.
     private IReadOnlyList<DocumentHeading> _lastHeadings = [];
     private MarkdownSource? _lastHeadingsSource;
-    // Gate finding F1 (2026-07-26 architecture-reviewer, bf9d3be): _lastHeadingsSource
-    // alone is a RECEIVER-state stamp (Source's CURRENT value at arrival), not a
-    // message-borne currency token, so a payload that arrives while a superseded
-    // page's document is still nominally "current" gets mislabeled with whatever
-    // Source now is. _activeRevealRenderId changes on every QueueRender (including
-    // a same-Source page recreation, e.g. after a WebView2 crash+retry, or every
-    // render in legacy MARKMELLO_RENDERER_SHELL_MODE=0), so stamping it too and
-    // requiring a match at re-emit distinguishes a superseded page's payload from
-    // the currently active one even when Source itself reads the same both times.
-    // Host-local token; no wire-contract change (the wire gap on headings-updated
-    // itself stays open, see design §11 adjacent findings).
-    private long _lastHeadingsRenderId;
+    // Gate finding F1 (2026-07-26 architecture-reviewer, bf9d3be), refined by
+    // design REVISION 3 (2026-07-26, work-items/active/2026-07-25-toc-empty-on-
+    // open/design.md §2/§4 F1): _lastHeadingsSource alone is a RECEIVER-state
+    // stamp (Source's CURRENT value at arrival), so a payload that arrives while
+    // a superseded page's document is still nominally "current" gets mislabeled
+    // with whatever Source now is. This field is a DEFENSIVE BACKSTOP against
+    // exactly that: it CATCHES an EARLY-captured payload from a superseded
+    // render generation for the same Source (_activeRevealRenderId bumps on
+    // every QueueRender, including a same-Source page recreation such as a
+    // WebView2 crash+retry, or every render in legacy
+    // MARKMELLO_RENDERER_SHELL_MODE=0). It does NOT catch a LATE arrival: a
+    // payload that lands after UpdateInputs/QueueRender have already assigned
+    // the new Source and generation in the same synchronous call is stamped
+    // with the NEW generation and passes -- host-side stamping structurally
+    // cannot detect a late arrival, because both stamps are read from receiver
+    // state, not from the wire message. The guarantee against a late arrival is
+    // INV-ORDER, not this field: applyLoadDocument posts headings-updated
+    // synchronously BEFORE layout-ready, and _hasLoadedDocument is set only by
+    // the layout-ready handler, so whenever HasLoadedDocumentForSource(source)
+    // is true this generation's own headings have already arrived. Host-local;
+    // no wire-contract change (the wire gap on headings-updated itself stays
+    // open, see design §14 ADJ-2).
+    private long _lastHeadingsCaptureGeneration;
     private bool _hasLayoutReady;
     private bool _hasMinimapState;
     private bool _lastLayoutReadyWasCached;
@@ -409,37 +420,51 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         DocumentFirstPaint?.Invoke(this, EventArgs.Empty);
     }
 
-    // Re-emit HeadingsChanged for the same no-op reload handled by
-    // RaiseDocumentRevealReadyForLoadedSource above -- headings are the third
-    // member of that re-emit set (design decision
-    // 2026-07-26-noop-reload-signal-reemit-ownership). A value-equal reload
-    // yields UpdateInputs action=None/ApplyLivePreferences -> no QueueRender
-    // -> ensureChromeNodes never re-runs in the renderer -> no fresh
-    // headings-updated is ever posted, so a TOC emptied by a prior
-    // Document=null transition (ClearDocumentHeadings) never gets refilled
-    // for a byte-identical reopen. Re-emits the payload retained at ingress
-    // (_lastHeadings / _lastHeadingsSource, written in
+    // Consumer-owned debt pull (design REVISION 3, work-items/active/2026-07-25-
+    // toc-empty-on-open/design.md D1). Folds in the prior
+    // RaiseDocumentHeadingsForLoadedSource -- one method, one entry point.
+    //
+    // Gate finding F2 (98f99ab) showed the HOST cannot pick the right trigger:
+    // discriminating on inputUpdateAction (None vs ApplyLivePreferences) is a
+    // host-observable proxy for a fact only the CONSUMER can name directly --
+    // "is my own heading collection empty". So the trigger moves here: the
+    // CALLER (ApplicateViewerView.IssueRenderRequest,
+    // ApplicateEditPreviewView.ApplyWebPreviewSource, both AFTER RequestRender
+    // -- invariant I9) answers "do I have debt" via consumerHasHeadings; this
+    // method answers "do I hold a payload valid for this source" via the
+    // guard ladder below. Two questions, two owners, no layering.
+    //
+    // Returns false immediately unless !consumerHasHeadings AND
+    // transactionGeneration == 0 (mode-toggle transactions never lose
+    // Document, so nothing is owed there). Only then does it fall through to
+    // the EXISTING guard ladder that used to gate RaiseDocumentHeadingsForLoadedSource:
+    // loaded-and-painted for this source, source match, capture-generation
+    // match (defensive backstop against an early-captured superseded-generation
+    // payload -- see _lastHeadingsCaptureGeneration's doc comment for what this
+    // does NOT catch), and a non-empty retained payload. Re-emits the payload
+    // retained at ingress (_lastHeadings / _lastHeadingsSource, written in
     // HandleHeadingsUpdatedMessage) instead of asking the renderer again:
-    // synchronous, so it cannot arrive late, and the renderer already holds
-    // nothing new to say for this document. Four guards, four distinct
-    // skip reasons -- each is a permanent diag-gate marker (design §7): a
-    // future regression that only ever hits "not-loaded" is benign (a real
-    // Render will still deliver); one that hits "source-mismatch" is a
-    // retention-ordering defect; one that hits "renderid-mismatch" (gate
-    // finding F1) means the retained payload was captured during a
-    // SUPERSEDED page generation for this same Source and must not be
-    // trusted even though Source itself still matches; one that hits
-    // "no-retained-payload" is correct for a heading-less document but a
-    // bug signal for any other.
-    internal void RaiseDocumentHeadingsForLoadedSource(MarkdownSource? source)
+    // synchronous, so it cannot arrive late relative to this call, and the
+    // renderer already holds nothing new to say for this document. Each skip
+    // reason is a permanent diag-gate marker (design §7), fire-only (logging a
+    // negative would flood -- this runs on every render request).
+    internal bool TryRaiseRetainedHeadingsForConsumerDebt(
+        MarkdownSource? source,
+        bool consumerHasHeadings,
+        long transactionGeneration)
     {
+        if (consumerHasHeadings || transactionGeneration != 0)
+        {
+            return false;
+        }
+
         if (!HasLoadedDocumentForSource(source))
         {
             ApplicateTrace.DiagMs(
                 "diag-gate",
                 "headings-reemit-skipped-not-loaded",
                 $"path={source?.Path ?? "(null)"}");
-            return;
+            return false;
         }
 
         if (!Equals(_lastHeadingsSource, source))
@@ -448,16 +473,16 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 "diag-gate",
                 "headings-reemit-skipped-source-mismatch",
                 $"path={source?.Path ?? "(null)"} retainedPath={_lastHeadingsSource?.Path ?? "(null)"}");
-            return;
+            return false;
         }
 
-        if (_lastHeadingsRenderId != _activeRevealRenderId)
+        if (_lastHeadingsCaptureGeneration != _activeRevealRenderId)
         {
             ApplicateTrace.DiagMs(
                 "diag-gate",
-                "headings-reemit-skipped-renderid-mismatch",
-                $"path={source?.Path ?? "(null)"} retainedRenderId={_lastHeadingsRenderId} activeRenderId={_activeRevealRenderId}");
-            return;
+                "headings-reemit-skipped-capture-generation-superseded",
+                $"path={source?.Path ?? "(null)"} retainedGeneration={_lastHeadingsCaptureGeneration} activeGeneration={_activeRevealRenderId}");
+            return false;
         }
 
         if (_lastHeadings.Count == 0)
@@ -466,7 +491,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                 "diag-gate",
                 "headings-reemit-skipped-no-retained-payload",
                 $"path={source?.Path ?? "(null)"}");
-            return;
+            return false;
         }
 
         ApplicateTrace.DiagMs(
@@ -474,6 +499,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             "headings-reemit",
             $"path={source?.Path ?? "(null)"} count={_lastHeadings.Count}");
         HeadingsChanged?.Invoke(this, _lastHeadings);
+        return true;
     }
 
     internal bool LastLayoutReadyWasCached => _lastLayoutReadyWasCached;
@@ -3514,14 +3540,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         // Retain at ingress, BEFORE the consumer gate below (deliberate and
         // load-bearing: the payload must survive even when live delivery is
         // dropped by a consumer's !_isAttachedToHost guard). Single writer.
-        // _lastHeadingsRenderId stamps the CURRENT render generation (gate
-        // finding F1) alongside Source -- both are receiver-side state, but
-        // unlike Source, the render id also changes on a same-Source page
+        // _lastHeadingsCaptureGeneration stamps the CURRENT render generation
+        // (gate finding F1) alongside Source -- both are receiver-side state,
+        // but unlike Source, the render id also changes on a same-Source page
         // recreation, so it distinguishes a superseded page's payload where
         // Source-equality alone cannot.
         _lastHeadings = headings;
         _lastHeadingsSource = Source;
-        _lastHeadingsRenderId = _activeRevealRenderId;
+        _lastHeadingsCaptureGeneration = _activeRevealRenderId;
         HeadingsChanged?.Invoke(this, headings);
     }
 

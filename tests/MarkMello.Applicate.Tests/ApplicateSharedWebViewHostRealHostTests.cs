@@ -328,8 +328,19 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
         });
     }
 
-    // ----- Headings no-op-reload re-emit (design work-items/active/2026-07-25-
-    // toc-empty-on-open/design.md, G1/G2/G3/G5/G8) ------------------------------
+    // ----- Headings consumer-owned debt pull (design REVISION 3,
+    // work-items/active/2026-07-25-toc-empty-on-open/design.md D1) -----------
+    // REVISION 3 moves the trigger from the HOST (ApplicateSharedWebViewHost.
+    // RequestRender, gated on inputUpdateAction) to the CONSUMER, which is the
+    // only party that knows whether its own heading collection is empty. The
+    // production call is ApplicateWebMarkdownDocumentView.
+    // TryRaiseRetainedHeadingsForConsumerDebt, invoked by ApplicateViewerView /
+    // ApplicateEditPreviewView AFTER their own RequestRender call. These tests
+    // drive the REAL View directly through that same entry point rather than
+    // relying on RequestRender to trigger anything -- after design D1.d,
+    // RequestRender contains NO heading logic at all (grep "Headings" in
+    // ApplicateSharedWebViewHost.cs returns nothing -- design claim 3).
+    //
     // Feeds the real IPC message sequence a genuine renderer would produce for a
     // fresh document load directly into the REAL View via HandleWebMessageBody --
     // the same injection seam IpcContractTests uses. No live WebView2 needed:
@@ -372,11 +383,63 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
         view.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "headings-updated", headings }));
     }
 
-    // G1 -- the end-to-end guard. Per design §8 this must be RED at 1d191f8,
-    // GREEN after the fix, and RED again when the single new
-    // View.RaiseDocumentHeadingsForLoadedSource(source) call line in
-    // ApplicateSharedWebViewHost.RequestRender is deleted -- verified manually
-    // as the mandatory mutation check, not encoded here.
+    // The end-to-end guard (design §12 claim 1) -- the actual regression this
+    // revision fixes. Per design §8 this must be RED at 98f99ab (empirically
+    // confirmed against a scratch worktree pinned at that commit before this
+    // fix was implemented: Assert.Equal(1, fireCount) failed with Actual: 0)
+    // and GREEN once the CONSUMER, not RequestRender's inputUpdateAction,
+    // drives the pull.
+    [Fact]
+    public void ReopenWithAChangedAvailableContentWidthAndAnEmptyTocRestoresTheHeadings()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostHeadings(host.View, "intro", "body");
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            IReadOnlyList<DocumentHeading>? reemitted = null;
+            var fireCount = 0;
+            host.View.HeadingsChanged += (_, headings) =>
+            {
+                reemitted = headings;
+                fireCount++;
+            };
+
+            // Reopen the SAME document with a CHANGED AvailableContentWidth --
+            // gate finding F2 (98f99ab): DetermineInputUpdateAction resolves
+            // ApplyLivePreferences here, not None -- the reachable trigger
+            // revision 2's host-side narrowing missed (a reopen from welcome
+            // recents after a window resize, or any preference/width delta
+            // while the TOC is empty). The production call site is a
+            // CONSUMER's own pull, so it is driven directly here rather than
+            // through RequestRender.
+            var changedWidthRequest = new ApplicateWebRenderRequest(
+                ReadingPreferences.Default, ImageSourceResolver: null, AvailableContentWidth: 900);
+            host.RequestRender(DocA, changedWidthRequest);
+            var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
+                DocA, consumerHasHeadings: false, transactionGeneration: 0);
+
+            Assert.True(pulled);
+            Assert.Equal(1, fireCount);
+            Assert.NotNull(reemitted);
+            Assert.Equal(2, reemitted!.Count);
+            Assert.Equal("intro", reemitted[0].Id);
+            Assert.Equal("body", reemitted[1].Id);
+        });
+    }
+
+    // Re-pointed at the new entry point (design §8 "three more must be
+    // re-pointed"). Same scenario as the end-to-end guard above but via a
+    // byte-identical reload (same width) -- action=None rather than
+    // ApplyLivePreferences -- proving the pull covers both reachable
+    // DetermineInputUpdateAction outcomes, not just one of them.
     [Fact]
     public void NoOpReloadReemitsRetainedHeadingsForTheSameSource()
     {
@@ -406,8 +469,14 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             // Same source, same content -> UpdateInputs returns
             // None/ApplyLivePreferences, not Render -- exactly the no-op
             // reload this design's root names (DetermineInputUpdateAction).
+            // The consumer pull runs AFTER RequestRender (invariant I9),
+            // passing consumerHasHeadings: false to simulate a TOC emptied by
+            // a prior Document=null transition (ClearDocumentHeadings).
             host.RequestRender(DocA, Request());
+            var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
+                DocA, consumerHasHeadings: false, transactionGeneration: 0);
 
+            Assert.True(pulled);
             Assert.Equal(1, fireCount);
             Assert.NotNull(reemitted);
             Assert.Equal(2, reemitted!.Count);
@@ -416,10 +485,12 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
         });
     }
 
-    // G2 -- no stale overwrite. Part A's retain-at-ingress is a single writer:
-    // a second headings-updated for the SAME source (e.g. a live split-editor
+    // Re-pointed at the new entry point. No stale overwrite: the retain-at-
+    // ingress write in HandleHeadingsUpdatedMessage is a single writer -- a
+    // second headings-updated for the SAME source (e.g. a live split-editor
     // content update that keeps the document path identical) must replace the
-    // retained payload, not accumulate alongside it.
+    // retained payload, not accumulate alongside it, and the pull must hand
+    // out the LATEST one.
     [Fact]
     public void NoOpReloadReemitsTheLatestRetainedHeadingsNotAStaleEarlierList()
     {
@@ -440,7 +511,10 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             host.View.HeadingsChanged += (_, headings) => reemitted = headings;
 
             host.RequestRender(DocA, Request());
+            var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
+                DocA, consumerHasHeadings: false, transactionGeneration: 0);
 
+            Assert.True(pulled);
             Assert.NotNull(reemitted);
             Assert.Equal(2, reemitted!.Count);
             Assert.Equal("second-a", reemitted[0].Id);
@@ -448,12 +522,15 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
         });
     }
 
-    // G3 -- I1: an empty retained payload (a heading-less document; the
+    // G1 (I1): an empty retained payload (a heading-less document; the
     // renderer's extractAndPostHeadings posts headings: [] when there is no
     // main.mm-document or no surviving heading) must never reach the TOC via
-    // the re-emit path -- the "no-retained-payload" guard suppresses it.
+    // the pull -- the "no-retained-payload" guard suppresses it. Renamed from
+    // NoOpReloadSuppressesReemitWhenRetainedPayloadIsEmpty and re-pointed at
+    // the new entry point (its RequestRender-only mechanism vanished under
+    // D1.d the same way the FastPath tests below did).
     [Fact]
-    public void NoOpReloadSuppressesReemitWhenRetainedPayloadIsEmpty()
+    public void G1PullIsSuppressedForAnEmptyRetainedPayload()
     {
         RunOnHost(host =>
         {
@@ -471,17 +548,25 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             host.View.HeadingsChanged += (_, _) => fireCount++;
 
             host.RequestRender(DocA, Request());
+            var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
+                DocA, consumerHasHeadings: false, transactionGeneration: 0);
 
+            Assert.False(pulled);
             Assert.Equal(0, fireCount);
         });
     }
 
-    // G5 -- I3: a no-op reload must not visibly rebuild the TOC column. The
-    // re-emit hands out the SAME retained list instance on every repeated
-    // no-op reload for the same document -- no derived/rebuilt list, so
-    // UpdateDocumentHeadings' consumers see identical contents each time.
+    // G2 (I3, INVERTED from RepeatedNoOpReloadsReemitTheSameRetainedHeadingListInstance,
+    // design §8 "the trap"): the prior test PINNED the churn as expected
+    // (Assert.Equal(3, observed.Count) for three no-op reloads against a
+    // POPULATED TOC) -- RED at 98f99ab is this file's own baseline run of that
+    // exact assertion (recorded: it passed with count=3, i.e. the OLD
+    // mechanism fired on every repeat despite a populated TOC). Under D1 the
+    // consumer's own consumerHasHeadings reading is false ONLY the first time
+    // (before the TOC is refilled) -- a repeat sync with an ALREADY-POPULATED
+    // TOC passes consumerHasHeadings: true and must not pull at all.
     [Fact]
-    public void RepeatedNoOpReloadsReemitTheSameRetainedHeadingListInstance()
+    public void G2RepeatedSyncsWithAPopulatedTocDoNotPull()
     {
         RunOnHost(host =>
         {
@@ -498,21 +583,26 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             var observed = new List<IReadOnlyList<DocumentHeading>>();
             host.View.HeadingsChanged += (_, headings) => observed.Add(headings);
 
+            // Three repeated syncs, each passing consumerHasHeadings: true --
+            // the TOC is already populated (as it would be after the FIRST
+            // successful pull in production), so none of these three may
+            // pull, unlike the pre-fix mechanism which fired on every one.
             host.RequestRender(DocA, Request());
+            host.View.TryRaiseRetainedHeadingsForConsumerDebt(DocA, consumerHasHeadings: true, transactionGeneration: 0);
             host.RequestRender(DocA, Request());
+            host.View.TryRaiseRetainedHeadingsForConsumerDebt(DocA, consumerHasHeadings: true, transactionGeneration: 0);
             host.RequestRender(DocA, Request());
+            host.View.TryRaiseRetainedHeadingsForConsumerDebt(DocA, consumerHasHeadings: true, transactionGeneration: 0);
 
-            Assert.Equal(3, observed.Count);
-            Assert.Same(observed[0], observed[1]);
-            Assert.Same(observed[0], observed[2]);
+            Assert.Empty(observed);
         });
     }
 
-    // G8 -- I5: mode-toggle reveal ordering stays bridge-owned. Part C's
-    // headings re-emit is gated the same way as its
+    // Re-pointed at the new entry point; realizes G3 (I5): mode-toggle reveal
+    // ordering stays bridge-owned. The pull is gated the same way as its
     // RaiseDocumentRevealReadyForLoadedSource sibling: only fires when
     // transactionGeneration == 0. A transactional RequestRender (Ctrl+E
-    // mode-toggle path) must not re-emit.
+    // mode-toggle path) must not pull.
     [Fact]
     public void TransactionalRequestRenderDoesNotReemitHeadings()
     {
@@ -532,27 +622,109 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             host.View.HeadingsChanged += (_, _) => fireCount++;
 
             host.RequestRender(DocA, Request(), transactionGeneration: 1);
+            var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
+                DocA, consumerHasHeadings: false, transactionGeneration: 1);
 
+            Assert.False(pulled);
             Assert.Equal(0, fireCount);
         });
     }
 
-    // G-F1 -- gate finding F1 (2026-07-26): _lastHeadingsSource alone is a
-    // RECEIVER-state stamp (Source's current value at arrival), not a
-    // message-borne currency token. This drives DocB through TWO separate
-    // page generations for the SAME Source value (DocB -> DocA -> DocB
-    // again, mirroring a same-Source page recreation such as a WebView2
-    // crash+retry or legacy MARKMELLO_RENDERER_SHELL_MODE=0's per-render
-    // Navigate) and leaves the SECOND DocB generation without its own fresh
-    // headings-updated. Source-equality alone cannot tell the two DocB
-    // generations apart (both are literally the same MarkdownSource), so
-    // the OLD code re-emits the FIRST generation's retained payload for the
-    // SECOND generation's no-op reload -- a genuinely superseded page's
-    // payload leaking forward. The render-id stamp added by F1 CAN tell
-    // them apart, because _activeRevealRenderId bumps on every QueueRender
-    // even when Source itself reads the same both times.
+    // G6 (I10): the pull is inert when the host holds no painted document at
+    // all -- a brand-new host, nothing ever rendered. HasLoadedDocumentForSource
+    // is false for every source, so the guard ladder's first real check must
+    // reject before ever touching _lastHeadings.
     [Fact]
-    public void NoOpReloadSkipsARetainedPayloadFromASupersededPageGeneration()
+    public void G6PullIsSuppressedWhenTheHostHoldsNoPaintedDocument()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
+                DocA, consumerHasHeadings: false, transactionGeneration: 0);
+
+            Assert.False(pulled);
+        });
+    }
+
+    // G4b (I7, INV-ORDER, C# half -- design §8 harness caveat): every other
+    // test in this file feeds layout-ready BEFORE calling PostHeadings (via
+    // DriveViewToLoadedAndPainted), the REVERSE of production order, so none
+    // of them are evidence for INV-ORDER. This test feeds headings-updated
+    // BEFORE layout-ready -- while the render is still in flight
+    // (_hasLoadedDocument is false in shell mode until layout-ready runs) --
+    // and proves the pull cannot succeed during that window even though a
+    // (premature) payload has already been retained at ingress. This is the
+    // structural backstop INV-ORDER relies on: HasLoadedDocumentForSource is
+    // the gate, and it is false for the whole in-flight duration.
+    [Fact]
+    public void G4bRetainedHeadingsAreNotPullableWhileARenderIsInFlight()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+
+            // Drive as far as document-ready (x2, per the shell-mode recipe)
+            // + minimap-state -- deliberately NOT layout-ready.
+            if (!host.View.HasLoadedDocumentForReveal)
+            {
+                host.View.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "document-ready" }));
+            }
+            if (!host.View.HasLoadedDocumentForReveal)
+            {
+                host.View.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "document-ready" }));
+            }
+            host.View.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "minimap-state", visible = false }));
+
+            // Headings arrive BEFORE layout-ready -- the reverse order this
+            // test exists to cover.
+            PostHeadings(host.View, "intro", "body");
+
+            // Explicit precondition: the render must still be in flight.
+            Assert.False(host.View.HasLoadedDocumentForSource(DocA));
+
+            var fireCount = 0;
+            host.View.HeadingsChanged += (_, _) => fireCount++;
+
+            var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
+                DocA, consumerHasHeadings: false, transactionGeneration: 0);
+
+            Assert.False(pulled);
+            Assert.Equal(0, fireCount);
+
+            // Complete the render so the host is left in a clean state.
+            host.View.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "layout-ready", cached = false }));
+        });
+    }
+
+    // Renamed from NoOpReloadSkipsARetainedPayloadFromASupersededPageGeneration
+    // (design §2 F1 / §8): reclassified as a DEFENSIVE-BRANCH PIN, not
+    // behavioural coverage -- _lastHeadingsCaptureGeneration is a backstop
+    // against an EARLY-captured payload from a superseded generation, not the
+    // guarantee that makes the pull correct today (that is INV-ORDER, covered
+    // by G4a/G4b). This drives DocB through TWO separate page generations for
+    // the SAME Source value (DocB -> DocA -> DocB again, mirroring a
+    // same-Source page recreation such as a WebView2 crash+retry or legacy
+    // MARKMELLO_RENDERER_SHELL_MODE=0's per-render Navigate) and leaves the
+    // SECOND DocB generation without its own fresh headings-updated.
+    // Source-equality alone cannot tell the two DocB generations apart (both
+    // are literally the same MarkdownSource), so without this guard the pull
+    // would hand out the FIRST generation's retained payload for the SECOND
+    // generation's reload -- a genuinely superseded page's payload leaking
+    // forward. _lastHeadingsCaptureGeneration CAN tell them apart, because
+    // _activeRevealRenderId bumps on every QueueRender even when Source itself
+    // reads the same both times.
+    [Fact]
+    public void NoOpReloadSkipsAPayloadCapturedUnderASupersededGeneration()
     {
         RunOnHost(host =>
         {
@@ -588,30 +760,21 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
 
             // A genuine no-op reload of the SECOND DocB generation.
             host.RequestRender(DocB, Request());
+            var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
+                DocB, consumerHasHeadings: false, transactionGeneration: 0);
 
+            Assert.False(pulled);
             Assert.Equal(0, fireCount);
         });
     }
 
-    // G-F2/I3 -- gate findings F2 and I3 (2026-07-26): the fast path in
-    // ApplicateSharedWebViewHost.RequestRender is entered whenever
-    // HasLoadedDocumentForSource is true, which covers BOTH a genuine no-op
-    // reload (action=None) AND a pure reading-preference change
-    // (action=ApplyLivePreferences, e.g. a width drag or a font-size step).
-    // Before F2, headings were re-emitted on every such fast-path call --
-    // proven behaviourally by the gate via a width-only change and,
-    // separately, a font-size-only change. Each re-emit runs the consumer's
-    // UpdateDocumentHeadings, which unconditionally replaces the
-    // ObservableCollection (I3: a visible TOC rebuild with nothing to
-    // refresh) and resets _pendingScrollToHeadingId. This is the REAL I3
-    // guard G5 could not give (G5 only proves the VIEW hands out the SAME
-    // list instance across repeats -- it says nothing about how many times
-    // a consumer would have been asked to rebuild from it). Counting
-    // HeadingsChanged fires here is a direct, sufficient proxy for consumer
-    // rebuild count: the production wiring (ApplicateViewerView /
-    // ApplicateEditPreviewView's OnHost*HeadingsChanged) applies synchronously
-    // and unconditionally to a small non-empty retained list, so each fire
-    // maps 1:1 to one ObservableCollection replacement.
+    // Rewritten at the pull's entry point (design §8 "the trap" / §15
+    // ratification: REWRITE, do not delete). After D1.d, RequestRender itself
+    // contains no heading logic at all, so these zero-fire assertions would
+    // otherwise pass VACUOUSLY -- the mechanism they used to guard left
+    // RequestRender entirely. The real reason nothing fires for a
+    // ALREADY-populated TOC across a run of width-only fast-path renders is
+    // consumerHasHeadings: true, driven here explicitly after every request.
     [Fact]
     public void FastPathRequestRenderWithOnlyAWidthChangeDoesNotReemitHeadings()
     {
@@ -634,12 +797,16 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             // previous one (Request() uses 800; none of these repeat it or
             // each other), so Source/ImageSourceResolver/ReadingPreferences
             // never change -- UpdateInputs must return ApplyLivePreferences
-            // every time, never None and never Render.
+            // every time, never None and never Render. The consumer's own TOC
+            // is already populated (consumerHasHeadings: true), matching what
+            // ApplicateViewerView.IssueRenderRequest would actually observe.
             for (var width = 700.0; width <= 780.0; width += 20.0)
             {
                 host.RequestRender(
                     DocA,
                     new ApplicateWebRenderRequest(ReadingPreferences.Default, ImageSourceResolver: null, AvailableContentWidth: width));
+                host.View.TryRaiseRetainedHeadingsForConsumerDebt(
+                    DocA, consumerHasHeadings: true, transactionGeneration: 0);
             }
 
             Assert.Equal(0, fireCount);
@@ -668,7 +835,10 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
 
             // Each request changes ONLY the reading preferences' FontSize
             // (Source/AvailableContentWidth/ImageSourceResolver held fixed),
-            // so UpdateInputs must return ApplyLivePreferences every time.
+            // so UpdateInputs must return ApplyLivePreferences every time. As
+            // above, consumerHasHeadings: true is the real reason nothing
+            // fires now that the mechanism lives at the pull, not in
+            // RequestRender.
             foreach (var fontSize in DistinctFontSizesForNoReemitTest)
             {
                 host.RequestRender(
@@ -677,6 +847,8 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
                         ReadingPreferences.Default with { FontSize = fontSize },
                         ImageSourceResolver: null,
                         AvailableContentWidth: 800));
+                host.View.TryRaiseRetainedHeadingsForConsumerDebt(
+                    DocA, consumerHasHeadings: true, transactionGeneration: 0);
             }
 
             Assert.Equal(0, fireCount);

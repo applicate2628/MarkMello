@@ -29,6 +29,17 @@ public static class ApplicateRendererShellMode
         //
         // Default: TRUE. To force legacy mode for a debugging session set
         // MARKMELLO_RENDERER_SHELL_MODE=0 (or "false"/"no"/"off").
+        //
+        // ADJ-1 (work-items/active/2026-07-25-toc-empty-on-open/design.md §0
+        // FACT 1, §14, §15 -- $lead ratified won't-fix, 2026-07-26): the Table
+        // of Contents has NEVER worked in legacy mode (envValue forcing this
+        // to false). Legacy's QueueRender branch calls _webView.Navigate(...)
+        // and sends NO IPC at all, so ensureChromeNodes (the renderer's only
+        // producer of headings-updated) never runs and DocumentHeading is
+        // never constructed for that mode. This is pre-existing and
+        // unreported -- explicit debugging opt-out, shell mode has been the
+        // default since Phase 4 -- and is accepted as won't-fix rather than
+        // fixed, since legacy mode is not a supported end-user render path.
         if (string.IsNullOrWhiteSpace(envValue))
         {
             return true;

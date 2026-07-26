@@ -484,10 +484,25 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         var shouldRestoreScroll = restoreProgress > 0
             && !_sharedHost.View.HasLoadedDocumentForSource(_viewModel.Document);
         _pendingScrollRestoreProgress = shouldRestoreScroll ? restoreProgress : null;
-        _sharedHost.RequestRender(
+        var transactionGeneration = ApplicateModeTransactionContext.GetTransactionGeneration(_webSlot);
+        _sharedHost.RequestRender(_viewModel.Document, request, transactionGeneration: transactionGeneration);
+
+        // Consumer-owned debt pull (design work-items/active/2026-07-25-toc-
+        // empty-on-open/design.md D1): this view's own DocumentHeadings
+        // collection is the only thing that knows whether it lost state a
+        // same-source no-op reload's UpdateInputs action=None/ApplyLivePreferences
+        // would otherwise never refill -- e.g. ClearDocumentHeadings ran on a
+        // prior Document=null transition (closing to the welcome screen), or
+        // ANY other reachable trigger of the fast path, not just action=None
+        // (gate finding F2, 98f99ab: a reopen carrying a changed
+        // AvailableContentWidth resolves to ApplyLivePreferences and was still
+        // losing the TOC). MUST run after RequestRender -- UpdateInputs may
+        // issue a real render and clear _hasLoadedDocument, which the pull's
+        // own guard ladder depends on (invariant I9).
+        _sharedHost.View.TryRaiseRetainedHeadingsForConsumerDebt(
             _viewModel.Document,
-            request,
-            transactionGeneration: ApplicateModeTransactionContext.GetTransactionGeneration(_webSlot));
+            consumerHasHeadings: _viewModel.HasDocumentHeadings,
+            transactionGeneration);
     }
 
     private void EnsureSharedHostMounted(bool force = false)
