@@ -239,7 +239,11 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         var level = System.Math.Clamp(heading.Level, 1, 6);
         var text = GetPlainText(heading.Inlines);
         var inlines = GetHeadingInlines(heading.Inlines);
-        var anchor = MarkdownHeadingAnchorSlugger.CreateAnchor(heading.Inlines);
+        // Document-unique, NOT a bare slug: two identically-titled headings would otherwise share an
+        // HTML id, and every duplicate TOC row would resolve to the last of them. The allocator is
+        // the shared owner of that de-duplication — the native fallback path routes through the same
+        // one, so the two renderers cannot drift on the suffix format.
+        var anchor = context.HeadingAnchors.Allocate(heading.Inlines);
         context.Headings.Add(new ApplicateHtmlHeading(level, text, anchor, blockIndex, inlines));
         context.PlainText.AppendLine(text);
 
@@ -861,6 +865,13 @@ public sealed class ApplicateHtmlMarkdownRenderer : IApplicateHtmlMarkdownRender
         public StringBuilder PlainText { get; } = new();
 
         public List<ApplicateHtmlHeading> Headings { get; } = [];
+
+        /// <summary>
+        /// Per-render heading anchor de-duplication. Scoped to this context, so each document render
+        /// starts from a clean numbering; blocks are rendered sequentially in document order, which
+        /// is what makes the allocated suffixes stable for a given document.
+        /// </summary>
+        public MarkdownHeadingAnchorAllocator HeadingAnchors { get; } = new();
 
         public List<ApplicateHtmlBlockMarker> Blocks { get; } = [];
 

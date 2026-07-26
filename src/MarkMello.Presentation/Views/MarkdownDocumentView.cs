@@ -15,7 +15,6 @@ using MarkMello.Application.Abstractions;
 using MarkMello.Domain;
 using MarkMello.Presentation.Views.Markdown;
 using MarkMello.Presentation.Views.Markdown.Minimap;
-using System.Globalization;
 using System.Threading;
 
 namespace MarkMello.Presentation.Views;
@@ -64,7 +63,7 @@ public sealed class MarkdownDocumentView : UserControl
 
     private readonly List<MarkdownDocumentSelectionFragmentBase> _selectionFragments = [];
     private readonly Dictionary<string, Control> _headingAnchorTargets = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, int> _headingAnchorCounts = new(StringComparer.Ordinal);
+    private MarkdownHeadingAnchorAllocator _headingAnchorAllocator = new();
     private readonly List<MarkdownSourceLineVisualAnchor> _sourceLineAnchors = [];
     private MarkdownDocumentTextMap _textMap = MarkdownDocumentTextMap.Empty;
     private bool _isPointerPressed;
@@ -591,7 +590,10 @@ public sealed class MarkdownDocumentView : UserControl
         DisposeSelectionFragments();
         _root.Children.Clear();
         _headingAnchorTargets.Clear();
-        _headingAnchorCounts.Clear();
+
+        // One allocator per document render: anchor numbering is document-scoped, so a rebuild must
+        // start from a clean one rather than continuing the previous document's counts.
+        _headingAnchorAllocator = new MarkdownHeadingAnchorAllocator();
         _sourceLineAnchors.Clear();
         ResetPointerState();
 
@@ -1482,20 +1484,14 @@ public sealed class MarkdownDocumentView : UserControl
 
     private void RegisterHeadingAnchor(MarkdownHeadingBlock block, Control headingControl)
     {
-        var baseAnchor = MarkdownHeadingAnchorSlugger.CreateAnchor(block.Inlines);
-        if (string.IsNullOrEmpty(baseAnchor))
+        // De-duplication lives in MarkdownHeadingAnchorAllocator, shared with the WebView renderer —
+        // this path used to keep its own private counter, which left the primary render path without
+        // one and the two free to drift.
+        var anchor = _headingAnchorAllocator.Allocate(block.Inlines);
+        if (string.IsNullOrEmpty(anchor))
         {
             return;
         }
-
-        var count = _headingAnchorCounts.TryGetValue(baseAnchor, out var currentCount)
-            ? currentCount
-            : 0;
-        _headingAnchorCounts[baseAnchor] = count + 1;
-
-        var anchor = count == 0
-            ? baseAnchor
-            : string.Create(CultureInfo.InvariantCulture, $"{baseAnchor}-{count}");
 
         _headingAnchorTargets.TryAdd(anchor, headingControl);
     }
