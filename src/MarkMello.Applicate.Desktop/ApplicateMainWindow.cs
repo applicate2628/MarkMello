@@ -2592,6 +2592,61 @@ public sealed class ApplicateMainWindow : MainWindow
     }
 
     /// <summary>
+    /// The open-documents <c>CollectionChanged</c> body, extracted so its ONE fold predicate is
+    /// reachable from a test driving a real <see cref="OpenDocumentsService"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The predicate is the ACTION, never the shape of the args. <c>_openDocuments</c> is private to
+    /// <see cref="OpenDocumentsService"/> and surfaced only as a read-only wrapper, so that class's four
+    /// mutation sites are the whole reachable action set:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><c>Add</c> — <c>OpenAsync</c> / <c>OpenStubAsync</c>. A document is being OPENED, which is
+    /// exactly what d11 clause 3 makes the automatic writer's trigger. FOLD.</item>
+    /// <item><c>Remove</c> — <c>Close</c>. Not an open, and closing a tab must not evict its recent
+    /// entry. NO fold; it carries no <c>NewItems</c>, so the old predicate already excluded it.</item>
+    /// <item><c>Move</c> — the tab-strip drag reorder. <c>ObservableCollection.Move</c> populates BOTH
+    /// <c>OldItems</c> and <c>NewItems</c>, so a <c>NewItems is not null</c> predicate folded the dragged
+    /// tab to the head of the recent list and the <paramref name="save"/> below persisted it. A layout
+    /// gesture is not a USE. NO fold — this is the defect this predicate fixes.</item>
+    /// <item><c>Replace</c> — UNREACHABLE today: its only source is <c>ObservableCollection.SetItem</c>,
+    /// i.e. an assignment through the indexer, and nothing assigns to <c>_openDocuments[i]</c>. It also
+    /// populates both lists, which is why narrowing to "not <c>Move</c>" would have been the wrong
+    /// shape.</item>
+    /// <item><c>Reset</c> — UNREACHABLE today: its only source is <c>ObservableCollection.ClearItems</c>,
+    /// i.e. <c>Clear()</c>, which is never called. It carries neither list.</item>
+    /// </list>
+    /// <para>
+    /// Testing the ACTION is what makes the two unreachable cases safe to leave unreachable: a future
+    /// <c>Replace</c> or <c>Reset</c> mutation site is excluded by construction, so this enumeration does
+    /// not have to be re-derived to stay correct.
+    /// </para>
+    /// <para>
+    /// <paramref name="save"/> runs on EVERY change, the reorder included — tab ORDER is persisted as
+    /// <c>ApplicateSession.OpenPaths</c>, so a reorder must still reach the session store. Only the MRU
+    /// fold is withheld.
+    /// </para>
+    /// </remarks>
+    internal static void HandleOpenDocumentsChanged(
+        NotifyCollectionChangedEventArgs e,
+        Action<string?> noteRecent,
+        Action save)
+    {
+        // The semantic test is the ACTION. The null test after it is only the nullable-reference
+        // obligation on IList? -- an Add always carries its new items -- never a second predicate.
+        if (e.Action == NotifyCollectionChangedAction.Add && e.NewItems is not null)
+        {
+            foreach (var added in e.NewItems.OfType<OpenDocument>())
+            {
+                noteRecent(added.FilePath);
+            }
+        }
+
+        save();
+    }
+
+    /// <summary>
     /// The ONE definition of "this persisted path is unusable -- drop the entry and keep restoring the
     /// rest", shared by BOTH restore-loop catch sites (per-path and argv) so the two cannot drift apart.
     /// <para>
@@ -3525,17 +3580,7 @@ public sealed class ApplicateMainWindow : MainWindow
             ClearRecentPathsAndCommit(recentPaths, viewModel.SetRecentFiles, SaveSession);
 
         ((INotifyCollectionChanged)openDocs.OpenDocuments).CollectionChanged += (_, e) =>
-        {
-            if (e.NewItems is not null)
-            {
-                foreach (var added in e.NewItems.OfType<OpenDocument>())
-                {
-                    NoteRecentDocument(added.FilePath);
-                }
-            }
-
-            SaveSession();
-        };
+            HandleOpenDocumentsChanged(e, NoteRecentDocument, SaveSession);
         openDocs.ActiveDocumentChanged += (_, _) =>
         {
             if (openDocs.ActiveDocument is not null)
