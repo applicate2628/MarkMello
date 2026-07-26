@@ -453,6 +453,26 @@
        and the keyboard-only focus adorner all come from the Button/Control
        base classes for free and need no restating here. -->
   <Style Selector="Button.mm-toc-row">
+    <!-- BorderThickness=0 is LOAD-BEARING, not tidiness. Fluent's Button
+         ControlTheme sets BorderThickness from ButtonBorderThemeThickness
+         (=1), and ButtonBorderBrush is transparent here — so the border
+         OCCUPIED LAYOUT WITHOUT PAINTING and survived casual screenshots.
+         Measured against b46fbec^ at 125% DPI: every row 2px taller (active
+         band 38->40), content +1px right, 2px less content width (one more
+         character lost to ellipsis), and a CUMULATIVE vertical drift of ~60px
+         over a full TOC — about 1.5 fewer rows per screen. The Border this
+         Button replaced defaulted BorderThickness to 0; every other Button.*
+         style in this file zeroes it explicitly. Guarded by
+         ApplicateTocPanelKeyboardAccessibilityTests.
+         The two ContentAlignment pins below are LATENT, not fixes: the row's
+         content Grid has a "*" column, so its desired width already equals the
+         constraint and Fluent's Center default is currently a layout no-op
+         (verified — the predicted centring did NOT occur). They exist so the
+         row keeps filling its slot if that Grid ever stops having a "*"
+         column. Matches Button.mm-menu-item above. -->
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    <Setter Property="VerticalContentAlignment" Value="Stretch" />
     <Setter Property="Template">
       <ControlTemplate>
         <ContentPresenter Background="{TemplateBinding Background}"

@@ -7,11 +7,15 @@ using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Automation.Peers;
 using Avalonia.Controls;
+using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Input;
+using Avalonia.Layout;
+using Avalonia.Markup.Xaml.Styling;
 using Avalonia.Threading;
 using Avalonia.Themes.Fluent;
+using Avalonia.VisualTree;
 using MarkMello.Applicate.Desktop.Views;
 using MarkMello.Applicate.Tests.Fakes;
 using MarkMello.Presentation.ViewModels;
@@ -237,6 +241,81 @@ public sealed class ApplicateTocPanelKeyboardAccessibilityTests
             Assert.Equal(0, ControlAutomationPeer.CreatePeerForElement(placeholder).GetHeadingLevel());
 
             return 0;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task RealizedRowCarriesNoBorderThicknessUnderTheRealStyleGraph()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        await session.Dispatch(() =>
+        {
+            // Structural assertion, not a pixel/colour capture — the same limit
+            // the adorner test above states at its own head. It proves the row
+            // reserves no border box in layout; it does NOT re-measure the
+            // rendered pixels that found the regression.
+            //
+            // Both styles are mandatory and this test is worthless without
+            // either. This assembly's Application (ApplicateAvaloniaTestApp) is
+            // a bare Avalonia.Application with NO styles at all, so:
+            //   - without FluentTheme, Button has no ControlTheme,
+            //     BorderThickness is already 0, and this test would pass
+            //     vacuously whether or not the fix is present;
+            //   - without Controls.axaml, "mm-toc-row" resolves to nothing and
+            //     the fix under test is not even in scope.
+            // Order mirrors MarkMello.Presentation/App.axaml exactly.
+            var app = Avalonia.Application.Current!;
+            var fluent = new FluentTheme();
+            var controls = new StyleInclude(new Uri("avares://MarkMello.Presentation/"))
+            {
+                Source = new Uri("avares://MarkMello.Presentation/Themes/Controls.axaml"),
+            };
+            app.Styles.Add(fluent);
+            app.Styles.Add(controls);
+            try
+            {
+                var wired = BuildWiredPanel();
+                try
+                {
+                    // Guards the b46fbec regression: converting the row from
+                    // Border to Button inherited Fluent's
+                    // ButtonBorderThemeThickness (=1) through the Button
+                    // ControlTheme. ButtonBorderBrush is transparent, so that
+                    // border painted nothing while still consuming layout —
+                    // 2px taller rows, content pushed 1px right, 2px narrower
+                    // content, and a cumulative ~60px drift down a full TOC.
+                    // Asserting the realized control (not the style file) is
+                    // what makes the removal of the setter turn this RED.
+                    foreach (var row in wired.Rows)
+                    {
+                        Assert.Equal(default, row.BorderThickness);
+                    }
+
+                    // Latent pins, asserted so a silent removal is caught: with
+                    // today's "Auto,*" content Grid these are a layout no-op,
+                    // so unlike BorderThickness they guard a future change
+                    // rather than a measured defect.
+                    Assert.Equal(HorizontalAlignment.Stretch, wired.Rows[0].HorizontalContentAlignment);
+                    Assert.Equal(VerticalAlignment.Stretch, wired.Rows[0].VerticalContentAlignment);
+
+                    // Proves the style graph above is genuinely live: the
+                    // mm-toc-row Template override must have replaced Fluent's
+                    // named PART_ContentPresenter with an unnamed one. If this
+                    // fails, Controls.axaml never applied and the
+                    // BorderThickness assertion proved nothing.
+                    var presenter = wired.Rows[0].GetVisualDescendants().OfType<ContentPresenter>().Single();
+                    Assert.Null(presenter.Name);
+                }
+                finally
+                {
+                    wired.Window.Close();
+                }
+            }
+            finally
+            {
+                app.Styles.Remove(controls);
+                app.Styles.Remove(fluent);
+            }
         }, CancellationToken.None);
     }
 
