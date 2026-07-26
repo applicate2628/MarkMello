@@ -1061,6 +1061,16 @@ public sealed class ApplicateSiblingMountTests
             {
                 capturedException = ex;
             }
+
+            // `return 0;` is LOAD-BEARING: HeadlessUnitTestSession.Dispatch has three
+            // overloads (Action; Func<TResult>; Func<Task<TResult>>) and a void-bodied
+            // async lambda (no return statement) resolves to Func<TResult> with
+            // TResult=Task, i.e. an unwrapped Task<Task> -- the single `await` above
+            // only awaits the OUTER task, so none of this lambda's internal awaits
+            // (including the background-thread signal this test races against) were
+            // ever actually waited for before the assertion below ran. See
+            // work-items/bugs/2026-07-26-async-lambda-dispatch-overload-swallows-exceptions.md.
+            return 0;
         }, CancellationToken.None);
 
         Assert.Null(capturedException);
@@ -1449,6 +1459,9 @@ public sealed class ApplicateSiblingMountTests
             Assert.Equal(1.0, revealed.EditOpacity);
             Assert.Equal(new[] { ApplicateMode.Viewer }, host.SuppressedModes);
             Assert.Empty(host.RestoredModes);
+            // load-bearing -- forces the Func<Task<TResult>> overload; see
+            // work-items/bugs/2026-07-26-async-lambda-dispatch-overload-swallows-exceptions.md
+            return 0;
         }, CancellationToken.None);
     }
 
@@ -1509,6 +1522,9 @@ public sealed class ApplicateSiblingMountTests
             Assert.True(viewerSlot.IsVisible);
             Assert.True(viewerSlot.IsHitTestVisible);
             Assert.False(editSlot.IsVisible);
+            // load-bearing -- forces the Func<Task<TResult>> overload; see
+            // work-items/bugs/2026-07-26-async-lambda-dispatch-overload-swallows-exceptions.md
+            return 0;
         }, CancellationToken.None);
     }
 
@@ -1551,6 +1567,9 @@ public sealed class ApplicateSiblingMountTests
             Assert.Equal(0.0, editSlot.Opacity);
             Assert.False(editSlot.IsHitTestVisible);
             Assert.Empty(host.RevealedGenerations);
+            // load-bearing -- forces the Func<Task<TResult>> overload; see
+            // work-items/bugs/2026-07-26-async-lambda-dispatch-overload-swallows-exceptions.md
+            return 0;
         }, CancellationToken.None);
     }
 
@@ -1602,6 +1621,9 @@ public sealed class ApplicateSiblingMountTests
             Assert.False(editSlot.IsVisible);
             Assert.Equal(0.0, editSlot.Opacity);
             Assert.Single(host.RestoredModes);
+            // load-bearing -- forces the Func<Task<TResult>> overload; see
+            // work-items/bugs/2026-07-26-async-lambda-dispatch-overload-swallows-exceptions.md
+            return 0;
         }, CancellationToken.None);
     }
 
@@ -1656,6 +1678,9 @@ public sealed class ApplicateSiblingMountTests
             Assert.False(editSlot.IsVisible);
             Assert.Equal(0.0, editSlot.Opacity);
             Assert.False(editSlot.IsHitTestVisible);
+            // load-bearing -- forces the Func<Task<TResult>> overload; see
+            // work-items/bugs/2026-07-26-async-lambda-dispatch-overload-swallows-exceptions.md
+            return 0;
         }, CancellationToken.None);
     }
 
