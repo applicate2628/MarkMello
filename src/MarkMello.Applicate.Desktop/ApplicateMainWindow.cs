@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Linq;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -2492,6 +2493,140 @@ public sealed class ApplicateMainWindow : MainWindow
         persist();
     }
 
+    /// <summary>
+    /// D12 (decision <c>2026-07-26-d12-restore-fold-precedence</c>) clause 1: fold the WHOLE restore set
+    /// into the recent list UP FRONT, before the first mirror push, so the first list the user sees is
+    /// already the final one. Seeds from the persisted recent history (already most-recent-first), then
+    /// folds every saved OPEN path in order and finally <paramref name="argvPath"/> through the pure
+    /// <see cref="ApplicateSession.BuildRecentPaths"/> (move-to-front, case-insensitive dedup, cap).
+    /// <para>
+    /// Returns nothing and publishes nothing: there is deliberately NO ledger of what it folded. d12
+    /// clause 3 forbids PREDICTING the replay's adds -- a prediction outlives an add that never arrives
+    /// and pre-claims an add the user may make first.
+    /// </para>
+    /// <para>
+    /// Mutates <paramref name="recentPaths"/> IN PLACE so the host's single writer-owner list instance is
+    /// never swapped underneath a reference already handed to the ViewModel mirror.
+    /// </para>
+    /// <para>
+    /// Pure list arithmetic -- performs NO I/O. A saved open path that no longer exists on disk is folded
+    /// anyway (declared delta 2); it is display-pruned while missing, per d11 clause 6. Adding an
+    /// existence filter here would silently re-hide that delta and defeat the whole hoist.
+    /// </para>
+    /// </summary>
+    internal static void SeedRecentPathsForRestore(
+        List<string> recentPaths,
+        IReadOnlyList<string> savedRecent,
+        IReadOnlyList<string> savedOpen,
+        string? argvPath)
+    {
+        recentPaths.Clear();
+        foreach (var recent in savedRecent)
+        {
+            if (!string.IsNullOrWhiteSpace(recent)
+                && !recentPaths.Exists(p => string.Equals(p, recent, System.StringComparison.OrdinalIgnoreCase)))
+            {
+                recentPaths.Add(recent);
+            }
+        }
+
+        void Fold(string? path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            var updated = ApplicateSession.BuildRecentPaths(recentPaths, path);
+            recentPaths.Clear();
+            recentPaths.AddRange(updated);
+        }
+
+        foreach (var open in savedOpen)
+        {
+            Fold(open);
+        }
+
+        Fold(argvPath);
+    }
+
+    /// <summary>
+    /// D12 clause 2: the automatic MRU writer's own precondition. Folds <paramref name="path"/>
+    /// move-to-front and mirrors -- EXCEPT when it is the one path the restore replay's
+    /// <c>ReplayOpenAsync</c> bracket currently names (<paramref name="replayFoldInFlight"/>), which is
+    /// DECLINED: no fold, no mirror. That is what stops a restore-driven add from resurrecting an entry
+    /// the user removed or cleared during the restore window, which the post-restore convergence save
+    /// would then persist.
+    /// <para>
+    /// The discriminator is the IDENTITY of the path, never a clock. d12 clause 4 forbids an
+    /// <c>isRestoring</c>-style time window here: a genuine user open DOES reach the collection during
+    /// restore (the VM-to-service bridge's Document branch is closed only by <c>inServiceLoad</c>), so a
+    /// time gate would silently discard it.
+    /// </para>
+    /// <para>
+    /// The parameter is ONE nullable path, never a set -- d12 clause 3. The check is ORIGIN-BLIND by
+    /// construction: it compares path identity and cannot tell whose add it is looking at. See d12's
+    /// accepted residual for the one bounded case where that costs a user's own add.
+    /// </para>
+    /// </summary>
+    internal static void NoteRecentDocumentCore(
+        List<string> recentPaths,
+        string? replayFoldInFlight,
+        string? path,
+        Action<IReadOnlyList<string>> mirror)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        if (string.Equals(path, replayFoldInFlight, System.StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var updated = ApplicateSession.BuildRecentPaths(recentPaths, path);
+        recentPaths.Clear();
+        recentPaths.AddRange(updated);
+        mirror(recentPaths);
+    }
+
+    /// <summary>
+    /// The ONE definition of "this persisted path is unusable -- drop the entry and keep restoring the
+    /// rest", shared by BOTH restore-loop catch sites (per-path and argv) so the two cannot drift apart.
+    /// <para>
+    /// SUBTYPE-INCLUSIVE for <see cref="System.IO.IOException"/>: FileNotFound, DirectoryNotFound,
+    /// DriveNotFound and PathTooLong are the normal shapes of a stale saved path, so inclusion is
+    /// mandatory rather than incidental. It EXCLUDES the programming and platform faults that happen to
+    /// derive from the admitted argument types.
+    /// </para>
+    /// <para>
+    /// Those exclusions are load-bearing, not cosmetic. <c>ObservableCollection.Add</c> raises
+    /// CollectionChanged SYNCHRONOUSLY, so this design's own MRU handler runs INSIDE these catch blocks;
+    /// a naive four-branch type test would silently swallow an <see cref="ArgumentNullException"/> thrown
+    /// from the very code this change introduces. Everything not admitted here still propagates.
+    /// </para>
+    /// </summary>
+    internal static bool IsUnusablePersistedPath(System.Exception ex)
+    {
+        return ex switch
+        {
+            // Excluded FIRST: each of these derives from an admitted type below, and a type test is
+            // necessarily subtype-inclusive. None is reachable from a corrupt persisted path -- the loop
+            // skips blank entries and both service entry points re-check IsNullOrWhiteSpace and throw a
+            // PLAIN ArgumentException before reaching Path.GetFullPath -- so excluding them drops no
+            // legitimate case and keeps real faults loud.
+            System.ArgumentNullException => false,
+            System.ArgumentOutOfRangeException => false,
+            System.PlatformNotSupportedException => false,
+            System.IO.IOException => true,
+            System.UnauthorizedAccessException => true,
+            System.ArgumentException => true,
+            System.NotSupportedException => true,
+            _ => false,
+        };
+    }
+
     private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)
     {
         var openDocs = App.Services?.GetService<IOpenDocumentsService>();
@@ -3335,6 +3470,13 @@ public sealed class ApplicateMainWindow : MainWindow
         // by SaveSession, and mirrored to the VM so the welcome screen can offer them for re-opening.
         var recentPaths = new List<string>();
 
+        // D12 clause 2: the ONE path the restore replay's ReplayOpenAsync bracket currently has in hand.
+        // Declared HERE, in the same closure as recentPaths, so NoteRecentDocument below can read it.
+        // NOT a second writer-owner of the recent state: it holds one path identity -- no order, no MRU
+        // membership, no persistence -- and cannot outlive the single ReplayOpenAsync call that set it.
+        // ReplayOpenAsync is its ONLY writer; an assignment anywhere else re-opens the defect.
+        string? replayFoldInFlight = null;
+
         void SaveSession()
         {
             if (isRestoring || sessionStore is null)
@@ -3367,18 +3509,12 @@ public sealed class ApplicateMainWindow : MainWindow
         }
 
         // Fold a just-opened document into the recent list and mirror it to the VM. Called on every
-        // document add (below) and once per restored open path.
+        // document add (below). D12: the eligibility check lives in this OWNER, not at the call site --
+        // "is this the path the replay currently has in hand" is the writer's own precondition. The
+        // marker is read LIVE on every invocation, so the core sees the value in force at that instant.
         void NoteRecentDocument(string? path)
         {
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return;
-            }
-
-            var updated = ApplicateSession.BuildRecentPaths(recentPaths, path);
-            recentPaths.Clear();
-            recentPaths.AddRange(updated);
-            viewModel.SetRecentFiles(recentPaths);
+            NoteRecentDocumentCore(recentPaths, replayFoldInFlight, path, viewModel.SetRecentFiles);
         }
 
         // Explicit user-initiated storage writers (distinct from the auto-fold above): the
@@ -3424,24 +3560,24 @@ public sealed class ApplicateMainWindow : MainWindow
                 }
             }
 
-            // Seed the recent list from the persisted history (most-recent-first already), then mirror
-            // to the VM so the welcome screen shows it immediately on a cold start.
-            recentPaths.Clear();
-            foreach (var recent in saved.RecentPaths)
-            {
-                if (!string.IsNullOrWhiteSpace(recent)
-                    && !recentPaths.Exists(p => string.Equals(p, recent, System.StringComparison.OrdinalIgnoreCase)))
-                {
-                    recentPaths.Add(recent);
-                }
-            }
-            viewModel.SetRecentFiles(recentPaths);
-
+            // Resolve argv BEFORE the seed so the up-front fold can include it. Nothing between the
+            // session load above and here awaits, so this stays inside the same uninterruptible
+            // dispatcher turn -- the user cannot interleave a remove or a clear before the seed lands.
             var argvPath = App.Services?.GetService<ICommandLineActivation>()?.GetActivationFilePath();
             if (string.IsNullOrWhiteSpace(argvPath))
             {
                 argvPath = viewModel.Document?.Path;
             }
+
+            // D12 clause 1: seed the recent list from the persisted history AND fold the whole restore
+            // set (every saved open path, then argv) UP FRONT, then mirror ONCE. Previously the seed
+            // carried RecentPaths only and each restored tab re-folded through NoteRecentDocument, which
+            // (a) reshuffled the visible list once per tab and (b) folded back in the very entries a user
+            // remove or clear had just dropped during the restore window -- the convergence save then
+            // persisted that resurrected list. Folding here makes the first list the user sees the final
+            // one, and the marker below declines the replay's own adds so they cannot re-pollute it.
+            SeedRecentPathsForRestore(recentPaths, saved.RecentPaths, saved.OpenPaths, argvPath);
+            viewModel.SetRecentFiles(recentPaths);
 
             // Multi-tab startup-scaling polish: determine the preferred
             // active path UP FRONT so the restore loop knows which one
@@ -3466,6 +3602,33 @@ public sealed class ApplicateMainWindow : MainWindow
             // by Program.StartSessionStartupDocumentPreRead is the
             // rendezvous for the active-doc fast path; stubs load when the
             // user clicks them later (EnsureLoadedAsync).
+            // D12 clause 2: the ONE bracket every replay open goes through. It NAMES the path it is
+            // about to open for exactly the lifetime of that one call, so the MRU writer -- which runs
+            // synchronously inside ObservableCollection.Add, on this thread, inside this very await --
+            // declines that add instead of re-folding a path the user just removed. The marker is
+            // cleared in this finally on EVERY path (success, dedup, throw), so it cannot outlive the
+            // call and cannot leak on a no-add route. An open added beside this bracket, unmarked,
+            // silently restores the original defect for that path.
+            async Task ReplayOpenAsync(string path, bool stub)
+            {
+                replayFoldInFlight = path;
+                try
+                {
+                    if (stub)
+                    {
+                        await openDocs.OpenStubAsync(path).ConfigureAwait(true);
+                    }
+                    else
+                    {
+                        await openDocs.OpenAsync(path, activate: false).ConfigureAwait(true);
+                    }
+                }
+                finally
+                {
+                    replayFoldInFlight = null;
+                }
+            }
+
             inVmMirror = true;
             try
             {
@@ -3484,22 +3647,15 @@ public sealed class ApplicateMainWindow : MainWindow
 
                     try
                     {
-                        if (canUseStubs && !isPreferred)
-                        {
-                            await openDocs.OpenStubAsync(path).ConfigureAwait(true);
-                        }
-                        else
-                        {
-                            await openDocs.OpenAsync(path, activate: false).ConfigureAwait(true);
-                        }
+                        await ReplayOpenAsync(path, stub: canUseStubs && !isPreferred).ConfigureAwait(true);
                     }
-                    catch (System.IO.IOException)
+                    catch (System.Exception ex) when (IsUnusablePersistedPath(ex))
                     {
-                        // File may have moved or been deleted since last session.
-                    }
-                    catch (System.UnauthorizedAccessException)
-                    {
-                        // Access lost since last session; skip silently.
+                        // The persisted path is unusable: moved, deleted, access lost since last
+                        // session, or corrupt enough that Path.GetFullPath rejects it. Drop this entry
+                        // and keep restoring the rest -- exactly today's missing-file semantic, now
+                        // covering the corrupt-path throws that used to escape the loop entirely and
+                        // skip the whole post-restore tail. Every other exception type still propagates.
                     }
                 }
 
@@ -3507,11 +3663,12 @@ public sealed class ApplicateMainWindow : MainWindow
                 {
                     try
                     {
-                        await openDocs.OpenAsync(argvPath, activate: false).ConfigureAwait(true);
+                        await ReplayOpenAsync(argvPath, stub: false).ConfigureAwait(true);
                     }
-                    catch (System.IO.IOException)
+                    catch (System.Exception ex) when (IsUnusablePersistedPath(ex))
                     {
-                        // Argv file may have moved between argv parse and now.
+                        // Argv file may have moved between argv parse and now, or be unusable.
+                        // Same one predicate as the per-path catch above, deliberately.
                     }
                 }
             }
@@ -3521,106 +3678,130 @@ public sealed class ApplicateMainWindow : MainWindow
                 isRestoring = false;
             }
 
-            // Pick the document to activate. Argv wins over the saved active
-            // because the user just explicitly asked for it. If the preferred
-            // path no longer exists in the restored set (file deleted, argv
-            // pointed at a missing file, etc.) fall back to the first open
-            // doc so the user is never left with an "active tab does not
-            // match displayed file" state.
-            // (preferredActivePath was already computed above to drive the
-            // stub-vs-full-open decision in the restore loop; reused here
-            // so the activation target stays consistent with the loop's
-            // "full open" choice.)
-            OpenDocument? toActivate = null;
-            if (!string.IsNullOrWhiteSpace(preferredActivePath))
+            // D12: the post-restore tail runs under a finally so the consolidated save happens
+            // even when the activation work below throws -- otherwise a remove or clear the user
+            // made during the restore window is silently lost, because SaveSession was muted for
+            // the whole window and nothing else writes it.
+            //
+            // The try opens HERE, AFTER the restore loop's own finally, deliberately and
+            // load-bearingly: widening it over the loop would let SaveSession persist a PARTIAL
+            // OpenPaths (it reads the LIVE openDocs.OpenDocuments), permanently dropping the tabs
+            // that had not opened yet -- where today the session file survives untouched and the
+            // next launch retries them all.
+            try
             {
-                foreach (var doc in openDocs.OpenDocuments)
+                // Pick the document to activate. Argv wins over the saved active
+                // because the user just explicitly asked for it. If the preferred
+                // path no longer exists in the restored set (file deleted, argv
+                // pointed at a missing file, etc.) fall back to the first open
+                // doc so the user is never left with an "active tab does not
+                // match displayed file" state.
+                // (preferredActivePath was already computed above to drive the
+                // stub-vs-full-open decision in the restore loop; reused here
+                // so the activation target stays consistent with the loop's
+                // "full open" choice.)
+                OpenDocument? toActivate = null;
+                if (!string.IsNullOrWhiteSpace(preferredActivePath))
                 {
-                    if (string.Equals(doc.FilePath, preferredActivePath, System.StringComparison.OrdinalIgnoreCase))
+                    foreach (var doc in openDocs.OpenDocuments)
                     {
-                        toActivate = doc;
-                        break;
+                        if (string.Equals(doc.FilePath, preferredActivePath, System.StringComparison.OrdinalIgnoreCase))
+                        {
+                            toActivate = doc;
+                            break;
+                        }
                     }
                 }
-            }
-            if (toActivate is null && openDocs.OpenDocuments.Count > 0)
-            {
-                toActivate = openDocs.OpenDocuments[0];
-            }
-
-            if (toActivate is not null)
-            {
-                // Multi-tab startup-scaling polish: make sure the
-                // chosen-active OpenDocument is fully loaded before
-                // anything reads its SourceText. In the happy path the
-                // restore loop above already called the full OpenAsync
-                // for the preferred path, so this is a no-op. In the
-                // fallback path (preferredActivePath was empty, missing,
-                // or refused to load and we picked OpenDocuments[0]
-                // which is a stub) the cache hit from
-                // Program.StartSessionStartupDocumentPreRead pays for the
-                // startup-tab read; on a true cache miss EnsureLoadedAsync
-                // falls through to disk. The Activate below fires
-                // ActiveDocumentChanged with inVmMirror=true so the
-                // bridge handler does not re-EnsureLoadedAsync on top
-                // of this call.
-                if (!toActivate.IsLoaded)
+                if (toActivate is null && openDocs.OpenDocuments.Count > 0)
                 {
+                    toActivate = openDocs.OpenDocuments[0];
+                }
+
+                if (toActivate is not null)
+                {
+                    // D12: seed the last-active path BEFORE the first throwing await below. If
+                    // EnsureLoadedAsync throws a type it does not catch, control reaches the convergence
+                    // finally with ActiveDocument still null (the loop opened with activate: false) and
+                    // lastActivePath null -- so the save would write ActivePath = null over a correct
+                    // on-disk value. SaveSession's existing PathIfStillOpen fallback then writes the right
+                    // path instead, and PathIfStillOpen already proves it is open. On the happy path the
+                    // Activate below overwrites this via ActiveDocumentChanged: zero behaviour change.
+                    lastActivePath = toActivate.FilePath;
+
+                    // Multi-tab startup-scaling polish: make sure the
+                    // chosen-active OpenDocument is fully loaded before
+                    // anything reads its SourceText. In the happy path the
+                    // restore loop above already called the full OpenAsync
+                    // for the preferred path, so this is a no-op. In the
+                    // fallback path (preferredActivePath was empty, missing,
+                    // or refused to load and we picked OpenDocuments[0]
+                    // which is a stub) the cache hit from
+                    // Program.StartSessionStartupDocumentPreRead pays for the
+                    // startup-tab read; on a true cache miss EnsureLoadedAsync
+                    // falls through to disk. The Activate below fires
+                    // ActiveDocumentChanged with inVmMirror=true so the
+                    // bridge handler does not re-EnsureLoadedAsync on top
+                    // of this call.
+                    if (!toActivate.IsLoaded)
+                    {
+                        try
+                        {
+                            await openDocs.EnsureLoadedAsync(toActivate).ConfigureAwait(true);
+                        }
+                        catch (System.IO.IOException)
+                        {
+                            // Fall through; the OpenPathAsync below will
+                            // surface the typed-error to the VM.
+                        }
+                        catch (System.UnauthorizedAccessException)
+                        {
+                            // Same fallthrough as IOException.
+                        }
+                    }
+
+                    // Single canonical Activate — no ReferenceEquals dance because
+                    // the restore loop above intentionally left ActiveDocument
+                    // unchanged (likely null, unless upstream's argv-load fired
+                    // PropertyChanged on Document before this lambda ran and the
+                    // bridge's mirror set it to argvPath's OpenDocument). Either
+                    // way, an explicit Activate here is correct: either it
+                    // promotes from null to toActivate, or it confirms toActivate
+                    // (which the existing SetActive-no-op guard handles silently).
+                    inVmMirror = true;
                     try
                     {
-                        await openDocs.EnsureLoadedAsync(toActivate).ConfigureAwait(true);
-                    }
-                    catch (System.IO.IOException)
-                    {
-                        // Fall through; the OpenPathAsync below will
-                        // surface the typed-error to the VM.
-                    }
-                    catch (System.UnauthorizedAccessException)
-                    {
-                        // Same fallthrough as IOException.
-                    }
-                }
-
-                // Single canonical Activate — no ReferenceEquals dance because
-                // the restore loop above intentionally left ActiveDocument
-                // unchanged (likely null, unless upstream's argv-load fired
-                // PropertyChanged on Document before this lambda ran and the
-                // bridge's mirror set it to argvPath's OpenDocument). Either
-                // way, an explicit Activate here is correct: either it
-                // promotes from null to toActivate, or it confirms toActivate
-                // (which the existing SetActive-no-op guard handles silently).
-                inVmMirror = true;
-                try
-                {
-                    openDocs.Activate(toActivate);
-                }
-                finally
-                {
-                    inVmMirror = false;
-                }
-
-                var startupLoadIsPending = viewModel.IsOpeningPath(toActivate.FilePath);
-                if (!string.Equals(viewModel.Document?.Path, toActivate.FilePath, System.StringComparison.OrdinalIgnoreCase)
-                    && !startupLoadIsPending)
-                {
-                    inServiceLoad = true;
-                    try
-                    {
-                        await viewModel.OpenPathAsync(toActivate.FilePath).ConfigureAwait(true);
-                    }
-                    catch (System.IO.IOException)
-                    {
-                        // File may have moved between restore and the VM load.
+                        openDocs.Activate(toActivate);
                     }
                     finally
                     {
-                        inServiceLoad = false;
+                        inVmMirror = false;
+                    }
+
+                    var startupLoadIsPending = viewModel.IsOpeningPath(toActivate.FilePath);
+                    if (!string.Equals(viewModel.Document?.Path, toActivate.FilePath, System.StringComparison.OrdinalIgnoreCase)
+                        && !startupLoadIsPending)
+                    {
+                        inServiceLoad = true;
+                        try
+                        {
+                            await viewModel.OpenPathAsync(toActivate.FilePath).ConfigureAwait(true);
+                        }
+                        catch (System.IO.IOException)
+                        {
+                            // File may have moved between restore and the VM load.
+                        }
+                        finally
+                        {
+                            inServiceLoad = false;
+                        }
                     }
                 }
             }
-
-            // Flush a consolidated save now that the restored set is final.
-            SaveSession();
+            finally
+            {
+                // Flush a consolidated save now that the restored set is final.
+                SaveSession();
+            }
         });
     }
 
