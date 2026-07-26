@@ -155,9 +155,24 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     // fired in the same order. However, if multiple frames call postMessage,
     // there is no guaranteed order." So post order is platform-guaranteed WITHIN
     // one page lifetime -- and NOT across a page recreation, where a dying page's
-    // already-queued payload can still land. INV-ORDER therefore covers the
-    // same-page case; this field covers the cross-page case it cannot reach. The
-    // two are complementary, not belt-and-braces on one hazard.
+    // already-queued payload can still land.
+    //
+    // CORRECTION (2026-07-26, gate finding A3 -- an earlier version of this
+    // comment claimed this field covers that cross-page case; it does NOT, and
+    // the claim contradicted the paragraph directly above it). The cross-page
+    // hazard the documentation implies is a LATE ARRIVAL, and a late arrival is
+    // exactly what this field cannot catch: it is stamped at ingress with the
+    // CURRENT generation, so a dying page's payload landing after the new
+    // generation is assigned is stamped with the NEW generation and passes both
+    // this check and the Source check. This field catches only the EARLY case
+    // (captured at generation N, read at N+1).
+    //
+    // So the honest statement is: nothing on the retained path closes the
+    // cross-page late-arrival window. What bounds the damage is incidental, not
+    // structural -- a recreated page for the SAME Source re-renders the same
+    // document, so the stale payload is usually content-identical. That is a
+    // coincidence of content, not a guarantee, and it is recorded as an open
+    // residual rather than papered over.
     //
     // Host-local; no wire-contract change (the wire gap on headings-updated
     // itself stays open, see design §14 ADJ-2).
