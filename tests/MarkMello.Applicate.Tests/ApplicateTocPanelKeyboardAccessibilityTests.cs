@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia;
+using Avalonia.Automation.Peers;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
@@ -189,6 +190,76 @@ public sealed class ApplicateTocPanelKeyboardAccessibilityTests
                 app.Styles.Remove(theme);
             }
         }, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task EachRowsAutomationPeerReportsThatHeadingsOwnLevel()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        await session.Dispatch(() =>
+        {
+            // Distinct levels across the whole Markdown h1..h6 domain, and NOT
+            // in ascending order, so neither a hardcoded constant nor a
+            // row-index-derived value can pass this.
+            var rows = BuildRowsAtLevels(3, 1, 6, 2);
+
+            // Read back through the row's own AutomationPeer, which is the
+            // object Avalonia.Win32.Automation's AutomationNode.GetPropertyValue
+            // queries for UIA_HeadingLevelPropertyId. Asserting
+            // AutomationProperties.GetHeadingLevel(row) instead would only read
+            // back the property BuildHeadingRow just wrote and would still pass
+            // if the peer chain never surfaced it.
+            var observed = rows
+                .Select(row => ControlAutomationPeer.CreatePeerForElement(row).GetHeadingLevel())
+                .ToArray();
+
+            Assert.Equal([3, 1, 6, 2], observed);
+
+            return 0;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task RecyclingPlaceholderRowsPeerAdvertisesNoHeadingLevel()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        await session.Dispatch(() =>
+        {
+            var panel = new ApplicateTocPanel();
+            var placeholder = (Button)BuildHeadingRowMethod.Invoke(panel, [null])!;
+
+            // 0 is the value Avalonia's ToUiaHeadingLevel maps to
+            // UiaHeadingLevel.None ("no heading level specified") — the correct
+            // advertisement for the null placeholder Avalonia builds while
+            // recycling virtualized containers. Guards against a future edit
+            // hoisting SetHeadingLevel above BuildHeadingRow's null check and
+            // making every recycled container claim to be a heading.
+            Assert.Equal(0, ControlAutomationPeer.CreatePeerForElement(placeholder).GetHeadingLevel());
+
+            return 0;
+        }, CancellationToken.None);
+    }
+
+    private static readonly MethodInfo BuildHeadingRowMethod = typeof(ApplicateTocPanel).GetMethod(
+        "BuildHeadingRow",
+        BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+    private static Button[] BuildRowsAtLevels(params int[] levels)
+    {
+        var viewModel = MinimalMainWindowViewModelFactory.Create();
+        viewModel.UpdateDocumentHeadings(
+            levels.Select((level, i) => new DocumentHeading($"h{i}", level, $"Heading {i}", (level - 1) * 12.0)).ToArray());
+
+        var panel = new ApplicateTocPanel();
+        panel.DataContext = viewModel;
+
+        // No Window and no layout pass: an automation peer is created by
+        // Control.GetOrCreateAutomationPeer, which only requires the UI thread
+        // (VerifyAccess) — unlike the focus/adorner tests above, nothing here
+        // depends on the row being laid out.
+        return viewModel.DocumentHeadings
+            .Select(heading => (Button)BuildHeadingRowMethod.Invoke(panel, [heading])!)
+            .ToArray();
     }
 
     private static WiredPanel BuildWiredPanel()

@@ -327,6 +327,11 @@ public sealed class ApplicateTocPanel : UserControl
             // virtualized containers during ItemsSource replacement. Focusable
             // is explicitly off so this placeholder never becomes an
             // unlabeled tab stop.
+            // AutomationProperties.HeadingLevel is deliberately NOT set here:
+            // HeadingLevelProperty registers no explicit default, so it reads
+            // back 0, which ToUiaHeadingLevel turns into UiaHeadingLevel.None —
+            // exactly "not a heading". Writing any level onto a recycling
+            // placeholder would advertise a heading that does not exist.
             return new Button
             {
                 IsVisible = false,
@@ -391,6 +396,20 @@ public sealed class ApplicateTocPanel : UserControl
         // name to assistive tech. The Button's own automation peer already
         // supplies the invokable role (Invoke pattern, ControlType.Button).
         AutomationProperties.SetName(row, HeadingPlainTextFallback(heading));
+        // Heading level, so assistive tech can jump by depth rather than only
+        // read the row's name. Avalonia's AutomationProperties.HeadingLevel is
+        // an int carrying the LOGICAL level, not a raw UIA constant: Avalonia
+        // 12.1.0's Avalonia.Win32.Automation/AutomationNode.cs
+        // ToUiaHeadingLevel maps 1..9 -> UiaHeadingLevel.Level1..Level9
+        // (UIA 80051..80059) and every other input, 0 included, -> .None
+        // (80050, "no heading level specified"). Markdown h1..h6 uses that same
+        // 1-based numbering and UIA's 1..9 is a strict superset, so the level
+        // passes through untransformed — an offset or remap here would be the
+        // bug. No clamp either: the renderer ingress already clamps to 1..6
+        // (ApplicateWebMarkdownDocumentView, SysMath.Clamp(parsedLevel, 1, 6)),
+        // and were that ever bypassed ToUiaHeadingLevel degrades to None, which
+        // claims no heading rather than a wrong one.
+        AutomationProperties.SetHeadingLevel(row, heading.Level);
 
         _rowsById[heading.Id] = row;
         row.PointerEntered += OnRowPointerEntered;
