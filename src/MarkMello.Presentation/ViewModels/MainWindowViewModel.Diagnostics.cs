@@ -115,6 +115,23 @@ public partial class MainWindowViewModel
                 // A session owns the buffer (edit mode, or a reading-mode dirty
                 // doc): push the repaired text into it as an unsaved edit; the
                 // user keeps control of saving (the dirty flow owns the write).
+                //
+                // The plain setter is deliberate, not a bypass of the edit-mode
+                // single-writer rule. It is the CONTENT-EDIT channel:
+                // EditWorkspaceView mirrors it onto the LIVE TextEditor as one
+                // minimal Document.Replace, so in edit mode the repair is a
+                // single undoable step that leaves the user's earlier typing,
+                // caret and scroll intact. Undoability here is the editor
+                // owner's contract, not this call site's.
+                //
+                // Do NOT "tidy" this into ApplyLoadedDocument or DiscardChanges:
+                // those bump DocumentGeneration, which declares a buffer
+                // REPLACEMENT and makes the editor discard the entire undo stack
+                // — the defect fixed in 07934af. Routing through
+                // EditWorkspaceView.ApplyEditModeSourceEdit would be worse: it
+                // is a ViewModel -> View reach, it wants a directed span this
+                // whole-document repair does not have, and no such view exists
+                // on the reading-mode-dirty path this same branch serves.
                 EditorSession!.SourceText = result.RepairedText;
             }
             else

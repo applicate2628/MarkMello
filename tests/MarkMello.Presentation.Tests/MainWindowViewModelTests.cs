@@ -1865,6 +1865,59 @@ public sealed class MainWindowViewModelTests
         Assert.False(harness.ViewModel.IsDocumentHealthBannerVisible);
     }
 
+    /// <summary>
+    /// The health repair must reach the source editor on the CONTENT-EDIT channel,
+    /// never the buffer-REPLACEMENT one. <see cref="EditorSessionViewModel.DocumentGeneration"/>
+    /// is not a proxy for that: it is the exact discriminator
+    /// <c>EditWorkspaceView.OnBoundSessionPropertyChanged</c> reads to choose between a
+    /// surgical <c>Document.Replace</c> (undo stack survives) and a whole-<c>TextDocument</c>
+    /// swap (undo stack discarded). Both writes raise the same <c>SourceText</c> event, so
+    /// the counter is the only thing separating them.
+    /// <para>
+    /// This pins the ViewModel half. The editor half — generation unchanged therefore the
+    /// user's earlier typing stays on the native undo stack — is pinned by
+    /// <c>EditWorkspaceExternalWriteUndoTests.ExternalContentEditKeepsEarlierTypingOnTheUndoStack</c>,
+    /// which lives in the Applicate suite because headless Avalonia is referenced only there.
+    /// The two compose into "a health repair is undoable"; neither half proves it alone.
+    /// </para>
+    /// <para>
+    /// Falsified by rewriting the repair's edit-mode branch to any buffer-replacing call
+    /// (<c>ApplyLoadedDocument</c>, <c>DiscardChanges</c>) — the shape a future refactor is
+    /// most likely to reach for, and the one that silently restores the destroyed-undo defect
+    /// fixed in <c>07934af</c> while every other health-repair test keeps passing.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task EditModeHealthFixLandsOnTheContentEditChannelNotABufferReplacement()
+    {
+        var harness = CreateHarness();
+        var path = Path.Combine(Path.GetTempPath(), "MarkMello.Tests", "health-edit.md");
+        // A hard-wrapped inline $…$ span — a repairable math defect.
+        const string original = "Note $a =\nb$ tail\n";
+        const string repaired = "Note $a = b$ tail\n";
+        harness.Loader.Sources[path] = CreateSource(path, original);
+
+        await harness.ViewModel.OpenPathAsync(path);
+        await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
+        harness.ViewModel.AnalyzeCurrentDocumentHealth();
+        Assert.True(harness.ViewModel.IsEditMode);
+        Assert.True(harness.ViewModel.IsDocumentHealthBannerVisible);
+        var session = harness.ViewModel.EditorSession!;
+        var generationBefore = session.DocumentGeneration;
+
+        await harness.ViewModel.ApplyDocumentHealthFixCommand.ExecuteAsync(null);
+
+        // The repair landed in the buffer...
+        Assert.Equal(repaired, session.SourceText);
+        // ...as an EDIT of the open document, not a replacement of it.
+        Assert.Equal(generationBefore, session.DocumentGeneration);
+        // Edit mode owns the buffer, so the repair must not touch disk or reload:
+        // the user still owns the save, and a reload would fight the buffer push.
+        Assert.Empty(harness.DocumentSaver.Saves);
+        Assert.Equal(1, harness.Loader.LoadCount);
+        Assert.True(harness.ViewModel.IsDirty);
+    }
+
     [Fact]
     public async Task DocumentHealthFixThatFailsToWriteKeepsBannerAndDoesNotClaimSuccess()
     {
