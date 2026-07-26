@@ -124,6 +124,9 @@ let hasReceivedHostPreferences = false;
 // переходит". Gate flipped once in `controller.initialVisibleReady.then(...)`.
 let hasInitialLayoutSettled = false;
 let minimapViewportFrameRequested = false;
+// Handle for the frame `queueMinimapViewportUpdate` requests, so the document
+// lifecycle owner can actually cancel it — the bookkeeping flag alone cannot.
+let minimapViewportFrameHandle: number | undefined;
 let pendingMinimapViewportLayoutState: CachedLayoutState | null = null;
 let minimapRefreshTimer: number | undefined;
 let minimapContentRefreshTimer: number | undefined;
@@ -3867,7 +3870,8 @@ function queueMinimapViewportUpdate(layoutState?: CachedLayoutState, perfMarkNam
   }
 
   minimapViewportFrameRequested = true;
-  window.requestAnimationFrame(() => {
+  minimapViewportFrameHandle = window.requestAnimationFrame(() => {
+    minimapViewportFrameHandle = undefined;
     minimapViewportFrameRequested = false;
     const queuedLayoutState = pendingMinimapViewportLayoutState;
     pendingMinimapViewportLayoutState = null;
@@ -4225,6 +4229,37 @@ function scheduleHeavyLiveUpdate(): void {
     heavyLiveUpdateTimer = undefined;
     queueMinimapViewportUpdate();
   }, HEAVY_LIVE_UPDATE_DEBOUNCE_MS);
+}
+
+// Cancellation owner for the deferred minimap *viewport* pipeline — the
+// counterpart of cancelDeferredMinimapContentRefresh, which already owns the
+// deferred *content* pipeline. Both are called from
+// resetModuleGlobalsForLoadDocument, the single document lifecycle owner that
+// `load-document`, `load-cached-document` and `clear-document` all route
+// through. That owner already cancelled layoutReadyTimer,
+// minimapContentRefreshTimer, cachedGeometryRefreshTimer,
+// mermaidCacheResumeTimer and themeMermaidRefreshTimer; these three deferred
+// entries were simply missed, so viewport work scheduled against a document
+// that no longer exists stayed armed with no cancellation path at all.
+// Declared here so every module-global it clears is lexically above it.
+function cancelDeferredMinimapViewportWork(): void {
+  if (minimapViewportFrameHandle !== undefined) {
+    window.cancelAnimationFrame(minimapViewportFrameHandle);
+    minimapViewportFrameHandle = undefined;
+  }
+  // Must be released together with the handle: leaving the flag latched would
+  // make every later queueMinimapViewportUpdate early-return forever.
+  minimapViewportFrameRequested = false;
+  // The snapshot belongs to the outgoing document; never let it reach the next one.
+  pendingMinimapViewportLayoutState = null;
+  if (minimapRefreshTimer !== undefined) {
+    window.clearTimeout(minimapRefreshTimer);
+    minimapRefreshTimer = undefined;
+  }
+  if (heavyLiveUpdateTimer !== undefined) {
+    window.clearTimeout(heavyLiveUpdateTimer);
+    heavyLiveUpdateTimer = undefined;
+  }
 }
 
 function handleHostMessage(raw: unknown): void {
@@ -4699,6 +4734,7 @@ function resetModuleGlobalsForLoadDocument(): void {
   ++initialRenderPipelineGeneration;
   ++progressiveMinimapRefreshGeneration;
   cancelDeferredMinimapContentRefresh(false);
+  cancelDeferredMinimapViewportWork();
   initialRenderPipelineCompleted = false;
   firstPrefsBootstrapSuppressedByLoadGeneration = null;
   postReadyEnhancementsCompleted = false;

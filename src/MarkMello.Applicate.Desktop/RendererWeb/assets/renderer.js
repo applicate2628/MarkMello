@@ -1863,6 +1863,7 @@
   var hasReceivedHostPreferences = false;
   var hasInitialLayoutSettled = false;
   var minimapViewportFrameRequested = false;
+  var minimapViewportFrameHandle;
   var pendingMinimapViewportLayoutState = null;
   var minimapRefreshTimer;
   var minimapContentRefreshTimer;
@@ -4640,7 +4641,8 @@
       return;
     }
     minimapViewportFrameRequested = true;
-    window.requestAnimationFrame(() => {
+    minimapViewportFrameHandle = window.requestAnimationFrame(() => {
+      minimapViewportFrameHandle = void 0;
       minimapViewportFrameRequested = false;
       const queuedLayoutState = pendingMinimapViewportLayoutState;
       pendingMinimapViewportLayoutState = null;
@@ -4873,6 +4875,22 @@
       heavyLiveUpdateTimer = void 0;
       queueMinimapViewportUpdate();
     }, HEAVY_LIVE_UPDATE_DEBOUNCE_MS);
+  }
+  function cancelDeferredMinimapViewportWork() {
+    if (minimapViewportFrameHandle !== void 0) {
+      window.cancelAnimationFrame(minimapViewportFrameHandle);
+      minimapViewportFrameHandle = void 0;
+    }
+    minimapViewportFrameRequested = false;
+    pendingMinimapViewportLayoutState = null;
+    if (minimapRefreshTimer !== void 0) {
+      window.clearTimeout(minimapRefreshTimer);
+      minimapRefreshTimer = void 0;
+    }
+    if (heavyLiveUpdateTimer !== void 0) {
+      window.clearTimeout(heavyLiveUpdateTimer);
+      heavyLiveUpdateTimer = void 0;
+    }
   }
   function handleHostMessage(raw) {
     const message = raw;
@@ -5226,6 +5244,7 @@
     ++initialRenderPipelineGeneration;
     ++progressiveMinimapRefreshGeneration;
     cancelDeferredMinimapContentRefresh(false);
+    cancelDeferredMinimapViewportWork();
     initialRenderPipelineCompleted = false;
     firstPrefsBootstrapSuppressedByLoadGeneration = null;
     postReadyEnhancementsCompleted = false;
