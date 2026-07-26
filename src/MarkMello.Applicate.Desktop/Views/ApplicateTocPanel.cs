@@ -4,11 +4,13 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Linq;
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
 using Avalonia.Controls.Shapes;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Styling;
@@ -47,7 +49,7 @@ public sealed class ApplicateTocPanel : UserControl
     private readonly Border _rootBorder;
     private readonly Border _separator;
     private MainWindowViewModel? _viewModel;
-    private readonly Dictionary<string, Border> _rowsById = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Button> _rowsById = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _rowIndexById = new(StringComparer.Ordinal);
     private string? _pendingActiveHeadingScrollReplayId;
     private bool _activeHeadingScrollReplayArmed;
@@ -317,16 +319,19 @@ public sealed class ApplicateTocPanel : UserControl
         _itemsControl.ItemsSource = headings;
     }
 
-    private Border BuildHeadingRow(DocumentHeading? heading)
+    private Button BuildHeadingRow(DocumentHeading? heading)
     {
         if (heading is null)
         {
             // Avalonia can invoke the item template with null while recycling
-            // virtualized containers during ItemsSource replacement.
-            return new Border
+            // virtualized containers during ItemsSource replacement. Focusable
+            // is explicitly off so this placeholder never becomes an
+            // unlabeled tab stop.
+            return new Button
             {
                 IsVisible = false,
                 IsHitTestVisible = false,
+                Focusable = false,
             };
         }
 
@@ -351,26 +356,54 @@ public sealed class ApplicateTocPanel : UserControl
         contentGrid.Children.Add(levelDot);
         contentGrid.Children.Add(content);
 
-        var row = new Border
+        // A native Button (not Focusable=true bolted onto a Border) so
+        // pointer, Enter, and Space all converge on the SAME
+        // Button.OnClick() -> Click event path handled once below in
+        // OnRowClicked (2026-07-17 accessibility bug: the old Border had only
+        // a PointerPressed handler and Focusable=False/NoneAutomationPeer).
+        // The "mm-toc-row" style (Controls.axaml) neutralizes the stock
+        // Fluent Button chrome so this row stays pixel-identical to the old
+        // Border; see that style's comment for the mechanism.
+        // ClickMode.Press keeps mouse-down activation — the old pointer
+        // behaviour, unchanged. RenderTransform=null pins out the Fluent
+        // Button's :pressed scale-down animation, which the old Border never
+        // had and which "the row must remain visually identical" forbids
+        // introducing.
+        var row = new Button
         {
+            Classes = { "mm-toc-row" },
+            ClickMode = ClickMode.Press,
+            Focusable = true,
             Padding = new Thickness(4, 6, 4, 6),
             Cursor = new Cursor(StandardCursorType.Hand),
             CornerRadius = new CornerRadius(4),
             Background = Brushes.Transparent,
             Margin = new Thickness(4, 1, 4, 1),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            RenderTransform = null,
             Tag = heading,
-            Child = contentGrid,
+            Content = contentGrid,
         };
+        // Plain-text accessible name: the same fallback CreateHeadingTextBlock
+        // uses, so a math-bearing heading (whose visual content includes a
+        // MathView with no text automation surface) still reports a sensible
+        // name to assistive tech. The Button's own automation peer already
+        // supplies the invokable role (Invoke pattern, ControlType.Button).
+        AutomationProperties.SetName(row, HeadingPlainTextFallback(heading));
 
         _rowsById[heading.Id] = row;
         row.PointerEntered += OnRowPointerEntered;
         row.PointerExited += OnRowPointerExited;
-        row.PointerPressed += OnRowPointerPressed;
+        row.Click += OnRowClicked;
         row.DetachedFromVisualTree += OnRowDetached;
         RefreshRowVisuals(row);
 
         return row;
     }
+
+    private static string HeadingPlainTextFallback(DocumentHeading heading)
+        => string.IsNullOrWhiteSpace(heading.Text) ? heading.Id : heading.Text;
 
     private Control BuildHeadingContent(DocumentHeading heading)
     {
@@ -418,7 +451,7 @@ public sealed class ApplicateTocPanel : UserControl
     private TextBlock CreateHeadingTextBlock(DocumentHeading heading, string? text, bool trim)
         => new()
         {
-            Text = text ?? (string.IsNullOrWhiteSpace(heading.Text) ? heading.Id : heading.Text),
+            Text = text ?? HeadingPlainTextFallback(heading),
             FontSize = heading.Level <= 1 ? 13 : 12,
             FontWeight = heading.Level <= 1 ? FontWeight.SemiBold : FontWeight.Normal,
             VerticalAlignment = VerticalAlignment.Center,
@@ -436,7 +469,7 @@ public sealed class ApplicateTocPanel : UserControl
 
     private void OnRowDetached(object? sender, VisualTreeAttachmentEventArgs e)
     {
-        if (sender is not Border row || row.Tag is not DocumentHeading heading)
+        if (sender is not Button row || row.Tag is not DocumentHeading heading)
         {
             return;
         }
@@ -449,7 +482,7 @@ public sealed class ApplicateTocPanel : UserControl
 
     private void OnRowPointerEntered(object? sender, PointerEventArgs e)
     {
-        if (sender is not Border row)
+        if (sender is not Button row)
         {
             return;
         }
@@ -462,7 +495,7 @@ public sealed class ApplicateTocPanel : UserControl
 
     private void OnRowPointerExited(object? sender, PointerEventArgs e)
     {
-        if (sender is not Border row)
+        if (sender is not Button row)
         {
             return;
         }
@@ -473,13 +506,15 @@ public sealed class ApplicateTocPanel : UserControl
         row.Background = Brushes.Transparent;
     }
 
-    private void OnRowPointerPressed(object? sender, PointerPressedEventArgs e)
+    // Single command path: pointer press, Enter, and Space all funnel through
+    // Button.OnClick() (ClickMode.Press for pointer/Space-on-down, Enter
+    // unconditionally per Avalonia's Button.OnKeyDown), which raises this one
+    // Click event. There is no separate PointerPressed handler any more —
+    // that duplication is exactly what the 2026-07-17 bug's "single command
+    // path" requirement forbids.
+    private void OnRowClicked(object? sender, RoutedEventArgs e)
     {
-        if (sender is not Border row || row.Tag is not DocumentHeading heading || _viewModel is null)
-        {
-            return;
-        }
-        if (!e.GetCurrentPoint(row).Properties.IsLeftButtonPressed)
+        if (sender is not Button row || row.Tag is not DocumentHeading heading || _viewModel is null)
         {
             return;
         }
@@ -496,7 +531,7 @@ public sealed class ApplicateTocPanel : UserControl
         _emptyState.IsVisible = count == 0;
     }
 
-    private bool IsActiveRow(Border row)
+    private bool IsActiveRow(Button row)
     {
         if (_viewModel is null)
         {
@@ -591,14 +626,14 @@ public sealed class ApplicateTocPanel : UserControl
         RequestActiveHeadingScroll(activeId, allowVirtualizedScroll: true);
     }
 
-    private void RefreshRowVisuals(Border row)
+    private void RefreshRowVisuals(Button row)
     {
         ApplyRowVisuals(row, IsActiveRow(row));
     }
 
-    private void ApplyRowVisuals(Border row, bool isActive)
+    private void ApplyRowVisuals(Button row, bool isActive)
     {
-        if (row.Tag is not DocumentHeading heading || row.Child is not Grid grid)
+        if (row.Tag is not DocumentHeading heading || row.Content is not Grid grid)
         {
             return;
         }
@@ -656,7 +691,7 @@ public sealed class ApplicateTocPanel : UserControl
             : fallback;
     }
 
-    private void ScrollRowIntoView(Border row)
+    private void ScrollRowIntoView(Button row)
     {
         if (!row.IsVisible || !row.IsAttachedToVisualTree())
         {

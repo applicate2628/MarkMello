@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Media;
+using Avalonia.Threading;
 using CSharpMath.Avalonia;
 using MarkMello.Applicate.Desktop;
 using MarkMello.Applicate.Desktop.Views;
@@ -495,13 +496,13 @@ public sealed class ApplicateViewerViewTests
                 [typeof(string), typeof(bool)],
                 modifiers: null);
 
-            var first = Assert.IsType<Border>(buildHeadingRow?.Invoke(panel, [
+            var first = Assert.IsType<Button>(buildHeadingRow?.Invoke(panel, [
                 new DocumentHeading("first", 1, "First", 0),
             ]));
-            var second = Assert.IsType<Border>(buildHeadingRow?.Invoke(panel, [
+            var second = Assert.IsType<Button>(buildHeadingRow?.Invoke(panel, [
                 new DocumentHeading("second", 2, "Second", 10),
             ]));
-            var third = Assert.IsType<Border>(buildHeadingRow?.Invoke(panel, [
+            var third = Assert.IsType<Button>(buildHeadingRow?.Invoke(panel, [
                 new DocumentHeading("third", 2, "Third", 20),
             ]));
 
@@ -527,7 +528,7 @@ public sealed class ApplicateViewerViewTests
                 "BuildHeadingRow",
                 BindingFlags.Instance | BindingFlags.NonPublic);
 
-            var row = Assert.IsType<Border>(buildHeadingRow?.Invoke(panel, [
+            var row = Assert.IsType<Button>(buildHeadingRow?.Invoke(panel, [
                 new DocumentHeading(
                     "wave",
                     1,
@@ -549,7 +550,7 @@ public sealed class ApplicateViewerViewTests
             // could never pass against the StackPanel BuildHeadingContent
             // actually returns (wrong from the same commit that added both,
             // 7bdaf75). Assert.IsAssignableFrom<Panel> asserts the real contract.
-            var grid = Assert.IsType<Grid>(row.Child);
+            var grid = Assert.IsType<Grid>(row.Content);
             var headingContent = Assert.IsAssignableFrom<Panel>(grid.Children[1]);
             Assert.Contains(headingContent.Children, child => child is TextBlock { Text: "Wave " });
             var mathView = Assert.Single(headingContent.Children.OfType<MathView>());
@@ -566,10 +567,30 @@ public sealed class ApplicateViewerViewTests
             // untouched — the divergence is entirely inside the third-party
             // control.
             Assert.Equal("Z_0", mathView.LaTeX);
-            row.Measure(new Size(300, 40));
-            row.Arrange(new Rect(0, 0, 300, 40));
-            Assert.True(mathView.Bounds.Width > 0);
-            Assert.True(mathView.Bounds.Height > 0);
+
+            // row is now a Button (a TemplatedControl), not the old Border: its
+            // "mm-toc-row" Template only resolves once the control is part of a
+            // styled visual tree, so a bare Measure/Arrange on the unattached
+            // control (which worked for Border, which draws its Child directly
+            // with no template) leaves Content unlaid-out. Host it and force a
+            // layout pass instead, same as ApplicateTocPanelKeyboardAccessibilityTests.
+            var window = new Window { Content = row, Width = 300, Height = 40 };
+            window.Show();
+            for (var i = 0; i < 10; i++)
+            {
+                Dispatcher.UIThread.RunJobs();
+                AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+            }
+
+            try
+            {
+                Assert.True(mathView.Bounds.Width > 0);
+                Assert.True(mathView.Bounds.Height > 0);
+            }
+            finally
+            {
+                window.Close();
+            }
             Assert.Contains(headingContent.Children, child => child is TextBlock { Text: " ports" });
         }, CancellationToken.None);
     }

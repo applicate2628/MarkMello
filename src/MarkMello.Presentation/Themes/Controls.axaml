@@ -437,6 +437,37 @@
     <Setter Property="Opacity" Value="0.55" />
   </Style>
 
+  <!-- TOC heading row (ApplicateTocPanel.BuildHeadingRow): a native Button so
+       Tab/Enter/Space reach heading navigation (2026-07-17 accessibility bug —
+       the row used to be a plain Border with only PointerPressed wiring).
+       Background/foreground/hover/active-row painting stays 100% code-driven
+       in ApplicateTocPanel (per-row theme-brush resolution there gives an
+       atomic re-tint on theme switch); the Template override below exists
+       ONLY to swap out the stock Fluent ContentPresenter's part name. Fluent's
+       Button ControlTheme keys its :pointerover/:pressed/:disabled chrome to
+       "ContentPresenter#PART_ContentPresenter" specifically (see
+       Avalonia.Themes.Fluent/Controls/Button.xaml) — an unnamed
+       ContentPresenter here never matches those selectors, so the row's own
+       Background/Foreground assignments are the only thing painting it, same
+       as the old Border. Enter/Space activation, the Invoke automation peer,
+       and the keyboard-only focus adorner all come from the Button/Control
+       base classes for free and need no restating here. -->
+  <Style Selector="Button.mm-toc-row">
+    <Setter Property="Template">
+      <ControlTemplate>
+        <ContentPresenter Background="{TemplateBinding Background}"
+                          BorderBrush="{TemplateBinding BorderBrush}"
+                          BorderThickness="{TemplateBinding BorderThickness}"
+                          CornerRadius="{TemplateBinding CornerRadius}"
+                          Content="{TemplateBinding Content}"
+                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                          Padding="{TemplateBinding Padding}"
+                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+      </ControlTemplate>
+    </Setter>
+  </Style>
+
   <Style Selector="Button.mm-inline-link">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
