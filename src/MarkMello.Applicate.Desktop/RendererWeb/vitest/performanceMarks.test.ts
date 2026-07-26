@@ -97,10 +97,15 @@ describe("performanceMarks", () => {
       | null = null;
     const observeArgs: PerformanceObserverInit[] = [];
     const disconnectMock = vi.fn();
+    // Vitest 4 invokes constructor mocks via Reflect.construct, which requires
+    // a `function`/`class` implementation -- an arrow function has no
+    // [[Construct]] and throws immediately, before production ever reaches
+    // observe(). Vitest 2 called mock implementations with .apply(), so the
+    // arrow worked there by accident.
     const FakeObserver = vi
       .fn()
       .mockImplementation(
-        (cb: (list: { getEntries: () => PerformanceEntry[] }) => void) => {
+        function (cb: (list: { getEntries: () => PerformanceEntry[] }) => void) {
           lastObserverCallback = cb;
           return {
             observe: (opts: PerformanceObserverInit) => observeArgs.push(opts),
@@ -132,12 +137,21 @@ describe("performanceMarks", () => {
   });
 
   it("installLongTaskObserver: silent fallback emits mm-longtask-observer-unsupported on observe throw", () => {
-    const FakeObserver = vi.fn().mockImplementation(() => ({
-      observe: () => {
-        throw new Error("longtask not supported");
-      },
-      disconnect: vi.fn(),
-    }));
+    // Regression note: this mock implementation used to be an arrow function.
+    // Under Vitest 4 that arrow's non-constructibility threw INSIDE `new
+    // PerformanceObserver(...)`, before observe() ever ran -- the test still
+    // went green because the production catch block fires either way, but it
+    // was no longer exercising the observe()-throws path it names. A
+    // `function` implementation lets the constructor succeed so the throw
+    // below is the one actually caught.
+    const FakeObserver = vi.fn().mockImplementation(function () {
+      return {
+        observe: () => {
+          throw new Error("longtask not supported");
+        },
+        disconnect: vi.fn(),
+      };
+    });
     vi.stubGlobal("PerformanceObserver", FakeObserver);
 
     const dispose = installLongTaskObserver();

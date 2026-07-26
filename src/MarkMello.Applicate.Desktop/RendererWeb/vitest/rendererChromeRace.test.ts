@@ -33,6 +33,11 @@ const makePreferences = (
 
 describe("renderer chrome race handling", () => {
   let rafCallbacks: FrameRequestCallback[];
+  // Named so individual tests can assert the manual stub is still the live
+  // `window.requestAnimationFrame` after calling `vi.useFakeTimers(...)` --
+  // Vitest 4 fakes requestAnimationFrame by default and would silently
+  // replace this stub, which is exactly the regression this suite hit.
+  let rafStub: (callback: FrameRequestCallback) => number;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -58,10 +63,11 @@ describe("renderer chrome race handling", () => {
     });
 
     rafCallbacks = [];
-    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    rafStub = (callback: FrameRequestCallback) => {
       rafCallbacks.push(callback);
       return rafCallbacks.length;
-    });
+    };
+    vi.stubGlobal("requestAnimationFrame", rafStub);
 
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
       if (this instanceof HTMLElement && this.classList.contains("mm-document")) {
@@ -250,7 +256,11 @@ describe("renderer chrome race handling", () => {
   });
 
   it("stamps layout-ready with the pipeline's own renderId when a superseded cache-miss advances the global", async () => {
-    vi.useFakeTimers();
+    // Fake only the timeout APIs this test advances -- faking
+    // requestAnimationFrame too (Vitest 4's default) would replace the manual
+    // rafStub from beforeEach and leave flushQueuedRafs() below with nothing
+    // to drain.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const messages: unknown[] = [];
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
       webview: { postMessage: (message: unknown) => messages.push(message) }
@@ -400,8 +410,14 @@ describe("renderer chrome race handling", () => {
     expect(document.querySelector(".mm-minimap-content svg")).toBeNull();
   });
 
-  it("keeps progressive heavy minimap finalization off the full-DOM clone path", async () => {
-    vi.useFakeTimers();
+  it("keeps progressive heavy minimap append off the SYNCHRONOUS full-DOM clone path (deferred refresh still clones after settling)", async () => {
+    // Fake only the timeout APIs this test advances (the 160ms deferred
+    // content-refresh timer). Vitest 4's default `vi.useFakeTimers()` also
+    // fakes requestAnimationFrame, which would silently replace the manual
+    // rafStub installed in beforeEach and stop flushQueuedRafs() below from
+    // ever draining -- assert the stub survived instead of assuming it.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    expect(window.requestAnimationFrame).toBe(rafStub);
     const messages: unknown[] = [];
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
       webview: { postMessage: (message: unknown) => messages.push(message) }
@@ -454,9 +470,18 @@ describe("renderer chrome race handling", () => {
     expect(perfMarks).toContain("mm-progressive-append-end");
     expect(perfMarks).not.toContain("mm-minimap-refresh-start");
 
+    // The assertions above prove only "no SYNCHRONOUS clone during
+    // progressive append" -- production still performs a deferred full clone
+    // once queueProgressiveMinimapAppendRefresh's 160ms timeout fires
+    // (renderer.ts: queueProgressiveMinimapAppendRefresh -> refreshMinimapContent
+    // -> cloneDocumentForMinimap -> cloneNode(true)). Prove that deferred
+    // clone actually runs instead of only trusting the restored content.
     cloneSpy.mockRestore();
+    const deferredCloneSpy = vi.spyOn(documentElement!, "cloneNode");
     await vi.advanceTimersByTimeAsync(160);
+    expect(deferredCloneSpy).toHaveBeenCalled();
     expect(document.querySelector(".mm-minimap-content .mm-document")?.textContent).toContain("Rest of heavy document");
+    deferredCloneSpy.mockRestore();
   });
 
   it("does not remeasure the detailed minimap clone on every width-handle drag frame", async () => {
@@ -567,7 +592,10 @@ describe("renderer chrome race handling", () => {
   });
 
   it("does not measure document layout for viewport-only updates while heavy auto minimap is hidden", async () => {
-    vi.useFakeTimers();
+    // Fake only the timeout APIs this test advances -- see the rafStub note
+    // on the earlier tests in this suite for why requestAnimationFrame must
+    // stay out of the fake set here.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const messages: unknown[] = [];
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
       webview: { postMessage: (message: unknown) => messages.push(message) }
@@ -724,7 +752,12 @@ describe("renderer chrome race handling", () => {
   });
 
   it("transactional load-document skipFrameWait emits layout-ready without flushing requestAnimationFrame", async () => {
-    vi.useFakeTimers();
+    // This path never touches requestAnimationFrame (skipFrameWait posts
+    // synchronously), so faking every timer would be harmless here -- but
+    // scope it to setTimeout/clearTimeout anyway to keep ownership explicit
+    // and consistent with the other tests in this suite that DO share the
+    // manual rafStub.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const messages: unknown[] = [];
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
       webview: { postMessage: (message: unknown) => messages.push(message) }
@@ -761,7 +794,11 @@ describe("renderer chrome race handling", () => {
   });
 
   it("non-transactional load-document keeps layout-ready behind animation frames", async () => {
-    vi.useFakeTimers();
+    // Fake only the timeout APIs this test advances -- see the rafStub note
+    // on the earlier tests in this suite for why requestAnimationFrame must
+    // stay out of the fake set here (Vitest 4's default `useFakeTimers()`
+    // would otherwise replace the manual rafStub and starve rafCallbacks).
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const messages: unknown[] = [];
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
       webview: { postMessage: (message: unknown) => messages.push(message) }
@@ -778,12 +815,23 @@ describe("renderer chrome race handling", () => {
 
     expect(findMessageIndex("layout-ready", messages)).toBe(-1);
     expect(rafCallbacks.length).toBeGreaterThan(0);
+    // The shared rafCallbacks queue interleaves several independent chains
+    // for this one load-document: document-first-paint's own 2-frame chain
+    // (loadDocument.ts notifyDocumentFirstPaint), minimap viewport
+    // scheduling, and layout-ready's 2-frame chain (renderer.ts
+    // scheduleLayoutReady). They queue and drain in FIFO order, so
+    // layout-ready's own chain is not the first two frames here -- the full
+    // queue must settle before layout-ready is guaranteed present.
     flushQueuedRafs();
     expect(findMessageIndex("layout-ready", messages)).toBeGreaterThanOrEqual(0);
   });
 
   it("non-transactional load-document emits layout-ready from fallback when animation frames are throttled", async () => {
-    vi.useFakeTimers();
+    // Fake only the timeout APIs this test advances. Manual frames are left
+    // UNFLUSHED throughout this test on purpose -- it exercises the
+    // frame-fallback timer path, which only exists because the raf path
+    // never delivers (a "throttled webview" surface).
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const messages: unknown[] = [];
     (window as unknown as { chrome: { webview: { postMessage: (m: unknown) => void } } }).chrome = {
       webview: { postMessage: (message: unknown) => messages.push(message) }
@@ -804,6 +852,12 @@ describe("renderer chrome race handling", () => {
     expect(findMessageIndex("layout-ready", messages)).toBeGreaterThanOrEqual(0);
     expect(messages.some((message: { type?: string; name?: string } | null) =>
       message?.type === "perf-mark" && message.name === "mm-layout-ready-frame-fallback")).toBe(true);
+    // The frame path and the fallback path are mutually exclusive (production's
+    // single `posted` guard in scheduleLayoutReady) -- with manual frames
+    // never flushed, only the fallback can fire, and it must fire exactly once.
+    const layoutReadyMessages = messages.filter((message: { type?: string } | null) =>
+      message?.type === "layout-ready");
+    expect(layoutReadyMessages).toHaveLength(1);
   });
 
   it("applies preferences carried by the settle probe before ack", async () => {

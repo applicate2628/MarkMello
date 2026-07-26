@@ -651,12 +651,27 @@ describe("renderer document cache", () => {
     };
 
     const { load, messages } = await loadRendererWithMessages();
-    const firstHtml = "<h1 id='first'>First</h1><pre class='mm-mermaid'><code data-mm-mermaid>graph TD; A-->B;</code></pre>";
+    // Production always HTML-encodes mermaid source before it ever reaches the
+    // DOM (ApplicateHtmlMarkdownRenderer.cs HtmlText()/WebUtility.HtmlEncode,
+    // confirmed by the producer test at ApplicateHtmlMarkdownRendererTests.cs
+    // expecting "A--&gt;B"). A raw "-->" never appears in real markup, and
+    // happy-dom 20's HTML parser double-parses a standalone "-->" as if it
+    // were closing a comment, corrupting an unencoded fixture into
+    // "graph TD; Agraph TD; A-->B;" before any cache logic ever runs. Use the
+    // production-shaped encoded fixture so this test exercises cache
+    // restoration, not a parser artifact of a synthetic fixture shape
+    // production never produces.
+    const firstHtml = "<h1 id='first'>First</h1><pre class='mm-mermaid'><code data-mm-mermaid>graph TD; A--&gt;B;</code></pre>";
     const secondHtml = "<h1 id='second'>Second</h1><p>other document</p>";
 
     load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: true, renderId: 1 });
     await letPipelineSettle();
     expect(mermaidRender).not.toHaveBeenCalled();
+    // Pre-cache decoded-text check: prove the encoded fixture parses back to
+    // the intended source BEFORE any cache-restore path runs, so a future
+    // parser regression here is caught as a parsing defect, not misread as a
+    // cache-restoration defect.
+    expect(document.querySelector<HTMLElement>("pre.mm-mermaid code")?.textContent).toBe("graph TD; A-->B;");
 
     load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
     await letPipelineSettle();
