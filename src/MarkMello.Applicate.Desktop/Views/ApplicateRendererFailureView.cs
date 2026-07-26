@@ -373,6 +373,22 @@ public sealed class ApplicateRendererFailureView : UserControl
         // from inside the callback and sets IsVisible=true again (:252) --
         // reversing the order would let this dismiss win over that re-show
         // instead of the other way around.
+        //
+        // F4 (round-5 gate finding, 2026-07-26): the retry button is visible
+        // for DocumentRenderFailed AND for the default: arm in
+        // ApplyFailureKind, but consumers only ever set a non-null
+        // RetryCallback for DocumentRenderFailed. Before this guard, a click
+        // reaching this handler with no callback wired still hid the
+        // overlay -- destroying the only failure surface for nothing. Not
+        // reachable today (ApplicateSharedWebViewHost raises only
+        // DocumentRenderFailed), but ClickRetryForTesting makes the seam
+        // directly callable, so the affordance-destroyer is one enum value
+        // away from live.
+        if (_retryCallback is null)
+        {
+            return;
+        }
+
         IsVisible = false;
         _retryCallback?.Invoke();
     }

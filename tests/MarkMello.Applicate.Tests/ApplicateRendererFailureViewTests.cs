@@ -269,6 +269,35 @@ public sealed class ApplicateRendererFailureViewTests
                 "A ShowFailure issued from inside the retry callback must leave the overlay visible (ordering: dismiss happens before invoke).");
         }, CancellationToken.None);
     }
+
+    // F4 (round-5 gate finding, 2026-07-26): OnRetryClick dismissed the
+    // overlay unconditionally before checking whether a retry callback was
+    // even set. The retry button is visible for both DocumentRenderFailed
+    // and the default: arm in ApplyFailureKind, but no consumer sets a
+    // non-null RetryCallback for anything other than DocumentRenderFailed --
+    // a click reaching the handler with retry: null must not destroy the
+    // only failure surface for nothing.
+    [Fact]
+    public async Task RetryClickWithNoCallbackLeavesTheOverlayVisible()
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        await session.Dispatch(() =>
+        {
+            var failure = new ApplicateRendererFailureEvent(
+                Kind: ApplicateRendererFailureKind.DocumentRenderFailed,
+                DocumentPath: @"E:\Downloads\wave.md",
+                Timestamp: new DateTime(2026, 5, 19, 9, 0, 0, DateTimeKind.Utc));
+
+            var view = new ApplicateRendererFailureView();
+            view.ShowFailure(failure, retry: null);
+
+            view.ClickRetryForTesting();
+
+            Assert.True(
+                view.IsVisible,
+                "OnRetryClick must not dismiss the overlay when no RetryCallback is set.");
+        }, CancellationToken.None);
+    }
 }
 
 public sealed class ApplicateRendererFailureEventTests

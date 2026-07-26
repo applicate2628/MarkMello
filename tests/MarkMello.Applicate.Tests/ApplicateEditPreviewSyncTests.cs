@@ -227,6 +227,21 @@ public sealed class ApplicateEditPreviewSyncTests
             "consumerHasHeadingDebt: ApplicateDeferredHeadingUpdater.HasHeadingDebt(",
             retryCurrentRender,
             StringComparison.Ordinal);
+        // F1 (round-5 gate finding, 2026-07-26): this call site was pinned
+        // only by "TryRaiseRetainedHeadingsForConsumerDebt is invoked" and
+        // ordering -- the three named arguments (mirroring the
+        // ApplyWebPreviewSource pin above) were not pinned, so
+        // `failureViewVisible: _failureView.IsVisible` could silently become
+        // `failureViewVisible: false` (or the other two arguments could
+        // drift) with the full suite staying green.
+        Assert.Contains("hasViewModel: _viewModel is not null", retryCurrentRender, StringComparison.Ordinal);
+        Assert.Contains("consumerHasHeadings: _viewModel?.HasDocumentHeadings ?? false", retryCurrentRender, StringComparison.Ordinal);
+        Assert.Contains("failureViewVisible: _failureView.IsVisible", retryCurrentRender, StringComparison.Ordinal);
+        // F2 (round-5 gate finding, 2026-07-26): pin the left operand's
+        // existence as a precondition -- otherwise deleting
+        // `_sharedHost?.RetryRender();` makes IndexOf return -1, and
+        // -1 < a positive index still satisfies the ordering assertion below.
+        Assert.Contains("_sharedHost?.RetryRender();", retryCurrentRender, StringComparison.Ordinal);
         Assert.True(
             retryCurrentRender.IndexOf("_sharedHost?.RetryRender();", StringComparison.Ordinal)
             < retryCurrentRender.IndexOf("TryRaiseRetainedHeadingsForConsumerDebt(", StringComparison.Ordinal),
