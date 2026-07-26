@@ -34,7 +34,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia.Desktop" Version="12.0.2" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.0" />
     <PackageReference Include="Avalonia.Controls.WebView" Version="12.0.1" />
     <!-- Official WebView2 managed SDK: needed to wrap the native ICoreWebView2
          pointer Avalonia only exposes as a raw nint (CoreWebView2.CreateFromComICoreWebView2)
