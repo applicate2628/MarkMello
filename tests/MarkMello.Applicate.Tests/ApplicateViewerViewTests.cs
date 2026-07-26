@@ -540,11 +540,32 @@ public sealed class ApplicateViewerViewTests
                     ]),
             ]));
 
+            // BuildHeadingContent's only call site (ApplicateTocPanel.BuildHeadingRow)
+            // adds this control to a Grid column and never casts it back to a
+            // concrete type; every other assertion in this test reads only
+            // Panel-base members (.Children). The contract here is "a Panel-
+            // derived container for the text/math segments", not "specifically
+            // a StackPanel" — Assert.IsType<Panel> was an exact-type check that
+            // could never pass against the StackPanel BuildHeadingContent
+            // actually returns (wrong from the same commit that added both,
+            // 7bdaf75). Assert.IsAssignableFrom<Panel> asserts the real contract.
             var grid = Assert.IsType<Grid>(row.Child);
-            var headingContent = Assert.IsType<Panel>(grid.Children[1]);
+            var headingContent = Assert.IsAssignableFrom<Panel>(grid.Children[1]);
             Assert.Contains(headingContent.Children, child => child is TextBlock { Text: "Wave " });
             var mathView = Assert.Single(headingContent.Children.OfType<MathView>());
-            Assert.Equal("Z_{0}", mathView.LaTeX);
+            // Assert.Equal("Z_{0}", ...) is wrong too, in the same never-reached
+            // tail as the Panel-type assertion above: MathView.LaTeX is not a
+            // passthrough of the string handed to the setter — CSharpMath parses
+            // it into a MathList and re-serializes on read, and its canonical
+            // writer drops braces around a SINGLE-atom subscript/superscript
+            // group as redundant ("Z_{0}" -> "Z_0"). Verified in-target: a
+            // multi-atom group round-trips WITH braces intact ("Z_{ab}" stays
+            // "Z_{ab}"), so this is the library's documented-by-behavior
+            // canonicalization of semantically-equivalent LaTeX, not data loss.
+            // NormalizeTexForRenderer itself (MarkMello-owned) leaves "Z_{0}"
+            // untouched — the divergence is entirely inside the third-party
+            // control.
+            Assert.Equal("Z_0", mathView.LaTeX);
             row.Measure(new Size(300, 40));
             row.Arrange(new Rect(0, 0, 300, 40));
             Assert.True(mathView.Bounds.Width > 0);

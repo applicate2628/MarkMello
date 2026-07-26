@@ -1281,8 +1281,37 @@ public sealed class ApplicateSiblingMountTests
     [Fact]
     public async Task BridgeModeSwitchPublishesTransactionGenerationContextThroughReconcile()
     {
+        // Regression guard for 2026-07-26-two-tests-wrong-since-inception.md:
+        // the original fixture called MakeBridge with no hostRevealIntents, so
+        // _modeRevealSession was null and every reconcile ran the legacy,
+        // non-transactional path (ApplicateSiblingMountBridge.Reconcile),
+        // which never calls ApplyTransactionGenerationContext at all. The
+        // assertions below were unreachable from the day this test was
+        // written; wiring FakeHostRevealIntents is required to exercise the
+        // transactional path the test's name claims to cover.
         var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
-        await session.Dispatch(() =>
+        // `return 0;` at the end of this lambda is LOAD-BEARING, not decorative
+        // -- do not remove it. HeadlessUnitTestSession.Dispatch has three
+        // overloads: Dispatch(Action, ...), Dispatch<TResult>(Func<TResult>, ...),
+        // and Dispatch<TResult>(Func<Task<TResult>>, ...). A void-bodied async
+        // lambda (no return statement) is convertible to BOTH of the first two,
+        // and the compiler resolves the ambiguity to the Func<TResult> overload
+        // with TResult=Task, i.e. Dispatch<Task>(...) returning Task<Task>. A
+        // single `await` on that only awaits the OUTER task (which completes as
+        // soon as the async lambda call returns its Task, before the lambda body
+        // has actually finished) -- the INNER task carrying the lambda's real
+        // completion and any exception is never observed. This was verified
+        // empirically: an unconditional throw placed deep in the reconcile path
+        // this test exercises did not fail the test until the lambda was given
+        // an explicit return value, which forces the compiler onto the
+        // Func<Task<TResult>> overload (the only one that awaits/unwraps the
+        // inner task and lets an exception fault the outer one). This is a
+        // sharper variant of work-items/bugs/2026-07-26-headless-dispatch-
+        // swallows-assertions.md that guard G11 (DispatchAwaitDisciplineTests)
+        // does not catch, because the call below IS awaited textually -- the
+        // gap is which overload that await resolves to. See adjacent-finding
+        // notes filed alongside this change.
+        await session.Dispatch(async () =>
         {
             var sessionRef = new object();
             var vm = new FakeMainWindowVm
@@ -1296,7 +1325,16 @@ public sealed class ApplicateSiblingMountTests
             var editChild = new Panel();
             editSlot.Children.Add(editContent);
             editSlot.Children.Add(editChild);
-            using var bridge = MakeBridge(vm, viewerSlot, editSlot, editContent);
+            ArrangeForLayout(viewerSlot, editSlot);
+
+            var host = new FakeHostRevealIntents(
+                () => (viewerSlot.Opacity, editSlot.Opacity));
+            using var bridge = MakeBridge(
+                vm,
+                viewerSlot,
+                editSlot,
+                editContent,
+                hostRevealIntents: host);
 
             Assert.Equal(0, ApplicateModeTransactionContext.GetTransactionGeneration(viewerSlot));
             Assert.Equal(0, ApplicateModeTransactionContext.GetTransactionGeneration(editSlot));
@@ -1312,11 +1350,27 @@ public sealed class ApplicateSiblingMountTests
             bridge.ForceReconcile();
             Assert.Equal(editGeneration, ApplicateModeTransactionContext.GetTransactionGeneration(editSlot));
 
+            // Commit the edit transaction through all four settle signals
+            // (layout is already settled from ArrangeForLayout above) so the
+            // next switch below is a genuine forward transition. Flipping
+            // IsEditMode back before commit would hit the compositor's rapid-
+            // toggle rollback branch (_suppressedOutgoingMode == requestedMode
+            // in TryReconcileTransactionalModeSwitch), which restores the
+            // pre-transaction slot state instead of allocating a new
+            // generation — a different, already-covered contract (see
+            // TransactionalModeSwitchDoesNotRestoreOutgoingNativeRendererOnSuccessInBothDirections).
+            host.RaiseCommitCompleted(editGeneration, ApplicateMode.Edit);
+            host.RaiseMinimapSettledNotApplicable(editGeneration);
+            host.RaiseRendererSettled(editGeneration);
+            await Task.Delay(50);
+            Assert.Equal(0, ApplicateModeTransactionContext.GetTransactionGeneration(editSlot));
+
             vm.IsEditMode = false;
 
             var viewerGeneration = ApplicateModeTransactionContext.GetTransactionGeneration(viewerSlot);
             Assert.True(viewerGeneration > editGeneration);
             Assert.Equal(0, ApplicateModeTransactionContext.GetTransactionGeneration(editSlot));
+            return 0; // load-bearing -- see comment above Dispatch(async () => ...
         }, CancellationToken.None);
     }
 
