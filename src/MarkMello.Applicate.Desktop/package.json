@@ -8,9 +8,9 @@
     "test:renderer": "vitest run --config vitest.config.ts"
   },
   "devDependencies": {
-    "esbuild": "0.28.0",
-    "typescript": "6.0.3",
-    "vitest": "2.1.8",
-    "happy-dom": "15.11.7"
+    "esbuild": "^0.28.1",
+    "happy-dom": "15.11.7",
+    "typescript": "^7.0.2",
+    "vitest": "2.1.8"
   }
 }
