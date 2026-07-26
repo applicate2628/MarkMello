@@ -827,7 +827,16 @@ describe("prepare-for-export full-render barrier", () => {
       get: () => "",
       set: () => { throw new Error("pre-write failure"); },
     });
-    expect(() => applyLoadDocument({ html: "<p>never written</p>" }, deps)).toThrow("pre-write failure");
-    expect(mutationCount).toBe(3);
+    try {
+      expect(() => applyLoadDocument({ html: "<p>never written</p>" }, deps)).toThrow("pre-write failure");
+      expect(mutationCount).toBe(3);
+    } finally {
+      // Revert the fault injection. Without this, the throwing setter outlives the test on a
+      // node that is still in the document, so ANY later `innerHTML` write on it throws from
+      // outside a test body. Deleting the own property restores the prototype accessor —
+      // the same `delete`-the-injection idiom this file's afterEach already uses for
+      // window.chrome / katex / mermaid.
+      delete (main as unknown as Record<string, unknown>).innerHTML;
+    }
   });
 });
