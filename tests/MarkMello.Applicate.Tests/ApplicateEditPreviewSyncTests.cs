@@ -200,6 +200,15 @@ public sealed class ApplicateEditPreviewSyncTests
         Assert.Contains("hasViewModel: _viewModel is not null", applyRender, StringComparison.Ordinal);
         Assert.Contains("consumerHasHeadings: _viewModel?.HasDocumentHeadings ?? false", applyRender, StringComparison.Ordinal);
         Assert.Contains("failureViewVisible: _failureView.IsVisible", applyRender, StringComparison.Ordinal);
+        // EXISTENCE PRECONDITION for the ordering assertion below (round-5 gate finding F2, extended here).
+        // Without it the ordering check passes VACUOUSLY when its left operand is deleted: IndexOf returns -1,
+        // and -1 < <any positive index> is true, so a surface that no longer calls RequestRender at all would
+        // ship green. Three sibling sites were fixed in e3cf39f; this is the fourth, deliberately scoped out
+        // of that pass and closed separately rather than left as a known hole.
+        Assert.Contains(
+            "_sharedHost.RequestRender(source, request, transactionGeneration: transactionGeneration);",
+            applyRender,
+            StringComparison.Ordinal);
         Assert.True(
             applyRender.IndexOf(
                 "_sharedHost.RequestRender(source, request, transactionGeneration: transactionGeneration);",
