@@ -171,6 +171,33 @@ public sealed class ApplicateEditPreviewSyncTests
     }
 
     [Fact]
+    public void EditPreviewPullsRetainedHeadingsForConsumerDebtAfterRequestRender()
+    {
+        // TEXT PIN, not a behavioural guard (round-3 adversarial gate on
+        // ca045b4, TASK 1, 2026-07-26) -- see
+        // ApplicateViewerViewTests.ViewerPullsRetainedHeadingsForConsumerDebtAfterRequestRender
+        // for the full rationale; this surface's production call site had the
+        // same unpinned gap.
+        var codeBehind = ReadEditPreviewCodeBehind();
+        var applyRender = ExtractMethodBody(codeBehind, "private void ApplyWebPreviewSource()");
+
+        Assert.Contains(
+            "TryRaiseRetainedHeadingsForConsumerDebt(",
+            applyRender,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "consumerHasHeadings: _viewModel?.HasDocumentHeadings ?? true",
+            applyRender,
+            StringComparison.Ordinal);
+        Assert.True(
+            applyRender.IndexOf(
+                "_sharedHost.RequestRender(source, request, transactionGeneration: transactionGeneration);",
+                StringComparison.Ordinal)
+            < applyRender.IndexOf("TryRaiseRetainedHeadingsForConsumerDebt(", StringComparison.Ordinal),
+            "The consumer-owned debt pull must run AFTER RequestRender (invariant I9, design D1.c) -- UpdateInputs may clear _hasLoadedDocument, which the pull's guard ladder depends on.");
+    }
+
+    [Fact]
     public void EditPreviewReevaluatesEffectiveVisibilityWhenInactivePrimeEnds()
     {
         var codeBehind = ReadEditPreviewCodeBehind();

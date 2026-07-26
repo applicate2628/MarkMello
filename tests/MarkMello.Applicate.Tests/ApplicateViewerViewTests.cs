@@ -153,6 +153,39 @@ public sealed class ApplicateViewerViewTests
     }
 
     [Fact]
+    public void ViewerPullsRetainedHeadingsForConsumerDebtAfterRequestRender()
+    {
+        // TEXT PIN, not a behavioural guard (round-3 adversarial gate on
+        // ca045b4, TASK 1, 2026-07-26): the real end-to-end coverage for this
+        // pull (ApplicateSharedWebViewHostRealHostTests, e.g.
+        // ReopenWithAChangedAvailableContentWidthAndAnEmptyTocRestoresTheHeadings)
+        // drives ApplicateWebMarkdownDocumentView.TryRaiseRetainedHeadingsForConsumerDebt
+        // directly through host.View -- it never calls IssueRenderRequest, so
+        // deleting the production call below, or moving it before RequestRender,
+        // left the whole 730-test Applicate suite green with no pin catching it.
+        // This test catches removal, reordering, or a changed consumer-predicate
+        // argument at the SOURCE-TEXT level only; it proves nothing about
+        // runtime behaviour (that is the job of the real-host guards above).
+        var codeBehind = ReadViewerCodeBehind();
+        var issueRender = ExtractMethodBody(codeBehind, "private void IssueRenderRequest()");
+
+        Assert.Contains(
+            "TryRaiseRetainedHeadingsForConsumerDebt(",
+            issueRender,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "consumerHasHeadings: _viewModel.HasDocumentHeadings",
+            issueRender,
+            StringComparison.Ordinal);
+        Assert.True(
+            issueRender.IndexOf(
+                "_sharedHost.RequestRender(_viewModel.Document, request, transactionGeneration: transactionGeneration);",
+                StringComparison.Ordinal)
+            < issueRender.IndexOf("TryRaiseRetainedHeadingsForConsumerDebt(", StringComparison.Ordinal),
+            "The consumer-owned debt pull must run AFTER RequestRender (invariant I9, design D1.c) -- UpdateInputs may clear _hasLoadedDocument, which the pull's guard ladder depends on.");
+    }
+
+    [Fact]
     public void HeavyDocumentResizeDebouncesOnlyLiveWebWidthEcho()
     {
         var codeBehind = ReadViewerCodeBehind();
@@ -206,7 +239,11 @@ public sealed class ApplicateViewerViewTests
         Assert.Contains("ScheduleApply(", updater, StringComparison.Ordinal);
         // Strengthened by Part D (design 2026-07-25-toc-empty-on-open §2/§9
         // H2): defer is no longer solely "!_documentRenderedForCurrentRequest"
-        // -- a same-source no-op reload re-emits headings with NO fresh
+        // -- a same-source no-op reload re-emits headings via the CONSUMER's
+        // own TryRaiseRetainedHeadingsForConsumerDebt pull (design REVISION 3
+        // D1, ca045b4; corrected 2026-07-26, round-3 gate finding B8 -- this
+        // is NOT a host-side re-emit, that branch was deleted from
+        // ApplicateSharedWebViewHost.RequestRender), with NO fresh
         // DocumentRendered to ever flip that flag, so a >=250-heading no-op
         // reopen would defer forever without the additional conjunct. See
         // ShouldDeferLargeTocHeadingUpdatesMatchesAllFourInputCombinations

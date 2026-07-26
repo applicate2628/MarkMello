@@ -73,8 +73,11 @@ internal sealed class ApplicateDeferredHeadingUpdater
     //
     // Part D (design work-items/active/2026-07-25-toc-empty-on-open/design.md
     // §2/§9 H2): a same-source no-op reload re-emits the retained heading list
-    // synchronously (ApplicateSharedWebViewHost.RequestRender ->
-    // RaiseDocumentHeadingsForLoadedSource) with no fresh DocumentRendered to
+    // synchronously (design REVISION 3 D1, ca045b4: the CONSUMER's own
+    // ApplicateWebMarkdownDocumentView.TryRaiseRetainedHeadingsForConsumerDebt
+    // pull, called immediately after its own RequestRender call -- not a host-
+    // side re-emit; ApplicateSharedWebViewHost.RequestRender carries no
+    // heading logic) with no fresh DocumentRendered to
     // ever flush a parked >=250-heading payload -- documentRenderedForCurrentRequest
     // stays false for the whole no-op reload (no new render, so the consumer's
     // "rendered" handler never fires), so the explicit-flush trigger never

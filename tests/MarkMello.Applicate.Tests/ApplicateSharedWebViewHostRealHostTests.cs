@@ -338,8 +338,13 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
     // ApplicateEditPreviewView AFTER their own RequestRender call. These tests
     // drive the REAL View directly through that same entry point rather than
     // relying on RequestRender to trigger anything -- after design D1.d,
-    // RequestRender contains NO heading logic at all (grep "Headings" in
-    // ApplicateSharedWebViewHost.cs returns nothing -- design claim 3).
+    // RequestRender contains ZERO heading LOGIC (design claim 3). Corrected
+    // 2026-07-26 (round-3 gate finding A4): grep "Headings" in
+    // ApplicateSharedWebViewHost.cs does NOT return nothing -- it returns two
+    // matches, both comment text pointing at this pull (the "Headings are NOT
+    // re-emitted from here" header and the TryRaiseRetainedHeadingsForConsumerDebt
+    // pointer). The substance stands (no heading LOGIC remains in that file);
+    // only the earlier "returns nothing" phrasing was false.
     //
     // Feeds the real IPC message sequence a genuine renderer would produce for a
     // fresh document load directly into the REAL View via HandleWebMessageBody --
