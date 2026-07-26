@@ -146,9 +146,21 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     // INV-ORDER, not this field: applyLoadDocument posts headings-updated
     // synchronously BEFORE layout-ready, and _hasLoadedDocument is set only by
     // the layout-ready handler, so whenever HasLoadedDocumentForSource(source)
-    // is true this generation's own headings have already arrived. Host-local;
-    // no wire-contract change (the wire gap on headings-updated itself stays
-    // open, see design §14 ADJ-2).
+    // is true this generation's own headings have already arrived.
+    //
+    // INV-ORDER's delivery leg is a DOCUMENTED WebView2 guarantee, and its scope
+    // is exactly why this field is kept. CoreWebView2.WebMessageReceived
+    // (webview2-dotnet-1.0.4022.49): "If the same page calls postMessage multiple
+    // times, the corresponding WebMessageReceived events are guaranteed to be
+    // fired in the same order. However, if multiple frames call postMessage,
+    // there is no guaranteed order." So post order is platform-guaranteed WITHIN
+    // one page lifetime -- and NOT across a page recreation, where a dying page's
+    // already-queued payload can still land. INV-ORDER therefore covers the
+    // same-page case; this field covers the cross-page case it cannot reach. The
+    // two are complementary, not belt-and-braces on one hazard.
+    //
+    // Host-local; no wire-contract change (the wire gap on headings-updated
+    // itself stays open, see design §14 ADJ-2).
     private long _lastHeadingsCaptureGeneration;
     private bool _hasLayoutReady;
     private bool _hasMinimapState;
