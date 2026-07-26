@@ -35,14 +35,14 @@
 
   <ItemGroup>
     <PackageReference Include="Avalonia.Desktop" Version="12.0.2" />
-    <PackageReference Include="Avalonia.Controls.WebView" Version="12.0.0" />
+    <PackageReference Include="Avalonia.Controls.WebView" Version="12.0.1" />
     <!-- Official WebView2 managed SDK: needed to wrap the native ICoreWebView2
          pointer Avalonia only exposes as a raw nint (CoreWebView2.CreateFromComICoreWebView2)
          and reach managed Profile.PreferredColorScheme (native-UI theme) + the
          ProcessFailed event, instead of hand-rolled vtable interop. The metapackage
          also carries WPF/WinForms flavor DLLs we never load; their net5.0-windows
          TFM trips a benign MSB3277 (demoted to a message below). -->
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3124.44" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" PrivateAssets="all" />
     <PackageReference Include="Avalonia.Diagnostics" Version="11.3.14" Condition="'$(Configuration)' == 'Debug'" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.7" />
     <PackageReference Include="Sylinko.CSharpMath.Avalonia" Version="12.0.0" />
