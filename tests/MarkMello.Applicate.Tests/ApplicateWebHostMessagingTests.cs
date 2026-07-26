@@ -441,6 +441,47 @@ public sealed class ApplicateWebHostMessagingTests
         Assert.DoesNotContain("PrimeActiveDocumentNativeModelCache", programSource, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// S4 (D13) -- the ONLY guard for the Program.cs consumer. Its dereference at
+    /// <c>session.GetStartupDocumentPath()</c> sits OUTSIDE the try that wraps the load, so the
+    /// one-keystroke silencer <c>session!</c> compiles cleanly under the strict build and converts a
+    /// swallowed read failure into a startup NullReferenceException on the pre-window path, with no
+    /// catch to absorb it. Both halves are needed: the ban catches the silencer, the ordering catches
+    /// a null branch inserted AFTER the dereference.
+    /// </summary>
+    [Fact]
+    public void SessionPreReadSkipsWhenThePersistedStateCannotBeObserved()
+    {
+        var programSource = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Program.cs"));
+
+        var sessionMethod = programSource.IndexOf(
+            "private static void StartSessionStartupDocumentPreRead(string[] args, IServiceProvider services)",
+            StringComparison.Ordinal);
+        Assert.True(sessionMethod >= 0, "The session startup pre-read method should exist.");
+
+        var unreadableSkip = programSource.IndexOf(
+            "perf-session-prefetch skipped reason=session-unreadable",
+            sessionMethod,
+            StringComparison.Ordinal);
+        var dereference = programSource.IndexOf(
+            "session.GetStartupDocumentPath()",
+            sessionMethod,
+            StringComparison.Ordinal);
+
+        Assert.True(unreadableSkip > sessionMethod, "The pre-read should skip when the session could not be observed.");
+        Assert.True(dereference > unreadableSkip, "The skip must precede the dereference, which sits outside the load try.");
+        Assert.DoesNotContain("session!", programSource, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void WebRenderShellUsesChunkedProgressiveAppendForVeryHeavyDocuments()
     {

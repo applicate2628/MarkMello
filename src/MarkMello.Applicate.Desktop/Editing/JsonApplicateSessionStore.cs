@@ -12,7 +12,9 @@ namespace MarkMello.Applicate.Desktop.Editing;
 /// JSON-backed session store under <c>%AppData%/MarkMello/applicate-session.json</c>.
 /// Mirrors the upstream <c>JsonSettingsStore</c> style: best-effort,
 /// atomic .tmp + rename, falls back to <see cref="ApplicateSession.Empty"/>
-/// on missing or corrupt data.
+/// on missing or corrupt data -- both of which were OBSERVED to hold no usable
+/// session. A read that could not observe the state at all returns <c>null</c>
+/// instead; see <see cref="IApplicateSessionStore.LoadAsync"/> (d13).
 /// </summary>
 public sealed partial class JsonApplicateSessionStore : IApplicateSessionStore
 {
@@ -24,7 +26,7 @@ public sealed partial class JsonApplicateSessionStore : IApplicateSessionStore
         _sessionFilePath = Path.Combine(rootDirectory, "applicate-session.json");
     }
 
-    public ValueTask<ApplicateSession> LoadAsync(CancellationToken cancellationToken = default)
+    public ValueTask<ApplicateSession?> LoadAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -32,19 +34,19 @@ public sealed partial class JsonApplicateSessionStore : IApplicateSessionStore
         {
             if (!File.Exists(_sessionFilePath))
             {
-                return ValueTask.FromResult(ApplicateSession.Empty);
+                return ValueTask.FromResult<ApplicateSession?>(ApplicateSession.Empty);
             }
 
             var json = File.ReadAllText(_sessionFilePath);
             if (string.IsNullOrWhiteSpace(json))
             {
-                return ValueTask.FromResult(ApplicateSession.Empty);
+                return ValueTask.FromResult<ApplicateSession?>(ApplicateSession.Empty);
             }
 
             var model = JsonSerializer.Deserialize(json, SessionJsonContext.Default.SessionFileModel);
             if (model is null)
             {
-                return ValueTask.FromResult(ApplicateSession.Empty);
+                return ValueTask.FromResult<ApplicateSession?>(ApplicateSession.Empty);
             }
 
             var session = new ApplicateSession
@@ -53,11 +55,22 @@ public sealed partial class JsonApplicateSessionStore : IApplicateSessionStore
                 ActivePath = string.IsNullOrWhiteSpace(model.ActivePath) ? null : model.ActivePath,
                 RecentPaths = model.RecentPaths ?? new List<string>(),
             };
-            return ValueTask.FromResult(session);
+            return ValueTask.FromResult<ApplicateSession?>(session);
+        }
+        catch (JsonException)
+        {
+            // OBSERVED: the bytes were read and they are not a session. No future read makes them
+            // one, so an empty baseline is true and the next ordinary save may overwrite the file.
+            // Mapping this to null instead would FREEZE persistence forever on a corrupt file.
+            return ValueTask.FromResult<ApplicateSession?>(ApplicateSession.Empty);
         }
         catch
         {
-            return ValueTask.FromResult(ApplicateSession.Empty);
+            // NOT OBSERVED: File.Exists/File.ReadAllText failed, so the bytes were never read and the
+            // user's real session may be sitting on disk intact. Fail closed -- the caller must not
+            // persist over a baseline this process could not see. Catch-all by design: anything not
+            // positively identified as an observed non-session is treated as possibly-intact.
+            return ValueTask.FromResult<ApplicateSession?>(null);
         }
     }
 

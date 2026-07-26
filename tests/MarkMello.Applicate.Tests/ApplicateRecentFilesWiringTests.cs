@@ -157,8 +157,20 @@ public sealed class ApplicateRecentFilesWiringTests
         var seedHelper = ExtractMethodBody(codeBehind, "internal static void SeedRecentPathsForRestore(");
         var coreHelper = ExtractMethodBody(codeBehind, "internal static void NoteRecentDocumentCore(");
         var unusableHelper = ExtractMethodBody(codeBehind, "internal static bool IsUnusablePersistedPath(");
+        // S5 (D13): this test enumerates its regions EXPLICITLY, so D13's new surface is uncovered by
+        // construction until it is named here. The composer is a new pure static in the same helper
+        // band; SaveSession and the store's LoadAsync are the other two bodies D13 rewrites.
+        var saveSession = ExtractMethodBody(codeBehind, "void SaveSession()");
+        var composer = ExtractMethodBody(codeBehind, "internal static ApplicateSession? ComposeSessionSnapshot(");
+        var storeLoad = ExtractMethodBody(
+            ReadSessionStoreSource(),
+            "public ValueTask<ApplicateSession?> LoadAsync(CancellationToken cancellationToken = default)");
 
-        foreach (var region in new[] { handlers, removeHelper, clearHelper, seedHelper, coreHelper, unusableHelper })
+        foreach (var region in new[]
+        {
+            handlers, removeHelper, clearHelper, seedHelper, coreHelper, unusableHelper,
+            saveSession, composer, storeLoad,
+        })
         {
             Assert.DoesNotContain("Timer", region, StringComparison.Ordinal);
             Assert.DoesNotContain("DispatcherTimer", region, StringComparison.Ordinal);
@@ -176,6 +188,7 @@ public sealed class ApplicateRecentFilesWiringTests
     private const string B = @"C:\a\two.md";
     private const string C = @"C:\a\three.md";
     private const string Z = @"C:\a\zed.md";
+    private const string X = @"C:\a\recent.md";
 
     /// <summary>B1 -- the filed defect, made executable.</summary>
     [Fact]
@@ -609,6 +622,160 @@ public sealed class ApplicateRecentFilesWiringTests
         Assert.True(awaitIndex > seedIndex, "The seed must land BEFORE the first throwing await.");
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // D13 (decision 2026-07-26-d13-persisted-session-observation-contract): a persisted session this
+    // process could not READ is never overwritten by this process. The composer is pure, so the
+    // POLICY is proven behaviourally; the WIRING that calls it is source-text plus the compiler.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// C-R1 -- the filed defect's host half, made executable. Every input except the observation is
+    /// deliberately POPULATED: a composer that ignores the observation returns a perfectly plausible
+    /// non-null snapshot here, and that snapshot IS the data loss.
+    /// </summary>
+    [Fact]
+    public void ComposeRefusesWhenThePersistedStateWasNotObserved()
+    {
+        var result = ApplicateMainWindow.ComposeSessionSnapshot(
+            observedSession: null,
+            new List<string> { A, B },
+            activeDocumentPath: A,
+            lastActivePath: B,
+            new List<string> { X });
+
+        Assert.Null(result);
+    }
+
+    /// <summary>
+    /// C-R2 -- the snapshot carries the LIVE lists, by reference, not the observed baseline's. The
+    /// baseline's lists are deliberately different, so a baseline-sourced composition (Phase 2's
+    /// restore-window branch landing a phase early, on the path where it is wrong) fails on value AND
+    /// on reference, and a defensive copy fails on reference. Assert.Same pins that the extraction is
+    /// a pure MOVE: the production code aliases the caller's lists today.
+    /// </summary>
+    [Fact]
+    public void ComposeCarriesTheLiveListsWhenTheStateWasObserved()
+    {
+        var observed = new ApplicateSession
+        {
+            OpenPaths = new List<string> { C },
+            RecentPaths = new List<string> { C },
+        };
+        var openPaths = new List<string> { A, B };
+        var recentPaths = new List<string> { X };
+
+        var result = ApplicateMainWindow.ComposeSessionSnapshot(
+            observed,
+            openPaths,
+            activeDocumentPath: A,
+            lastActivePath: B,
+            recentPaths);
+
+        Assert.NotNull(result);
+        Assert.Same(openPaths, result.OpenPaths);
+        Assert.Same(recentPaths, result.RecentPaths);
+        Assert.Equal(new List<string> { A, B }, result.OpenPaths);
+        Assert.Equal(new List<string> { X }, result.RecentPaths);
+    }
+
+    /// <summary>
+    /// C-R3 -- PathIfStillOpen's first direct coverage anywhere in the repo. Case (c) is the one the
+    /// diff cannot show: the OrdinalIgnoreCase comparer is an ARGUMENT, so dropping it in the move
+    /// still compiles and still passes (a) and (b), while silently rejecting a correct ActivePath
+    /// that differs only in case -- the next startup then loses the active tab.
+    /// </summary>
+    [Fact]
+    public void ComposeRejectsAnActivePathThatIsNotOpen()
+    {
+        var observed = ApplicateSession.Empty;
+
+        var fallback = ApplicateMainWindow.ComposeSessionSnapshot(
+            observed, new List<string> { A, B }, C, B, new List<string>());
+        Assert.NotNull(fallback);
+        Assert.Equal(B, fallback.ActivePath);
+
+        var bothDangling = ApplicateMainWindow.ComposeSessionSnapshot(
+            observed, new List<string> { A, B }, C, C, new List<string>());
+        Assert.NotNull(bothDangling);
+        Assert.Null(bothDangling.ActivePath);
+
+        var caseDiffering = ApplicateMainWindow.ComposeSessionSnapshot(
+            observed, new List<string> { @"C:\a\One.md" }, @"C:\a\one.md", null, new List<string>());
+        Assert.NotNull(caseDiffering);
+        Assert.Equal(@"C:\a\one.md", caseDiffering.ActivePath);
+    }
+
+    /// <summary>
+    /// S1 -- the value handed to SaveAsync is the one the composer returned. This does NOT police how
+    /// the refusal is SPELLED; that is the compiler's job (SaveAsync takes a non-nullable session, so
+    /// every weakening that leaves the composer's value on the write path is CS8604). S1 asks only
+    /// what the compiler cannot: is this the composer's value, or a construction, a coalesce, a
+    /// null-forgive, or a second source?
+    /// </summary>
+    [Fact]
+    public void SaveSessionWritesOnlyWhatTheComposerReturned()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var body = ExtractMethodBody(codeBehind, "void SaveSession()");
+
+        Assert.Equal(1, CountOccurrences(body, "var snapshot = ComposeSessionSnapshot("));
+        Assert.DoesNotContain("ApplicateSession", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("new", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("??", body, StringComparison.Ordinal);
+        Assert.Equal(CountOccurrences(body, "!="), CountOccurrences(body, "!"));
+
+        var composeIndex = body.IndexOf("var snapshot = ComposeSessionSnapshot(", StringComparison.Ordinal);
+        var writeIndex = body.IndexOf("sessionStore.SaveAsync(snapshot)", StringComparison.Ordinal);
+        Assert.True(composeIndex >= 0, "SaveSession should compose through ComposeSessionSnapshot.");
+        Assert.True(writeIndex >= 0, "SaveSession should still write the composed snapshot.");
+        Assert.True(writeIndex > composeIndex, "The composition must precede the write.");
+
+        Assert.Equal(1, CountOccurrences(body, "sessionStore.SaveAsync(snapshot)"));
+    }
+
+    /// <summary>
+    /// S2 -- the observation is assigned exactly once, from the store call itself, and never cleared.
+    /// Both halves are load-bearing and neither subsumes the other: a coalesce on the RHS is caught
+    /// only by the negative half, and an assignment from the already-coalesced local only by the
+    /// positive half. The regex's optional <c>??</c> arm makes the compound <c>??=</c> spelling count
+    /// as a third assignment, which is the form that slipped past an earlier version of this guard.
+    /// </summary>
+    [Fact]
+    public void ObservedSessionIsAssignedOnceFromTheStoreAndNeverCleared()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+        var bridge = ExtractMethodBody(
+            codeBehind,
+            "private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)");
+
+        var assignments = System.Text.RegularExpressions.Regex
+            .Matches(bridge, @"observedSession\s*(?:\?\?)?=\s*(?<rhs>[^;=][^;]*);")
+            .Select(match => match.Groups["rhs"].Value.Trim())
+            .ToList();
+
+        Assert.Equal(2, assignments.Count);
+        var loadRhs = Assert.Single(assignments, rhs => rhs != "null");
+        Assert.Contains("sessionStore.LoadAsync(", loadRhs, StringComparison.Ordinal);
+        Assert.DoesNotContain("??", loadRhs, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateSession.Empty", loadRhs, StringComparison.Ordinal);
+
+        Assert.DoesNotMatch(@"\bout\s+observedSession\b", bridge);
+        Assert.DoesNotMatch(@"\bref\s+observedSession\b", bridge);
+    }
+
+    /// <summary>
+    /// S3 -- ExtractRestoreRegion anchors every restore guard on this exact literal. Rewriting it
+    /// silently re-bases the slice they are all measured over, and they would most likely stay green
+    /// while asserting about a different region.
+    /// </summary>
+    [Fact]
+    public void RestoreRegionAnchorSurvives()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+
+        Assert.Equal(1, CountOccurrences(codeBehind, "ApplicateSession saved = ApplicateSession.Empty"));
+    }
+
     /// <summary>
     /// The restore lambda, anchored on the unique <c>ApplicateSession saved</c> declaration rather
     /// than on a <c>Dispatcher.UIThread.Post</c> (there are three). Anchoring here also puts the
@@ -761,6 +928,19 @@ public sealed class ApplicateRecentFilesWiringTests
             "src",
             "MarkMello.Applicate.Desktop",
             "ApplicateMainWindow.cs"));
+
+    private static string ReadSessionStoreSource()
+        => File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "src",
+            "MarkMello.Applicate.Desktop",
+            "Editing",
+            "JsonApplicateSessionStore.cs"));
 
     private static string ExtractMethodBody(string source, string signature)
     {

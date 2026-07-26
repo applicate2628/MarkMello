@@ -253,7 +253,7 @@ internal static class Program
                 $"perf-session-prefetch argv-resolve-failed ex={ex.GetType().Name}");
         }
 
-        ApplicateSession session;
+        ApplicateSession? session;
         try
         {
             // Synchronous load — JsonApplicateSessionStore.LoadAsync is a
@@ -269,6 +269,18 @@ internal static class Program
             ApplicateTrace.Diag(
                 "startup-pre-window",
                 $"perf-session-prefetch load-failed ex={ex.GetType().Name}");
+            return;
+        }
+
+        if (session is null)
+        {
+            // d13: the persisted state could not be OBSERVED, so there is no startup path to trust.
+            // The prefetch is a pure optimisation -- skipping it costs one cache miss the active
+            // document load already handles. This is also the earliest runtime witness that the
+            // unobservable route fired at all.
+            ApplicateTrace.DiagMs(
+                "startup-pre-window",
+                "perf-session-prefetch skipped reason=session-unreadable");
             return;
         }
 

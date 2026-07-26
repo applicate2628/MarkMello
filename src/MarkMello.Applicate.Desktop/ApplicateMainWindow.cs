@@ -177,6 +177,15 @@ public sealed class ApplicateMainWindow : MainWindow
         try
         {
             var session = sessionStore.LoadAsync().AsTask().GetAwaiter().GetResult();
+            if (session is null)
+            {
+                // d13: the persisted state could not be observed, so there is no startup document to
+                // hold the reveal for. Explicit rather than `?.` -- it matches this method's own
+                // `sessionStore is null` early return above, and keeps the fail-closed decision
+                // greppable instead of hiding it in operator semantics.
+                return false;
+            }
+
             var restoredStartupPath = session.GetStartupDocumentPath();
             return !string.IsNullOrWhiteSpace(restoredStartupPath)
                    && System.IO.File.Exists(restoredStartupPath);
@@ -2682,6 +2691,63 @@ public sealed class ApplicateMainWindow : MainWindow
         };
     }
 
+    /// <summary>
+    /// Compose the session snapshot to persist, or decide that this process must persist NOTHING.
+    /// <para>
+    /// d13 clause 4: the composition root -- not the store -- owns what to do about an unobservable
+    /// read. Returns <c>null</c> when <paramref name="observedSession"/> is <c>null</c>, i.e. when the
+    /// store reported that the persisted state could not be OBSERVED and the user's real tab set and
+    /// recent-files history may still be sitting on disk intact. Writing a live snapshot over that
+    /// baseline destroys both, silently, from one transient read failure.
+    /// </para>
+    /// <para>
+    /// The refusal lives HERE, in a returned value, rather than in a caller-side <c>if</c>, because
+    /// the caller cannot proceed without the value: <c>SaveAsync</c> takes a NON-nullable session, so
+    /// every way of defanging the refusal that leaves this value on the write path is CS8604 -- a
+    /// build error under <c>Nullable=enable</c> + <c>TreatWarningsAsErrors</c>. A <c>bool</c>
+    /// predicate would not have worked; its verdict can be discarded as a bare expression statement.
+    /// </para>
+    /// <para>
+    /// Pure by construction -- no store, no DI, no dispatcher, no <c>Window</c> state, no I/O -- which
+    /// is what makes the policy directly testable with no fake for <c>IApplicateSessionStore</c>.
+    /// </para>
+    /// </summary>
+    internal static ApplicateSession? ComposeSessionSnapshot(
+        ApplicateSession? observedSession,
+        List<string> openPaths,
+        string? activeDocumentPath,
+        string? lastActivePath,
+        List<string> recentPaths)
+    {
+        if (observedSession is null)
+        {
+            return null;
+        }
+
+        // ActivePath must ALWAYS be an OPEN path (or null). Guard BOTH inputs:
+        //  - ActiveDocument may briefly still point at a just-removed file
+        //    (Close removes the doc from OpenDocuments — firing this
+        //    CollectionChanged save — BEFORE it re-points ActiveDocument);
+        //  - the last-active-file fallback restores the last-viewed file after a
+        //    session-only untitled owns the window (Ctrl+N leaves the file tabs
+        //    open), but must not resurrect a file that was closed.
+        // A dangling ActivePath with empty OpenPaths would make the next startup
+        // hold the reveal gate for a doc that never restores (15s fallback).
+        // The OrdinalIgnoreCase comparer is load-bearing, not decorative: Windows paths differing
+        // only in case are the SAME file, and dropping it silently rejects a correct ActivePath.
+        string? PathIfStillOpen(string? path)
+            => path is not null && openPaths.Contains(path, System.StringComparer.OrdinalIgnoreCase)
+                ? path
+                : null;
+        return new ApplicateSession
+        {
+            OpenPaths = openPaths,
+            ActivePath = PathIfStillOpen(activeDocumentPath)
+                ?? PathIfStillOpen(lastActivePath),
+            RecentPaths = recentPaths,
+        };
+    }
+
     private void InstallActiveDocumentBridge(MainWindowViewModel viewModel)
     {
         var openDocs = App.Services?.GetService<IOpenDocumentsService>();
@@ -3532,6 +3598,13 @@ public sealed class ApplicateMainWindow : MainWindow
         // ReplayOpenAsync is its ONLY writer; an assignment anywhere else re-opens the defect.
         string? replayFoldInFlight = null;
 
+        // D13 clause 1/4: the pre-restore on-disk baseline AS OBSERVED by the store. null means the
+        // store could NOT observe it (an IO or access failure), so the user's real tabs and recents
+        // may still be intact on disk and this process must persist nothing over them. Assigned
+        // exactly ONCE, from the store call itself, and NEVER cleared -- the convergence save runs
+        // after the restore loop's finally, so clearing it there would restore the defect in full.
+        ApplicateSession? observedSession = null;
+
         void SaveSession()
         {
             if (isRestoring || sessionStore is null)
@@ -3539,27 +3612,19 @@ public sealed class ApplicateMainWindow : MainWindow
                 return;
             }
 
-            var openPaths = openDocs.OpenDocuments.Select(d => d.FilePath).ToList();
-            // ActivePath must ALWAYS be an OPEN path (or null). Guard BOTH inputs:
-            //  - ActiveDocument may briefly still point at a just-removed file
-            //    (Close removes the doc from OpenDocuments — firing this
-            //    CollectionChanged save — BEFORE it re-points ActiveDocument);
-            //  - the last-active-file fallback restores the last-viewed file after a
-            //    session-only untitled owns the window (Ctrl+N leaves the file tabs
-            //    open), but must not resurrect a file that was closed.
-            // A dangling ActivePath with empty OpenPaths would make the next startup
-            // hold the reveal gate for a doc that never restores (15s fallback).
-            string? PathIfStillOpen(string? path)
-                => path is not null && openPaths.Contains(path, System.StringComparer.OrdinalIgnoreCase)
-                    ? path
-                    : null;
-            var snapshot = new ApplicateSession
+            var snapshot = ComposeSessionSnapshot(
+                observedSession,
+                openDocs.OpenDocuments.Select(d => d.FilePath).ToList(),
+                openDocs.ActiveDocument?.FilePath,
+                lastActivePath,
+                recentPaths);
+            if (snapshot is null)
             {
-                OpenPaths = openPaths,
-                ActivePath = PathIfStillOpen(openDocs.ActiveDocument?.FilePath)
-                    ?? PathIfStillOpen(lastActivePath),
-                RecentPaths = recentPaths,
-            };
+                // The on-disk session was never observed, so it may still hold the user's
+                // tabs and recents. The composer owns that decision; this branch obeys it.
+                return;
+            }
+
             _ = sessionStore.SaveAsync(snapshot).AsTask();
         }
 
@@ -3597,10 +3662,21 @@ public sealed class ApplicateMainWindow : MainWindow
             {
                 try
                 {
-                    saved = await sessionStore.LoadAsync().ConfigureAwait(true);
+                    observedSession = await sessionStore.LoadAsync().ConfigureAwait(true);
+                    saved = observedSession ?? ApplicateSession.Empty;
+                    if (observedSession is null)
+                    {
+                        // Logged ONCE, at the cause. A line inside SaveSession's refusal would fire on
+                        // every tab open and close for the whole process lifetime; this single cause
+                        // fully determines every refusal that follows it.
+                        ApplicateTrace.Diag("startup-applicate-window", "session-load unobserved");
+                    }
                 }
                 catch
                 {
+                    // Contract-defensive only: the shipped store has no observable throwing path. It
+                    // deliberately assigns NOTHING to observedSession -- an unobserved state must stay
+                    // unobserved, so a future throwing store cannot license the destructive write.
                     saved = ApplicateSession.Empty;
                 }
             }
