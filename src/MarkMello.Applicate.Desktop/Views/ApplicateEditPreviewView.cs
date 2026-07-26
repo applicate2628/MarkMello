@@ -815,15 +815,15 @@ internal sealed class ApplicateEditPreviewView : UserControl, ISourceLineScrollS
         _sharedHost.RequestRender(source, request, transactionGeneration: transactionGeneration);
 
         // Consumer-owned debt pull (design work-items/active/2026-07-25-toc-
-        // empty-on-open/design.md D1) -- see
+        // empty-on-open/design.md D4/D6) -- see
         // ApplicateViewerView.IssueRenderRequest for the full rationale. A null
         // _viewModel (edit-preview can render standalone, without one bound)
-        // treats consumerHasHeadings as true so the pull skips entirely --
-        // there is no TOC surface here to refill state debt for.
+        // makes consumerHasHeadingDebt false so the pull skips entirely --
+        // there is no TOC surface here to refill state debt for (same null
+        // semantics as the prior _viewModel?.HasDocumentHeadings ?? true).
         _sharedHost.View.TryRaiseRetainedHeadingsForConsumerDebt(
             source,
-            consumerHasHeadings: _viewModel?.HasDocumentHeadings ?? true,
-            transactionGeneration);
+            consumerHasHeadingDebt: _viewModel is not null && !_viewModel.HasDocumentHeadings && !_failureView.IsVisible);
     }
 
     internal bool PrimeInactiveWebPreview(

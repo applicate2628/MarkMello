@@ -174,7 +174,7 @@ public sealed class ApplicateViewerViewTests
             issueRender,
             StringComparison.Ordinal);
         Assert.Contains(
-            "consumerHasHeadings: _viewModel.HasDocumentHeadings",
+            "consumerHasHeadingDebt: !_viewModel.HasDocumentHeadings && !_failureView.IsVisible",
             issueRender,
             StringComparison.Ordinal);
         Assert.True(

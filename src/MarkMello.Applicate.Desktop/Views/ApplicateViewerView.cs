@@ -501,8 +501,7 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         // own guard ladder depends on (invariant I9).
         _sharedHost.View.TryRaiseRetainedHeadingsForConsumerDebt(
             _viewModel.Document,
-            consumerHasHeadings: _viewModel.HasDocumentHeadings,
-            transactionGeneration);
+            consumerHasHeadingDebt: !_viewModel.HasDocumentHeadings && !_failureView.IsVisible);
     }
 
     private void EnsureSharedHostMounted(bool force = false)

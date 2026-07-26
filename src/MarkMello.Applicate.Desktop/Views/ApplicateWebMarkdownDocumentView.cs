@@ -447,26 +447,38 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         DocumentFirstPaint?.Invoke(this, EventArgs.Empty);
     }
 
-    // Consumer-owned debt pull (design REVISION 3, work-items/active/2026-07-25-
-    // toc-empty-on-open/design.md D1). Folds in the prior
+    // Consumer-owned debt pull (design REVISION 4, work-items/active/2026-07-25-
+    // toc-empty-on-open/design.md D4/D6). Folds in the prior
     // RaiseDocumentHeadingsForLoadedSource -- one method, one entry point.
     //
     // Gate finding F2 (98f99ab) showed the HOST cannot pick the right trigger:
     // discriminating on inputUpdateAction (None vs ApplyLivePreferences) is a
     // host-observable proxy for a fact only the CONSUMER can name directly --
-    // "is my own heading collection empty". So the trigger moves here: the
-    // CALLER (ApplicateViewerView.IssueRenderRequest,
-    // ApplicateEditPreviewView.ApplyWebPreviewSource, both AFTER RequestRender
-    // -- invariant I9) answers "do I have debt" via consumerHasHeadings; this
-    // method answers "do I hold a payload valid for this source" via the
-    // guard ladder below. Two questions, two owners, no layering.
+    // "do I have heading debt". So the trigger lives here: the CALLER
+    // (ApplicateViewerView.IssueRenderRequest, ApplicateEditPreviewView.
+    // ApplyWebPreviewSource, both AFTER RequestRender -- invariant I9) answers
+    // "do I have debt" directly via consumerHasHeadingDebt -- own collection
+    // empty AND not currently showing its own renderer-failure view, so a
+    // deliberate clear beside a failure view (E2, a non-fatal render failure)
+    // is never mistaken for real debt (E1, Document went null) and pulled
+    // back beside it (design D4, DEFECT-1). This method answers the OTHER
+    // question, "do I hold a payload valid for this source", via the guard
+    // ladder below. Two questions, two owners, no layering.
     //
-    // Returns false immediately unless !consumerHasHeadings AND
-    // transactionGeneration == 0 (mode-toggle transactions never lose
-    // Document, so nothing is owed there). Only then does it fall through to
-    // the EXISTING guard ladder that used to gate RaiseDocumentHeadingsForLoadedSource:
-    // loaded-and-painted for this source, source match, capture-generation
-    // match (defensive backstop against an early-captured superseded-generation
+    // Returns false immediately unless consumerHasHeadingDebt is true. There
+    // is no transaction-generation conjunct here (design D6, DEFECT-2): a
+    // mode transaction that cancels existing debt (the 80ms defer window
+    // invalidated mid-toggle) and then drives only a no-op RequestRender is
+    // exactly the case this pull must SETTLE, not skip -- the debt predicate
+    // above already forbids firing on a populated collection, so a
+    // transaction-generation conjunct here guarded nothing but blocked the
+    // only settlement opportunity. Shape A's OWN transactionGeneration == 0
+    // gate (ApplicateSharedWebViewHost.cs) is unaffected by this and remains
+    // the sole guard against re-emitting reveal-ready mid-transaction. Once
+    // past the debt check, this falls through to the EXISTING guard ladder
+    // that used to gate RaiseDocumentHeadingsForLoadedSource: loaded-and-
+    // painted for this source, source match, capture-generation match
+    // (defensive backstop against an early-captured superseded-generation
     // payload -- see _lastHeadingsCaptureGeneration's doc comment for what this
     // does NOT catch), and a non-empty retained payload. Re-emits the payload
     // retained at ingress (_lastHeadings / _lastHeadingsSource, written in
@@ -477,10 +489,9 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     // negative would flood -- this runs on every render request).
     internal bool TryRaiseRetainedHeadingsForConsumerDebt(
         MarkdownSource? source,
-        bool consumerHasHeadings,
-        long transactionGeneration)
+        bool consumerHasHeadingDebt)
     {
-        if (consumerHasHeadings || transactionGeneration != 0)
+        if (!consumerHasHeadingDebt)
         {
             return false;
         }

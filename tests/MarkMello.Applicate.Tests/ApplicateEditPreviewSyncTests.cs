@@ -186,7 +186,7 @@ public sealed class ApplicateEditPreviewSyncTests
             applyRender,
             StringComparison.Ordinal);
         Assert.Contains(
-            "consumerHasHeadings: _viewModel?.HasDocumentHeadings ?? true",
+            "consumerHasHeadingDebt: _viewModel is not null && !_viewModel.HasDocumentHeadings && !_failureView.IsVisible",
             applyRender,
             StringComparison.Ordinal);
         Assert.True(

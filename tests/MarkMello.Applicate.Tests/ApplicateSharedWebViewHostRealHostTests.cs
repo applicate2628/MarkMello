@@ -429,7 +429,7 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
                 ReadingPreferences.Default, ImageSourceResolver: null, AvailableContentWidth: 900);
             host.RequestRender(DocA, changedWidthRequest);
             var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
-                DocA, consumerHasHeadings: false, transactionGeneration: 0);
+                DocA, consumerHasHeadingDebt: true);
 
             Assert.True(pulled);
             Assert.Equal(1, fireCount);
@@ -475,11 +475,11 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             // None/ApplyLivePreferences, not Render -- exactly the no-op
             // reload this design's root names (DetermineInputUpdateAction).
             // The consumer pull runs AFTER RequestRender (invariant I9),
-            // passing consumerHasHeadings: false to simulate a TOC emptied by
+            // passing consumerHasHeadingDebt: true to simulate a TOC emptied by
             // a prior Document=null transition (ClearDocumentHeadings).
             host.RequestRender(DocA, Request());
             var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
-                DocA, consumerHasHeadings: false, transactionGeneration: 0);
+                DocA, consumerHasHeadingDebt: true);
 
             Assert.True(pulled);
             Assert.Equal(1, fireCount);
@@ -517,7 +517,7 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
 
             host.RequestRender(DocA, Request());
             var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
-                DocA, consumerHasHeadings: false, transactionGeneration: 0);
+                DocA, consumerHasHeadingDebt: true);
 
             Assert.True(pulled);
             Assert.NotNull(reemitted);
@@ -554,7 +554,7 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
 
             host.RequestRender(DocA, Request());
             var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
-                DocA, consumerHasHeadings: false, transactionGeneration: 0);
+                DocA, consumerHasHeadingDebt: true);
 
             Assert.False(pulled);
             Assert.Equal(0, fireCount);
@@ -567,9 +567,9 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
     // POPULATED TOC) -- RED at 98f99ab is this file's own baseline run of that
     // exact assertion (recorded: it passed with count=3, i.e. the OLD
     // mechanism fired on every repeat despite a populated TOC). Under D1 the
-    // consumer's own consumerHasHeadings reading is false ONLY the first time
+    // consumer's own consumerHasHeadingDebt reading is true ONLY the first time
     // (before the TOC is refilled) -- a repeat sync with an ALREADY-POPULATED
-    // TOC passes consumerHasHeadings: true and must not pull at all.
+    // TOC passes consumerHasHeadingDebt: false and must not pull at all.
     [Fact]
     public void G2RepeatedSyncsWithAPopulatedTocDoNotPull()
     {
@@ -588,28 +588,82 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             var observed = new List<IReadOnlyList<DocumentHeading>>();
             host.View.HeadingsChanged += (_, headings) => observed.Add(headings);
 
-            // Three repeated syncs, each passing consumerHasHeadings: true --
+            // Three repeated syncs, each passing consumerHasHeadingDebt: false --
             // the TOC is already populated (as it would be after the FIRST
             // successful pull in production), so none of these three may
             // pull, unlike the pre-fix mechanism which fired on every one.
             host.RequestRender(DocA, Request());
-            host.View.TryRaiseRetainedHeadingsForConsumerDebt(DocA, consumerHasHeadings: true, transactionGeneration: 0);
+            host.View.TryRaiseRetainedHeadingsForConsumerDebt(DocA, consumerHasHeadingDebt: false);
             host.RequestRender(DocA, Request());
-            host.View.TryRaiseRetainedHeadingsForConsumerDebt(DocA, consumerHasHeadings: true, transactionGeneration: 0);
+            host.View.TryRaiseRetainedHeadingsForConsumerDebt(DocA, consumerHasHeadingDebt: false);
             host.RequestRender(DocA, Request());
-            host.View.TryRaiseRetainedHeadingsForConsumerDebt(DocA, consumerHasHeadings: true, transactionGeneration: 0);
+            host.View.TryRaiseRetainedHeadingsForConsumerDebt(DocA, consumerHasHeadingDebt: false);
 
             Assert.Empty(observed);
         });
     }
 
-    // Re-pointed at the new entry point; realizes G3 (I5): mode-toggle reveal
-    // ordering stays bridge-owned. The pull is gated the same way as its
-    // RaiseDocumentRevealReadyForLoadedSource sibling: only fires when
-    // transactionGeneration == 0. A transactional RequestRender (Ctrl+E
-    // mode-toggle path) must not pull.
+    // G9 (D4, design REVISION 4 §2/§3): DEFECT-1 -- a stale TOC reappears on
+    // top of the renderer-failure view. The consumer's own debt expression
+    // (ApplicateViewerView.IssueRenderRequest / ApplicateEditPreviewView.
+    // ApplyWebPreviewSource, D4.b/D4.c) is
+    // !_viewModel.HasDocumentHeadings && !_failureView.IsVisible -- when the
+    // failure view is visible the AND drives the whole expression to false
+    // regardless of whether the consumer's own collection is empty, so the
+    // pull must not fire even though a valid non-empty retained payload
+    // exists for this source (E2's deliberate clear left DocumentHeadings
+    // empty, but nothing here may refill it beside a failure view).
     [Fact]
-    public void TransactionalRequestRenderDoesNotReemitHeadings()
+    public void PullIsSuppressedWhileTheConsumerDisplaysTheFailureView()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostHeadings(host.View, "intro", "body");
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            var fireCount = 0;
+            host.View.HeadingsChanged += (_, _) => fireCount++;
+
+            // The consumer's own debt expression evaluates to false because
+            // the failure-view term is true (the renderer failed and the
+            // consumer is currently showing its failure view), even though
+            // the pull holds a valid non-empty retained payload for this
+            // source.
+            var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
+                DocA, consumerHasHeadingDebt: false);
+
+            Assert.False(pulled);
+            Assert.Equal(0, fireCount);
+        });
+    }
+
+    // G10 (D6, design REVISION 4 §2/§3, INVERTED from
+    // TransactionalRequestRenderDoesNotReemitHeadings): DEFECT-2 -- a mode
+    // transaction cancels existing debt (Ctrl+E inside the 80ms defer window
+    // invalidates the scheduled ScheduleApply callback,
+    // ApplicateDeferredHeadingUpdater.cs) and then the ONLY replacement pull
+    // used to be suppressed by a transactionGeneration != 0 conjunct that
+    // this test PINNED as expected behaviour (Assert.False(pulled),
+    // Assert.Equal(0, fireCount)) -- exactly the same trap
+    // RepeatedNoOpReloadsReemitTheSameRetainedHeadingListInstance pinned
+    // before ca045b4 inverted it (now G2). The guard's stated rationale was
+    // verified FALSE (design §1 DEFECT-2): the debt predicate above already
+    // forbids firing on a populated collection, so the conjunct blocked the
+    // only settlement opportunity rather than preventing churn. The
+    // transactionGeneration parameter is deleted from the pull entirely
+    // (D6.a); Shape A's OWN transactionGeneration == 0 gate at
+    // ApplicateSharedWebViewHost.cs:359 is untouched and remains the sole
+    // guard against re-emitting reveal-ready mid-transaction -- it does not
+    // apply to this consumer-owned pull.
+    [Fact]
+    public void PullSettlesDebtDuringAModeTransaction()
     {
         RunOnHost(host =>
         {
@@ -624,14 +678,26 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             Assert.True(host.View.HasLoadedDocumentForSource(DocA));
 
             var fireCount = 0;
-            host.View.HeadingsChanged += (_, _) => fireCount++;
+            IReadOnlyList<DocumentHeading>? reemitted = null;
+            host.View.HeadingsChanged += (_, headings) =>
+            {
+                reemitted = headings;
+                fireCount++;
+            };
 
+            // A mode transaction (Ctrl+E toggle) drives RequestRender with a
+            // POSITIVE transactionGeneration (Shape A's own gate, unaffected
+            // by D6) -- the consumer's own collection was cleared by the
+            // invalidated defer timer, so it reports debt.
             host.RequestRender(DocA, Request(), transactionGeneration: 1);
             var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
-                DocA, consumerHasHeadings: false, transactionGeneration: 1);
+                DocA, consumerHasHeadingDebt: true);
 
-            Assert.False(pulled);
-            Assert.Equal(0, fireCount);
+            Assert.True(pulled);
+            Assert.Equal(1, fireCount);
+            Assert.NotNull(reemitted);
+            Assert.Single(reemitted!);
+            Assert.Equal("intro", reemitted[0].Id);
         });
     }
 
@@ -650,7 +716,7 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             host.AttachTo(slot, ViewerIntent());
 
             var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
-                DocA, consumerHasHeadings: false, transactionGeneration: 0);
+                DocA, consumerHasHeadingDebt: true);
 
             Assert.False(pulled);
         });
@@ -701,7 +767,7 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             host.View.HeadingsChanged += (_, _) => fireCount++;
 
             var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
-                DocA, consumerHasHeadings: false, transactionGeneration: 0);
+                DocA, consumerHasHeadingDebt: true);
 
             Assert.False(pulled);
             Assert.Equal(0, fireCount);
@@ -766,7 +832,7 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             // A genuine no-op reload of the SECOND DocB generation.
             host.RequestRender(DocB, Request());
             var pulled = host.View.TryRaiseRetainedHeadingsForConsumerDebt(
-                DocB, consumerHasHeadings: false, transactionGeneration: 0);
+                DocB, consumerHasHeadingDebt: true);
 
             Assert.False(pulled);
             Assert.Equal(0, fireCount);
@@ -779,7 +845,7 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
     // otherwise pass VACUOUSLY -- the mechanism they used to guard left
     // RequestRender entirely. The real reason nothing fires for a
     // ALREADY-populated TOC across a run of width-only fast-path renders is
-    // consumerHasHeadings: true, driven here explicitly after every request.
+    // consumerHasHeadingDebt: false, driven here explicitly after every request.
     [Fact]
     public void FastPathRequestRenderWithOnlyAWidthChangeDoesNotReemitHeadings()
     {
@@ -803,7 +869,7 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             // each other), so Source/ImageSourceResolver/ReadingPreferences
             // never change -- UpdateInputs must return ApplyLivePreferences
             // every time, never None and never Render. The consumer's own TOC
-            // is already populated (consumerHasHeadings: true), matching what
+            // is already populated (consumerHasHeadingDebt: false), matching what
             // ApplicateViewerView.IssueRenderRequest would actually observe.
             for (var width = 700.0; width <= 780.0; width += 20.0)
             {
@@ -811,7 +877,7 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
                     DocA,
                     new ApplicateWebRenderRequest(ReadingPreferences.Default, ImageSourceResolver: null, AvailableContentWidth: width));
                 host.View.TryRaiseRetainedHeadingsForConsumerDebt(
-                    DocA, consumerHasHeadings: true, transactionGeneration: 0);
+                    DocA, consumerHasHeadingDebt: false);
             }
 
             Assert.Equal(0, fireCount);
@@ -841,7 +907,7 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             // Each request changes ONLY the reading preferences' FontSize
             // (Source/AvailableContentWidth/ImageSourceResolver held fixed),
             // so UpdateInputs must return ApplyLivePreferences every time. As
-            // above, consumerHasHeadings: true is the real reason nothing
+            // above, consumerHasHeadingDebt: false is the real reason nothing
             // fires now that the mechanism lives at the pull, not in
             // RequestRender.
             foreach (var fontSize in DistinctFontSizesForNoReemitTest)
@@ -853,7 +919,7 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
                         ImageSourceResolver: null,
                         AvailableContentWidth: 800));
                 host.View.TryRaiseRetainedHeadingsForConsumerDebt(
-                    DocA, consumerHasHeadings: true, transactionGeneration: 0);
+                    DocA, consumerHasHeadingDebt: false);
             }
 
             Assert.Equal(0, fireCount);
