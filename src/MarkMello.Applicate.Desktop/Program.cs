@@ -163,8 +163,14 @@ internal static class Program
                     FileName: Path.GetFileName(canonical),
                     Content: content);
 
-                EarlyDocumentCache.Deposit(canonical, source);
-                ApplicateTrace.DiagMs("startup-pre-window", "perf-doc read-done", $"bytes={content.Length}");
+                // deposited=False means the pre-read ran but bought nothing: the
+                // cache declined because it could not observe the file's identity
+                // and so could never prove these bytes still match it.
+                var deposited = EarlyDocumentCache.Deposit(canonical, source);
+                ApplicateTrace.DiagMs(
+                    "startup-pre-window",
+                    "perf-doc read-done",
+                    $"bytes={content.Length} deposited={deposited}");
                 await PrimeActiveDocumentRenderedBodyCacheAsync(services, source, CancellationToken.None)
                     .ConfigureAwait(false);
             }
@@ -304,10 +310,13 @@ internal static class Program
                     Path: canonical,
                     FileName: Path.GetFileName(canonical),
                     Content: content);
-                EarlyDocumentCache.Deposit(canonical, source);
+                // deposited=False means the pre-read ran but bought nothing: the
+                // cache declined because it could not observe the file's identity
+                // and so could never prove these bytes still match it.
+                var deposited = EarlyDocumentCache.Deposit(canonical, source);
                 ApplicateTrace.Diag(
                     "startup-pre-window",
-                    $"perf-session-prefetch deposit path={canonical} bytes={content.Length}");
+                    $"perf-session-prefetch deposit path={canonical} bytes={content.Length} deposited={deposited}");
                 await PrimeActiveDocumentRenderedBodyCacheAsync(services, source, CancellationToken.None)
                     .ConfigureAwait(false);
             }

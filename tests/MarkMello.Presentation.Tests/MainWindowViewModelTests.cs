@@ -1289,6 +1289,7 @@ public sealed class MainWindowViewModelTests
         var readiness = new ManualRendererReadinessService();
         var harness = CreateHarness(rendererReadiness: readiness);
         harness.CommandLine.ActivationPath = path;
+        WriteStartupDocument(path, "# Startup\n\nbody");
         EarlyDocumentCache.Deposit(path, CreateSource(path, "# Startup\n\nbody"));
 
         var initializeTask = harness.ViewModel.InitializeAsync();
@@ -1314,6 +1315,7 @@ public sealed class MainWindowViewModelTests
         using var renderer = new BlockingMarkdownRenderer();
         var harness = CreateHarness(rendererReadiness: readiness, markdownRenderer: renderer);
         harness.CommandLine.ActivationPath = path;
+        WriteStartupDocument(path, "# Startup\n\nbody");
         EarlyDocumentCache.Deposit(path, CreateSource(path, "# Startup\n\nbody"));
 
         var initializeTask = harness.ViewModel.InitializeAsync();
@@ -1351,6 +1353,7 @@ public sealed class MainWindowViewModelTests
         var readiness = new ManualRendererReadinessService();
         var harness = CreateHarness(rendererReadiness: readiness);
         harness.Loader.Sources[path] = CreateSource(path, "# Initial\n\nbody");
+        WriteStartupDocument(path, "# Initial\n\nbody");
 
         await harness.ViewModel.OpenPathAsync(path);
         await harness.ViewModel.ToggleEditModeCommand.ExecuteAsync(null);
@@ -1818,6 +1821,17 @@ public sealed class MainWindowViewModelTests
 
     private static MarkdownSource CreateSource(string path, string content)
         => new(path, Path.GetFileName(path), content);
+
+    // EarlyDocumentCache stamps the file's identity at deposit and re-checks it
+    // at consume, so a deposit for a path with no file behind it is declined --
+    // it is a state neither real producer can create, since both read the file
+    // before depositing. These fixtures used to deposit against paths that were
+    // only ever identifiers; give them the file the production path implies.
+    private static void WriteStartupDocument(string path, string content)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, content);
+    }
 
     private static AppUpdatePackage CreateUpdatePackage()
         => new(
