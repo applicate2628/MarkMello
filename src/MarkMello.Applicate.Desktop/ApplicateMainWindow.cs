@@ -160,40 +160,87 @@ public sealed class ApplicateMainWindow : MainWindow
         ApplicateTrace.DiagMs("startup-applicate-window", "startup-document-publish-ready");
     }
 
-    private static bool ShouldHoldStartupDocumentReveal()
+    // THE window-side observation of the persisted session, and the single owner of every window-side
+    // read of it. Before this field the hold decision below and the posted bridge restore each read the
+    // store independently and nothing reconciled them: when the first read succeeded and the second
+    // failed, the reveal gate was installed while nothing restored, so the covered window waited on the
+    // compositor's 15s fallback for a document that never arrived
+    // (work-items/bugs/2026-07-26-reveal-gate-held-for-a-document-that-never-arrives.md).
+    //
+    // Three states, all load-bearing -- which is why this is a memoized Task and not a nullable
+    // ApplicateSession? field, a shape that can only express two:
+    //   field null       NOT ATTEMPTED. Command-line activation returns from the hold decision before
+    //                    any read, so the bridge legitimately performs the first one.
+    //   task -> null     ATTEMPTED but NOT OBSERVED (d13). Never re-attempted: a retry IS the second,
+    //                    contradicting read this owner exists to remove.
+    //   task -> session  OBSERVED.
+    // Collapsing "not attempted" into "unobserved" would give command-line startup a synchronous
+    // session read it does not need; collapsing it the other way would let an unobserved read be
+    // retried and disagree with itself.
+    //
+    // UI-thread-only by construction (the constructor and one dispatcher post), so the memoization
+    // needs no lock.
+    private Task<ApplicateSession?>? _startupSessionObservation;
+
+    private Task<ApplicateSession?> ObserveStartupSessionOnce()
+        => _startupSessionObservation ??= LoadStartupSessionOnceAsync();
+
+    /// <summary>
+    /// The one physical window-side session read. Every way it can fail -- no service provider, no
+    /// registration, a throwing store -- normalises to <c>null</c> HERE and only here, so "could not
+    /// observe" has a single owner and a single spelling. It must never coalesce to
+    /// <see cref="ApplicateSession.Empty"/>: d13 keeps observed-empty distinct from could-not-observe,
+    /// and the bridge's refusal to persist over an unobserved baseline is derived from this result.
+    /// <c>ConfigureAwait(false)</c> is load-bearing -- the hold decision below blocks on this task on
+    /// the UI thread, so the continuation must not be posted back to the dispatcher.
+    /// </summary>
+    private static async Task<ApplicateSession?> LoadStartupSessionOnceAsync()
+    {
+        try
+        {
+            var sessionStore = App.Services?.GetService<IApplicateSessionStore>();
+            if (sessionStore is null)
+            {
+                return null;
+            }
+
+            return await sessionStore.LoadAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private bool ShouldHoldStartupDocumentReveal()
     {
         var startupPath = App.Services?.GetService<ICommandLineActivation>()?.GetActivationFilePath();
         if (!string.IsNullOrWhiteSpace(startupPath))
         {
+            // Returns BEFORE ObserveStartupSessionOnce below, deliberately: command-line activation
+            // already knows its document, so this path must not gain a synchronous session read.
+            // The observation stays NOT ATTEMPTED and the bridge performs the first and only one.
             return true;
         }
 
-        var sessionStore = App.Services?.GetService<IApplicateSessionStore>();
-        if (sessionStore is null)
+        var session = ObserveStartupSessionOnce().GetAwaiter().GetResult();
+        if (session is null)
         {
+            // d13: the persisted state could not be observed, so there is no startup document to
+            // hold the reveal for. Explicit rather than `?.` -- it keeps the fail-closed decision
+            // greppable instead of hiding it in operator semantics. Every failure that used to be
+            // caught here (absent registration, throwing store) now arrives as this same null,
+            // normalised by the owner above; a second catch at this height would be a second
+            // owner for one invariant. The two calls that remain below are documented not to
+            // throw -- ApplicateSession.GetStartupDocumentPath is a pure scan of its own list, and
+            // File.Exists returns false rather than raising (the same documented behaviour
+            // JsonApplicateSessionStore.cs:33-40 relies on).
             return false;
         }
 
-        try
-        {
-            var session = sessionStore.LoadAsync().AsTask().GetAwaiter().GetResult();
-            if (session is null)
-            {
-                // d13: the persisted state could not be observed, so there is no startup document to
-                // hold the reveal for. Explicit rather than `?.` -- it matches this method's own
-                // `sessionStore is null` early return above, and keeps the fail-closed decision
-                // greppable instead of hiding it in operator semantics.
-                return false;
-            }
-
-            var restoredStartupPath = session.GetStartupDocumentPath();
-            return !string.IsNullOrWhiteSpace(restoredStartupPath)
-                   && System.IO.File.Exists(restoredStartupPath);
-        }
-        catch
-        {
-            return false;
-        }
+        var restoredStartupPath = session.GetStartupDocumentPath();
+        return !string.IsNullOrWhiteSpace(restoredStartupPath)
+               && System.IO.File.Exists(restoredStartupPath);
     }
 
     private void InstallStartupDocumentRevealGate(MainWindowViewModel viewModel)
@@ -3662,7 +3709,13 @@ public sealed class ApplicateMainWindow : MainWindow
             {
                 try
                 {
-                    observedSession = await sessionStore.LoadAsync().ConfigureAwait(true);
+                    // The SAME window-side observation the constructor's hold decision used. On an
+                    // ordinary launch the constructor already made it, so this consumes that exact
+                    // result and performs no second physical read; when command-line activation
+                    // short-circuited the constructor before any read, this IS the first and only
+                    // one. Either way the two window-side consumers can no longer disagree, which is
+                    // what used to install the reveal gate for a document that then never restored.
+                    observedSession = await ObserveStartupSessionOnce().ConfigureAwait(true);
                     saved = observedSession ?? ApplicateSession.Empty;
                     if (observedSession is null)
                     {

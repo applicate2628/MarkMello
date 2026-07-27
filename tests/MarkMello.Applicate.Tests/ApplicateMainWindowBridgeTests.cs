@@ -376,7 +376,10 @@ public sealed class ApplicateMainWindowBridgeTests
         var compositor = ReadAirspaceCompositorSource();
         var hostAdapters = ReadAirspaceCompositorHostAdaptersSource();
         var constructor = ExtractMethodBody(codeBehind, "public ApplicateMainWindow(");
-        var shouldHold = ExtractMethodBody(codeBehind, "private static bool ShouldHoldStartupDocumentReveal()");
+        var shouldHold = ExtractMethodBody(codeBehind, "private bool ShouldHoldStartupDocumentReveal()");
+        var observe = ExtractMethodBody(
+            codeBehind,
+            "private static async Task<ApplicateSession?> LoadStartupSessionOnceAsync()");
         var gate = ExtractMethodBody(codeBehind, "private void InstallStartupDocumentRevealGate(MainWindowViewModel viewModel)");
 
         Assert.Contains("ShouldHoldStartupDocumentReveal()", constructor, StringComparison.Ordinal);
@@ -384,8 +387,22 @@ public sealed class ApplicateMainWindowBridgeTests
         Assert.Contains("InstallStartupDocumentRevealGate(viewModel);", constructor, StringComparison.Ordinal);
         Assert.Contains("skipInitialViewerDocumentSwitchCover: holdStartupDocumentReveal", constructor, StringComparison.Ordinal);
         Assert.Contains("GetService<ICommandLineActivation>()?.GetActivationFilePath()", shouldHold, StringComparison.Ordinal);
-        Assert.Contains("GetService<IApplicateSessionStore>()", shouldHold, StringComparison.Ordinal);
-        Assert.Contains("sessionStore.LoadAsync().AsTask().GetAwaiter().GetResult()", shouldHold, StringComparison.Ordinal);
+        // Command-line activation must not gain a synchronous session read: the argv branch returns
+        // BEFORE the observation is taken, which leaves it "not attempted" for the bridge to perform
+        // asynchronously. Ordering is the whole content of that constraint, so it is asserted as
+        // ordering rather than as the mere presence of both lines.
+        Assert.True(
+            shouldHold.IndexOf("return true;", StringComparison.Ordinal)
+                < shouldHold.IndexOf("ObserveStartupSessionOnce()", StringComparison.Ordinal),
+            "The command-line branch must return before the session observation is taken.");
+        // The hold decision consumes the memoized window-side observation instead of reading the
+        // store itself. The store resolution and the physical read live in the owner below --
+        // asserted there rather than deleted, so "the hold decision still reads the session" stays
+        // guarded, one indirection further out.
+        Assert.Contains("ObserveStartupSessionOnce().GetAwaiter().GetResult()", shouldHold, StringComparison.Ordinal);
+        Assert.DoesNotContain("LoadAsync(", shouldHold, StringComparison.Ordinal);
+        Assert.Contains("GetService<IApplicateSessionStore>()", observe, StringComparison.Ordinal);
+        Assert.Contains("sessionStore.LoadAsync()", observe, StringComparison.Ordinal);
         Assert.Contains("session.GetStartupDocumentPath()", shouldHold, StringComparison.Ordinal);
         Assert.Contains("System.IO.File.Exists(restoredStartupPath)", shouldHold, StringComparison.Ordinal);
         Assert.Contains("_airspaceCompositor.RegisterStartupSession(", gate, StringComparison.Ordinal);

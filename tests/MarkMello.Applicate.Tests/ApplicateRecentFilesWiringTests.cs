@@ -734,11 +734,20 @@ public sealed class ApplicateRecentFilesWiringTests
     }
 
     /// <summary>
-    /// S2 -- the observation is assigned exactly once, from the store call itself, and never cleared.
-    /// Both halves are load-bearing and neither subsumes the other: a coalesce on the RHS is caught
-    /// only by the negative half, and an assignment from the already-coalesced local only by the
-    /// positive half. The regex's optional <c>??</c> arm makes the compound <c>??=</c> spelling count
-    /// as a third assignment, which is the form that slipped past an earlier version of this guard.
+    /// S2 -- the observation is assigned exactly once, from the window-side observation owner, and
+    /// never cleared. Both halves are load-bearing and neither subsumes the other: a coalesce on the
+    /// RHS is caught only by the negative half, and an assignment from the already-coalesced local
+    /// only by the positive half. The regex's optional <c>??</c> arm makes the compound <c>??=</c>
+    /// spelling count as a third assignment, which is the form that slipped past an earlier version
+    /// of this guard.
+    ///
+    /// <para>The RHS used to be the store call itself. It is now
+    /// <c>ObserveStartupSessionOnce()</c> -- one indirection out, because the bridge and the
+    /// constructor's reveal-hold decision must consume ONE observation rather than read the store
+    /// twice (<c>bugs/2026-07-26-reveal-gate-held-for-a-document-that-never-arrives.md</c>). What
+    /// that owner is allowed to return is guarded by
+    /// <see cref="TheWindowHasExactlyOneSessionLoadCallSite"/>; this test still owns "assigned once,
+    /// uncoalesced, never cleared".</para>
     /// </summary>
     [Fact]
     public void ObservedSessionIsAssignedOnceFromTheStoreAndNeverCleared()
@@ -755,12 +764,43 @@ public sealed class ApplicateRecentFilesWiringTests
 
         Assert.Equal(2, assignments.Count);
         var loadRhs = Assert.Single(assignments, rhs => rhs != "null");
-        Assert.Contains("sessionStore.LoadAsync(", loadRhs, StringComparison.Ordinal);
+        Assert.Contains("ObserveStartupSessionOnce(", loadRhs, StringComparison.Ordinal);
         Assert.DoesNotContain("??", loadRhs, StringComparison.Ordinal);
         Assert.DoesNotContain("ApplicateSession.Empty", loadRhs, StringComparison.Ordinal);
 
         Assert.DoesNotMatch(@"\bout\s+observedSession\b", bridge);
         Assert.DoesNotMatch(@"\bref\s+observedSession\b", bridge);
+    }
+
+    /// <summary>
+    /// S2b -- ONE physical window-side session read exists in the whole code-behind, it lives in the
+    /// memoized owner, and that owner never forges <c>ApplicateSession.Empty</c> out of a failure to
+    /// observe (d13).
+    ///
+    /// <para>The behavioural guard for this is
+    /// <c>ApplicateMainWindowStartupSessionTests.WindowSideStartupObservationIsPerformedExactlyOnceAndRestoresItsDocument</c>,
+    /// which counts real calls against a fake store. This source-text test is the cheap companion
+    /// that fires on the SHAPE -- a third consumer added later gets caught at the call site rather
+    /// than only when someone happens to run the headless window test.</para>
+    ///
+    /// <para><b>Limit.</b> The count keys on the <c>.LoadAsync(</c> spelling. A read routed through a
+    /// delegate or an extension method would not be seen here; the behavioural count test is what
+    /// covers that.</para>
+    /// </summary>
+    [Fact]
+    public void TheWindowHasExactlyOneSessionLoadCallSite()
+    {
+        var codeBehind = ReadMainWindowCodeBehind();
+
+        Assert.Equal(1, CountOccurrences(codeBehind, ".LoadAsync("));
+        Assert.Equal(1, CountOccurrences(codeBehind, "_startupSessionObservation ??="));
+
+        var owner = ExtractMethodBody(
+            codeBehind,
+            "private static async Task<ApplicateSession?> LoadStartupSessionOnceAsync()");
+
+        Assert.Contains("sessionStore.LoadAsync()", owner, StringComparison.Ordinal);
+        Assert.DoesNotContain("ApplicateSession.Empty", owner, StringComparison.Ordinal);
     }
 
     /// <summary>
