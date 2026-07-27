@@ -179,6 +179,45 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     private long _lastHeadingsCaptureGeneration;
     private bool _hasLayoutReady;
     private bool _hasMinimapState;
+    // Retained at ingress (HandleMinimapStateMessage, single writer) so a
+    // consumer carrying reservation debt can pull the last-known minimap state
+    // without asking the renderer again -- see
+    // TryRaiseRetainedMinimapStateForConsumerDebt. Second Shape-B member
+    // (work-items/decisions/2026-07-26-noop-reload-signal-reemit-ownership.md,
+    // option 1 "retain at ingress"), mirroring _lastHeadings / _lastHeadingsSource
+    // / _lastHeadingsCaptureGeneration above.
+    //
+    // Retaining BEFORE the MinimapStateChanged raise is deliberate and
+    // load-bearing for the same reason it is on the heading path: the only
+    // consumer (ApplicateViewerView) subscribes and unsubscribes with its own
+    // host attachment (WireSharedHostEvents / UnwireSharedHostEvents), so a
+    // state posted while edit-preview owns the host is dropped by live delivery
+    // and would otherwise be lost entirely.
+    //
+    // Why option 2 ("make the producer replayable") is NOT used: the renderer's
+    // postMinimapState drops an identical state against its lastPostedMinimapState
+    // ledger, which is a DEDUPLICATION mechanism, not a recovery surface --
+    // removing it is a behavioural change with its own owner and its own gate.
+    // Runtime-proven consequence (probe 2026-07-27, five valid repeats):
+    // minimap-state fires exactly once per session and zero times after a
+    // close-all-tabs + reopen, so nothing but a retained snapshot can settle it.
+    private ApplicateWebMinimapStateEventArgs? _lastMinimapState;
+    private MarkdownSource? _lastMinimapStateSource;
+    // Same defensive-backstop semantics as _lastHeadingsCaptureGeneration (see
+    // its comment for what host-side stamping does and does NOT catch): it
+    // catches an EARLY-captured payload from a superseded render generation for
+    // the same Source, and cannot catch a LATE arrival.
+    //
+    // It carries MORE weight here than it does for headings, because this member
+    // has NO analogue of INV-ORDER to fall back on. ShouldCompleteRender
+    // deliberately does NOT require _hasMinimapState (dropped from the gate
+    // 2026-05-19, see that method's comment), so HasLoadedDocumentForSource being
+    // true does NOT imply this generation's minimap-state has arrived. This field
+    // is therefore the load-bearing currency check on this path, not a backstop:
+    // when the current generation has posted no minimap-state, the retained
+    // payload's generation cannot match and the pull is inert (fail-closed --
+    // exactly the behaviour that exists today, never worse).
+    private long _lastMinimapStateCaptureGeneration;
     private bool _lastLayoutReadyWasCached;
     private bool _requiresPostReadyEnhancements;
     private bool _postReadyEnhancementsComplete = true;
@@ -537,6 +576,121 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             "headings-reemit",
             $"path={source?.Path ?? "(null)"} count={_lastHeadings.Count}");
         HeadingsChanged?.Invoke(this, _lastHeadings);
+        return true;
+    }
+
+    // Second Shape-B member (work-items/decisions/2026-07-26-noop-reload-signal-
+    // reemit-ownership.md). Same split of questions as the heading pull above:
+    // the CALLER answers "do I have debt" (ApplicateViewerView.
+    // HasMinimapReservationDebt over its own _webMinimapReservedWidth -- the host
+    // cannot observe that field), and this method answers "do I hold a payload
+    // valid for this source".
+    //
+    // WRITER ENUMERATION (the decision's obligation on every Shape-B member).
+    // The consumer field _webMinimapReservedWidth has exactly three writers and
+    // no others:
+    //   W1 ApplicateViewerView.SyncFromViewModel, _viewModel is null -> 0. Cannot
+    //      reach a pull: that branch returns before IssueRenderRequest, which
+    //      itself returns early on a null ViewModel.
+    //   W2 ApplicateViewerView.SyncFromViewModel, document-identity transition
+    //      -> 0. REAL DEBT when the renderer still holds the same document with
+    //      the minimap drawn (close all tabs, reopen from Recents: action=None,
+    //      no render, no replay). Guards 2-4 below reject the other case (a
+    //      genuinely different document), where a real render follows and the
+    //      renderer will report afresh.
+    //   W3 ApplicateViewerView.OnHostMinimapStateChanged with Visible=false -> 0.
+    //      A DELIBERATE clear (the minimap was hidden), and the E2-analogue this
+    //      member must never undo.
+    // W3 needs no separate consumer-observable discriminator -- and this is where
+    // the heading analogy legitimately CHANGES SHAPE rather than being copied.
+    // Headings' E2 comes from a different owner (the airspace compositor) than
+    // the retained payload, so the retained list stays non-empty across it and a
+    // consumer-side discriminator (_failureView.IsVisible) is required. Here the
+    // ONLY writer that deliberately empties the consumer is the very message that
+    // writes this retention, so retention and consumer move together: after W3
+    // the retained payload is itself Visible=false, and guard 5 below rejects it.
+    // The discriminator is the retained payload. A consumer-side flag would be a
+    // second place that knows how to recover this state -- exactly what the
+    // decision's one-owner rule forbids.
+    //
+    // CURRENCY. There is no INV-ORDER analogue for this payload: ShouldCompleteRender
+    // does not require _hasMinimapState, so HasLoadedDocumentForSource(source)
+    // does NOT imply this generation posted a minimap-state. Guard 4 (capture
+    // generation) is therefore the load-bearing check, not a backstop, and it
+    // fails closed: no minimap-state for the current generation means no pull.
+    // The residual it cannot close is the same LATE-arrival window the heading
+    // path carries (a payload stamped at ingress with the new generation) --
+    // bounded here by the fact that the value re-raised is the last thing the
+    // renderer said about THIS document under THIS generation, and by the next
+    // live minimap-state overwriting it.
+    //
+    // Synchronous by construction, so it cannot arrive late relative to its own
+    // call.
+    //
+    // GUARD ORDER is chosen for diagnostic signal, not for correctness -- every
+    // guard is a pure read and all of them must pass, so the order is free. The
+    // two high-frequency negatives return SILENTLY and everything past them
+    // logs, because past them the host genuinely holds a positive reservation
+    // while a consumer reports debt: a rare and interesting window worth a
+    // permanent marker. This is the same reasoning the heading pull applies to
+    // its own high-frequency negative ("logging a negative would flood -- this
+    // runs on every render request"), but the frequencies fall differently:
+    // there the populated-collection case short-circuits, here a consumer with
+    // the minimap OFF reports debt on EVERY sync, so the retained-payload check
+    // is the one that must stay quiet.
+    internal bool TryRaiseRetainedMinimapStateForConsumerDebt(
+        MarkdownSource? source,
+        bool consumerHasMinimapDebt)
+    {
+        if (!consumerHasMinimapDebt)
+        {
+            return false;
+        }
+
+        // The minimap analogue of the heading pull's empty-payload guard, and
+        // W3's discriminator: a retained "minimap hidden" state reserves nothing,
+        // so re-raising it could only ever confirm the zero the consumer already
+        // holds -- while wrongly reporting that a debt was settled. Deliberately
+        // FIRST and deliberately SILENT: with the minimap off, the consumer
+        // holds 0 legitimately and so reports debt on every sync, and a diag
+        // line here would be one stderr write per render request forever.
+        if (_lastMinimapState is not { Visible: true, ReservedWidth: > 0 } retained)
+        {
+            return false;
+        }
+
+        if (!HasLoadedDocumentForSource(source))
+        {
+            ApplicateTrace.DiagMs(
+                "diag-gate",
+                "minimap-state-reemit-skipped-not-loaded",
+                $"path={source?.Path ?? "(null)"}");
+            return false;
+        }
+
+        if (!Equals(_lastMinimapStateSource, source))
+        {
+            ApplicateTrace.DiagMs(
+                "diag-gate",
+                "minimap-state-reemit-skipped-source-mismatch",
+                $"path={source?.Path ?? "(null)"} retainedPath={_lastMinimapStateSource?.Path ?? "(null)"}");
+            return false;
+        }
+
+        if (_lastMinimapStateCaptureGeneration != _activeRevealRenderId)
+        {
+            ApplicateTrace.DiagMs(
+                "diag-gate",
+                "minimap-state-reemit-skipped-capture-generation-superseded",
+                $"path={source?.Path ?? "(null)"} retainedGeneration={_lastMinimapStateCaptureGeneration} activeGeneration={_activeRevealRenderId}");
+            return false;
+        }
+
+        ApplicateTrace.DiagMs(
+            "diag-gate",
+            "minimap-state-reemit",
+            $"path={source?.Path ?? "(null)"} reservedWidth={retained.ReservedWidth:F2}");
+        MinimapStateChanged?.Invoke(this, retained);
         return true;
     }
 
@@ -3694,6 +3848,12 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
+        // Retain at ingress, BEFORE the raise below (see the fields' comment):
+        // the payload must survive even when live delivery is dropped because
+        // the viewer is not the currently wired consumer. Single writer.
+        _lastMinimapState = state;
+        _lastMinimapStateSource = Source;
+        _lastMinimapStateCaptureGeneration = _activeRevealRenderId;
         MinimapStateChanged?.Invoke(this, state);
         _hasMinimapState = true;
         CompleteLayoutReady();

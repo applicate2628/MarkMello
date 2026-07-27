@@ -388,6 +388,74 @@ public sealed class ApplicateViewerViewTests
             ApplicateDeferredHeadingUpdater.HasHeadingDebt(hasViewModel, consumerHasHeadings, failureViewVisible));
     }
 
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(-1, true)]
+    [InlineData(0.4, false)]
+    [InlineData(168, false)]
+    [InlineData(double.NaN, true)]
+    public void HasMinimapReservationDebtMatchesAllInputs(
+        double consumerReservedWidth,
+        bool expectedDebt)
+    {
+        // Behavioural guard for the consumer half of the minimap-reservation
+        // Shape-B member (work-items/decisions/2026-07-26-noop-reload-signal-
+        // reemit-ownership.md). The source-text pin below can only prove the
+        // call site wires this predicate in; it cannot prove its truth table.
+        //
+        // Row 0 -> true is the runtime-proven defect: SyncFromViewModel zeroes
+        // _webMinimapReservedWidth on the document-identity transition and a
+        // same-source reopen replays nothing. Row 168 -> false is the ordinary
+        // sync that must NOT churn the column width. Row NaN -> true is the
+        // fail-closed choice the production comment documents (a `<= 0` spelling
+        // would report NO debt there and strand the width); it is unreachable
+        // today, and pinned so the spelling is not "simplified" back.
+        Assert.Equal(
+            expectedDebt,
+            ApplicateViewerView.HasMinimapReservationDebt(consumerReservedWidth));
+    }
+
+    [Fact]
+    public void ViewerPullsRetainedMinimapReservationForConsumerDebtAfterRequestRender()
+    {
+        // TEXT PIN, not a behavioural guard -- same standing as
+        // ViewerPullsRetainedHeadingsForConsumerDebtAfterRequestRender above.
+        // The end-to-end coverage lives in ApplicateSharedWebViewHostRealHostTests
+        // (M1..M7), which drives ApplicateWebMarkdownDocumentView.
+        // TryRaiseRetainedMinimapStateForConsumerDebt directly through host.View
+        // and never calls IssueRenderRequest -- so deleting the production call
+        // below, or moving it before RequestRender, would leave the whole suite
+        // green with nothing catching it.
+        //
+        // The named argument is pinned too (round-5 gate finding F1 on the
+        // heading member: an unpinned argument can silently become a literal
+        // while every behavioural test stays green).
+        var codeBehind = ReadViewerCodeBehind();
+        var issueRender = ExtractMethodBody(codeBehind, "private void IssueRenderRequest()");
+
+        Assert.Contains(
+            "TryRaiseRetainedMinimapStateForConsumerDebt(",
+            issueRender,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "consumerHasMinimapDebt: HasMinimapReservationDebt(_webMinimapReservedWidth)",
+            issueRender,
+            StringComparison.Ordinal);
+        // Pin the left operand's existence as a precondition, or the ordering
+        // assertion below passes vacuously when it is deleted (IndexOf returns
+        // -1, and -1 < a positive index is still true).
+        Assert.Contains(
+            "_sharedHost.RequestRender(_viewModel.Document, request, transactionGeneration: transactionGeneration);",
+            issueRender,
+            StringComparison.Ordinal);
+        Assert.True(
+            issueRender.IndexOf(
+                "_sharedHost.RequestRender(_viewModel.Document, request, transactionGeneration: transactionGeneration);",
+                StringComparison.Ordinal)
+            < issueRender.IndexOf("TryRaiseRetainedMinimapStateForConsumerDebt(", StringComparison.Ordinal),
+            "The consumer-owned minimap debt pull must run AFTER RequestRender (invariant I9) -- UpdateInputs may clear _hasLoadedDocument, which the pull's guard ladder depends on.");
+    }
+
     [Fact]
     public void TocHeadingUpdaterDefersEmptyPayloadsToAvoidCollapseFlash()
     {

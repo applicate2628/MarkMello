@@ -505,6 +505,20 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
                 hasViewModel: true,
                 consumerHasHeadings: _viewModel.HasDocumentHeadings,
                 failureViewVisible: _failureView.IsVisible));
+
+        // Second Shape-B member (work-items/decisions/2026-07-26-noop-reload-
+        // signal-reemit-ownership.md, option 1): _webMinimapReservedWidth was
+        // zeroed by the document-identity transition above, and a same-source
+        // reopen resolves to action=None -- no render, and the renderer's own
+        // dedupe ledger suppresses the only replay that could refill it
+        // (runtime-proven: minimap-state fired once per session, zero times
+        // after reopen). The document column then computes as if the minimap
+        // were absent while it is still drawn. Same invariant I9 as the pull
+        // above: MUST run after RequestRender, whose UpdateInputs may clear
+        // _hasLoadedDocument that the pull's guard ladder depends on.
+        _sharedHost.View.TryRaiseRetainedMinimapStateForConsumerDebt(
+            _viewModel.Document,
+            consumerHasMinimapDebt: HasMinimapReservationDebt(_webMinimapReservedWidth));
     }
 
     private void EnsureSharedHostMounted(bool force = false)
@@ -979,6 +993,32 @@ public sealed class ApplicateViewerView : UserControl, IDisposable
         var desiredContentWidth = _manualContentWidth ?? _viewModel.ContentWidthSetting;
         return ClampManualContentWidth(desiredContentWidth) + _documentHorizontalPadding;
     }
+
+    // Consumer-side debt predicate for the minimap-reservation Shape-B member
+    // (work-items/decisions/2026-07-26-noop-reload-signal-reemit-ownership.md).
+    // Owned here, next to the only field it reads and the only call site that
+    // uses it: this view is the sole subscriber to MinimapStateChanged and the
+    // sole owner of _webMinimapReservedWidth, so there is no second surface to
+    // share a predicate with (unlike ApplicateDeferredHeadingUpdater.HasHeadingDebt,
+    // which exists because viewer AND edit-preview both ask the heading question).
+    // Pure and internal so its truth table is testable without a live host.
+    //
+    // Emptiness IS the whole debt expression here, and the decision's
+    // "emptiness is necessary and NOT sufficient" obligation is discharged on the
+    // HOST side rather than by adding a conjunct: the only writer that
+    // deliberately zeroes this field is OnHostMinimapStateChanged on a
+    // Visible=false report, which is the same message that updates the host's
+    // retained snapshot -- so that case is rejected by the pull's own
+    // retained-reservation guard. Full enumeration:
+    // ApplicateWebMarkdownDocumentView.TryRaiseRetainedMinimapStateForConsumerDebt.
+    //
+    // Written as !(x > 0) rather than x <= 0 on purpose, so the predicate is
+    // total over doubles: a NaN reservation would report NO debt under <= 0 and
+    // strand the column width forever. NaN is unreachable today (TryReadMinimapState
+    // rejects non-finite widths at ingress and both reset sites write literal 0),
+    // so this is a fail-closed choice, not a live defect being handled.
+    internal static bool HasMinimapReservationDebt(double consumerReservedWidth)
+        => !(consumerReservedWidth > 0);
 
     internal static double CalculateAvailableContentWidth(
         double boundsWidth,

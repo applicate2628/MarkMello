@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
 using System.Threading;
@@ -882,6 +883,344 @@ public sealed class ApplicateSharedWebViewHostRealHostTests
             }
 
             Assert.Equal(0, fireCount);
+        });
+    }
+
+    // ----- Minimap-reservation consumer-owned debt pull -------------------------
+    // Second Shape-B member of the no-op-reload state-debt class
+    // (work-items/decisions/2026-07-26-noop-reload-signal-reemit-ownership.md,
+    // option 1 "retain at ingress"). Runtime-proven root (probe 2026-07-27, five
+    // valid repeats): after closing all tabs and reopening the same file from
+    // Recents, the renderer still holds the document with the minimap drawn and
+    // posts NO minimap-state (its lastPostedMinimapState dedupe ledger suppresses
+    // the identical state), while the consumer zeroed its reservation on the
+    // document-identity transition. At a binding clamp ceiling the document
+    // column then widens and its left inset goes to 0, so the text runs into the
+    // strip the minimap still occupies.
+    //
+    // Same harness contract as the heading pull above: the production call site
+    // is ApplicateViewerView.IssueRenderRequest AFTER its own RequestRender
+    // (invariant I9), driven here directly through host.View, with the consumer's
+    // debt reading supplied explicitly.
+
+    private static void PostMinimapState(
+        ApplicateWebMarkdownDocumentView view,
+        bool visible,
+        double reservedWidth)
+        => view.HandleWebMessageBody(JsonSerializer.Serialize(
+            new { type = "minimap-state", visible, reservedWidth }));
+
+    // Same recipe as DriveViewToLoadedAndPainted MINUS its minimap-state post.
+    // Required by the tests below that must leave a generation with NO
+    // minimap-state of its own: the shared helper's `visible = false` post would
+    // itself overwrite the retention, so those tests would be rejected by the
+    // retained-reservation guard and prove nothing about the guard they name.
+    // Sound because ShouldCompleteRender does not require _hasMinimapState --
+    // layout-ready alone completes the reveal (asserted by each caller).
+    private static void DriveViewToLoadedAndPaintedWithoutMinimapState(
+        ApplicateWebMarkdownDocumentView view)
+    {
+        if (!view.HasLoadedDocumentForReveal)
+        {
+            view.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "document-ready" }));
+        }
+        if (!view.HasLoadedDocumentForReveal)
+        {
+            view.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "document-ready" }));
+        }
+        view.HandleWebMessageBody(JsonSerializer.Serialize(new { type = "layout-ready", cached = false }));
+    }
+
+    // M1 -- the end-to-end guard, and the harm this member exists to prevent.
+    // RED without the retain-at-ingress write in HandleMinimapStateMessage, and
+    // RED without the pull itself.
+    //
+    // It also pins the PLACEMENT claim, not only the existence of a retention:
+    // the minimap-state below is posted while NOTHING is subscribed to
+    // MinimapStateChanged (the handler is attached afterwards), so live delivery
+    // is dropped exactly as it is when edit-preview owns the host. The payload
+    // survives only because it is retained BEFORE the raise. Moving the retention
+    // after the raise still passes here -- what fails is deleting it, or gating
+    // it on a consumer being present.
+    [Fact]
+    public void NoOpReloadReemitsTheRetainedMinimapReservationForTheSameSource()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            // The renderer reports a VISIBLE minimap reserving 168 px -- the
+            // width the probe measured on a real build.
+            PostMinimapState(host.View, visible: true, reservedWidth: 168);
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            ApplicateWebMinimapStateEventArgs? reemitted = null;
+            var fireCount = 0;
+            host.View.MinimapStateChanged += (_, state) =>
+            {
+                reemitted = state;
+                fireCount++;
+            };
+
+            // The reopen: same source, same content -> UpdateInputs resolves
+            // None (or ApplyLivePreferences), never Render, so the renderer is
+            // sent nothing and replays nothing. consumerHasMinimapDebt: true is
+            // the consumer's own reading after SyncFromViewModel zeroed
+            // _webMinimapReservedWidth on the document-identity transition.
+            host.RequestRender(DocA, Request());
+            var pulled = host.View.TryRaiseRetainedMinimapStateForConsumerDebt(
+                DocA, consumerHasMinimapDebt: true);
+
+            Assert.True(
+                pulled,
+                "The minimap reservation is LOST while the minimap is still drawn: reopening the same "
+                + "document resolves to a no-op reload, the renderer's dedupe ledger suppresses any "
+                + "minimap-state replay, and nothing refills the consumer's reservation -- so the document "
+                + "column is laid out as if the minimap strip were free and the text runs underneath it.");
+            Assert.True(
+                reemitted is { Visible: true } && Math.Abs(reemitted.ReservedWidth - 168) < 0.001,
+                "The reservation restored must be the 168 px the renderer last reported for this document; "
+                + $"a wrong width mis-lays the column just as a missing one does. Got visible="
+                + $"{reemitted?.Visible.ToString() ?? "(no event)"} reservedWidth="
+                + $"{reemitted?.ReservedWidth.ToString("F2", CultureInfo.InvariantCulture) ?? "(no event)"}.");
+            Assert.True(
+                fireCount == 1,
+                $"The pull must re-emit exactly once per settled debt; fired {fireCount} times.");
+        });
+    }
+
+    // M2 -- the writer-enumeration obligation's W3 case, and the reason this
+    // member needs no consumer-side discriminator field. A minimap the user (or
+    // policy) HID is a DELIBERATE zero, not debt. Because the same message that
+    // zeroes the consumer also writes the host's retained snapshot, the retained
+    // payload itself discriminates: it reads Visible=false, and the pull must
+    // refuse. RED if the retained-reservation guard is dropped.
+    [Fact]
+    public void M2PullIsSuppressedWhenTheRetainedStateSaysTheMinimapIsHidden()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            // Minimap shown, then deliberately hidden -- the second message is
+            // the one that drove the consumer's reservation to 0.
+            PostMinimapState(host.View, visible: true, reservedWidth: 168);
+            PostMinimapState(host.View, visible: false, reservedWidth: 0);
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            var fireCount = 0;
+            host.View.MinimapStateChanged += (_, _) => fireCount++;
+
+            host.RequestRender(DocA, Request());
+            var pulled = host.View.TryRaiseRetainedMinimapStateForConsumerDebt(
+                DocA, consumerHasMinimapDebt: true);
+
+            Assert.True(
+                !pulled && fireCount == 0,
+                "A deliberately HIDDEN minimap must never be resurrected as a reservation: the consumer "
+                + "reads 0 because the renderer said the strip is gone, not because it lost state. "
+                + "Reinstating 168 px here would inset the document away from a strip nothing occupies, "
+                + $"undoing another owner's decision. pulled={pulled} fireCount={fireCount}.");
+        });
+    }
+
+    // M3 -- a consumer that already holds a reservation has no debt, so a repeat
+    // sync must not pull at all. The consumer, not the host, owns this reading.
+    [Fact]
+    public void M3RepeatedSyncsWithAPopulatedReservationDoNotPull()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostMinimapState(host.View, visible: true, reservedWidth: 168);
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            var fireCount = 0;
+            host.View.MinimapStateChanged += (_, _) => fireCount++;
+
+            for (var i = 0; i < 3; i++)
+            {
+                host.RequestRender(DocA, Request());
+                host.View.TryRaiseRetainedMinimapStateForConsumerDebt(
+                    DocA, consumerHasMinimapDebt: false);
+            }
+
+            Assert.True(
+                fireCount == 0,
+                $"A consumer holding a live reservation has no debt to settle; the pull fired {fireCount} "
+                + "times anyway, churning the column width on every ordinary sync.");
+        });
+    }
+
+    // M4 -- inert on a host that has never painted anything: a pull on a
+    // brand-new host must never raise. OUTCOME pin, not an isolation of one
+    // guard: nothing is retained AND nothing is loaded, so the retained-payload
+    // check rejects first and the loaded check would reject too. Both facts are
+    // true of a fresh host and neither is worth engineering apart.
+    [Fact]
+    public void M4PullIsSuppressedWhenTheHostHoldsNoPaintedDocument()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            var pulled = host.View.TryRaiseRetainedMinimapStateForConsumerDebt(
+                DocA, consumerHasMinimapDebt: true);
+
+            Assert.False(pulled);
+        });
+    }
+
+    // M5 -- currency. Unlike the heading path there is no INV-ORDER analogue
+    // here (ShouldCompleteRender deliberately does not require _hasMinimapState),
+    // so the capture-generation check is this member's load-bearing currency
+    // guard, not a backstop. Two page generations for the SAME Source value
+    // (DocB -> DocA -> DocB), with no fresh minimap-state for the second: the
+    // first generation's reservation must not leak forward. RED without the
+    // guard.
+    [Fact]
+    public void M5PullSkipsAReservationCapturedUnderASupersededGeneration()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocB, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostMinimapState(host.View, visible: true, reservedWidth: 168);
+            Assert.True(host.View.HasLoadedDocumentForSource(DocB));
+
+            // Neither of the next two generations posts a minimap-state, so the
+            // retained payload stays DocB-generation-1's VISIBLE 168 px -- the
+            // capture-generation check is the only thing left that can reject it
+            // (the retained-reservation guard cannot, deliberately).
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPaintedWithoutMinimapState(host.View);
+
+            // DocB reopened: a real render, a NEW page generation for the SAME
+            // MarkdownSource value.
+            host.RequestRender(DocB, Request());
+            DriveViewToLoadedAndPaintedWithoutMinimapState(host.View);
+            Assert.True(host.View.HasLoadedDocumentForSource(DocB));
+
+            var fireCount = 0;
+            host.View.MinimapStateChanged += (_, _) => fireCount++;
+
+            host.RequestRender(DocB, Request());
+            var pulled = host.View.TryRaiseRetainedMinimapStateForConsumerDebt(
+                DocB, consumerHasMinimapDebt: true);
+
+            Assert.True(
+                !pulled && fireCount == 0,
+                "A reservation captured under a superseded page generation must not be handed to a later "
+                + "one: Source equality alone cannot tell two generations of the same document apart, and "
+                + "a stale width lays the column out against a minimap that generation never reported. "
+                + $"pulled={pulled} fireCount={fireCount}.");
+        });
+    }
+
+    // M6 -- the retention is a SINGLE writer: a later minimap-state for the same
+    // source replaces the retained payload rather than accumulating beside it,
+    // and the pull hands out the LATEST one.
+    [Fact]
+    public void M6PullReemitsTheLatestRetainedReservationNotAStaleEarlierOne()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostMinimapState(host.View, visible: true, reservedWidth: 168);
+            PostMinimapState(host.View, visible: true, reservedWidth: 210);
+            Assert.True(host.View.HasLoadedDocumentForSource(DocA));
+
+            ApplicateWebMinimapStateEventArgs? reemitted = null;
+            host.View.MinimapStateChanged += (_, state) => reemitted = state;
+
+            host.RequestRender(DocA, Request());
+            var pulled = host.View.TryRaiseRetainedMinimapStateForConsumerDebt(
+                DocA, consumerHasMinimapDebt: true);
+
+            Assert.True(
+                pulled,
+                "The minimap reservation is LOST while the minimap is still drawn -- see "
+                + "NoOpReloadReemitsTheRetainedMinimapReservationForTheSameSource for the harm; this test "
+                + "additionally requires that the reservation restored is the LATEST one.");
+            Assert.True(
+                reemitted is not null && Math.Abs(reemitted.ReservedWidth - 210) < 0.001,
+                "The pull must restore the reservation the renderer reported LAST, not an earlier one; "
+                + $"got {reemitted?.ReservedWidth.ToString("F2", CultureInfo.InvariantCulture) ?? "(no event)"} instead of 210.");
+        });
+    }
+
+    // M7 -- COMPOSITE pin, stated honestly: one document's minimap geometry must
+    // never reach another document's layout. It does NOT isolate the source
+    // guard. A Source change forces a QueueRender, so the capture generation
+    // moves with it and BOTH the source check and the generation check reject
+    // here -- exactly as they do on the heading path, whose source check has the
+    // same property. The source check is kept as a defensive branch (it asserts
+    // payload ownership independently of the generation's lifecycle); this test
+    // pins the OUTCOME, not that branch alone, and is labelled so no later
+    // reader mistakes it for coverage of the guard in isolation.
+    [Fact]
+    public void M7PullIsSuppressedForADifferentSourceThanTheRetainedOne()
+    {
+        RunOnHost(host =>
+        {
+            var warmup = new Panel();
+            var slot = new Panel { IsVisible = true };
+            host.SetWarmupParent(warmup);
+            host.AttachTo(slot, ViewerIntent());
+
+            host.RequestRender(DocA, Request());
+            DriveViewToLoadedAndPainted(host.View);
+            PostMinimapState(host.View, visible: true, reservedWidth: 168);
+
+            // DocB becomes the loaded document, and deliberately gets no
+            // minimap-state of its own -- so only DocA's reservation is retained
+            // (the shared drive helper's visible=false post would have replaced
+            // it and made this test pass for the wrong reason).
+            host.RequestRender(DocB, Request());
+            DriveViewToLoadedAndPaintedWithoutMinimapState(host.View);
+            Assert.True(host.View.HasLoadedDocumentForSource(DocB));
+
+            var fireCount = 0;
+            host.View.MinimapStateChanged += (_, _) => fireCount++;
+
+            host.RequestRender(DocB, Request());
+            var pulled = host.View.TryRaiseRetainedMinimapStateForConsumerDebt(
+                DocB, consumerHasMinimapDebt: true);
+
+            Assert.True(
+                !pulled && fireCount == 0,
+                "One document's minimap reservation must never be applied to another document's layout. "
+                + $"pulled={pulled} fireCount={fireCount}.");
         });
     }
 
