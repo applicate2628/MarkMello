@@ -261,7 +261,17 @@ let liveDocumentBlockElementsStale = true;
 const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
 type ProcessedDocumentCacheEntry = {
   fragment: DocumentFragment;
+  // Top-level children of main.mm-document only. A live diagnostic contract:
+  // the open tab-switch filing's measurements are counted against this exact
+  // meaning, so it stays `nodes.length` and nothing else.
   nodeCount: number;
+  // Whole-subtree element count of the preserved fragment. `nodeCount` scores a
+  // one-table document as 1 against unbounded real size, so it cannot size a
+  // memory budget; this can.
+  elementCount: number;
+  // elementCount x 2 when the entry also carries a minimap snapshot. Observation
+  // only in this commit — nothing reads it to decide an eviction yet.
+  weight: number;
   layoutState: CachedLayoutState;
   headings: HeadingPayload[];
   minimapSnapshot: CachedMinimapSnapshot | null;
@@ -341,6 +351,21 @@ function preserveCurrentProcessedDocument(): void {
   const fragment = document.createDocumentFragment();
   const nodes = Array.from(main.childNodes);
   fragment.append(...nodes);
+  // Cache-weight measurement. OBSERVATION ONLY — nothing below reads these
+  // numbers to evict; the count cap is still the only eviction rule. They exist
+  // so a memory budget can be sized from real documents instead of a guess.
+  //
+  // The walk runs here, on the now-DETACHED fragment, with a universal
+  // selector: pure tree traversal that forces neither layout nor style
+  // resolution. One walk only — `weight` is derived from its result further
+  // down, once the minimap snapshot exists.
+  //
+  // Timed because the walk lands on the very switch-away path this work exists
+  // to shorten, and the design left its CPU cost explicitly unmeasured. This is
+  // a measurement, not a schedule: nothing defers a decision on it.
+  const elementWalkStartMs = performance.now();
+  const elementCount = fragment.querySelectorAll("*").length;
+  const elementWalkMs = performance.now() - elementWalkStartMs;
   // Warm-up sets content-visibility:visible on blocks; do NOT persist that into
   // the processed-document cache. A cache-hit restore re-inserts the cached
   // nodes and a tab-switch back would then force a full-document synchronous
@@ -358,10 +383,19 @@ function preserveCurrentProcessedDocument(): void {
     documentHeight: minimapDocumentHeight,
     lastPostedState: lastPostedMinimapState,
   });
+  // An entry that also carries a minimap snapshot holds a second complete
+  // structural duplicate of the same tree: `cloneDocumentForMinimap` deep-copies
+  // `.mm-document`, `sanitizeMinimapCloneTree` only edits attributes and never
+  // removes nodes, and `captureMinimapSnapshot` (minimapCache.ts) deep-copies
+  // that again into the snapshot fragment. So the snapshot doubles the entry's
+  // real cost.
+  const weight = elementCount * (minimapSnapshot ? 2 : 1);
   processedDocumentCache.delete(cacheKey);
   processedDocumentCache.set(cacheKey, {
     fragment,
     nodeCount: nodes.length,
+    elementCount,
+    weight,
     layoutState: { ...lastKnownLayoutState },
     headings: lastExtractedHeadings.map(cloneHeadingPayload),
     minimapSnapshot,
@@ -374,9 +408,20 @@ function preserveCurrentProcessedDocument(): void {
     processedDocumentCache.delete(oldest);
   }
   currentDocumentCacheKey = null;
+  // Summed after eviction, so it describes the cache that is actually live.
+  let totalWeight = 0;
+  for (const entry of processedDocumentCache.values()) {
+    totalWeight += entry.weight;
+  }
+  // Additive: `entries` and `nodeCount` keep their existing meaning because the
+  // open filing's measurements are read against them.
   postPerfMark("mm-document-cache-store", {
     entries: processedDocumentCache.size,
     nodeCount: nodes.length,
+    elementCount,
+    weight,
+    totalWeight,
+    elementWalkMs,
   });
 }
 

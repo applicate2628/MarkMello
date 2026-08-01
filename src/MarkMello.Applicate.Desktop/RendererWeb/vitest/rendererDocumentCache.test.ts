@@ -39,6 +39,20 @@ function rendererCacheKey(html: string, theme: "light" | "dark" | "classic-white
   return `${theme}|${html.length}|${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
+// `perf-mark.detail` is a JSON *string* by IPC contract
+// (contract/ipc-contract.json rendererMessageShapes/perf-mark), so the fields
+// inside it are not part of that contract and are read back by parsing.
+function findCacheStoreDetail(messages: unknown[]): Record<string, unknown> {
+  const mark = messages.find((message): message is { type: "perf-mark"; name: string; detail?: string } =>
+    typeof message === "object"
+    && message !== null
+    && (message as { type?: unknown }).type === "perf-mark"
+    && (message as { name?: unknown }).name === "mm-document-cache-store");
+  expect(mark).toBeTruthy();
+  expect(typeof mark!.detail).toBe("string");
+  return JSON.parse(mark!.detail!) as Record<string, unknown>;
+}
+
 beforeEach(() => {
   delete (window as unknown as { chrome?: unknown }).chrome;
 });
@@ -122,6 +136,152 @@ describe("renderer document cache", () => {
     load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
 
     expect(heightReads).toBe(0);
+  });
+
+  it("reads no geometry anywhere in the preserved fragment subtree", async () => {
+    // The neighbouring guard above stubs offsetHeight on DIRECT CHILDREN of
+    // main.mm-document only. A forced layout inside the cache-weight walk would
+    // land on a DESCENDANT and that guard would never see it. This one covers
+    // the whole subtree the fragment carries, and four read surfaces.
+    vi.stubGlobal("requestIdleCallback", vi.fn(() => 1));
+    const { load } = await loadRendererWithMessages();
+    const firstHtml =
+      "<h1 id='first'>First</h1>"
+      + "<table><tbody><tr><td><span id='deep'>cell</span></td><td><em>other</em></td></tr></tbody></table>";
+    const secondHtml = "<h1 id='second'>Second</h1><p>other document</p>";
+
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    const subtree = Array.from(main.querySelectorAll<HTMLElement>("*"));
+    // Fixture sanity: without nesting this test would silently degrade into a
+    // duplicate of the direct-children guard.
+    expect(subtree.length).toBeGreaterThan(main.children.length);
+    expect(document.querySelector("#deep")).not.toBeNull();
+
+    const reads: string[] = [];
+    for (const node of subtree) {
+      for (const property of ["offsetHeight", "offsetTop", "scrollHeight"] as const) {
+        Object.defineProperty(node, property, {
+          configurable: true,
+          get: () => {
+            reads.push(`${node.tagName}.${property}`);
+            return 40;
+          },
+        });
+      }
+      Object.defineProperty(node, "getBoundingClientRect", {
+        configurable: true,
+        value: () => {
+          reads.push(`${node.tagName}.getBoundingClientRect`);
+          return {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            top: 0,
+            right: 1,
+            bottom: 1,
+            left: 0,
+            toJSON: () => ({}),
+          } as DOMRect;
+        },
+      });
+    }
+
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+
+    // Asserted synchronously: the preserve runs inside the load above, and
+    // later warm-up work legitimately measures geometry.
+    expect(reads).toEqual([]);
+  });
+
+  it("reports cache weight on the store mark without changing what nodeCount means", async () => {
+    const { load, messages } = await loadRendererWithMessages();
+    const firstHtml =
+      "<h1 id='first'>First</h1>"
+      + "<table><tbody><tr><td><span>cell</span></td><td><em>other</em></td></tr></tbody></table>";
+    const secondHtml = "<h1 id='second'>Second</h1><p>other document</p>";
+
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    const expectedNodeCount = main.childNodes.length;
+    const expectedElementCount = main.querySelectorAll("*").length;
+    // The two must differ, or the test cannot tell them apart — which is the
+    // whole reason elementCount exists alongside nodeCount.
+    expect(expectedElementCount).toBeGreaterThan(expectedNodeCount);
+
+    messages.length = 0;
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+    await letPipelineSettle();
+
+    const detail = findCacheStoreDetail(messages);
+    // nodeCount is a live diagnostic contract read by the open tab-switch
+    // filing; elementCount is additive and must not have redefined it.
+    expect(detail.nodeCount).toBe(expectedNodeCount);
+    expect(detail.entries).toBe(1);
+    expect(detail.elementCount).toBe(expectedElementCount);
+    // No minimap snapshot in this fixture, so weight is undoubled.
+    expect(detail.weight).toBe(expectedElementCount);
+    expect(detail.totalWeight).toBe(detail.weight);
+    expect(typeof detail.elementWalkMs).toBe("number");
+    expect(Number.isFinite(detail.elementWalkMs as number)).toBe(true);
+    expect(detail.elementWalkMs as number).toBeGreaterThanOrEqual(0);
+  });
+
+  it("doubles the reported weight of an entry that also carries a minimap snapshot", async () => {
+    const root = document.documentElement;
+    Object.defineProperty(root, "scrollHeight", { configurable: true, value: 2400 });
+    Object.defineProperty(root, "clientHeight", { configurable: true, value: 800 });
+
+    const { load, messages } = await loadRendererWithMessages();
+    const firstHtml =
+      "<h1 id='first'>First</h1>"
+      + "<table><tbody><tr><td><span>cell</span></td><td><em>other</em></td></tr></tbody></table>";
+    const secondHtml = "<h1 id='second'>Second</h1><p>other document</p>";
+
+    load({
+      type: "reading-preferences",
+      fontFamily: "serif",
+      fontSize: 16,
+      lineHeight: 1.6,
+      maxWidth: 820,
+      minMaxWidth: 320,
+      minimapMode: "on",
+      viewerChromeEnabled: true,
+      documentScrollEnabled: true,
+      wheelProxyEnabled: true,
+      widthResizerVisibility: "on-hover",
+      viewportWidth: 1200,
+      viewportHeight: 800,
+    });
+    load({
+      type: "minimap-policy",
+      minimapPolicy: {
+        minHostWidth: 0,
+        minScrollableViewportRatio: 1,
+        maxDetailedDocumentHeight: 10000,
+      },
+    });
+
+    load({ type: "load-document", html: firstHtml, documentName: "first.md", theme: "light", hasMermaid: false, renderId: 1 });
+    await letPipelineSettle();
+
+    const main = document.querySelector<HTMLElement>("main.mm-document")!;
+    const expectedElementCount = main.querySelectorAll("*").length;
+
+    messages.length = 0;
+    load({ type: "load-document", html: secondHtml, documentName: "second.md", theme: "light", hasMermaid: false, renderId: 2 });
+    await letPipelineSettle();
+
+    const detail = findCacheStoreDetail(messages);
+    expect(detail.elementCount).toBe(expectedElementCount);
+    // The snapshot is a second complete structural duplicate of the same tree,
+    // so the entry costs twice its element count.
+    expect(detail.weight).toBe(expectedElementCount * 2);
   });
 
   it("keeps the processed-document cache owner clone-free and timer-free", () => {

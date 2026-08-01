@@ -2009,6 +2009,9 @@
     const fragment = document.createDocumentFragment();
     const nodes = Array.from(main.childNodes);
     fragment.append(...nodes);
+    const elementWalkStartMs = performance.now();
+    const elementCount = fragment.querySelectorAll("*").length;
+    const elementWalkMs = performance.now() - elementWalkStartMs;
     for (const node of nodes) {
       if (node instanceof Element) {
         node.classList.remove("mm-warmed");
@@ -2021,10 +2024,13 @@
       documentHeight: minimapDocumentHeight,
       lastPostedState: lastPostedMinimapState
     });
+    const weight = elementCount * (minimapSnapshot ? 2 : 1);
     processedDocumentCache.delete(cacheKey);
     processedDocumentCache.set(cacheKey, {
       fragment,
       nodeCount: nodes.length,
+      elementCount,
+      weight,
       layoutState: { ...lastKnownLayoutState },
       headings: lastExtractedHeadings.map(cloneHeadingPayload),
       minimapSnapshot
@@ -2037,9 +2043,17 @@
       processedDocumentCache.delete(oldest);
     }
     currentDocumentCacheKey = null;
+    let totalWeight = 0;
+    for (const entry of processedDocumentCache.values()) {
+      totalWeight += entry.weight;
+    }
     postPerfMark("mm-document-cache-store", {
       entries: processedDocumentCache.size,
-      nodeCount: nodes.length
+      nodeCount: nodes.length,
+      elementCount,
+      weight,
+      totalWeight,
+      elementWalkMs
     });
   }
   function applyViewerChromeState() {
