@@ -578,11 +578,25 @@ img {
   text-align: left;
   vertical-align: top;
   white-space: normal;
-  /* `anywhere` (not `break-word`) so soft-wrap opportunities count toward the
-     cell's min-content width — that lets an auto-layout table actually shrink to
-     max-width:100% (the readable column / resizer width) and reflow, instead of
-     overflowing past it when the per-column min-content sum is too wide. */
-  overflow-wrap: anywhere;
+  /* `break-word`, NOT `anywhere`. `anywhere`'s soft-wrap opportunities count
+     toward min-content, which let the table shrink below its word-safe width by
+     breaking prose MID-WORD — measured at 1.54 characters per line on the
+     reported document. Operator ruling 2026-08-01: word integrity beats avoiding
+     a scrollbar. `break-word` breaks only at legal UAX #14 points, so words and
+     identifiers (a DOI, a path) stay whole; a table that then cannot fit scrolls
+     inside .mm-table-scroll instead.
+
+     Accepted debt, measured rather than assumed: a clean 5-column prose table
+     holding NO code spans gains a horizontal scrollbar (scrollWidth 881 -> 948)
+     — caused by THIS declaration alone, not by the cell-code change below.
+
+     Reading `white-space: normal` above: on the live reading surface that
+     declaration is DEAD. Cells are contenteditable="plaintext-only", so Chromium
+     computes white-space-collapse: preserve => `pre-wrap`. Anything inheriting
+     from a cell therefore gets `pre-wrap`, not `normal` — geometrically
+     identical on both measured documents, but it matters for content carrying
+     runs of whitespace. */
+  overflow-wrap: break-word;
 }
 
 .mm-document th {
@@ -621,9 +635,18 @@ img {
   background: color-mix(in srgb, var(--mm-editable-tint) 8%, transparent);
 }
 
-.mm-document table code {
-  white-space: nowrap;
-}
+/* Inline code in table cells deliberately carries NO `white-space: nowrap`.
+   6481d02 kept it as a CONDITIONAL decision, in its own words "for now (prose
+   drives the width in the reported docs)" — and the 2026-07-27 measurement
+   falsified exactly that premise: in the reported document CODE drove the width,
+   demanding 1148 px of an available 881 and yielding none of it, which starved
+   the prose columns to ~39 px. Removing it is inseparable from `break-word`
+   above: with `anywhere` still in force, code would inherit it and identifiers
+   would shred too.
+
+   NOT covered here: `.math-inline` below and KaTeX's `.katex .base`
+   { white-space: nowrap } are the third and fourth sites of this same defect
+   class. A cell containing inline math keeps the old pathology. */
 
 /* GFM task-list checkboxes (- [ ] / - [x]). The list drops its bullet and
    reserves a small left gutter; the checkbox is pulled into that gutter and the
