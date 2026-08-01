@@ -338,7 +338,7 @@
       deps.notifyDocumentCacheMiss?.(message.renderId, message.cacheKey ?? void 0);
       return;
     }
-    deps.preserveCurrentDocumentCache?.();
+    deps.preserveCurrentDocumentCache?.(message.cacheKey);
     deps.cancelCurrentMathController();
     deps.resetModuleGlobals();
     if (message.theme) {
@@ -1951,7 +1951,8 @@
   var liveDocumentBlockElements = [];
   var liveDocumentBlockElementIndex = createBlockElementIndex([]);
   var liveDocumentBlockElementsStale = true;
-  var PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
+  var PROCESSED_DOCUMENT_CACHE_WEIGHT_BUDGET = 5e5;
+  var PROCESSED_DOCUMENT_CACHE_MAX_ENTRIES = 12;
   function cloneHeadingPayload(heading) {
     return {
       ...heading,
@@ -1997,7 +1998,7 @@
   function setCurrentProcessedDocumentCacheKey(cacheKey) {
     currentDocumentCacheKey = cacheKey;
   }
-  function preserveCurrentProcessedDocument() {
+  function preserveCurrentProcessedDocument(pinnedIncomingKey) {
     if (!currentDocumentCacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
       return;
     }
@@ -2035,26 +2036,52 @@
       headings: lastExtractedHeadings.map(cloneHeadingPayload),
       minimapSnapshot
     });
-    while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
-      const oldest = processedDocumentCache.keys().next().value;
-      if (oldest === void 0) {
-        break;
-      }
-      processedDocumentCache.delete(oldest);
-    }
+    const { totalWeight, evicted, overBudget } = evictProcessedDocumentCacheEntries(
+      processedDocumentCache,
+      cacheKey,
+      pinnedIncomingKey
+    );
     currentDocumentCacheKey = null;
-    let totalWeight = 0;
-    for (const entry of processedDocumentCache.values()) {
-      totalWeight += entry.weight;
-    }
     postPerfMark("mm-document-cache-store", {
       entries: processedDocumentCache.size,
       nodeCount: nodes.length,
       elementCount,
       weight,
       totalWeight,
-      elementWalkMs
+      elementWalkMs,
+      evicted,
+      overBudget
     });
+  }
+  function evictProcessedDocumentCacheEntries(cache, justStoredKey, pinnedIncomingKey) {
+    let totalWeight = 0;
+    for (const entry of cache.values()) {
+      totalWeight += entry.weight;
+    }
+    let evicted = 0;
+    while (totalWeight > PROCESSED_DOCUMENT_CACHE_WEIGHT_BUDGET || cache.size > PROCESSED_DOCUMENT_CACHE_MAX_ENTRIES) {
+      let victimKey;
+      let victimWeight = 0;
+      for (const [key, entry] of cache) {
+        if (key === justStoredKey || key === pinnedIncomingKey) {
+          continue;
+        }
+        victimKey = key;
+        victimWeight = entry.weight;
+        break;
+      }
+      if (victimKey === void 0) {
+        break;
+      }
+      cache.delete(victimKey);
+      totalWeight -= victimWeight;
+      evicted++;
+    }
+    return {
+      totalWeight,
+      evicted,
+      overBudget: totalWeight > PROCESSED_DOCUMENT_CACHE_WEIGHT_BUDGET
+    };
   }
   function applyViewerChromeState() {
     document.documentElement.dataset.mmChrome = viewerChromeEnabled ? "on" : "off";

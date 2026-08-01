@@ -258,7 +258,30 @@ let lastPostedPreviewSourceLine: number | null = null;
 let liveDocumentBlockElements: HTMLElement[] = [];
 let liveDocumentBlockElementIndex: BlockElementIndex = createBlockElementIndex([]);
 let liveDocumentBlockElementsStale = true;
-const PROCESSED_DOCUMENT_CACHE_LIMIT = 4;
+// Memory budget for the processed-document cache, in `weight` units
+// (elementCount, doubled when the entry also carries a minimap snapshot).
+//
+// Sized from a measured 7-document session on real documents, which recorded 28
+// stores, 16 misses and ZERO hits against the count cap of 4 this replaces:
+// seven documents against a capacity of four means every revisit pays a full
+// rebuild (~1354 ms on a matched MISS/HIT pair).
+//   - the whole session weighs 489 548, so 500 000 holds all of it at once and
+//     revisit misses go to zero;
+//   - it stays under the ceiling rule `<= 4 x heaviest document`
+//     (4 x 242 538 = 970 152). The cap it replaces already admitted four entries
+//     of UNBOUNDED size, so a budget at roughly half that ceiling cannot regress
+//     memory against what ships today.
+// PER-HOST. Measurement showed strict alternation across all 28 stores: only the
+// minimap host doubles (weight = elementCount x 2), the second host x 1. The same
+// number therefore buys half as many documents on the minimap host, and is sized
+// for that host.
+const PROCESSED_DOCUMENT_CACHE_WEIGHT_BUDGET = 500_000;
+// The budget alone cannot bound entry COUNT. The cache key embeds the theme
+// (createProcessedDocumentCacheKey), so every theme switch orphans a whole
+// generation of entries; cheap ones would accumulate under budget forever in an
+// app-lifetime host. The two caps bound different failure modes and neither
+// replaces the other.
+const PROCESSED_DOCUMENT_CACHE_MAX_ENTRIES = 12;
 type ProcessedDocumentCacheEntry = {
   fragment: DocumentFragment;
   // Top-level children of main.mm-document only. A live diagnostic contract:
@@ -269,8 +292,9 @@ type ProcessedDocumentCacheEntry = {
   // one-table document as 1 against unbounded real size, so it cannot size a
   // memory budget; this can.
   elementCount: number;
-  // elementCount x 2 when the entry also carries a minimap snapshot. Observation
-  // only in this commit — nothing reads it to decide an eviction yet.
+  // elementCount x 2 when the entry also carries a minimap snapshot. This is the
+  // unit both cache caps are denominated in, and what
+  // evictProcessedDocumentCacheEntries sums and decrements.
   weight: number;
   layoutState: CachedLayoutState;
   headings: HeadingPayload[];
@@ -337,7 +361,11 @@ function setCurrentProcessedDocumentCacheKey(cacheKey: string | null): void {
   currentDocumentCacheKey = cacheKey;
 }
 
-function preserveCurrentProcessedDocument(): void {
+// `pinnedIncomingKey` is the cache key of the document the caller is switching
+// TO, and is never evicted by the pass below. See
+// evictProcessedDocumentCacheEntries for why the owner is told rather than the
+// caller reordered.
+function preserveCurrentProcessedDocument(pinnedIncomingKey?: string | null): void {
   if (!currentDocumentCacheKey || !initialRenderPipelineCompleted || !postReadyEnhancementsCompleted) {
     return;
   }
@@ -351,9 +379,8 @@ function preserveCurrentProcessedDocument(): void {
   const fragment = document.createDocumentFragment();
   const nodes = Array.from(main.childNodes);
   fragment.append(...nodes);
-  // Cache-weight measurement. OBSERVATION ONLY — nothing below reads these
-  // numbers to evict; the count cap is still the only eviction rule. They exist
-  // so a memory budget can be sized from real documents instead of a guess.
+  // Cache-weight measurement. The eviction pass below is denominated in it, so
+  // this walk is load-bearing rather than diagnostic.
   //
   // The walk runs here, on the now-DETACHED fragment, with a universal
   // selector: pure tree traversal that forces neither layout nor style
@@ -400,21 +427,17 @@ function preserveCurrentProcessedDocument(): void {
     headings: lastExtractedHeadings.map(cloneHeadingPayload),
     minimapSnapshot,
   });
-  while (processedDocumentCache.size > PROCESSED_DOCUMENT_CACHE_LIMIT) {
-    const oldest = processedDocumentCache.keys().next().value;
-    if (oldest === undefined) {
-      break;
-    }
-    processedDocumentCache.delete(oldest);
-  }
+  // Synchronous at the store site. `totalWeight` comes back describing the cache
+  // that is actually live, so nothing here re-sums it.
+  const { totalWeight, evicted, overBudget } = evictProcessedDocumentCacheEntries(
+    processedDocumentCache,
+    cacheKey,
+    pinnedIncomingKey);
   currentDocumentCacheKey = null;
-  // Summed after eviction, so it describes the cache that is actually live.
-  let totalWeight = 0;
-  for (const entry of processedDocumentCache.values()) {
-    totalWeight += entry.weight;
-  }
   // Additive: `entries` and `nodeCount` keep their existing meaning because the
-  // open filing's measurements are read against them.
+  // open filing's measurements are read against them. `evicted` and `overBudget`
+  // are new — `overBudget` is how a knowingly-exceeded budget (a single document
+  // heavier than the whole budget) is disclosed rather than hidden.
   postPerfMark("mm-document-cache-store", {
     entries: processedDocumentCache.size,
     nodeCount: nodes.length,
@@ -422,7 +445,70 @@ function preserveCurrentProcessedDocument(): void {
     weight,
     totalWeight,
     elementWalkMs,
+    evicted,
+    overBudget,
   });
+}
+
+// The eviction rule, and the single owner of both caps. Called synchronously at
+// the store site: NO TIMERS, nothing here defers a decision.
+//
+// Two keys are non-evictable. `justStoredKey` is the entry the caller has just
+// stored — evicting it would make the store a no-op. `pinnedIncomingKey` is the
+// key the caller is about to fetch: applyLoadDocument preserves BEFORE it looks
+// the incoming key up (loadDocument.ts), so without the pin a budget-driven pass
+// can delete the very entry the next line asks for. The owner is TOLD what it
+// may not evict rather than depending on call order in another module.
+//
+// The one sum of `weight` in this whole path happens here and is then maintained
+// by decrement, so the returned total always describes the cache that is
+// actually live once eviction has finished.
+function evictProcessedDocumentCacheEntries<TEntry extends { weight: number }>(
+  cache: Map<string, TEntry>,
+  justStoredKey: string,
+  pinnedIncomingKey: string | null | undefined,
+): { totalWeight: number; evicted: number; overBudget: boolean } {
+  let totalWeight = 0;
+  for (const entry of cache.values()) {
+    totalWeight += entry.weight;
+  }
+
+  let evicted = 0;
+  while (totalWeight > PROCESSED_DOCUMENT_CACHE_WEIGHT_BUDGET
+    || cache.size > PROCESSED_DOCUMENT_CACHE_MAX_ENTRIES) {
+    let victimKey: string | undefined;
+    let victimWeight = 0;
+    // Map iterates in insertion order and every store re-inserts its key, so
+    // the first admissible entry is the least recently stored.
+    for (const [key, entry] of cache) {
+      if (key === justStoredKey || key === pinnedIncomingKey) {
+        continue;
+      }
+
+      victimKey = key;
+      victimWeight = entry.weight;
+      break;
+    }
+
+    // Termination guard: nothing left that may be evicted. A single document
+    // heavier than the whole budget lands here and is KEPT, knowingly over
+    // budget. Refusing to store it would make heavy documents permanently
+    // uncacheable — strictly worse than the count cap this replaces, which
+    // always admitted at least one entry regardless of its size.
+    if (victimKey === undefined) {
+      break;
+    }
+
+    cache.delete(victimKey);
+    totalWeight -= victimWeight;
+    evicted++;
+  }
+
+  return {
+    totalWeight,
+    evicted,
+    overBudget: totalWeight > PROCESSED_DOCUMENT_CACHE_WEIGHT_BUDGET,
+  };
 }
 
 function applyViewerChromeState(): void {
@@ -6109,8 +6195,11 @@ function setFullRenderBarrierFailureForTesting(reason: unknown | null): void {
 }
 
 export {
+  PROCESSED_DOCUMENT_CACHE_MAX_ENTRIES,
+  PROCESSED_DOCUMENT_CACHE_WEIGHT_BUDGET,
   captureRenderedHtmlSnapshot,
   enqueueLazyMermaidRender,
+  evictProcessedDocumentCacheEntries,
   getMermaidLifecycleSnapshotForTesting,
   handlePrepareForExport,
   handleCaptureRenderedHtml,

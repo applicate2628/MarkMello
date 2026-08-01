@@ -350,12 +350,18 @@ describe("prepare-for-export full-render barrier", () => {
     const barrierStart = source.indexOf("async function driveFullRenderBarrier(");
     const barrierEnd = source.indexOf("async function handlePrepareForExport(", barrierStart);
     const barrier = source.slice(barrierStart, barrierEnd);
-    const cacheStart = source.indexOf("function preserveCurrentProcessedDocument()");
+    // Anchored on the name plus its opening paren, NOT on an empty "()": the
+    // preserve function takes the non-evictable incoming cache key, and an
+    // anchor that pins the arity silently slices an empty region on the next
+    // signature change instead of guarding anything.
+    const cacheStart = source.indexOf("function preserveCurrentProcessedDocument(");
     const cacheEnd = source.indexOf("function applyViewerChromeState", cacheStart);
     const cacheOwner = source.slice(cacheStart, cacheEnd);
 
     expect(barrierStart).toBeGreaterThanOrEqual(0);
     expect(barrierEnd).toBeGreaterThan(barrierStart);
+    expect(cacheStart).toBeGreaterThanOrEqual(0);
+    expect(cacheEnd).toBeGreaterThan(cacheStart);
     expect(barrier).toContain("await waitForProgressiveAppendFinal()");
     expect(barrier).toContain("await waitForDocumentWarmup()");
     expect(barrier).toContain("await trackMermaidRenderCall(");

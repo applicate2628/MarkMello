@@ -29,7 +29,9 @@ export type LoadDocumentDeps = {
   ensureChromeNodes: (useCachedDocumentState?: boolean) => void;
   applyTheme: (theme: "light" | "dark" | "classic-white") => void;
   debugLog: (text: string) => void;
-  preserveCurrentDocumentCache?: () => void;
+  // Takes the key of the document being switched TO, which the cache owner must
+  // not evict while storing the outgoing one. See the call site below.
+  preserveCurrentDocumentCache?: (pinnedKey?: string | null) => void;
   getCachedDocumentFragment?: (cacheKey: string) => DocumentFragment | undefined;
   setCurrentDocumentCacheKey?: (cacheKey: string | null) => void;
   restoreCachedScrollPosition?: () => void;
@@ -70,7 +72,14 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
     return;
   }
 
-  deps.preserveCurrentDocumentCache?.();
+  // The store below evicts, and the lookup at the `!restoreOnly` branch further
+  // down asks for `message.cacheKey` AFTER it. Hand the incoming key over as
+  // non-evictable so a store can never destroy the entry this same load is about
+  // to fetch. Passed unconditionally: on either path the incoming key is the one
+  // document this load must not lose. Deliberately NOT fixed by reordering the
+  // two calls — that would leave the invariant implicit in the call order of a
+  // module already carrying the ordering-sensitivity note above.
+  deps.preserveCurrentDocumentCache?.(message.cacheKey);
   deps.cancelCurrentMathController();
   deps.resetModuleGlobals();
   if (message.theme) {
