@@ -1268,6 +1268,56 @@ function ensureDocumentWarmup(): void {
   window.requestAnimationFrame(warmupSlice);
 }
 
+// "Post-ready enhancements are complete" and "it is safe to warm the whole
+// document" are two DIFFERENT facts, and conflating them is what made a cache
+// HIT cost more than a MISS on a heavy document.
+//
+// `postReadyEnhancementsCompleted` means "there is nothing left to enhance".
+// `warmupAllowed` means "this document reached a first settled paint, so
+// warming the rest no longer steals anyone's frame" — a REACHED state, not an
+// asserted one. The fresh path reaches the two many frames apart, so raising
+// them together there is harmless. The cache-restore path asserts all of its
+// postconditions in one synchronous burst on the same task as the DOM attach,
+// so raising them together armed the warm-up BEFORE first paint — and the two
+// frames the host's reveal cover is waiting on (the double rAF in
+// loadDocument.ts, the only owner of "first settled paint of this load") then
+// each carried a full-document forced layout, because every warmupSlice calls
+// findTopVisibleBlockIndex plus two getBoundingClientRect (a read class this
+// repository measures as a full layout flush, ~856 ms on the heaviest doc).
+//
+// So the restore path defers only the ARMING, to that same double rAF. It does
+// NOT defer postReadyEnhancementsCompleted: preserveCurrentProcessedDocument
+// returns early while that flag is false, so deferring it would stop documents
+// being cached at all when switched away quickly.
+function allowDocumentWarmup(): void {
+  warmupAllowed = true;
+  ensureDocumentWarmup();
+}
+
+// Keyed by BOTH the load generation and the renderId. resetModuleGlobalsFor-
+// LoadDocument clears this and bumps the generation on every load, but that
+// alone is not enough: load A's outer rAF can already have fired when load B
+// arrives, leaving A's INNER rAF to run one frame later against B's freshly
+// stored arm. Matching the renderId too keeps a superseded switch from arming
+// the warm-up of the document that replaced it.
+let pendingWarmupArm: { generation: number; renderId: number | undefined } | null = null;
+
+function armDocumentWarmupAfterFirstPaint(renderId: number | undefined): void {
+  pendingWarmupArm = { generation: initialRenderPipelineGeneration, renderId };
+}
+
+function consumePendingWarmupArm(renderId: number | undefined): void {
+  const pending = pendingWarmupArm;
+  if (pending === null
+    || pending.generation !== initialRenderPipelineGeneration
+    || pending.renderId !== renderId) {
+    return;
+  }
+
+  pendingWarmupArm = null;
+  allowDocumentWarmup();
+}
+
 function warmupSlice(): void {
   let scheduleNext = false;
   try {
@@ -1849,14 +1899,20 @@ function handleCaptureRenderedHtml(
   }
 }
 
+// `armWarmup` defaults to true so both fresh-path callers keep the exact
+// behaviour they had. Only the cache-restore path passes false, because on that
+// path this function runs in the same task as the DOM attach — see
+// allowDocumentWarmup for why arming there lands before first paint.
 function postPostReadyEnhancementsComplete(
   renderId: number | undefined,
   hasMermaid: boolean | undefined,
-  hasHljs: boolean | undefined
+  hasHljs: boolean | undefined,
+  armWarmup = true
 ): void {
   postReadyEnhancementsCompleted = true;
-  warmupAllowed = true;
-  ensureDocumentWarmup();
+  if (armWarmup) {
+    allowDocumentWarmup();
+  }
   const message: RendererMessage = {
     type: "post-ready-enhancements-complete",
     hasMermaid: hasMermaid === true,
@@ -4871,6 +4927,10 @@ function resetModuleGlobalsForLoadDocument(): void {
   postReadyEnhancementsCompleted = false;
   warmupAllowed = false;
   warmupRunning = false;
+  // A deferred arm belongs to the document being replaced. The generation bump
+  // above already invalidates it; dropping the record keeps this owner the
+  // single place the warm-up lifecycle is reset rather than leaving stale state.
+  pendingWarmupArm = null;
   currentController?.cancel();
   currentController = null;
   // A document swap is the SOLE invalidation owner of the cached-headings rebuild debt: the old
@@ -5072,7 +5132,14 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
         mathCount: document.querySelectorAll("[data-tex]").length
       });
       postCachedLayoutReady();
-      postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
+      // armWarmup: false — this runs synchronously with the DOM attach, so the
+      // warm-up would otherwise start on the very frames the host's reveal cover
+      // is waiting for. Handed to the double rAF in loadDocument.ts instead,
+      // which is this load's first-settled-paint owner. Everything else here
+      // stays synchronous; in particular postReadyEnhancementsCompleted must,
+      // or this document stops being cacheable on a fast switch-away.
+      postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs, false);
+      armDocumentWarmupAfterFirstPaint(renderId);
       scheduleCachedMermaidResume(hasMermaid);
     },
     notifyDocumentCacheMiss: (renderId, cacheKey) => {
@@ -5091,6 +5158,11 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
       if (renderId !== undefined) {
         postHostMessage({ type: "document-first-paint", renderId });
       }
+      // This callback IS the tail of loadDocument.ts's double rAF, i.e. the one
+      // existing "first settled paint of this load generation" signal. A
+      // cache-restored document arms its warm-up here rather than at the swap.
+      // No new readiness mechanism and no timer: rAF is a frame event.
+      consumePendingWarmupArm(renderId);
     },
   };
 }

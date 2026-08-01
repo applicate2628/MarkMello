@@ -2625,6 +2625,22 @@
     warmupRunning = true;
     window.requestAnimationFrame(warmupSlice);
   }
+  function allowDocumentWarmup() {
+    warmupAllowed = true;
+    ensureDocumentWarmup();
+  }
+  var pendingWarmupArm = null;
+  function armDocumentWarmupAfterFirstPaint(renderId) {
+    pendingWarmupArm = { generation: initialRenderPipelineGeneration, renderId };
+  }
+  function consumePendingWarmupArm(renderId) {
+    const pending = pendingWarmupArm;
+    if (pending === null || pending.generation !== initialRenderPipelineGeneration || pending.renderId !== renderId) {
+      return;
+    }
+    pendingWarmupArm = null;
+    allowDocumentWarmup();
+  }
   function warmupSlice() {
     let scheduleNext = false;
     try {
@@ -3088,10 +3104,11 @@
       });
     }
   }
-  function postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs) {
+  function postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs, armWarmup = true) {
     postReadyEnhancementsCompleted = true;
-    warmupAllowed = true;
-    ensureDocumentWarmup();
+    if (armWarmup) {
+      allowDocumentWarmup();
+    }
     const message = {
       type: "post-ready-enhancements-complete",
       hasMermaid: hasMermaid === true,
@@ -5291,6 +5308,7 @@
     postReadyEnhancementsCompleted = false;
     warmupAllowed = false;
     warmupRunning = false;
+    pendingWarmupArm = null;
     currentController?.cancel();
     currentController = null;
     pendingCachedActiveHeadingObserverRebuild = false;
@@ -5436,7 +5454,8 @@
           mathCount: document.querySelectorAll("[data-tex]").length
         });
         postCachedLayoutReady();
-        postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs);
+        postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs, false);
+        armDocumentWarmupAfterFirstPaint(renderId);
         scheduleCachedMermaidResume(hasMermaid);
       },
       notifyDocumentCacheMiss: (renderId, cacheKey) => {
@@ -5455,6 +5474,7 @@
         if (renderId !== void 0) {
           postHostMessage({ type: "document-first-paint", renderId });
         }
+        consumePendingWarmupArm(renderId);
       }
     };
   }
