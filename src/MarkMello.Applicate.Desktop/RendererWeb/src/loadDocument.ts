@@ -111,8 +111,34 @@ export function applyLoadDocument(message: LoadDocumentMessage, deps: LoadDocume
   if (deps.notifyDocumentFirstPaint) {
     const notifyDocumentFirstPaint = deps.notifyDocumentFirstPaint;
     const renderId = message.renderId;
+    const fromCache = cachedFragment !== undefined;
+    // DIAGNOSTIC ONLY — these two marks add no scheduling and no branch; the
+    // frame chain below is byte-for-byte the same chain as before.
+    //
+    // The window this double rAF spans is the ~1 s unlogged block after the
+    // host's post-ready-enhancements-complete. Nothing distinguished "the
+    // renderer is stuck inside a frame callback" from "the browser has not
+    // reached the next frame yet", and those have completely different
+    // explanations, so the frame boundaries themselves are the measurement.
+    // `t` is the renderer's own clock: host perf-mark lines are stamped on
+    // arrival, so a starved message pump would otherwise collapse these two
+    // into one instant. Both carry renderId, and the host tags every
+    // [renderer-perf] line with its shellDocumentId, so neither frame can be
+    // attributed to the wrong host or the wrong switch by adjacency.
     window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => notifyDocumentFirstPaint(renderId));
+      deps.emitMark("mm-load-frame-1", {
+        renderId: renderId ?? null,
+        cached: fromCache,
+        t: Math.round(performance.now() * 10) / 10,
+      });
+      window.requestAnimationFrame(() => {
+        deps.emitMark("mm-load-frame-2", {
+          renderId: renderId ?? null,
+          cached: fromCache,
+          t: Math.round(performance.now() * 10) / 10,
+        });
+        notifyDocumentFirstPaint(renderId);
+      });
     });
   }
   deps.setCurrentDocumentCacheKey?.(message.cacheKey ?? null);

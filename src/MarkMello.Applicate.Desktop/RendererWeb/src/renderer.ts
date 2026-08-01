@@ -765,6 +765,18 @@ function postPerfMark(name: string, detail?: Record<string, unknown>): void {
   postHostMessage(message);
 }
 
+// Renderer-side monotonic timestamp, carried as the `t` detail field of the
+// cache-restore span marks below. The host stamps a perf-mark line with its own
+// ARRIVAL time, so a stalled WebView2 message pump bunches marks the renderer
+// emitted far apart — three wrong intervals in the 2026-07-27 tab-switch
+// investigation came from reading arrival deltas as renderer deltas. `t` makes
+// the renderer-side interval readable on its own, and (host ms − t) isolates the
+// hop. Comparable only WITHIN one shellDocumentId: performance.now() is relative
+// to each host's own shell navigation. Tenth-of-a-ms, matching the host's F1.
+function perfMarkTime(): number {
+  return Math.round(performance.now() * 10) / 10;
+}
+
 function emitMinimapDragSuppressPerfMark(name: string, detail: Record<string, unknown>): void {
   if (hostWindow.__mmMathObserverPerfEnabled !== true) {
     return;
@@ -2338,6 +2350,17 @@ function postCachedLayoutReady(): void {
     clientHeight: layoutState.clientHeight,
     topBlockIndex: layoutState.topBlockIndex
   });
+  // DIAGNOSTIC boundary, block A — the LAST renderer statement before the
+  // layout-ready the host stamps as `ipc-layout-ready`. Whatever remains
+  // between this mark and that host line is the renderer→host hop itself, not
+  // renderer work. `cachedState` says whether the layout state came from the
+  // cache or was recomputed here, i.e. whether the getScrollState +
+  // findTopVisibleBlockIndex pair above ran at all.
+  postPerfMark("mm-restore-layout-ready-pre-post", {
+    renderId: currentDocumentRenderId,
+    cachedState: cachedLayoutState !== null,
+    t: perfMarkTime(),
+  });
   postHostMessage({
     type: "layout-ready",
     scrollTop: layoutState.scrollTop,
@@ -3202,6 +3225,17 @@ function restoreCachedMinimapContent(): boolean {
     updateMinimapVisibility(true);
     updateMinimapViewport({ skipVisibilityUpdate: true });
     updateWidthHandlePositionForCurrentLayout();
+    // DIAGNOSTIC boundary, block B. This frame callback is registered DURING
+    // applyLoadDocument's synchronous burst and therefore AFTER the double rAF
+    // at loadDocument.ts:111-117, so it is the last callback of frame 1 for a
+    // cache restore. Paired with mm-load-frame-1 it bounds frame 1's callback
+    // batch; the gap to mm-load-frame-2 is then unambiguously BETWEEN frames.
+    // Emitted only on the taken path — a stale-generation frame stays silent,
+    // which is itself the signal that this restore's frame 1 never ran.
+    postPerfMark("mm-restore-minimap-frame-end", {
+      renderId: currentDocumentRenderId,
+      t: perfMarkTime(),
+    });
   });
   return true;
 }
@@ -5106,18 +5140,45 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
       emitMark(name, detail);
       if (name === "mm-load-document"
         || name === "mm-load-document-cache-hit"
-        || name === "mm-load-document-cache-miss") {
+        || name === "mm-load-document-cache-miss"
+        // DIAGNOSTIC, block B. loadDocument.ts owns the double rAF that spans
+        // this block and has no other host channel, so its two frame-boundary
+        // marks bridge through the same selected-mark list.
+        || name === "mm-load-frame-1"
+        || name === "mm-load-frame-2") {
         postPerfMark(name, (detail as Record<string, unknown> | undefined) ?? undefined);
       }
     },
-    ensureChromeNodes,
+    ensureChromeNodes: (useCachedDocumentState) => {
+      ensureChromeNodes(useCachedDocumentState);
+      // DIAGNOSTIC boundary, block A. Wrapped here rather than inside
+      // ensureChromeNodes so the mark lands after the WHOLE call, including the
+      // postCachedHeadings tail that follows the mm-minimap-cache-hit emitted
+      // mid-way through it. mm-minimap-cache-hit → this bounds that tail; this →
+      // mm-restore-scroll-end bounds the scroll restore. Fires on the cold path
+      // too, where `cached` is false and no minimap-cache-hit precedes it.
+      postPerfMark("mm-chrome-nodes-end", {
+        renderId: currentDocumentRenderId,
+        cached: useCachedDocumentState === true,
+        t: perfMarkTime(),
+      });
+    },
     applyTheme,
     onDocumentBodyMutated: establishNormalMermaidOwnerAfterBodyMutation,
     debugLog: postDebugLog,
     preserveCurrentDocumentCache: preserveCurrentProcessedDocument,
     getCachedDocumentFragment: getCachedProcessedDocumentFragment,
     setCurrentDocumentCacheKey: setCurrentProcessedDocumentCacheKey,
-    restoreCachedScrollPosition,
+    restoreCachedScrollPosition: () => {
+      restoreCachedScrollPosition();
+      // DIAGNOSTIC boundary, block A — closes the scroll restore
+      // (scrollIntoView + blockDocumentTop + window.scrollTo), which is one of
+      // the four candidates the block was decomposed against.
+      postPerfMark("mm-restore-scroll-end", {
+        renderId: currentDocumentRenderId,
+        t: perfMarkTime(),
+      });
+    },
     completeCachedDocumentLoad: (renderId, hasMermaid, hasHljs, skipFrameWait) => {
       if (hasUnrenderedDocumentMath()) {
         void runLoadDocumentInitialRenderPipeline(hasMermaid, skipFrameWait, renderId, hasHljs, false);
@@ -5131,6 +5192,15 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
         type: "document-ready",
         mathCount: document.querySelectorAll("[data-tex]").length
       });
+      // DIAGNOSTIC boundary, block A — closes the two whole-document selector
+      // walks this entry runs before layout-ready (hasUnrenderedDocumentMath
+      // above the early return, and the [data-tex] count on the line above).
+      // They are a different cost class from the forced layout inside
+      // postCachedLayoutReady, so they get their own boundary.
+      postPerfMark("mm-restore-math-scan-end", {
+        renderId: renderId ?? currentDocumentRenderId,
+        t: perfMarkTime(),
+      });
       postCachedLayoutReady();
       // armWarmup: false — this runs synchronously with the DOM attach, so the
       // warm-up would otherwise start on the very frames the host's reveal cover
@@ -5141,6 +5211,16 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
       postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs, false);
       armDocumentWarmupAfterFirstPaint(renderId);
       scheduleCachedMermaidResume(hasMermaid);
+      // DIAGNOSTIC boundary, block B — the last statement of the restore's
+      // synchronous burst. Block B is measured from the host's
+      // post-ready-enhancements-complete, which is posted three statements
+      // above this one; without this mark the arming and the mermaid resume sit
+      // inside the block unattributed. From here the renderer runs nothing until
+      // a frame callback fires.
+      postPerfMark("mm-restore-sync-end", {
+        renderId: renderId ?? currentDocumentRenderId,
+        t: perfMarkTime(),
+      });
     },
     notifyDocumentCacheMiss: (renderId, cacheKey) => {
       const message: RendererMessage = {

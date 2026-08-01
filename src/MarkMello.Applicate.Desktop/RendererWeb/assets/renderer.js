@@ -363,8 +363,21 @@
     if (deps.notifyDocumentFirstPaint) {
       const notifyDocumentFirstPaint = deps.notifyDocumentFirstPaint;
       const renderId = message.renderId;
+      const fromCache = cachedFragment !== void 0;
       window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => notifyDocumentFirstPaint(renderId));
+        deps.emitMark("mm-load-frame-1", {
+          renderId: renderId ?? null,
+          cached: fromCache,
+          t: Math.round(performance.now() * 10) / 10
+        });
+        window.requestAnimationFrame(() => {
+          deps.emitMark("mm-load-frame-2", {
+            renderId: renderId ?? null,
+            cached: fromCache,
+            t: Math.round(performance.now() * 10) / 10
+          });
+          notifyDocumentFirstPaint(renderId);
+        });
       });
     }
     deps.setCurrentDocumentCacheKey?.(message.cacheKey ?? null);
@@ -2292,6 +2305,9 @@
     }
     postHostMessage(message);
   }
+  function perfMarkTime() {
+    return Math.round(performance.now() * 10) / 10;
+  }
   function emitMinimapDragSuppressPerfMark(name, detail) {
     if (hostWindow.__mmMathObserverPerfEnabled !== true) {
       return;
@@ -3448,6 +3464,11 @@
       clientHeight: layoutState.clientHeight,
       topBlockIndex: layoutState.topBlockIndex
     });
+    postPerfMark("mm-restore-layout-ready-pre-post", {
+      renderId: currentDocumentRenderId,
+      cachedState: cachedLayoutState !== null,
+      t: perfMarkTime()
+    });
     postHostMessage({
       type: "layout-ready",
       scrollTop: layoutState.scrollTop,
@@ -4122,6 +4143,10 @@
       updateMinimapVisibility(true);
       updateMinimapViewport({ skipVisibilityUpdate: true });
       updateWidthHandlePositionForCurrentLayout();
+      postPerfMark("mm-restore-minimap-frame-end", {
+        renderId: currentDocumentRenderId,
+        t: perfMarkTime()
+      });
     });
     return true;
   }
@@ -5429,18 +5454,31 @@
       // semantic anchor rather than centralized here.
       emitMark: (name, detail) => {
         emitMark(name, detail);
-        if (name === "mm-load-document" || name === "mm-load-document-cache-hit" || name === "mm-load-document-cache-miss") {
+        if (name === "mm-load-document" || name === "mm-load-document-cache-hit" || name === "mm-load-document-cache-miss" || name === "mm-load-frame-1" || name === "mm-load-frame-2") {
           postPerfMark(name, detail ?? void 0);
         }
       },
-      ensureChromeNodes,
+      ensureChromeNodes: (useCachedDocumentState) => {
+        ensureChromeNodes(useCachedDocumentState);
+        postPerfMark("mm-chrome-nodes-end", {
+          renderId: currentDocumentRenderId,
+          cached: useCachedDocumentState === true,
+          t: perfMarkTime()
+        });
+      },
       applyTheme,
       onDocumentBodyMutated: establishNormalMermaidOwnerAfterBodyMutation,
       debugLog: postDebugLog,
       preserveCurrentDocumentCache: preserveCurrentProcessedDocument,
       getCachedDocumentFragment: getCachedProcessedDocumentFragment,
       setCurrentDocumentCacheKey: setCurrentProcessedDocumentCacheKey,
-      restoreCachedScrollPosition,
+      restoreCachedScrollPosition: () => {
+        restoreCachedScrollPosition();
+        postPerfMark("mm-restore-scroll-end", {
+          renderId: currentDocumentRenderId,
+          t: perfMarkTime()
+        });
+      },
       completeCachedDocumentLoad: (renderId, hasMermaid, hasHljs, skipFrameWait) => {
         if (hasUnrenderedDocumentMath()) {
           void runLoadDocumentInitialRenderPipeline(hasMermaid, skipFrameWait, renderId, hasHljs, false);
@@ -5453,10 +5491,18 @@
           type: "document-ready",
           mathCount: document.querySelectorAll("[data-tex]").length
         });
+        postPerfMark("mm-restore-math-scan-end", {
+          renderId: renderId ?? currentDocumentRenderId,
+          t: perfMarkTime()
+        });
         postCachedLayoutReady();
         postPostReadyEnhancementsComplete(renderId, hasMermaid, hasHljs, false);
         armDocumentWarmupAfterFirstPaint(renderId);
         scheduleCachedMermaidResume(hasMermaid);
+        postPerfMark("mm-restore-sync-end", {
+          renderId: renderId ?? currentDocumentRenderId,
+          t: perfMarkTime()
+        });
       },
       notifyDocumentCacheMiss: (renderId, cacheKey) => {
         const message = {
