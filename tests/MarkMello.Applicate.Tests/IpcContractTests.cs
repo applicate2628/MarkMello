@@ -1147,6 +1147,53 @@ public sealed class IpcContractTests
         });
     }
 
+    // Host attribution (2026-08-01). The process runs TWO WebView hosts — the
+    // viewer and the off-screen edit preview — whose markers interleave in ONE
+    // stderr stream, and `renderId` is a PER-INSTANCE counter, so both hosts
+    // stamp the same ids. Attributing a marker to a host by adjacency in that
+    // shared stream produced two wrong conclusions during the 2026-07-27
+    // tab-switch investigation. Every marker must therefore carry its emitting
+    // view's `shellDocumentId`, and carry it at the TAIL: the log extractors in
+    // .scratch match a marker by its leading `ms=` / `detail=` prefix, so a tail
+    // field is additive to them while a mid-string one silently zeroes every
+    // count they report. Both halves are asserted here.
+    [Fact]
+    public void PerfMarkTraceIsAttributableToItsEmittingHost()
+    {
+        RunOnTwoViews((firstHost, secondHost) =>
+        {
+            const string bare = @"{""type"":""perf-mark"",""name"":""mm-attribution-probe""}";
+            var firstLine = CaptureStderr(firstHost, bare).TrimEnd('\r', '\n');
+            var secondLine = CaptureStderr(secondHost, bare).TrimEnd('\r', '\n');
+
+            // 1. The tag is present and terminal on each emitted line.
+            var tag = new Regex(@" shellDocumentId=(\d+)$");
+            var firstTag = tag.Match(firstLine);
+            var secondTag = tag.Match(secondLine);
+            Assert.True(firstTag.Success, $"no trailing shellDocumentId in: {firstLine}");
+            Assert.True(secondTag.Success, $"no trailing shellDocumentId in: {secondLine}");
+
+            // 2. The point of the tag: two hosts are TELLABLE APART. Same marker
+            //    name, same renderId space, different emitting view.
+            Assert.NotEqual(firstTag.Groups[1].Value, secondTag.Groups[1].Value);
+
+            // 3. Tail placement relative to `detail=`, which is what the
+            //    extractors' `detail=(\{.*\})` capture depends on. Anchor indices
+            //    are asserted to be found first — a -1 here would otherwise make
+            //    the ordering comparison pass vacuously, the exact way a guard in
+            //    this repository already went silently green on an empty string.
+            var withDetail = CaptureStderr(
+                secondHost,
+                @"{""type"":""perf-mark"",""name"":""mm-attribution-probe"",""detail"":""{\""weight\"":7}""}")
+                .TrimEnd('\r', '\n');
+            var detailAt = withDetail.IndexOf("detail=", StringComparison.Ordinal);
+            var tagAt = withDetail.IndexOf(" shellDocumentId=", StringComparison.Ordinal);
+            Assert.True(detailAt > -1, $"no detail= in: {withDetail}");
+            Assert.True(tagAt > -1, $"no shellDocumentId in: {withDetail}");
+            Assert.True(detailAt < tagAt, $"shellDocumentId must follow detail=, got: {withDetail}");
+        });
+    }
+
     // terra revision 5+6: renderId is optional+nullable in the contract, but the
     // host DROPS the message on missing/non-numeric renderId. Executable proof via
     // the handler's own diag output (positive control + two negative drops).
@@ -1512,6 +1559,20 @@ public sealed class IpcContractTests
 
                 return;
         }
+    }
+
+    // Two views on one dispatch, for contracts that only exist BETWEEN the two
+    // hosts the process runs (e.g. trace attribution). Blocking wait kept in the
+    // helper for the same reason the single-view overload gives below.
+    private static void RunOnTwoViews(
+        Action<ApplicateWebMarkdownDocumentView, ApplicateWebMarkdownDocumentView> body)
+    {
+        var session = HeadlessUnitTestSession.GetOrStartForAssembly(Assembly.GetExecutingAssembly());
+        session.Dispatch(
+            () => body(
+                new ApplicateWebMarkdownDocumentView(new NoopRenderer()),
+                new ApplicateWebMarkdownDocumentView(new NoopRenderer())),
+            CancellationToken.None).GetAwaiter().GetResult();
     }
 
     private static void RunOnView(Action<ApplicateWebMarkdownDocumentView> body)

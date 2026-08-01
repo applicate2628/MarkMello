@@ -306,14 +306,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ApplicateRenderedBodyCache renderedBodyCache,
         ApplicateFullRenderDeliveryHooks? fullRenderDeliveryHooks)
     {
-        ApplicateTrace.DiagMs("startup-webview", "webview-view-ctor-start");
+        TraceDiagMs("startup-webview", "webview-view-ctor-start");
         _renderer = renderer;
         _renderedBodyCache = renderedBodyCache;
         _shellAssetFactory = shellAssetFactory;
         // Shell mode requires both the env-var flag AND the factory injection.
         // Missing either falls back to legacy per-document Navigate.
         _shellMode = ApplicateRendererShellMode.IsEnabled && shellAssetFactory is not null;
-        ApplicateTrace.DiagMs("startup-webview", "native-webview-ctor-start");
+        TraceDiagMs("startup-webview", "native-webview-ctor-start");
         _webView = new ApplicateNativeWebView
         {
             ClipToBounds = true,
@@ -331,7 +331,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _invokeFullRenderMessageRaw = fullRenderDeliveryHooks?.InvokeRaw
             ?? (script => webView.InvokeScript(script));
         _fullRenderDeliveryObserved = fullRenderDeliveryHooks?.DeliveryObserved;
-        ApplicateTrace.DiagMs("startup-webview", "native-webview-ctor-end");
+        TraceDiagMs("startup-webview", "native-webview-ctor-end");
 
         _webView.EnvironmentRequested += OnEnvironmentRequested;
         _webView.NavigationStarted += OnNavigationStarted;
@@ -344,8 +344,34 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         ClipToBounds = true;
         ActualThemeVariantChanged += OnThemeChanged;
         AddHandler(KeyDownEvent, OnWebViewKeyDown, handledEventsToo: true);
-        ApplicateTrace.DiagMs("startup-webview", "webview-view-ctor-end");
+        TraceDiagMs("startup-webview", "webview-view-ctor-end");
     }
+
+    /// <summary>
+    /// Sole <see cref="ApplicateTrace.DiagMs"/> entry point for this view, so
+    /// every marker it emits identifies WHICH host emitted it.
+    ///
+    /// The process runs two <c>ApplicateSharedWebViewHost</c> instances (viewer
+    /// and off-screen edit-preview). <see cref="ApplicateTrace.DiagMs"/> is a
+    /// static emitter with no host concept, and <c>renderId</c> is a
+    /// per-instance counter, so both hosts stamp the SAME ids into one shared
+    /// stderr stream. Attributing a marker to a host by adjacency in that
+    /// stream produced two wrong conclusions during the 2026-07-27 tab-switch
+    /// investigation; <see cref="_shellDocumentId"/> is process-unique
+    /// (<c>Interlocked.Increment</c>) and makes the attribution a field read
+    /// instead of an inference.
+    ///
+    /// The tag is appended at the TAIL of <paramref name="extraFields"/>: the
+    /// log extractors match a marker by its leading <c>ms=</c>/<c>detail=</c>
+    /// prefix, so a tail field is additive to them and a mid-string one is not.
+    /// </summary>
+    private void TraceDiagMs(string group, string evt, string extraFields = "")
+        => ApplicateTrace.DiagMs(
+            group,
+            evt,
+            extraFields.Length > 0
+                ? $"{extraFields} shellDocumentId={_shellDocumentId}"
+                : $"shellDocumentId={_shellDocumentId}");
 
     public MarkdownSource? Source
     {
@@ -478,7 +504,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
-        ApplicateTrace.DiagMs(
+        TraceDiagMs(
             "diag-gate",
             "document-reveal-ready-reemit-noop",
             $"path={source?.Path ?? "(null)"}");
@@ -537,7 +563,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         if (!HasLoadedDocumentForSource(source))
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "diag-gate",
                 "headings-reemit-skipped-not-loaded",
                 $"path={source?.Path ?? "(null)"}");
@@ -546,7 +572,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         if (!Equals(_lastHeadingsSource, source))
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "diag-gate",
                 "headings-reemit-skipped-source-mismatch",
                 $"path={source?.Path ?? "(null)"} retainedPath={_lastHeadingsSource?.Path ?? "(null)"}");
@@ -555,7 +581,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         if (_lastHeadingsCaptureGeneration != _activeRevealRenderId)
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "diag-gate",
                 "headings-reemit-skipped-capture-generation-superseded",
                 $"path={source?.Path ?? "(null)"} retainedGeneration={_lastHeadingsCaptureGeneration} activeGeneration={_activeRevealRenderId}");
@@ -564,14 +590,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         if (_lastHeadings.Count == 0)
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "diag-gate",
                 "headings-reemit-skipped-no-retained-payload",
                 $"path={source?.Path ?? "(null)"}");
             return false;
         }
 
-        ApplicateTrace.DiagMs(
+        TraceDiagMs(
             "diag-gate",
             "headings-reemit",
             $"path={source?.Path ?? "(null)"} count={_lastHeadings.Count}");
@@ -661,7 +687,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         if (!HasLoadedDocumentForSource(source))
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "diag-gate",
                 "minimap-state-reemit-skipped-not-loaded",
                 $"path={source?.Path ?? "(null)"}");
@@ -670,7 +696,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         if (!Equals(_lastMinimapStateSource, source))
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "diag-gate",
                 "minimap-state-reemit-skipped-source-mismatch",
                 $"path={source?.Path ?? "(null)"} retainedPath={_lastMinimapStateSource?.Path ?? "(null)"}");
@@ -679,14 +705,14 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         if (_lastMinimapStateCaptureGeneration != _activeRevealRenderId)
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "diag-gate",
                 "minimap-state-reemit-skipped-capture-generation-superseded",
                 $"path={source?.Path ?? "(null)"} retainedGeneration={_lastMinimapStateCaptureGeneration} activeGeneration={_activeRevealRenderId}");
             return false;
         }
 
-        ApplicateTrace.DiagMs(
+        TraceDiagMs(
             "diag-gate",
             "minimap-state-reemit",
             $"path={source?.Path ?? "(null)"} reservedWidth={retained.ReservedWidth:F2}");
@@ -1024,7 +1050,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         var focusedAfter = NativeMethods.GetFocus();
         if (IsNativeFocusInsideWebView(handle, focusedAfter))
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "pane-seq",
                 "native-focus-release-failed",
                 $"source={focusSource} focus=0x{focused.ToInt64():X} target=0x{focusTarget.ToInt64():X} previous=0x{previous.ToInt64():X} after=0x{focusedAfter.ToInt64():X} error={setFocusError}");
@@ -2046,7 +2072,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void OnEnvironmentRequested(object? sender, WebViewEnvironmentRequestedEventArgs e)
     {
-        ApplicateTrace.DiagMs("startup-webview", "environment-requested");
+        TraceDiagMs("startup-webview", "environment-requested");
         e.EnableDevTools = false;
         if (e is WindowsWebView2EnvironmentRequestedEventArgs windows)
         {
@@ -2467,18 +2493,18 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                     && layoutReadyRenderIdProperty.TryGetInt64(out var layoutReadyRenderId)
                     && layoutReadyRenderId != _activeRevealRenderId)
                 {
-                    ApplicateTrace.DiagMs("diag-gate", "layout-ready-dropped-stale",
+                    TraceDiagMs("diag-gate", "layout-ready-dropped-stale",
                         $"msgRenderId={layoutReadyRenderId} active={_activeRevealRenderId}");
                     return;
                 }
 
-                ApplicateTrace.DiagMs("diag-gate", "ipc-layout-ready",
+                TraceDiagMs("diag-gate", "ipc-layout-ready",
                     $"awaiting={_awaitingLayoutReady} hasLoaded={_hasLoadedDocument} hasLayoutBefore={_hasLayoutReady} cached={ReadBoolean(document.RootElement, "cached")}");
                 if (!_hasLoadedDocument && _activeRevealRenderId > 0)
                 {
                     _hasLoadedDocument = true;
                     BeginAwaitingLayoutReady();
-                    ApplicateTrace.DiagMs(
+                    TraceDiagMs(
                         "diag-gate",
                         "layout-ready-promoted-loaded",
                         $"renderId={_activeRevealRenderId}");
@@ -2545,7 +2571,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                                 extras = $"detail={detailText}";
                             }
                         }
-                        ApplicateTrace.DiagMs("renderer-perf", name, extras);
+                        TraceDiagMs("renderer-perf", name, extras);
                     }
                 }
                 return;
@@ -3992,7 +4018,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _documentFirstPaintReceived = false;
         _documentFirstPaintRaised = false;
         _progressiveAppendPending = false;
-        ApplicateTrace.DiagMs(
+        TraceDiagMs(
             "diag-gate",
             "document-reveal-gate-configured",
             $"renderId={renderId} requiresPostReady={requiresPostReadyEnhancements}");
@@ -4025,7 +4051,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         if (renderId != _activeRevealRenderId)
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "diag-gate",
                 "post-ready-enhancements-stale",
                 $"renderId={renderId} active={_activeRevealRenderId}");
@@ -4033,7 +4059,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         _postReadyEnhancementsComplete = true;
-        ApplicateTrace.DiagMs(
+        TraceDiagMs(
             "diag-gate",
             "post-ready-enhancements-complete",
             $"renderId={renderId} requiresPostReady={_requiresPostReadyEnhancements}");
@@ -4054,7 +4080,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         var theme = NormalizeRendererThemeName(themeProperty.GetString()!);
-        ApplicateTrace.DiagMs(
+        TraceDiagMs(
             "renderer-perf",
             "theme-applied-ack",
             $"theme={theme} requestId={requestId}");
@@ -4090,7 +4116,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
     private void CompleteLayoutReady()
     {
-        ApplicateTrace.DiagMs("diag-gate", "complete-layout-ready-enter",
+        TraceDiagMs("diag-gate", "complete-layout-ready-enter",
             $"hasLoaded={_hasLoadedDocument} hasLayout={_hasLayoutReady} awaiting={_awaitingLayoutReady} minimap={_hasMinimapState} willFire={ShouldCompleteRender(_hasLoadedDocument, _hasLayoutReady, _hasMinimapState) && _awaitingLayoutReady}");
         if (!ShouldCompleteRender(_hasLoadedDocument, _hasLayoutReady, _hasMinimapState)
             || !_awaitingLayoutReady)
@@ -4130,7 +4156,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         CompleteDocumentRenderVisualReady();
         _documentRevealReadyRaised = true;
         _pendingRendererCacheFallbackLoads.Remove(_activeRevealRenderId);
-        ApplicateTrace.DiagMs(
+        TraceDiagMs(
             "diag-gate",
             "document-reveal-ready",
             $"renderId={_activeRevealRenderId} requiresPostReady={_requiresPostReadyEnhancements}");
@@ -4148,7 +4174,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
 
         _documentFirstPaintRaised = true;
-        ApplicateTrace.DiagMs(
+        TraceDiagMs(
             "diag-gate",
             "document-first-paint",
             $"renderId={_activeRevealRenderId}");
@@ -4483,7 +4509,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
         catch (Exception ex)
         {
-            ApplicateTrace.DiagMs("startup-webview", "native-ui-color-scheme-failed", $"reason={ex.GetType().Name}");
+            TraceDiagMs("startup-webview", "native-ui-color-scheme-failed", $"reason={ex.GetType().Name}");
         }
     }
 
@@ -4494,7 +4520,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     // (rather than re-awaiting a poisoned TCS), and surface the failure view.
     private void OnCoreProcessFailed(object? sender, Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedEventArgs e)
     {
-        ApplicateTrace.DiagMs("pane-seq", "core-process-failed", $"kind={e.ProcessFailedKind}");
+        TraceDiagMs("pane-seq", "core-process-failed", $"kind={e.ProcessFailedKind}");
         // Same failure class as the nav-fail site, so it must use the same latch
         // idiom -- including the drop that lets the next navigation re-arm.
         //
@@ -4508,7 +4534,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         var pendingShellReadyFaulted = false;
         if (ShouldInvalidateShellForProcessFailure(e.ProcessFailedKind))
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "pane-seq",
                 "shell-invalidated-for-dead-page",
                 $"kind={e.ProcessFailedKind}");
@@ -4534,7 +4560,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         }
         else
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "pane-seq",
                 "core-process-failed-no-fallback",
                 $"kind={e.ProcessFailedKind}");
@@ -4854,7 +4880,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
     /// </summary>
     internal void RequestModeToggleSettleProbe()
     {
-        ApplicateTrace.DiagMs("pane-seq", "host-revealgate-probe-sent");
+        TraceDiagMs("pane-seq", "host-revealgate-probe-sent");
         // Carry the same preference payload as a live preference update. C#
         // posts host messages through asynchronous WebView2 script calls, so
         // the settle probe must be self-contained: even if the prior
@@ -4871,7 +4897,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
             return;
         }
 
-        ApplicateTrace.DiagMs(
+        TraceDiagMs(
             "pane-seq",
             "host-transaction-settle-probe-sent",
             $"transactionGeneration={transactionGeneration} skipFrameWait={skipFrameWait}");
@@ -5197,7 +5223,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             if (isModeSettleProbe)
             {
-                ApplicateTrace.DiagMs(
+                TraceDiagMs(
                     "pane-seq",
                     "host-renderer-message-native-post-end",
                     $"elapsedMs={Stopwatch.GetElapsedTime(postStart).TotalMilliseconds:F2}");
@@ -5208,7 +5234,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 
         if (isModeSettleProbe)
         {
-            ApplicateTrace.DiagMs(
+            TraceDiagMs(
                 "pane-seq",
                 "host-renderer-message-fallback-invoke",
                 $"elapsedMs={Stopwatch.GetElapsedTime(postStart).TotalMilliseconds:F2}");
@@ -5240,7 +5266,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         {
             if (isModeSettleProbe)
             {
-                ApplicateTrace.DiagMs(
+                TraceDiagMs(
                     "pane-seq",
                     "host-renderer-message-native-post-failed",
                     $"reason={ex.GetType().Name}");
