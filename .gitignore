@@ -63,3 +63,8 @@ TestResults/
 
 # graphify knowledge-graph output (local tool artifact, never committed)
 graphify-out/
+
+# Per-project Codex MCP on/off switches (machine state, not project source).
+# Carries only `enabled` flags layered over the global ~/.codex/config.toml;
+# the server names are the local machine's own fleet, so it does not travel.
+/.codex/
