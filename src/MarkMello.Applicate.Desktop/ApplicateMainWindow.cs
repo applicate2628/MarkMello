@@ -1807,6 +1807,27 @@ public sealed class ApplicateMainWindow : MainWindow
         Closed += OnApplicateMainWindowClosed;
     }
 
+    /// <summary>
+    /// Session edit-intent admission for the inactive edit-preview prime: should
+    /// the prime be deferred because this session has not entered edit mode yet?
+    /// </summary>
+    /// <remarks>
+    /// <para>The prime keeps a second full copy of the active document resident on
+    /// the edit WebView. That buys ~0.5s on the first Ctrl+E, once, and the saving
+    /// does not scale with document weight while the resident memory does. So the
+    /// copy is deferred until the session demonstrates it wants edit mode.</para>
+    /// <para>Total over all three booleans on purpose. Deferral is meaningful only
+    /// in the reading-with-a-document case, so it is defined false everywhere else
+    /// rather than left to the caller's ordering вЂ” the caller's own gates may be
+    /// reordered without silently arming this rule outside its domain, and the
+    /// table test can pin all eight combinations.</para>
+    /// </remarks>
+    internal static bool ShouldDeferInactiveEditPrimeUntilEditIntent(
+        bool isEditMode,
+        bool hasDocument,
+        bool editIntentEstablished)
+        => !isEditMode && hasDocument && !editIntentEstablished;
+
     private void InstallInactiveEditPreviewPrime(
         MainWindowViewModel viewModel,
         Panel contentPanel,
@@ -1828,6 +1849,20 @@ public sealed class ApplicateMainWindow : MainWindow
         ReadingPreferences? revealReadyPreferences = null;
         bool primeQueued = false;
         bool primeInProgress = false;
+
+        // Session edit-intent admission. The inactive prime keeps a SECOND full
+        // copy of the active document resident on the edit WebView so the first
+        // Ctrl+E is instant. Measured, that buys ~0.5s exactly once and does not
+        // scale with document weight, while the resident memory does -- 357.7 MB
+        // continuously on the operator's heavy document, ~7x the memory for ~10%
+        // more benefit. So the copy is not paid for until the session proves it
+        // wants edit mode: the prime stays deferred until edit mode is entered
+        // once, after which every later switch is primed exactly as before.
+        //
+        // The window is a DI singleton (Program.cs), so this closure's lifetime
+        // IS the process lifetime -- "session" needs no separate lifetime object,
+        // and the flag never has to be reset.
+        bool editIntentEstablished = false;
         bool delayedHeavyPrimeReady = false;
         MarkdownSource? delayedHeavyPrimeDocument = null;
         ReadingPreferences? delayedHeavyPrimePreferences = null;
@@ -1876,10 +1911,17 @@ public sealed class ApplicateMainWindow : MainWindow
         void OnPrimeViewModelChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
             if (e.PropertyName == nameof(MainWindowViewModel.IsEditMode)
-                && viewModel.IsEditMode
-                && primeInProgress)
+                && viewModel.IsEditMode)
             {
-                CompletePrime(success: false, preserveCurrentVisibility: true);
+                // Entering edit mode IS the session's edit intent -- the one and
+                // only writer of the flag. No new subscription, event or timer:
+                // this branch already ran on exactly this transition.
+                editIntentEstablished = true;
+
+                if (primeInProgress)
+                {
+                    CompletePrime(success: false, preserveCurrentVisibility: true);
+                }
             }
 
             if (e.PropertyName is nameof(MainWindowViewModel.Document)
@@ -1975,6 +2017,30 @@ public sealed class ApplicateMainWindow : MainWindow
             if (viewModel.IsEditMode || viewModel.Document is not { } document)
             {
                 CancelDelayedHeavyPrime();
+                return;
+            }
+
+            // Session edit-intent admission. Deliberately ahead of
+            // TrySkipViewportOnlyPrime, which WRITES primedDocument /
+            // primedPreferences -- letting a pre-intent call reach it would record
+            // a prime that never happened. No CancelDelayedHeavyPrime() here: the
+            // sole ScheduleDelayedHeavyPrime call site sits below this guard, so
+            // pre-intent no delayed timer can exist and cancelling would be a
+            // guard with no reachable precondition.
+            //
+            // The arguments re-read live state the gate above has already settled;
+            // that is not a second check but the argument list of the rule's single
+            // owner, which is total over all three booleans so the table test can
+            // pin every combination. Do not "tidy" them into literals.
+            if (ShouldDeferInactiveEditPrimeUntilEditIntent(
+                    viewModel.IsEditMode,
+                    hasDocument: viewModel.Document is not null,
+                    editIntentEstablished))
+            {
+                ApplicateTrace.DiagMs(
+                    "pane-seq",
+                    "editpreview-inactive-prime-deferred-no-edit-intent",
+                    $"source={document.Path} contentLength={document.Content.Length}");
                 return;
             }
 
@@ -2911,8 +2977,12 @@ public sealed class ApplicateMainWindow : MainWindow
 
         // Table-cell channel. Successful acknowledgements always carry the
         // canonical decoded text/key. Patch every involved DOM before its
-        // silent source swap; the distinct primed edit host never saw a viewer
-        // edit and would otherwise claim source it did not render.
+        // silent source swap. Whether the distinct edit host is primed at all is
+        // now conditional -- it stays unprimed until the session enters edit mode
+        // once. These patches keep a PRIMED host's fast path valid (it never saw
+        // the viewer's edit and would otherwise claim source it did not render)
+        // and are inert on an unprimed one, where every edit-host leg
+        // early-returns on !_hasLoadedDocument.
         viewModel.TableCellCommitted += (_, commit) =>
         {
             MirrorReadingInPlaceEdit(
