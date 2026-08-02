@@ -265,8 +265,20 @@ let liveDocumentBlockElementsStale = true;
 // stores, 16 misses and ZERO hits against the count cap of 4 this replaces:
 // seven documents against a capacity of four means every revisit pays a full
 // rebuild (~1354 ms on a matched MISS/HIT pair).
-//   - the whole session weighs 489 548, so 500 000 holds all of it at once and
-//     revisit misses go to zero;
+//
+// SOURCE — named because an adversarial review attached these figures to the
+// wrong session and reported them as false. Every number below comes from
+// `.scratch/2026-08-01-cache-weight/app-20260801-141441.err.log`, captured while
+// the OLD count cap of 4 was still live, so its `weight` fields are diagnostic
+// only. Do NOT read them against `.scratch/tabswitch-diag/app-20260727-164417.err.log`,
+// which backs a DIFFERENT claim (the 3-misses-of-7-revisits rate) and records
+// 26/6/8 for its own, later session.
+//   - the whole session weighs 489 548 — the SUM of the seven DISTINCT documents'
+//     weights on the minimap host (242 538 + 185 160 + 32 010 + 17 322 + 10 908 +
+//     1 268 + 342), not any single `totalWeight` line. No line carries it: under a
+//     cap of 4 the seven never coexisted, so the peak observed `totalWeight` is
+//     only 455 928. So 500 000 holds all of it at once and revisit misses go to
+//     zero;
 //   - it stays under the ceiling rule `<= 4 x heaviest document`
 //     (4 x 242 538 = 970 152). The cap it replaces already admitted four entries
 //     of UNBOUNDED size, so a budget at roughly half that ceiling cannot regress
