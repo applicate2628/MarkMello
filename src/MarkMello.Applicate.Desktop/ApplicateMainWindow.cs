@@ -1818,7 +1818,7 @@ public sealed class ApplicateMainWindow : MainWindow
     /// copy is deferred until the session demonstrates it wants edit mode.</para>
     /// <para>Total over all three booleans on purpose. Deferral is meaningful only
     /// in the reading-with-a-document case, so it is defined false everywhere else
-    /// rather than left to the caller's ordering вЂ” the caller's own gates may be
+    /// rather than left to the caller's ordering — the caller's own gates may be
     /// reordered without silently arming this rule outside its domain, and the
     /// table test can pin all eight combinations.</para>
     /// </remarks>
@@ -3772,6 +3772,15 @@ public sealed class ApplicateMainWindow : MainWindow
             SaveSession();
         };
 
+        // Warm the OTHER open tabs' rendered body once the active document has
+        // painted, so a tab click lands on a cache hit instead of a cold render.
+        // Installed from HERE because this is the one scope that holds both the
+        // open-documents service and the D11 recent-files (MRU) list the
+        // prefetcher orders its candidates by. The list is snapshotted per
+        // trigger, on this (UI) thread, and never mutated — d11 clause 1 keeps
+        // the closure below the single writer-owner.
+        InstallBackgroundTabPrefetch(openDocs, () => recentPaths.ToList());
+
         Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
         {
             ApplicateSession saved = ApplicateSession.Empty;
@@ -4200,6 +4209,137 @@ public sealed class ApplicateMainWindow : MainWindow
         Closed += onWindowClosed;
         fallbackTimer.Tick += OnFallbackTick;
         fallbackTimer.Start();
+    }
+
+    /// <summary>
+    /// Install the background tab prefetch: wiring ONLY. Every decision — which
+    /// documents, in what order, how many, which are skipped, how many run at
+    /// once, and what is measured — belongs to
+    /// <see cref="ApplicateBackgroundTabPrefetcher"/>. This method subscribes
+    /// the renderer's own state events and hands over a UI-thread snapshot.
+    ///
+    /// <para><b>No timers.</b> The wiring deliberately does NOT inherit
+    /// <see cref="InstallDeferredSecondaryWebViewPreWarm"/>'s
+    /// <see cref="SecondaryWebViewPreWarmDelay"/> or its fallback tick. Those
+    /// exist to bound a startup pre-warm that must eventually happen; a prefetch
+    /// must not. The events alone are complete: if the active document never
+    /// settles and never fails, no prefetch happens, and that fail-closed
+    /// behaviour is the correct one.</para>
+    /// </summary>
+    private void InstallBackgroundTabPrefetch(
+        IOpenDocumentsService openDocs,
+        Func<IReadOnlyList<string>> recentPathsSnapshot)
+    {
+        var services = App.Services;
+        var cache = services?.GetService<ApplicateRenderedBodyCache>();
+        var renderer = services?.GetService<IApplicateHtmlMarkdownRenderer>();
+        var settings = services?.GetService<ISettingsStore>();
+        var visibleHost = services?.GetService<IApplicateSharedWebViewHostProvider>()?.ViewerHost
+            ?? services?.GetService<IApplicateSharedWebViewHost>();
+        if (cache is null || renderer is null || settings is null || visibleHost is null)
+        {
+            // Nothing to warm and nothing to warm it with. A prefetch is a pure
+            // optimisation, so an incomplete container costs a cache miss the
+            // ordinary activation path already handles.
+            return;
+        }
+
+        var prefetcher = new ApplicateBackgroundTabPrefetcher(
+            cache,
+            renderer,
+            settings,
+            services?.GetService<IImageSourceResolver>(),
+            new ApplicateOpenTabPrefetchDocumentSource(openDocs));
+
+        // Set when first paint arrives while the visible document is still
+        // appending, so ProgressiveAppendCompleted triggers ONLY the pass that
+        // was actually deferred — never an append that lands before the visible
+        // document has painted at all.
+        var deferredForProgressiveAppend = false;
+
+        void TriggerPrefetch(string reason)
+        {
+            deferredForProgressiveAppend = false;
+
+            // The renderer's state events arrive on the UI thread, which is the
+            // only thread on which the live open-documents collection and the
+            // MRU list can be read without racing their writers.
+            prefetcher.Trigger(
+                new ApplicatePrefetchSnapshot(
+                    openDocs.OpenDocuments.Select(document => document.FilePath).ToList(),
+                    openDocs.ActiveDocument?.FilePath,
+                    recentPathsSnapshot()),
+                reason);
+        }
+
+        void OnVisibleDocumentFirstPaint(object? sender, EventArgs e)
+        {
+            if (visibleHost.View.HasPendingProgressiveAppend)
+            {
+                deferredForProgressiveAppend = true;
+                ApplicateTrace.DiagMs(
+                    "perf-tab-prefetch",
+                    "trigger-deferred",
+                    "cause=progressive-append-pending");
+                return;
+            }
+
+            TriggerPrefetch("document-first-paint");
+        }
+
+        void OnVisibleProgressiveAppendCompleted(object? sender, EventArgs e)
+        {
+            if (!deferredForProgressiveAppend)
+            {
+                return;
+            }
+
+            TriggerPrefetch("progressive-append-completed");
+        }
+
+        void OnVisibleRendererFailed(object? sender, ApplicateRendererFailureEvent e)
+        {
+            // Abort rather than proceed: the visible document did not reach a
+            // usable state, so spending CPU warming the tabs beside it is the
+            // wrong trade. The next successful paint re-arms the pass.
+            deferredForProgressiveAppend = false;
+            prefetcher.CancelInFlight("renderer-failed");
+        }
+
+        void OnActiveDocumentChanged(object? sender, ActiveDocumentChangedEventArgs e)
+        {
+            // The candidate set this pass was computed from no longer describes
+            // the user's position. The new active document's own first paint
+            // re-arms with the correct set.
+            deferredForProgressiveAppend = false;
+            prefetcher.CancelInFlight("active-document-changed");
+        }
+
+        void OnOpenDocumentsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+        {
+            if (e.Action == NotifyCollectionChangedAction.Remove)
+            {
+                prefetcher.CancelInFlight("tab-closed");
+            }
+        }
+
+        void OnWindowClosed(object? sender, EventArgs e)
+        {
+            visibleHost.View.DocumentFirstPaint -= OnVisibleDocumentFirstPaint;
+            visibleHost.View.ProgressiveAppendCompleted -= OnVisibleProgressiveAppendCompleted;
+            visibleHost.RendererFailed -= OnVisibleRendererFailed;
+            openDocs.ActiveDocumentChanged -= OnActiveDocumentChanged;
+            ((INotifyCollectionChanged)openDocs.OpenDocuments).CollectionChanged -= OnOpenDocumentsChanged;
+            Closed -= OnWindowClosed;
+            prefetcher.Dispose();
+        }
+
+        visibleHost.View.DocumentFirstPaint += OnVisibleDocumentFirstPaint;
+        visibleHost.View.ProgressiveAppendCompleted += OnVisibleProgressiveAppendCompleted;
+        visibleHost.RendererFailed += OnVisibleRendererFailed;
+        openDocs.ActiveDocumentChanged += OnActiveDocumentChanged;
+        ((INotifyCollectionChanged)openDocs.OpenDocuments).CollectionChanged += OnOpenDocumentsChanged;
+        Closed += OnWindowClosed;
     }
 
     private void InstallSharedWebViewWarmupPanel()

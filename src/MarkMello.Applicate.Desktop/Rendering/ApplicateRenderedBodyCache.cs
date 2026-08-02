@@ -17,6 +17,20 @@ internal sealed class ApplicateRenderedBodyCache
         _maxEntries = System.Math.Max(0, maxEntries);
     }
 
+    /// <summary>
+    /// This cache's capacity, so a caller that must size its work against it
+    /// reads the ONE owner instead of re-typing the constant. Read-only and
+    /// additive: no eviction, coalescing, or storage behaviour depends on it
+    /// being visible.
+    /// <para>
+    /// Used by <see cref="ApplicateBackgroundTabPrefetcher"/> to cap a prefetch
+    /// pass at <c>MaxEntries - 1</c> — the active document's entry lives in this
+    /// same cache, so a pass allowed to fill every slot would evict the document
+    /// that started it.
+    /// </para>
+    /// </summary>
+    public int MaxEntries => _maxEntries;
+
     public async Task<ApplicateRenderedBody> GetOrRenderAsync(
         MarkdownSource source,
         ReadingPreferences preferences,

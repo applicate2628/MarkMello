@@ -1592,6 +1592,28 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
                     cancellationToken)
                 .ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
+
+            // The rendered-body cache's outcome ON THE ACTIVATION PATH, on the
+            // always-on timed channel. The ModeToggle line below says the same
+            // thing, but ApplicateTrace.ModeToggle is [Conditional("DEBUG")] —
+            // the compiler removes it from the Release build the perf harness
+            // actually measures, which is why a warm tab switch could only be
+            // INFERRED from a host-segment separation rather than read directly.
+            //
+            // Emitted HERE rather than inside ApplicateRenderedBodyCache on
+            // purpose: the cache has three callers (startup prime, background
+            // prefetch, this activation), and only a call-site marker can say
+            // WHICH one a hit belongs to without widening GetOrRenderAsync's
+            // signature. The other two already mark their own outcomes
+            // (`perf-doc body-prime-*`, `perf-tab-prefetch candidate-*`); this
+            // was the one that did not. Together they give
+            // ApplicateRenderedBodyCache's capacity a measured hit rate to be
+            // sized against instead of a guess.
+            TraceDiagMs(
+                "perf-body-cache",
+                renderedFromMarkdown ? "activation-miss" : "activation-hit",
+                $"id={renderId} path={source.Path} htmlLength={body.BodyHtml.Length}");
+
             if (!renderedFromMarkdown)
             {
                 ApplicateTrace.ModeToggle(
