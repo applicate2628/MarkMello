@@ -53,6 +53,45 @@ describe("editable table cells", () => {
     expect(cell.dataset.mmCellPlaintextFallback).toBe("true");
   });
 
+  // A cached document's nodes are MOVED back into the DOM by
+  // preserveCurrentProcessedDocument, not cloned, so the discovery observer
+  // re-finds the very same cells still carrying the mark from their previous
+  // preparation. Assigning contentEditable there forces one style
+  // recalculation per cell for no change in value.
+  it("skips the contentEditable write on a cell that already carries the mark", () => {
+    const { cell, assignedModes } = createCell({ support: "plaintext-only" });
+    cell.setAttribute("contenteditable", "plaintext-only");
+
+    prepareEditableCells();
+
+    expect(assignedModes).toEqual([]);
+    expect(cell.getAttribute("contenteditable")).toBe("plaintext-only");
+    expect(cell.dataset.mmCellPlaintextFallback).toBeUndefined();
+  });
+
+  it("re-prepares a marked cell that still carries a stale fallback flag", () => {
+    const { cell, assignedModes } = createCell({ support: "plaintext-only" });
+    cell.setAttribute("contenteditable", "plaintext-only");
+    cell.dataset.mmCellPlaintextFallback = "true";
+
+    prepareEditableCells();
+
+    expect(assignedModes).toEqual(["plaintext-only"]);
+    expect(cell.dataset.mmCellPlaintextFallback).toBeUndefined();
+  });
+
+  it("re-prepares a cell left in the fallback state rather than skipping it", () => {
+    const { cell, assignedModes } = createCell({ support: "fallback" });
+    cell.setAttribute("contenteditable", "true");
+    cell.dataset.mmCellPlaintextFallback = "true";
+
+    prepareEditableCells();
+
+    expect(assignedModes).toEqual(["plaintext-only", "true"]);
+    expect(cell.contentEditable).toBe("true");
+    expect(cell.dataset.mmCellPlaintextFallback).toBe("true");
+  });
+
   it("sanitizes fallback beforeinput and paste to single-line literal text", () => {
     const { cell } = createCell({ support: "fallback", text: "" });
     prepareEditableCells();

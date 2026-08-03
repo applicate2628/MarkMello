@@ -5731,6 +5731,9 @@
     if (cell.closest(".mm-minimap-content") !== null) {
       return;
     }
+    if (cell.getAttribute("contenteditable") === "plaintext-only" && !cell.hasAttribute("data-mm-cell-plaintext-fallback")) {
+      return;
+    }
     cell.contentEditable = "plaintext-only";
     if (cell.contentEditable === "plaintext-only") {
       delete cell.dataset.mmCellPlaintextFallback;
