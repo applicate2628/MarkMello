@@ -2619,8 +2619,15 @@ public sealed class ApplicateMainWindow : MainWindow
     /// D12 (decision <c>2026-07-26-d12-restore-fold-precedence</c>) clause 1: fold the WHOLE restore set
     /// into the recent list UP FRONT, before the first mirror push, so the first list the user sees is
     /// already the final one. Seeds from the persisted recent history (already most-recent-first), then
-    /// folds every saved OPEN path in order and finally <paramref name="argvPath"/> through the pure
+    /// folds every saved OPEN path and finally <paramref name="argvPath"/> through the pure
     /// <see cref="ApplicateSession.BuildRecentPaths"/> (move-to-front, case-insensitive dedup, cap).
+    /// <para>
+    /// The saved open set is folded LEAST-RECENT-FIRST by the persisted MRU's own ranking, so
+    /// move-to-front leaves the open block in genuine activation-recency order rather than in reverse
+    /// tab order. An open path the persisted MRU does not rank folds first, in <paramref name="savedOpen"/>
+    /// order, so it lands behind the ranked ones -- the same two populations and the same tie-break
+    /// <see cref="Rendering.ApplicateBackgroundTabPrefetcher.OrderCandidates"/> applies downstream.
+    /// </para>
     /// <para>
     /// Returns nothing and publishes nothing: there is deliberately NO ledger of what it folded. d12
     /// clause 3 forbids PREDICTING the replay's adds -- a prediction outlives an add that never arrives
@@ -2664,9 +2671,65 @@ public sealed class ApplicateMainWindow : MainWindow
             recentPaths.AddRange(updated);
         }
 
+        // The fold SEQUENCE for the saved open set. Move-to-front means the LAST fold ends at the
+        // HEAD, so folding least-recent-first leaves the open block in persisted-recency order. The
+        // ranks are read from `recentPaths` as it stands right now -- exactly the deduped persisted
+        // MRU -- and MUST be captured before the first Fold, which mutates that list.
+        //
+        // Folding the open set in TAB order instead (what this did before) left the seed at exactly
+        // REVERSE TAB ORDER and overwrote the genuine cross-session recency for precisely the
+        // documents that are open. That recency is real, persisted data, not an inference: the MRU
+        // records ACTIVATION as well as opening (d11's amended clause 3), the ActiveDocumentChanged
+        // handler folds it and calls SaveSession in the same pass, and the store round-trips
+        // RecentPaths. F1 of
+        // work-items/bugs/2026-08-02-tab-prefetch-warms-the-wrong-three-documents.md.
+        //
+        // d12 clause 1 is preserved, not amended around: the WHOLE saved open set is still folded,
+        // still up front, still before the first mirror push, still through the one pure
+        // BuildRecentPaths owner, and still with no ledger of what was folded. Only the order within
+        // the block changes, and only where the persisted MRU actually ranks a path -- an open path
+        // it does not rank folds first, in savedOpen order, byte-identically to before, which is why
+        // declared deltas 1, 2 and 3 (guards B4, B8, B9) are unchanged.
+        var rank = new Dictionary<string, int>(System.StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < recentPaths.Count; index++)
+        {
+            rank[recentPaths[index]] = index;
+        }
+
+        var unrankedOpen = new List<string>();
+        var rankedOpen = new List<(string Path, int Rank)>();
+        var rankedSeen = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
         foreach (var open in savedOpen)
         {
+            if (string.IsNullOrWhiteSpace(open))
+            {
+                continue;
+            }
+
+            if (!rank.TryGetValue(open, out var openRank))
+            {
+                // Unranked entries are deliberately NOT deduplicated: a repeated saved open path must
+                // keep folding move-to-front, which is declared delta 3.
+                unrankedOpen.Add(open);
+            }
+            else if (rankedSeen.Add(open))
+            {
+                rankedOpen.Add((open, openRank));
+            }
+        }
+
+        // Distinct paths always carry distinct ranks (the seed above is deduplicated), so this
+        // comparison is total and List.Sort's instability cannot reach the result.
+        rankedOpen.Sort(static (left, right) => right.Rank.CompareTo(left.Rank));
+
+        foreach (var open in unrankedOpen)
+        {
             Fold(open);
+        }
+
+        foreach (var open in rankedOpen)
+        {
+            Fold(open.Path);
         }
 
         Fold(argvPath);

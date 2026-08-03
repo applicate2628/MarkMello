@@ -247,14 +247,15 @@ internal sealed class ApplicateBackgroundTabPrefetcher : IDisposable
     /// already-open path without an <c>Add</c>, so tab switches never reached the
     /// list at all: <c>work-items/bugs/2026-08-02-mru-records-openings-not-activations.md</c>.)</para>
     ///
-    /// <para><b>REMAINING DEFECT — the FIRST pass after a session restore is
-    /// still not activation-ordered.</b> d12 clause 1
-    /// (<c>ApplicateMainWindow.SeedRecentPathsForRestore</c>) folds every saved
-    /// open path move-to-front in tab order at restore, which leaves this
-    /// ordering as exactly REVERSE TAB ORDER until the user's first tab switch
-    /// re-heads it. That seeding is an accepted decision and is NOT worked
-    /// around here — a prefetch-local recency list would be the second owner
-    /// d11 clause 1 forbids. Filed as F1 of
+    /// <para><b>The FIRST pass after a session restore is activation-ordered
+    /// too.</b> It was not: d12 clause 1
+    /// (<c>ApplicateMainWindow.SeedRecentPathsForRestore</c>) folded every saved
+    /// open path move-to-front in TAB order at restore, which left this ordering
+    /// as exactly REVERSE TAB ORDER until the user's first tab switch re-headed
+    /// it — so the one pass that runs before the user touches anything warmed the
+    /// last three tabs in the strip. The seed now folds that set least-recent-first
+    /// by the persisted MRU's own ranking, at the MRU owner, so no prefetch-local
+    /// recency list (the second owner d11 clause 1 forbids) was needed here. F1 of
     /// <c>work-items/bugs/2026-08-02-tab-prefetch-warms-the-wrong-three-documents.md</c>.</para>
     ///
     /// <para><b>Excluded:</b> the active document — it is already rendered, and

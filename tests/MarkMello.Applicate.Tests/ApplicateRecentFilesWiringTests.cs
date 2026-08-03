@@ -200,7 +200,10 @@ public sealed class ApplicateRecentFilesWiringTests
             new List<string> { A, B },
             new List<string> { A, B },
             argvPath: null);
-        Assert.Equal(new List<string> { B, A }, recentPaths);
+        // The persisted MRU says A was used last, and both paths are open, so the seed must preserve
+        // [A,B]. This asserted [B,A] until B12 below: the old tab-order fold INVERTED the persisted
+        // recency here. Still an exact literal list -- the value moved, the strength did not.
+        Assert.Equal(new List<string> { A, B }, recentPaths);
 
         // The user removes A while the restore is still in flight (the persist is muted, so this
         // lives only in memory until the post-restore convergence save).
@@ -415,6 +418,61 @@ public sealed class ApplicateRecentFilesWiringTests
 
         // A dedup-by-skip-later-occurrence variant yields [B,A]; move-to-front yields [A,B].
         Assert.Equal(new List<string> { A, B }, recentPaths);
+    }
+
+    /// <summary>
+    /// B12 -- F1 of <c>work-items/bugs/2026-08-02-tab-prefetch-warms-the-wrong-three-documents.md</c>.
+    /// The persisted MRU is genuine ACTIVATION recency: <c>ApplicateSession.RecentPaths</c> is folded on
+    /// every <c>ActiveDocumentChanged</c> and persisted by the <c>SaveSession</c> in the same handler, and
+    /// the store round-trips it. Folding the saved OPEN set in TAB order threw that away and left the
+    /// seed at exactly REVERSE TAB ORDER -- so the first background-prefetch pass of every cold start
+    /// warmed the last three tabs in the strip instead of the three documents last reached for.
+    /// <para>
+    /// The fixture separates all three candidate orders, so it discriminates the two live mutations as
+    /// well as the defect: persisted recency is [B,A,C], reverse tab order is [C,B,A] (the defect), and
+    /// plain tab order is [A,B,C].
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void SeedKeepsThePersistedRecencyOrderOfTheSavedOpenPaths()
+    {
+        var recentPaths = new List<string>();
+
+        // Persisted recency: B used last, then A, then C. Tab-strip order: A, B, C.
+        ApplicateMainWindow.SeedRecentPathsForRestore(
+            recentPaths,
+            new List<string> { B, A, C },
+            new List<string> { A, B, C },
+            argvPath: null);
+
+        Assert.Equal(new List<string> { B, A, C }, recentPaths);
+    }
+
+    /// <summary>
+    /// B13 -- the two properties the recency-ordered fold must NOT buy at the cost of. A saved open path
+    /// the persisted MRU does not rank (it fell off <c>MaxRecentPaths</c>, or the file predates D11) is
+    /// still folded -- d12 clause 1's presence guarantee -- and lands BEHIND the ranked ones, matching
+    /// the tie-break <c>ApplicateBackgroundTabPrefetcher.OrderCandidates</c> already applies to the same
+    /// two populations. A ranked path that is no longer open keeps its persisted place behind the block.
+    /// <para>
+    /// Four distinct mutations fail here, which is why the fixture carries all three populations at once:
+    /// folding the unranked one LAST gives [Z,B,A,X]; dropping it gives [B,A,X]; leaving ranked open
+    /// paths unfolded gives [Z,X,B,A]; the unfixed tab-order fold gives [Z,B,A,X].
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void SeedFoldsAnUnrankedOpenPathBehindTheRankedOnes()
+    {
+        var recentPaths = new List<string>();
+
+        // X: ranked, closed. B and A: ranked, open. Z: open, absent from the persisted MRU.
+        ApplicateMainWindow.SeedRecentPathsForRestore(
+            recentPaths,
+            new List<string> { X, B, A },
+            new List<string> { A, B, Z },
+            argvPath: null);
+
+        Assert.Equal(new List<string> { B, A, Z, X }, recentPaths);
     }
 
     /// <summary>
