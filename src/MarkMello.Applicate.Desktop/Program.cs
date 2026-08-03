@@ -32,6 +32,17 @@ internal static class Program
         // item C; the same Stopwatch shape was already proven by the
         // existing "[startup] AppBootstrap" / "[startup] FirstWindow" lines).
         ApplicateTrace.Touch();
+
+        // Arm the global failure report before anything else can fail. Two event
+        // subscriptions and nothing more -- no disk, no allocation worth naming
+        // -- because this runs on every launch; the crash sink is resolved
+        // lazily inside the fatal path, which by definition runs at most once.
+        //
+        // It REPORTS, it does not rescue: the window still closes, but it leaves
+        // a record. See
+        // work-items/decisions/2026-08-04-fatal-failures-are-reported-not-swallowed.md.
+        ApplicateFatalReport.Install();
+
         ApplicateTrace.DiagMs("startup-pre-window", "program-main-enter");
 
         if (!ApplicateSingleInstanceService.TryCreatePrimary(out var singleInstance))
@@ -109,7 +120,14 @@ internal static class Program
     public static AppBuilder BuildAvaloniaApp() =>
         AppBuilder.Configure<App>()
             .UsePlatformDetect()
-            .LogToTrace();
+            .LogToTrace()
+            // The UI-thread half of the global failure report. It cannot go in
+            // Main next to Install(): Dispatcher.UnhandledException is an
+            // INSTANCE event on Dispatcher.UIThread, and touching that before
+            // platform setup binds a dispatcher against an unresolved threading
+            // interface. AfterSetup runs once setup has completed and before the
+            // lifetime starts, which is exactly the seam.
+            .AfterSetup(_ => ApplicateFatalReport.InstallDispatcherHook());
 
     /// <summary>
     /// Schedule a thread-pool pre-read of the argv document and deposit the
