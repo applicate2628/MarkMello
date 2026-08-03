@@ -5330,6 +5330,18 @@ function buildLoadDocumentDeps(): import("./loadDocument").LoadDocumentDeps {
       initialRenderPipelineCompleted = true;
       hasInitialLayoutSettled = true;
       postReadyEnhancementsCompleted = true;
+      // This is the restore path's settle owner, so it owes the same pairing the
+      // cold path's initialVisibleReady owes: raising the flag is not observable
+      // on its own. ensureChromeNodes already ran the width-handle write earlier
+      // in this same burst (from loadDocument.ts, before this callback), while
+      // resetModuleGlobals still had the flag false, so it left the handle
+      // hidden. Without this call the handle stays hidden until some unrelated
+      // event happens to run the updater.
+      // Layout is clean here — restoreCachedScrollPosition flushed it and
+      // nothing since has written style — so this reads geometry rather than
+      // forcing a reflow, and on a policy-heavy document it takes the CSS-model
+      // branch and reads no geometry at all.
+      updateWidthHandlePositionForCurrentLayout();
       postHostMessage({
         type: "document-ready",
         mathCount: document.querySelectorAll("[data-tex]").length

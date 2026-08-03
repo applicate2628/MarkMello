@@ -5668,6 +5668,7 @@
         initialRenderPipelineCompleted = true;
         hasInitialLayoutSettled = true;
         postReadyEnhancementsCompleted = true;
+        updateWidthHandlePositionForCurrentLayout();
         postHostMessage({
           type: "document-ready",
           mathCount: document.querySelectorAll("[data-tex]").length

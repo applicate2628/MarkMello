@@ -106,19 +106,13 @@ describe("cache-restore warm-up arming", () => {
   // cached restore, so this pins that it is still raised synchronously and was
   // not carried into the deferred path.
   //
-  // Source-text rather than behavioural, deliberately. Two pre-existing facts,
-  // both verified against the UNFIXED tree so neither is attributed to this
-  // commit, put the flag's only observable behind a frame:
-  //   - the restore path never re-runs the width-handle write itself
-  //     (ensureChromeNodes runs at loadDocument.ts:145, BEFORE
-  //     completeCachedDocumentLoad at :160, so it reads the flag while
-  //     resetModuleGlobals still has it false);
-  //   - every ungated caller of updateWidthHandlePositionForCurrentLayout is
-  //     rAF- or probe-driven, and applyReadingPreferences only QUEUES, gating
-  //     its width-handle update behind `viewerChromeChanged` (renderer.ts:4315).
-  // Reaching it behaviourally therefore needs a chrome off/on round trip across
-  // several drained frames -- machinery that is itself more likely to go
-  // vacuous than the regression it would catch.
+  // Source-text rather than behavioural, deliberately: this pins WHERE the flag
+  // is raised, which is what the arming move could get wrong. That the raise is
+  // actually observable on the restore is a separate contract, and it is now
+  // covered behaviourally in rendererCachedWidthHandleReveal.test.ts -- the
+  // restore path re-runs the width-handle write itself, because ensureChromeNodes
+  // runs before this callback and therefore reads the flag while
+  // resetModuleGlobals still has it false.
   it("does not defer the settled-layout flag along with the warm-up arming", () => {
     const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
     const start = source.indexOf("completeCachedDocumentLoad: (");
