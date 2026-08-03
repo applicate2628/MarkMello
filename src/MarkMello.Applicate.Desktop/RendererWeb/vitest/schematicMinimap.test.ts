@@ -2,8 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   walkDocumentBlocks,
   renderSchematicSvg,
-  shouldTriggerPhaseB,
-  schedulePhaseBRebuild,
+  schedulePhaseBGeometryRefresh,
   type DocumentBlock,
   type DocumentBlockKind,
 } from "../src/schematicMinimap";
@@ -109,86 +108,62 @@ describe("integration", () => {
   });
 });
 
-describe("Phase B trigger", () => {
-  it("returns true if document height changed >=100px after allMathRendered", () => {
-    // 100px threshold = roughly 1 paragraph/math block worth. Smaller drifts
-    // (rounding, scrollbar appearance) don't trigger 70ms+ full reclone.
-    expect(shouldTriggerPhaseB(1100, 1000)).toBe(true);
-    expect(shouldTriggerPhaseB(900, 1000)).toBe(true);
+describe("schedulePhaseBGeometryRefresh (real renderer seam)", () => {
+  it("calls refresh('B') exactly once, unconditionally, after allMathRendered", async () => {
+    // The height-delta gate is gone with the rebuild. It compared two LIVE
+    // document heights and never inspected the clone, so it gated the geometry
+    // re-measure on a staleness proxy that does not describe the clone. A stable
+    // document height must no longer suppress the re-measure.
+    const refresh = vi.fn();
+    let resolveMath: () => void = () => {};
+    const allMathRendered = new Promise<void>(r => { resolveMath = r; });
+
+    const phaseBReady = schedulePhaseBGeometryRefresh({ allMathRendered, refresh });
+
+    expect(refresh).not.toHaveBeenCalled();
+    resolveMath();
+    await phaseBReady;
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith("B");
   });
 
-  it("returns false if document height drift is below threshold", () => {
-    expect(shouldTriggerPhaseB(1000, 1000)).toBe(false);
-    expect(shouldTriggerPhaseB(1099, 1000)).toBe(false);
-    expect(shouldTriggerPhaseB(999, 1000)).toBe(false);
-    expect(shouldTriggerPhaseB(1000.5, 1000)).toBe(false);
-  });
-
-  it("returns false if cached height is 0 (Phase A never ran)", () => {
-    expect(shouldTriggerPhaseB(1000, 0)).toBe(false);
-  });
-});
-
-describe("schedulePhaseBRebuild (real renderer seam)", () => {
-  it("calls refresh('B') when documentHeight changes after allMathRendered", async () => {
-    vi.useFakeTimers();
-    // `Omit` strips the DOM lib's own (required, non-optional)
+  it("runs on the promise continuation with no timer or idle deferral", async () => {
+    // NO TIMERS guard. `Omit` strips the DOM lib's own (required, non-optional)
     // `requestIdleCallback` declaration before re-adding it as optional --
-    // intersecting straight onto `typeof window` would keep it required
-    // (the real declaration wins), making it neither deletable nor safely
-    // unassignable under `exactOptionalPropertyTypes`.
+    // intersecting straight onto `typeof window` would keep it required (the real
+    // declaration wins), making it neither deletable nor safely unassignable under
+    // `exactOptionalPropertyTypes`.
     const win = window as Omit<typeof window, "requestIdleCallback"> & {
       requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
     };
     const originalRequestIdleCallback = win.requestIdleCallback;
-    // Optional property (present ⇒ typed function, never explicitly
-    // `undefined`) — force the "absent" fallback path by deleting it.
-    delete win.requestIdleCallback;
+    const idleCallback = vi.fn(() => 1);
+    win.requestIdleCallback = idleCallback;
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
     try {
       const refresh = vi.fn();
-      const currentScrollHeight = 200;
-      const cachedHeight = 100;
       let resolveMath: () => void = () => {};
       const allMathRendered = new Promise<void>(r => { resolveMath = r; });
 
-      const phaseBReady = schedulePhaseBRebuild({
-        allMathRendered,
-        getCurrentDocumentHeight: () => currentScrollHeight,
-        getCachedDocumentHeight: () => cachedHeight,
-        refresh,
-      });
-
+      const phaseBReady = schedulePhaseBGeometryRefresh({ allMathRendered, refresh });
       resolveMath();
+      // One microtask turn. The retired idle/setTimeout deferral could not have run
+      // the refresh by here; a plain promise continuation has.
       await Promise.resolve();
-      // Phase B refresh is now deferred via requestIdleCallback (or setTimeout
-      // 50ms fallback in happy-dom which lacks requestIdleCallback).
-      await vi.advanceTimersByTimeAsync(50);
-      await phaseBReady;
       expect(refresh).toHaveBeenCalledWith("B");
+
+      // And neither deferral primitive was reached at all, so the timers are
+      // deleted rather than relocated behind a different name.
+      expect(idleCallback).not.toHaveBeenCalled();
+      expect(setTimeoutSpy).not.toHaveBeenCalled();
+      await phaseBReady;
     } finally {
+      setTimeoutSpy.mockRestore();
       if (originalRequestIdleCallback === undefined) {
         delete win.requestIdleCallback;
       } else {
         win.requestIdleCallback = originalRequestIdleCallback;
       }
-      vi.useRealTimers();
     }
-  });
-
-  it("does NOT call refresh when documentHeight stable", async () => {
-    const refresh = vi.fn();
-    let resolveMath: () => void = () => {};
-    const allMathRendered = new Promise<void>(r => { resolveMath = r; });
-
-    const phaseBReady = schedulePhaseBRebuild({
-      allMathRendered,
-      getCurrentDocumentHeight: () => 100,
-      getCachedDocumentHeight: () => 100,
-      refresh,
-    });
-
-    resolveMath();
-    await phaseBReady;
-    expect(refresh).not.toHaveBeenCalled();
   });
 });

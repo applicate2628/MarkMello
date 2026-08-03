@@ -1068,28 +1068,9 @@
   }
 
   // RendererWeb/src/schematicMinimap.ts
-  var PHASE_B_HEIGHT_DELTA_THRESHOLD_PX = 100;
-  function shouldTriggerPhaseB(currentHeight, cachedHeight) {
-    if (cachedHeight <= 0) return false;
-    return Math.abs(currentHeight - cachedHeight) >= PHASE_B_HEIGHT_DELTA_THRESHOLD_PX;
-  }
-  function schedulePhaseBRebuild(deps) {
+  function schedulePhaseBGeometryRefresh(deps) {
     return deps.allMathRendered.then(() => {
-      if (!shouldTriggerPhaseB(deps.getCurrentDocumentHeight(), deps.getCachedDocumentHeight())) {
-        return;
-      }
-      const win = window;
-      return new Promise((resolve) => {
-        const refresh = () => {
-          deps.refresh("B");
-          resolve();
-        };
-        if (typeof win.requestIdleCallback === "function") {
-          win.requestIdleCallback(refresh, { timeout: 500 });
-        } else {
-          window.setTimeout(refresh, 50);
-        }
-      });
+      deps.refresh("B");
     });
   }
 
@@ -2337,15 +2318,27 @@
       emitMathObserverWindowMark: (detail) => emitMark("mm-math-observer-window", detail)
     });
     const phaseBDocumentCacheKey = currentDocumentCacheKey;
-    const initialVisualSettleReady = schedulePhaseBRebuild({
+    const initialVisualSettleReady = schedulePhaseBGeometryRefresh({
       allMathRendered: controller.allMathRendered,
-      getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
-      getCachedDocumentHeight: () => minimapDocumentHeight,
       refresh: (phase) => {
         if (phaseBDocumentCacheKey !== currentDocumentCacheKey || controller.isCancelled()) {
           return;
         }
-        refreshMinimapContent(phase);
+        const root = document.scrollingElement ?? document.documentElement;
+        minimapDocumentHeight = root.scrollHeight;
+        invalidateMinimapCloneMeasuredGeometry();
+        updateMinimapVisibility(true);
+        updateMinimapViewport({ skipVisibilityUpdate: true });
+        emitMark("mm-minimap-refresh-skipped", {
+          phase,
+          reason: "geometry-only",
+          documentHeight: minimapDocumentHeight
+        });
+        postPerfMark("mm-minimap-refresh-skipped", {
+          phase,
+          reason: "geometry-only",
+          documentHeight: minimapDocumentHeight
+        });
       }
     });
     const readinessController = {

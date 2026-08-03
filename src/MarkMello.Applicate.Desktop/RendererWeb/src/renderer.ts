@@ -24,7 +24,7 @@ import type {
 import { applyLoadDocument, clearDocumentState } from "./loadDocument";
 import { renderMath as renderMathInit } from "./mathRenderInit";
 import { isTerminalMathState } from "./mathRenderQueue";
-import { schedulePhaseBRebuild } from "./schematicMinimap";
+import { schedulePhaseBGeometryRefresh } from "./schematicMinimap";
 import { emitMark, installLongTaskObserver, recordScrollIpc, getReport, getFpsSampler } from "./performanceMarks";
 import { createScrollCoalescer } from "./scrollCoalescer";
 import { calculateWidthHandleLeft, clampWidthHandleLeft } from "./widthHandleLayout";
@@ -824,25 +824,57 @@ function renderMath(): MathReadinessController {
     isMathObserverWindowTelemetryEnabled: () => hostWindow.__mmMathObserverPerfEnabled === true,
     emitMathObserverWindowMark: (detail) => emitMark("mm-math-observer-window", detail),
   });
-  // Phase B fires after allMathRendered to re-clone the minimap when the
-  // document height genuinely drifted (>=100px). The staleness guard must key
-  // off document IDENTITY (currentDocumentCacheKey — same token used by
-  // scheduleCachedMermaidResume), NOT layoutReadyGeneration: the latter is
-  // bumped by this same render's scheduleLayoutReady BETWEEN this capture and
-  // Phase B firing, so the old generation-token guard always cancelled and the
-  // rebuild was dead on every initial render. isCancelled() still guards a real
+  // Phase B fires after allMathRendered and RE-MEASURES the minimap clone instead
+  // of re-cloning it. The clone renders its own math in place (the math pass is
+  // document-wide and the clone is mounted inside the document before it captures
+  // its node set), so its CONTENT needs no reconciliation — but its GEOMETRY does:
+  // minimapContentHeight and minimapCloneSpaceLayout are generation-keyed caches
+  // whose only other invalidators are resize, preferences, and the argument-less
+  // viewport update, none of which fire on a load-then-idle document.
+  //
+  // The staleness guard must key off document IDENTITY (currentDocumentCacheKey —
+  // same token used by scheduleCachedMermaidResume), NOT layoutReadyGeneration: the
+  // latter is bumped by this same render's scheduleLayoutReady BETWEEN this capture
+  // and Phase B firing, so the old generation-token guard always cancelled and the
+  // work was dead on every initial render. isCancelled() still guards a real
   // new-document load.
   const phaseBDocumentCacheKey = currentDocumentCacheKey;
-  const initialVisualSettleReady = schedulePhaseBRebuild({
+  const initialVisualSettleReady = schedulePhaseBGeometryRefresh({
     allMathRendered: controller.allMathRendered,
-    getCurrentDocumentHeight: () => (document.scrollingElement ?? document.documentElement).scrollHeight,
-    getCachedDocumentHeight: () => minimapDocumentHeight,
     refresh: (phase) => {
       if (phaseBDocumentCacheKey !== currentDocumentCacheKey || controller.isCancelled()) {
         return;
       }
 
-      refreshMinimapContent(phase);
+      // The geometry residual of the deleted rebuild, in the shape
+      // refreshInitialVisibleMinimapContent already ships: refresh the cached
+      // document height (it feeds isPolicyHeavyMinimapDocument), invalidate the
+      // clone's measured geometry as an EXPLICIT cause rather than riding on the
+      // argument-less commit contract, then issue exactly one commit against it.
+      //
+      // Deliberately absent: minimapContent.replaceChildren(clone). The clone is
+      // already correct, and replacing it created clone nodes AFTER the mermaid
+      // sweep had handed installLazyMermaidObserver its node set, stranding them in
+      // no observer and no queue for the rest of the session.
+      //
+      // This is the allMathRendered ENTRY MOMENT of the geometry-invalidation
+      // class, not a claim that the class is closed: a lazy mermaid render is a
+      // second producer that still has no invalidation of its own.
+      const root = document.scrollingElement ?? document.documentElement;
+      minimapDocumentHeight = root.scrollHeight;
+      invalidateMinimapCloneMeasuredGeometry();
+      updateMinimapVisibility(true);
+      updateMinimapViewport({ skipVisibilityUpdate: true });
+      emitMark("mm-minimap-refresh-skipped", {
+        phase,
+        reason: "geometry-only",
+        documentHeight: minimapDocumentHeight
+      });
+      postPerfMark("mm-minimap-refresh-skipped", {
+        phase,
+        reason: "geometry-only",
+        documentHeight: minimapDocumentHeight
+      });
     },
   });
   const readinessController: MathReadinessController = {
@@ -2956,7 +2988,9 @@ function ensureMinimap(): void {
   window.addEventListener("pointercancel", handleMinimapPointerUp, true);
 }
 
-// Read by Task 15 schedulePhaseBRebuild to decide if Phase B rebuild is needed.
+// Cached document height behind isPolicyHeavyMinimapDocument(). Written by every
+// minimap content refresh and by the post-allMathRendered geometry re-measure, so
+// math growth can still cross maxDetailedDocumentHeight.
 let minimapDocumentHeight = 0;
 
 function clearMinimapCloneReadCache(): void {

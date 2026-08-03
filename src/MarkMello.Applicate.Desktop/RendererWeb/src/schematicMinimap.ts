@@ -98,55 +98,39 @@ export function renderSchematicSvg(blocks: DocumentBlock[], documentWidth: numbe
   return svg;
 }
 
-// Tolerance threshold for Phase B re-clone. With content-visibility:auto on
-// document blocks (renderer.css), off-screen math stays at intrinsic size
-// until intersected → total scrollHeight is stable between Phase A
-// (visible-first math done) and allMathRendered. Small drifts (rounding,
-// scrollbar appearance, sub-pixel layout) used to trigger a 70ms+ full
-// cloneNode of a 138-formula doc for no visible gain.
+// Phase B fires once, after allMathRendered. It schedules a GEOMETRY re-measure of
+// the minimap clone — it does NOT re-clone it.
 //
-// 100px = roughly 1 paragraph or 1 math block worth of "real height shift".
-// Below this, Phase A's clone is "close enough"; above this, content
-// genuinely changed and re-cloning the minimap matters.
-const PHASE_B_HEIGHT_DELTA_THRESHOLD_PX = 100;
-
-export function shouldTriggerPhaseB(currentHeight: number, cachedHeight: number): boolean {
-  if (cachedHeight <= 0) return false;
-  return Math.abs(currentHeight - cachedHeight) >= PHASE_B_HEIGHT_DELTA_THRESHOLD_PX;
-}
-
-export type PhaseBRebuildDeps = {
+// The mounted Phase-A clone is a live render target, not a stale snapshot: it is
+// mounted inside the document (loadDocument.ts:171) BEFORE the document-wide math
+// and mermaid passes capture their node sets (:191), so those passes render into
+// the clone as well as into the live document. Measured over 6 byte-identical runs:
+// 2 527 rendered [data-tex] in the live tree and 2 527 in the clone, f_structural
+// 0.0000 across 696 blocks. The rebuild this used to schedule therefore replaced a
+// correct clone with an equivalent one, at 489.8 ms and 144 840 dirtied layout
+// objects, and it destroyed the mermaid the clone had already rendered.
+//
+// The height-delta staleness gate went with the rebuild. It compared two LIVE
+// document heights and never inspected the clone at all, so it was a proxy for a
+// staleness that does not occur.
+//
+// What survives is the clone's own geometry: its math rendered in place, so its
+// measured height and clone-space block tops changed, and those caches are
+// generation-keyed with no other invalidator on a load-then-idle document. The
+// caller owns that re-measure; this seam owns only WHEN it happens. It is
+// unconditional because it is cheap — one cached-height write plus one commit.
+//
+// NO TIMER, idle callback, or deadline. There is no long task left to defer, and
+// deferring the re-measure would only move work out of browser idle time into the
+// frame right after allMathRendered — backward. Staleness is handled
+// deterministically by the caller's document-identity guard inside `refresh`.
+export type PhaseBGeometryRefreshDeps = {
   allMathRendered: Promise<void>;
-  getCurrentDocumentHeight: () => number;
-  getCachedDocumentHeight: () => number;
   refresh: (phase: "B") => void;
 };
 
-export function schedulePhaseBRebuild(deps: PhaseBRebuildDeps): Promise<void> {
+export function schedulePhaseBGeometryRefresh(deps: PhaseBGeometryRefreshDeps): Promise<void> {
   return deps.allMathRendered.then(() => {
-    if (!shouldTriggerPhaseB(deps.getCurrentDocumentHeight(), deps.getCachedDocumentHeight())) {
-      return;
-    }
-    // Defer the actual rebuild to browser idle time. Phase B re-clones a
-    // 138-formula doc (~47ms long task in Phase A's window). The user has
-    // already seen the initial render — they're not waiting for minimap
-    // refinement. Running it during idle lets the cold-render budget
-    // breathe and keeps the minimap update OUT of any user-visible long
-    // task. requestIdleCallback timeout backstop (500ms) ensures it
-    // eventually runs even if main thread stays busy.
-    const win = window as typeof window & {
-      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
-    };
-    return new Promise<void>(resolve => {
-      const refresh = () => {
-        deps.refresh("B");
-        resolve();
-      };
-      if (typeof win.requestIdleCallback === "function") {
-        win.requestIdleCallback(refresh, { timeout: 500 });
-      } else {
-        window.setTimeout(refresh, 50);
-      }
-    });
+    deps.refresh("B");
   });
 }
