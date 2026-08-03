@@ -143,9 +143,11 @@ public sealed class ApplicateOpenDocumentsMruFoldTests : IDisposable
 
         Assert.Equal(2, probe.FoldCount);
 
-        // NOT a fold: re-opening an already-open document deduplicates inside the service and
-        // produces no add at all, so it never reaches this handler. Pre-existing behaviour, named
-        // explicitly by d12's "scope of never dropped" so it is not misread as coverage.
+        // NOT a fold ON THIS TRIGGER: re-opening an already-open document deduplicates inside the
+        // service and produces no add at all, so it never reaches this handler. That is a statement
+        // about the COLLECTION trigger's reach, not about the MRU's — the activation the dedupe path
+        // performs instead DOES fold, on the other trigger, which this probe deliberately does not
+        // wire. See ApplicateActivationMruFoldTests for that half.
         await service.OpenAsync(first.FilePath);
         Assert.Equal(new List<string> { second.FilePath, first.FilePath }, probe.RecentPaths);
         Assert.Equal(2, probe.FoldCount);

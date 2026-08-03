@@ -15,9 +15,11 @@ public sealed class ApplicateSession
     public string? ActivePath { get; init; }
 
     /// <summary>
-    /// Recently opened document paths, most-recent-first, deduplicated, capped. Distinct from
-    /// OpenPaths (which are the CURRENTLY-open tabs): a path stays here after its tab is closed, so
-    /// the welcome screen can offer it for re-opening.
+    /// Recently USED document paths, most-recent-first, deduplicated, capped. "Used" is opened OR
+    /// activated: switching to an already-open tab re-heads its entry, so this tracks what the user
+    /// last reached for rather than what they first opened. Distinct from OpenPaths (which are the
+    /// CURRENTLY-open tabs): a path stays here after its tab is closed, so the welcome screen can
+    /// offer it for re-opening.
     /// </summary>
     public List<string> RecentPaths { get; init; } = new();
 
@@ -40,8 +42,9 @@ public sealed class ApplicateSession
     public static ApplicateSession Empty => new();
 
     /// <summary>
-    /// Fold a just-opened path into a recent list: move-to-front, case-insensitive dedup, cap. Pure
-    /// so the maintenance logic is unit-testable independent of the store or the UI.
+    /// Fold a just-used path into a recent list: move-to-front, case-insensitive dedup, cap. Pure
+    /// so the maintenance logic is unit-testable independent of the store or the UI. WHICH events
+    /// count as a use (an open, an activation) is the caller's decision, never this fold's.
     /// </summary>
     public static List<string> BuildRecentPaths(IEnumerable<string> existing, string openedPath)
     {

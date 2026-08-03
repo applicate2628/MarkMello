@@ -574,15 +574,81 @@ public sealed class ApplicateRecentFilesWiringTests
         Assert.True(replayFinally >= 0, "The bracket must clear the marker in its own finally.");
         Assert.Contains("replayFoldInFlight = null;", replay[replayFinally..], StringComparison.Ordinal);
 
-        // (iii) Exactly ONE writer of a non-null marker, counted over the WHOLE bridge body -- the
-        // restore anchor cannot see a writer placed in NoteRecentDocument or the CollectionChanged
-        // handler, both of which precede it.
+        // (iii) Every non-null marker writer lives INSIDE the restore region. That is the actual
+        // invariant: the marker suppresses an MRU fold, so a writer reachable from a NON-replay path
+        // could silence a genuine user activation. The writers that matter are the ones the restore
+        // anchor cannot see -- one placed in NoteRecentDocument or the CollectionChanged handler,
+        // both of which precede it.
+        //
+        // Asserted by LOCATION, not by count. The replay legitimately owns more than one bracket
+        // (the per-path open here, and the post-restore Activate guarded by S6b), so a bare count
+        // would go red on a correct second bracket while staying green on a smuggled writer that
+        // merely replaced the first -- wrong in both directions.
         var bridgeSetters = MarkerAssignments(bridge).Where(rhs => rhs != "null").ToList();
-        Assert.Single(bridgeSetters);
+        var restoreSetters = MarkerAssignments(restore).Where(rhs => rhs != "null").ToList();
+        Assert.NotEmpty(restoreSetters);
+        Assert.Equal(restoreSetters, bridgeSetters);
+
+        // (iii-b) Every bracket CLEARS what it sets: one null-clear per non-null writer. A bracket
+        // that sets and forgets to clear leaks the decline past its own call, and every later
+        // activation of that path is silently dropped from the MRU for the rest of the session.
+        var restoreClears = MarkerAssignments(restore).Where(rhs => rhs == "null").ToList();
+        Assert.Equal(restoreSetters.Count, restoreClears.Count);
 
         // (iv) Both replay opens are AWAITED. `_ = ReplayOpenAsync(...)` suppresses CS4014 and would
         // fire every replay open concurrently against one arbitrarily-overwritten marker.
         Assert.Equal(2, CountOccurrences(restore, "await ReplayOpenAsync("));
+    }
+
+    /// <summary>
+    /// S6b -- the post-restore activation is bracketed too. Once the MRU gained its activation
+    /// trigger (<c>ApplicateMainWindow.HandleActiveDocumentChangedForRecent</c>, filed defect
+    /// <c>bugs/2026-08-02-mru-records-openings-not-activations.md</c>), the restore tail's own
+    /// <c>Activate</c> became an MRU-writing event -- and it is the REPLAY's action, not a use:
+    /// nobody clicked, the restore merely finished.
+    /// <para>
+    /// Unbracketed, it re-folds the activated path to the head of the recent list, which undoes a
+    /// remove or clear the user made during the restore window -- exactly the d12 defect the marker
+    /// exists to prevent -- and the convergence save then persists the resurrected entry.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void ThePostRestoreActivationGoesThroughTheMarkerBracket()
+    {
+        var restore = ExtractRestoreRegion(out _, out _);
+
+        var activateIndex = restore.IndexOf("openDocs.Activate(toActivate);", StringComparison.Ordinal);
+        Assert.True(activateIndex >= 0, "The restore tail should activate the chosen document.");
+        Assert.Equal(1, CountOccurrences(restore, "openDocs.Activate("));
+
+        // The marker is set from the path being activated, BEFORE the activation.
+        var setterIndex = restore.LastIndexOf(
+            "replayFoldInFlight = toActivate.FilePath;",
+            activateIndex,
+            StringComparison.Ordinal);
+        Assert.True(
+            setterIndex >= 0,
+            "The post-restore Activate must name its path in the marker before firing.");
+
+        // Nothing but the bracket's own opening sits between the setter and the activation: an
+        // awaited call in that gap would let a user activation land while the marker is held.
+        var betweenSetterAndActivate = restore[setterIndex..activateIndex];
+        Assert.DoesNotContain("await ", betweenSetterAndActivate, StringComparison.Ordinal);
+
+        // ...and it is cleared in the bracket's own finally, not merely after the call.
+        var finallyIndex = restore.IndexOf("finally", activateIndex, StringComparison.Ordinal);
+        Assert.True(finallyIndex > activateIndex, "The activation bracket must have a finally.");
+        var clearIndex = restore.IndexOf(
+            "replayFoldInFlight = null;",
+            finallyIndex,
+            StringComparison.Ordinal);
+        Assert.True(clearIndex > finallyIndex, "The activation bracket must clear the marker in its finally.");
+
+        // The clear belongs to THIS finally, not a later one: no second finally intervenes.
+        var nextFinally = restore.IndexOf("finally", finallyIndex + "finally".Length, StringComparison.Ordinal);
+        Assert.True(
+            nextFinally < 0 || clearIndex < nextFinally,
+            "The clear must sit in the activation bracket's own finally.");
     }
 
     /// <summary>S7 -- both persisted-path catch sites share the ONE predicate.</summary>

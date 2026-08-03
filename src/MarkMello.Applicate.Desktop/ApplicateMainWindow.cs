@@ -2716,6 +2716,12 @@ public sealed class ApplicateMainWindow : MainWindow
     /// <summary>
     /// The open-documents <c>CollectionChanged</c> body, extracted so its ONE fold predicate is
     /// reachable from a test driving a real <see cref="OpenDocumentsService"/>.
+    /// <para>
+    /// This is ONE of the MRU's two triggers; the other is
+    /// <see cref="HandleActiveDocumentChangedForRecent"/>. Both call the same single writer, so the
+    /// enumeration below settles only which COLLECTION changes count as a use -- an activation
+    /// arrives on the other event entirely and is not among the actions listed here.
+    /// </para>
     /// </summary>
     /// <remarks>
     /// <para>
@@ -2766,6 +2772,66 @@ public sealed class ApplicateMainWindow : MainWindow
         }
 
         save();
+    }
+
+    /// <summary>
+    /// The <c>ActiveDocumentChanged</c> body's recent-files half: the MRU records a USE, and
+    /// activating a document IS the use. Extracted so this trigger's ONE precondition is reachable
+    /// from a test driving a real <see cref="OpenDocumentsService"/>, exactly as
+    /// <see cref="HandleOpenDocumentsChanged"/> is for the collection trigger.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Filed defect <c>work-items/bugs/2026-08-02-mru-records-openings-not-activations.md</c>: the
+    /// collection trigger alone fires only on <c>Add</c>, and <c>OpenAsync</c> deduplicates an
+    /// already-open path and returns after <c>SetActive</c> WITHOUT an <c>Add</c>. So the list
+    /// recorded first-OPENINGS and no tab switch ever reached it. This is the missing trigger, added
+    /// beside the existing one rather than by teaching <c>OpenAsync</c>'s dedupe path to <c>Add</c> —
+    /// a synthetic <c>Add</c> would change what EVERY observer of that collection sees (the tabs
+    /// strip's rebuild, the session snapshot's open set) to buy an MRU bump.
+    /// </para>
+    /// <para>
+    /// Both triggers funnel into the SAME <paramref name="noteRecent"/> writer, so d11 clause 3 still
+    /// has exactly one automatic writer mutating exactly one list — what changes is the set of events
+    /// that reach it, never the number of owners. d12 clause 2's replay decline therefore covers this
+    /// trigger for free: it lives inside <see cref="NoteRecentDocumentCore"/>, and this handler adds
+    /// no second precondition on top of it.
+    /// </para>
+    /// <para>
+    /// The head check is this trigger's OWN precondition, and it is an identity test, never a clock.
+    /// A fresh <c>OpenAsync</c> raises <c>Add</c> AND <c>SetActive</c>, so without it every open would
+    /// fold twice and mirror twice — and each mirror re-runs the view model's per-entry
+    /// <c>File.Exists</c> prune and rebuilds its <c>ObservableCollection</c>. Declining when the path
+    /// is already most-recent is exact, not approximate:
+    /// <see cref="ApplicateSession.BuildRecentPaths"/> is move-to-front, so folding a path already at
+    /// index 0 reproduces the identical list. Nothing is skipped, only a no-op write.
+    /// </para>
+    /// <para>
+    /// Persistence cadence is UNCHANGED by this: the subscription that owns this trigger already
+    /// called <c>SaveSession</c> on every activation to keep <c>ActivePath</c> current, so no
+    /// activation writes to disk that did not already write. The fold runs BEFORE that save so the
+    /// snapshot carries the updated order rather than the previous one.
+    /// </para>
+    /// </remarks>
+    internal static void HandleActiveDocumentChangedForRecent(
+        IReadOnlyList<string> recentPaths,
+        string? activePath,
+        Action<string?> noteRecent)
+    {
+        // ClearActive raises this event with a null document -- a session-only untitled document owns
+        // the window and no file is active. Nothing to record.
+        if (string.IsNullOrWhiteSpace(activePath))
+        {
+            return;
+        }
+
+        if (recentPaths.Count > 0
+            && string.Equals(recentPaths[0], activePath, System.StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        noteRecent(activePath);
     }
 
     /// <summary>
@@ -3703,16 +3769,20 @@ public sealed class ApplicateMainWindow : MainWindow
         var sessionStore = App.Services?.GetService<IApplicateSessionStore>();
         var isRestoring = sessionStore is not null;
 
-        // D11 Recent files: accumulate opened document paths (most-recent-first, dedup, capped)
-        // across sessions. Seeded from the restored session below, folded on each doc open, persisted
-        // by SaveSession, and mirrored to the VM so the welcome screen can offer them for re-opening.
+        // D11 Recent files: accumulate USED document paths (most-recent-first, dedup, capped) across
+        // sessions. Seeded from the restored session below, folded on each doc open AND on each
+        // activation, persisted by SaveSession, and mirrored to the VM so the welcome screen can offer
+        // them for re-opening. Two triggers, ONE writer (NoteRecentDocument) -- d11 clause 3.
         var recentPaths = new List<string>();
 
-        // D12 clause 2: the ONE path the restore replay's ReplayOpenAsync bracket currently has in hand.
+        // D12 clause 2: the ONE path the restore replay currently has in hand.
         // Declared HERE, in the same closure as recentPaths, so NoteRecentDocument below can read it.
         // NOT a second writer-owner of the recent state: it holds one path identity -- no order, no MRU
-        // membership, no persistence -- and cannot outlive the single ReplayOpenAsync call that set it.
-        // ReplayOpenAsync is its ONLY writer; an assignment anywhere else re-opens the defect.
+        // membership, no persistence -- and cannot outlive the single replay call that set it.
+        // Written by the replay's TWO brackets and nowhere else: ReplayOpenAsync (the per-path open)
+        // and the post-restore Activate. Both are the restore machinery acting on its own behalf --
+        // the user clicked nothing -- which is exactly the origin the decline exists for. An
+        // assignment anywhere else, or a replay-driven mutation left unbracketed, re-opens the defect.
         string? replayFoldInFlight = null;
 
         // D13 clause 1/4: the pre-restore on-disk baseline AS OBSERVED by the store. null means the
@@ -3745,8 +3815,9 @@ public sealed class ApplicateMainWindow : MainWindow
             _ = sessionStore.SaveAsync(snapshot).AsTask();
         }
 
-        // Fold a just-opened document into the recent list and mirror it to the VM. Called on every
-        // document add (below). D12: the eligibility check lives in this OWNER, not at the call site --
+        // Fold a just-USED document into the recent list and mirror it to the VM. The ONE automatic
+        // writer (d11 clause 3), reached from BOTH triggers below: every document add, and every
+        // activation. D12: the eligibility check lives in this OWNER, not at either call site --
         // "is this the path the replay currently has in hand" is the writer's own precondition. The
         // marker is read LIVE on every invocation, so the core sees the value in force at that instant.
         void NoteRecentDocument(string? path)
@@ -3769,6 +3840,18 @@ public sealed class ApplicateMainWindow : MainWindow
             {
                 lastActivePath = openDocs.ActiveDocument.FilePath;
             }
+
+            // The MRU's SECOND trigger. Activating a document is the "use" the list is named for, and
+            // it is the only one that reaches a switch between already-open tabs -- OpenAsync dedupes
+            // those without an Add, so the collection trigger above never sees them. Routed into the
+            // SAME NoteRecentDocument writer, so d11 clause 3 keeps one automatic writer, and placed
+            // BEFORE SaveSession so the save below persists the folded order in the same pass. This
+            // adds no save: the SaveSession call was already unconditional on every activation.
+            HandleActiveDocumentChangedForRecent(
+                recentPaths,
+                openDocs.ActiveDocument?.FilePath,
+                NoteRecentDocument);
+
             SaveSession();
         };
 
@@ -4022,12 +4105,27 @@ public sealed class ApplicateMainWindow : MainWindow
                     // promotes from null to toActivate, or it confirms toActivate
                     // (which the existing SetActive-no-op guard handles silently).
                     inVmMirror = true;
+
+                    // D12 clause 2, carried onto the MRU's activation trigger: this activation is the
+                    // REPLAY's own, not a use -- the user clicked nothing, the restore simply finished.
+                    // Naming its path for exactly this call makes the one MRU writer decline it, so a
+                    // remove or clear the user made during the restore window is not undone by the
+                    // restore completing. The seed above already placed the whole restored set in its
+                    // d12 clause 1 order; this activation must not re-head it.
+                    //
+                    // inVmMirror is deliberately NOT the discriminator here: it is set around genuine
+                    // USER activations too (the VM-to-service bridge sets it whenever the view model's
+                    // Document drives the service, which is how opening a recent-files entry arrives),
+                    // so gating the fold on it would silently swallow the very tab-switch case this
+                    // trigger exists to record. The path identity is the discriminator, per d12 clause 3.
+                    replayFoldInFlight = toActivate.FilePath;
                     try
                     {
                         openDocs.Activate(toActivate);
                     }
                     finally
                     {
+                        replayFoldInFlight = null;
                         inVmMirror = false;
                     }
 

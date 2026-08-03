@@ -238,21 +238,24 @@ internal sealed class ApplicateBackgroundTabPrefetcher : IDisposable
     /// ones; the tab index is also the tie-break that makes the sort
     /// deterministic, since <see cref="List{T}.Sort"/> is not stable.</para>
     ///
-    /// <para><b>KNOWN DEFECT — the MRU is NOT activation recency, so this does
-    /// not order by "which document the user reached for most recently."</b>
-    /// The MRU's only automatic writer folds on the open-documents collection's
-    /// <c>Add</c> action (<c>ApplicateMainWindow.HandleOpenDocumentsChanged</c>),
-    /// and <c>OpenDocumentsService.OpenAsync</c> dedups an already-open path and
-    /// returns after <c>SetActive</c> without an <c>Add</c> — so switching
-    /// between open tabs never updates the MRU. Independently, d12 clause 1
+    /// <para><b>In-session this IS activation recency.</b> The MRU has a second
+    /// automatic trigger — <c>ApplicateMainWindow.HandleActiveDocumentChangedForRecent</c>,
+    /// on the service's <c>ActiveDocumentChanged</c> — so a switch between
+    /// already-open tabs folds move-to-front and this ordering follows which
+    /// document the user actually reached for. (Previously only the collection's
+    /// <c>Add</c> action wrote, and <c>OpenDocumentsService.OpenAsync</c> dedups an
+    /// already-open path without an <c>Add</c>, so tab switches never reached the
+    /// list at all: <c>work-items/bugs/2026-08-02-mru-records-openings-not-activations.md</c>.)</para>
+    ///
+    /// <para><b>REMAINING DEFECT — the FIRST pass after a session restore is
+    /// still not activation-ordered.</b> d12 clause 1
     /// (<c>ApplicateMainWindow.SeedRecentPathsForRestore</c>) folds every saved
     /// open path move-to-front in tab order at restore, which leaves this
-    /// ordering as exactly REVERSE TAB ORDER for the startup pass. Both are
-    /// accepted decisions; correcting the aim needs a signal neither owner
-    /// emits today. Filed as F1 of
-    /// <c>work-items/bugs/2026-08-02-tab-prefetch-warms-the-wrong-three-documents.md</c>
-    /// and NOT worked around here — a prefetch-local recency list would be the
-    /// second owner d11 clause 1 forbids.</para>
+    /// ordering as exactly REVERSE TAB ORDER until the user's first tab switch
+    /// re-heads it. That seeding is an accepted decision and is NOT worked
+    /// around here — a prefetch-local recency list would be the second owner
+    /// d11 clause 1 forbids. Filed as F1 of
+    /// <c>work-items/bugs/2026-08-02-tab-prefetch-warms-the-wrong-three-documents.md</c>.</para>
     ///
     /// <para><b>Excluded:</b> the active document — it is already rendered, and
     /// it is the one entry this pass must not spend its budget on.</para>
