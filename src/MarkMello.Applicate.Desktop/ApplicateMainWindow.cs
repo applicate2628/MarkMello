@@ -2517,7 +2517,7 @@ public sealed class ApplicateMainWindow : MainWindow
 
         singleInstance.ActivationRequested += (_, args) =>
         {
-            Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
+            ApplicateDispatch.PostGuarded(async () =>
             {
                 ApplicateForegroundWindowActivator.ActivateExternalRequest(this);
 
@@ -2564,7 +2564,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 {
                     // Same failure mode as normal open; no extra surface in the activation path.
                 }
-            });
+            }, "single-instance-activation");
         };
     }
 
@@ -3212,7 +3212,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 return;
             }
 
-            Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
+            ApplicateDispatch.PostGuarded(async () =>
             {
                 if (args.ActiveDocument is null)
                 {
@@ -3573,7 +3573,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 {
                     inServiceLoad = false;
                 }
-            });
+            }, "active-document-changed-mirror");
         };
 
         viewModel.PropertyChanged += (_, args) =>
@@ -3635,7 +3635,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 // Mirror the VM clear by closing the active OpenDocument so
                 // the tabs strip matches. If the user clicked Cancel, the
                 // VM keeps its document and this branch is never entered.
-                Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
+                ApplicateDispatch.PostGuarded(async () =>
                 {
                     // CreateNewDocument (Ctrl+N) also clears VM.Document before it
                     // installs the untitled EditorSession, but a session-only
@@ -3741,13 +3741,13 @@ public sealed class ApplicateMainWindow : MainWindow
                     {
                         inServiceLoad = false;
                     }
-                });
+                }, "vm-document-cleared-mirror");
                 return;
             }
             var fileName = document!.FileName;
             var content = document.Content;
 
-            Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
+            ApplicateDispatch.PostGuarded(async () =>
             {
                 // If service already knows about this path, just activate it.
                 // Otherwise also try a cross-source content+filename match
@@ -3822,7 +3822,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 {
                     inVmMirror = false;
                 }
-            });
+            }, "vm-document-save-mirror");
         };
 
         // Persistence: restore the open documents list saved from the last
@@ -3927,7 +3927,7 @@ public sealed class ApplicateMainWindow : MainWindow
         // the closure below the single writer-owner.
         InstallBackgroundTabPrefetch(openDocs, () => recentPaths.ToList());
 
-        Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
+        ApplicateDispatch.PostGuarded(async () =>
         {
             ApplicateSession saved = ApplicateSession.Empty;
             if (sessionStore is not null)
@@ -4217,7 +4217,7 @@ public sealed class ApplicateMainWindow : MainWindow
                 // Flush a consolidated save now that the restored set is final.
                 SaveSession();
             }
-        });
+        }, "startup-session-restore");
     }
 
     // PE r2 item A — pre-warm wiring. Runs once at ctor time, right after
