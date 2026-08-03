@@ -4455,6 +4455,23 @@ function flushPendingReadingPreferences(): void {
   const wheelProxyChanged = !prev || prev.wheelProxyEnabled !== next.wheelProxyEnabled;
   const widthResizerVisibilityChanged = !prev || prev.widthResizerVisibility !== next.widthResizerVisibility;
 
+  // Arrival is a fact the moment we hold `next`, so record it BEFORE any work
+  // that reads it. Phase A calls updateWidthHandlePositionForCurrentLayout on
+  // both branches of `viewerChromeChanged`, and its `hidden` predicate
+  // (updateWidthHandlePosition / ...FromCssModel) reads
+  // hasReceivedHostPreferences. Raising the flag after those calls made the
+  // function announce that preferences had arrived having just acted as though
+  // they had not: when the host delivers reading-preferences and load-document
+  // in ONE task the load's settle owner (initialVisibleReady.then, which raises
+  // hasInitialLayoutSettled and re-runs the write) runs BEFORE this frame, so
+  // nothing re-ran the write afterwards and the handle stayed hidden for the
+  // life of the document. Same defect class as the cached-restore reveal.
+  // The `hadHostPreferences` snapshot moves WITH the raise: it is the
+  // before-image the first-prefs bootstrap below is gated on, so the two are
+  // one transaction and splitting them would disable that bootstrap entirely.
+  const hadHostPreferences = hasReceivedHostPreferences;
+  hasReceivedHostPreferences = true;
+
   // Phase A — presentation (cheap, synchronous).
   const root = document.documentElement;
   if (fontFamilyChanged) root.dataset.mmFontFamily = next.fontFamily;
@@ -4508,8 +4525,6 @@ function flushPendingReadingPreferences(): void {
     document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
   }
 
-  const hadHostPreferences = hasReceivedHostPreferences;
-  hasReceivedHostPreferences = true;
   lastAppliedReadingPreferences = next;
 
   // Width handle anchor depends purely on .mm-document size + body size →

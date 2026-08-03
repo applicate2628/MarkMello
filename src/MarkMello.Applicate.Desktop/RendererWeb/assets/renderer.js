@@ -5062,6 +5062,8 @@
     const documentScrollChanged = !prev || prev.documentScrollEnabled !== next.documentScrollEnabled;
     const wheelProxyChanged = !prev || prev.wheelProxyEnabled !== next.wheelProxyEnabled;
     const widthResizerVisibilityChanged = !prev || prev.widthResizerVisibility !== next.widthResizerVisibility;
+    const hadHostPreferences = hasReceivedHostPreferences;
+    hasReceivedHostPreferences = true;
     const root = document.documentElement;
     if (fontFamilyChanged) root.dataset.mmFontFamily = next.fontFamily;
     if (fontSizeChanged) root.style.setProperty("--mm-document-font-size", `${next.fontSize}px`);
@@ -5092,8 +5094,6 @@
       const widthResizerClasses = getWidthResizerVisibilityClasses(widthResizerVisibility);
       document.body.classList.toggle(WIDTH_RESIZER_ALWAYS_CLASS, widthResizerClasses.alwaysClass);
     }
-    const hadHostPreferences = hasReceivedHostPreferences;
-    hasReceivedHostPreferences = true;
     lastAppliedReadingPreferences = next;
     const layoutAffectingChange = fontFamilyChanged || fontSizeChanged || lineHeightChanged || maxWidthChanged || minimapModeChanged || viewerChromeChanged;
     if (layoutAffectingChange) {
