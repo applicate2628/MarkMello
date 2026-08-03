@@ -66,6 +66,12 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - The WebView renderer hides the document body, minimap, and width-resizer handle until the bootstrap pipeline finishes math + mermaid + code-block rendering and posts `layout-ready`. Without this gate the user briefly sees a fallback state on tab switch and fresh launch (web fonts not yet swapped, `\[ ... \]` math placeholders, raw mermaid source, width handle at a stale X coordinate). The reveal uses a 120ms CSS opacity transition shared by all three surfaces.
 - The hide-rule is scoped to `body > main.mm-document` (and the minimap aside, and the width-handle div) so that the minimap's cloned `.mm-document` subtree is not affected; the clone always renders at full opacity inside the minimap container.
 
+## Release Scope (v0.3.29-applicate)
+
+- The recent-files list now records the document you last **looked at**, not merely the one you first opened. Switching between already-open tabs previously left the list untouched, so a document you had been reading for an hour could sit below one you opened once and closed. The menu's own wording already said "recently viewed"; the behaviour now matches it.
+- The width-adjustment handle no longer disappears after switching to a short document and back. It was hidden during the restore and, on documents with no minimap to rebuild, nothing ever brought it back for the rest of the session.
+- Tables no longer pay a style recalculation per cell every time a document is restored from the cache. On a table-heavy document the switch cost drops from about 80 ms to about 4 ms; on a very large table it was over a second.
+
 ## Release Scope (v0.3.28-applicate)
 
 - The minimap no longer shows a block of raw diagram source where the document shows the rendered diagram. Each mermaid diagram is now decided and rendered once, against the document, and the result is copied into the minimap — so the two always agree instead of drifting apart as soon as the reader scrolls to a diagram.
