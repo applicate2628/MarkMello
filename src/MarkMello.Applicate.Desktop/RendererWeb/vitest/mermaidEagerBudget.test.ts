@@ -102,6 +102,135 @@ async function loadRendererWithEagerNodes(count: number): Promise<LoadedRenderer
   };
 }
 
+// G-M1 fixture. A mixed sweep: the live document and the minimap clone both hold the
+// same two diagrams, because the mermaid sweeps are document-wide and the clone is
+// mounted inside the document before they run. Only the LIVE nodes may decide.
+type SurfaceFixture = {
+  renderMermaidNodes: LoadedRenderer["renderMermaidNodes"];
+  liveEager: HTMLElement;
+  liveLazy: HTMLElement;
+  followers: HTMLElement[];
+  sweptNodes: HTMLElement[];
+  observedNodes: () => Set<Element>;
+  followerRectReads: () => number;
+  perfMarks: () => Array<{ name: string; detail: Record<string, unknown> }>;
+};
+
+function stubRect(node: HTMLElement, top: number, bottom: number, onRead?: () => void): void {
+  node.getBoundingClientRect = () => {
+    onRead?.();
+    return {
+      x: 0, y: top, top, bottom, left: 0, right: 100,
+      width: 100, height: bottom - top, toJSON: () => ({})
+    } as DOMRect;
+  };
+}
+
+function mermaidPre(blockIndex: string, source: string): HTMLElement {
+  const pre = document.createElement("pre");
+  pre.className = "mm-mermaid";
+  pre.dataset.mmBlockIndex = blockIndex;
+  const code = document.createElement("code");
+  code.className = "language-mermaid";
+  code.dataset.mmMermaid = "";
+  code.textContent = source;
+  pre.appendChild(code);
+  return pre;
+}
+
+async function loadRendererWithLiveAndCloneSurfaces(): Promise<SurfaceFixture> {
+  vi.resetModules();
+  document.documentElement.innerHTML = `<body><main class="mm-document"></main></body>`;
+
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    void callback;
+    return 0;
+  });
+
+  const observed = new Set<Element>();
+  class FakeIntersectionObserver {
+    constructor(callback: IntersectionObserverCallback) {
+      void callback;
+    }
+    observe(element: Element): void {
+      observed.add(element);
+    }
+    unobserve(element: Element): void {
+      observed.delete(element);
+    }
+    disconnect(): void {
+      observed.clear();
+    }
+  }
+  vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver as unknown as typeof IntersectionObserver);
+
+  const marks: Array<{ name: string; detail: Record<string, unknown> }> = [];
+  (window as unknown as {
+    chrome: { webview: { postMessage: (message: unknown) => void } };
+  }).chrome = {
+    webview: {
+      postMessage: (message: unknown) => {
+        const posted = message as { type?: string; name?: string; detail?: string };
+        if (posted?.type !== "perf-mark" || posted.name === undefined) return;
+        marks.push({
+          name: posted.name,
+          detail: posted.detail === undefined ? {} : JSON.parse(posted.detail) as Record<string, unknown>
+        });
+      }
+    }
+  };
+
+  const rendererModule = await import("../src/renderer") as unknown as {
+    renderMermaidNodes: LoadedRenderer["renderMermaidNodes"];
+    __testSetMinimapCloneBlockElementsForTesting: (
+      clone: HTMLElement,
+      elements: readonly HTMLElement[]
+    ) => void;
+  };
+
+  const main = document.querySelector<HTMLElement>("main.mm-document");
+  if (!main) throw new Error("document root missing");
+
+  const liveEager = mermaidPre("2", "graph TD; A0 --> B0");
+  const liveLazy = mermaidPre("7", "graph TD; A1 --> B1");
+  main.append(liveEager, liveLazy);
+  stubRect(liveEager, 0, 100);
+  // Far past viewportHeight + MERMAID_EAGER_VIEWPORT_MARGIN_PX for happy-dom's 0-height
+  // viewport, so this one is unambiguously lazy.
+  stubRect(liveLazy, 90_000, 90_100);
+
+  const minimap = document.createElement("aside");
+  minimap.className = "mm-minimap";
+  const followerRoot = document.createElement("div");
+  followerRoot.className = "mm-minimap-content";
+  minimap.appendChild(followerRoot);
+  document.body.appendChild(minimap);
+
+  let followerRectReads = 0;
+  const followers = [mermaidPre("2", "graph TD; A0 --> B0"), mermaidPre("7", "graph TD; A1 --> B1")];
+  for (const follower of followers) {
+    followerRoot.appendChild(follower);
+    // Deliberately OUT of the eager band: if a follower ever reached the predicate it
+    // would be classified lazy and land in the observer, which is exactly the failure
+    // this fixture is built to make visible.
+    stubRect(follower, 90_000, 90_100, () => { followerRectReads++; });
+  }
+
+  rendererModule.__testSetMinimapCloneBlockElementsForTesting(followerRoot, []);
+
+  return {
+    renderMermaidNodes: rendererModule.renderMermaidNodes,
+    liveEager,
+    liveLazy,
+    followers,
+    // Document order, as every real sweep produces it: live nodes first, clone after.
+    sweptNodes: [liveEager, liveLazy, ...followers],
+    observedNodes: () => observed,
+    followerRectReads: () => followerRectReads,
+    perfMarks: () => marks
+  };
+}
+
 describe("eager Mermaid batch", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -171,5 +300,86 @@ describe("eager Mermaid batch", () => {
     for (const node of nodes) {
       expect(node.classList.contains("is-rendered")).toBe(true);
     }
+  });
+});
+
+// G-M1. This replaces the source-text assertion that used to live in
+// handleHostMessageLoadDocument.test.ts and pin the literal
+// `installLazyMermaidObserver(lazyNodes, generation, mermaid);`. That literal was the ONLY
+// thing pinning "every lazy node reaches an observer", and it says nothing about WHICH
+// nodes `lazyNodes` holds. The assertions below are behavioural and were proven to go red
+// on a build where the surface partition is removed: the two clone nodes then appear in
+// observedNodes(), and their rects are read.
+describe("one render decision per diagram", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("observes exactly the live lazy complement — no follower observed, no live lazy node unobserved", async () => {
+    const fixture = await loadRendererWithLiveAndCloneSurfaces();
+    const mermaid: MermaidApiForTesting = {
+      render: async (id) => ({ svg: `<svg id="${id}"><g/></svg>` })
+    };
+
+    await fixture.renderMermaidNodes(fixture.sweptNodes, mermaid);
+
+    expect(Array.from(fixture.observedNodes())).toEqual([fixture.liveLazy]);
+    for (const follower of fixture.followers) {
+      expect(fixture.observedNodes().has(follower)).toBe(false);
+    }
+    // No diagram is left both unrendered AND unobserved on the deciding surface.
+    const stranded = [fixture.liveEager, fixture.liveLazy].filter(node =>
+      !node.classList.contains("is-rendered") && !fixture.observedNodes().has(node));
+    expect(stranded).toHaveLength(0);
+  });
+
+  it("never measures a follower: getBoundingClientRect is not called on a clone node", async () => {
+    const fixture = await loadRendererWithLiveAndCloneSurfaces();
+    const mermaid: MermaidApiForTesting = {
+      render: async (id) => ({ svg: `<svg id="${id}"><g/></svg>` })
+    };
+
+    await fixture.renderMermaidNodes(fixture.sweptNodes, mermaid);
+
+    expect(fixture.followerRectReads()).toBe(0);
+  });
+
+  it("calls mermaid.render once per DIAGRAM, and the clone twin receives the result", async () => {
+    const fixture = await loadRendererWithLiveAndCloneSurfaces();
+    const renderedSources: string[] = [];
+    const mermaid: MermaidApiForTesting = {
+      render: async (id, source) => {
+        renderedSources.push(source);
+        return { svg: `<svg id="${id}"><g/></svg>` };
+      }
+    };
+
+    await fixture.renderMermaidNodes(fixture.sweptNodes, mermaid);
+
+    // Four swept nodes, two diagrams, one eager decision: one render, not two.
+    expect(renderedSources).toEqual(["graph TD; A0 --> B0"]);
+    expect(fixture.liveEager.classList.contains("is-rendered")).toBe(true);
+    const eagerTwin = fixture.followers[0]!;
+    expect(eagerTwin.classList.contains("is-rendered")).toBe(true);
+    expect(eagerTwin.nextElementSibling?.className).toBe("mm-mermaid-svg");
+    // The lazy diagram rendered on neither surface, so both stay raw source together.
+    expect(fixture.liveLazy.classList.contains("is-rendered")).toBe(false);
+    expect(fixture.followers[1]!.classList.contains("is-rendered")).toBe(false);
+  });
+
+  it("reports decisions and swept nodes as separate fields on mm-mermaid-visible-first", async () => {
+    const fixture = await loadRendererWithLiveAndCloneSurfaces();
+    const mermaid: MermaidApiForTesting = {
+      render: async (id) => ({ svg: `<svg id="${id}"><g/></svg>` })
+    };
+
+    await fixture.renderMermaidNodes(fixture.sweptNodes, mermaid);
+
+    const mark = fixture.perfMarks().find(entry => entry.name === "mm-mermaid-visible-first");
+    expect(mark).toBeDefined();
+    // total/eager/lazy count DECISIONS; `swept` keeps the pre-change quantity under a name
+    // that still means the same thing, so a cross-arm gate cannot compare the wrong number.
+    expect(mark!.detail).toEqual({ total: 2, eager: 1, lazy: 1, swept: 4, follower: 2, unscoped: 0 });
   });
 });

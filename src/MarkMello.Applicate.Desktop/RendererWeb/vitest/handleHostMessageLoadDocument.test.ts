@@ -210,6 +210,113 @@ describe("handleHostMessage(load-document)", () => {
     expect(renderMermaidNodes).not.toContain("allNodes.slice");
   });
 
+  // G-M2, the source half. The text assertion above pins that `lazyNodes` reaches the
+  // observer; it cannot pin WHICH nodes `lazyNodes` holds, and that is the property the
+  // one-decision-per-diagram change turns on: a minimap clone node must never be an
+  // observer target, because the observer only ever sees what it was handed at install
+  // time. The BEHAVIOURAL guard for it — proven to go red on a build where the partition
+  // is bypassed, by observing the clone's nodes and reading their rects — lives in
+  // mermaidEagerBudget.test.ts, "one render decision per diagram". This assertion is the
+  // cheap source-level companion: the eager/lazy split must be taken over the partition's
+  // deciding set, never over the swept set.
+  it("derives the observed set from the live/unscoped partition, never from the raw sweep", () => {
+    const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+    const renderStart = source.indexOf("async function renderMermaidNodes(");
+    const renderEnd = source.indexOf("function renderCodeBlocks", renderStart);
+    const renderMermaidNodes = source.slice(renderStart, renderEnd);
+
+    expect(renderStart).toBeGreaterThanOrEqual(0);
+    expect(renderEnd).toBeGreaterThan(renderStart);
+    expect(renderMermaidNodes).toContain("partitionMermaidNodesBySurface(");
+    expect(renderMermaidNodes).toContain("const decidingNodes = surfaces.deciding;");
+    expect(renderMermaidNodes).toContain("decidingNodes.filter(node =>");
+    expect(renderMermaidNodes).toContain("const lazyNodes = decidingNodes.filter(");
+    expect(renderMermaidNodes).not.toContain("allNodes.filter");
+  });
+
+  // I-1 / G-B0-d. The minimap clone is TRUTHFUL because the math and mermaid passes are
+  // document-wide: the clone is mounted before they capture their node sets, so it renders
+  // its own content in place. Scoping any of them to the live document is barred on its
+  // own (2 527 formulas revert to raw source in the minimap), and barred TWICE OVER
+  // together with the Phase-B rebuild removal, which leaves no rebuild to repair them.
+  // The fix for the double render is PROPAGATION, and propagation narrows nothing — so
+  // the danger signature is checked directly: every mermaid sweep still starts at
+  // `document`, and renderMath still receives `documentRoot: document`.
+  it("keeps every mermaid sweep and the math documentRoot document-wide", () => {
+    const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+
+    const sweeps = Array.from(source.matchAll(/([A-Za-z0-9_.]+)\.querySelectorAll<HTMLElement>\(\s*"pre\.mm-mermaid(:not\(\.is-rendered\))?"/g));
+    // renderMermaid (theme refresh + post-ready), scheduleCachedMermaidResume,
+    // recoverMermaidBarrierFailure, driveFullRenderBarrier.
+    expect(sweeps).toHaveLength(4);
+    for (const sweep of sweeps) {
+      expect(sweep[1]).toBe("document");
+    }
+
+    expect(source).toContain("documentRoot: document");
+    expect(source).not.toContain('documentRoot: document.querySelector');
+  });
+
+  // Claim 10. There are exactly TWO edges that mount clone nodes, and both are already
+  // marked by a rebuildMinimapCloneBlockElementIndex call. The pull attaches beside each of
+  // them — BEFORE the rebuild, so the geometry invalidation the rebuild performs covers the
+  // content the pull just mirrored in. A third mount edge appearing without a pull re-opens
+  // the hole silently, so the call-site inventory is pinned at two.
+  it("runs the mirror pull at both clone-mount edges, before the index rebuild", () => {
+    const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
+
+    const mountEdges = Array.from(source.matchAll(/rebuildMinimapCloneBlockElementIndex\((?!root)/g));
+    expect(mountEdges).toHaveLength(2);
+
+    expect(source).toContain(
+      "  mirrorRenderedMermaidIntoMinimapClone();\n"
+      + "  rebuildMinimapCloneBlockElementIndex(clone);\n"
+    );
+    expect(source).toContain(
+      "  mirrorRenderedMermaidIntoMinimapClone();\n"
+      + "  rebuildMinimapCloneBlockElementIndex(minimapContent!);\n"
+    );
+  });
+
+  // The eager gate's already-rendered defect is deliberately NOT admitted here: fixing it
+  // needs the predicate AND the observer target changed together, because a lazy
+  // display:none <pre> never intersects, and landing only the predicate half strands a
+  // diagram with stale-theme colours for the rest of the session. So the predicate is
+  // pinned byte for byte, to stop a mid-implementation tidy-up from landing that half alone.
+  it("leaves isMermaidNodeNearViewport's body untouched", () => {
+    const source = readFileSync("RendererWeb/src/mermaidRender.ts", "utf8");
+    expect(source).toContain(
+      "  const rect = node.getBoundingClientRect();\n"
+      + "  return rect.bottom >= -marginPx && rect.top <= viewportHeight + marginPx;\n"
+    );
+  });
+
+  // No timer, deadline, elapsed-time budget, requestIdleCallback or polling participates
+  // in the render decision or in propagation. Both propagation moments are state edges: a
+  // render settling, and a clone being mounted.
+  it("arms no clock anywhere in the mermaid render or surface leaves", () => {
+    for (const path of ["RendererWeb/src/mermaidRender.ts", "RendererWeb/src/mermaidSurface.ts"]) {
+      const source = readFileSync(path, "utf8");
+      for (const primitive of [
+        "setTimeout",
+        "setInterval",
+        "requestIdleCallback",
+        "requestAnimationFrame",
+        "performance.now"
+      ]) {
+        expect(source, `${path} must not use ${primitive}`).not.toContain(primitive);
+      }
+    }
+
+    // The single pre-existing Date.now() is a component of the render ID mermaid is
+    // handed, not a decision about elapsed time. Pinned so it cannot quietly become one,
+    // and so the propagation path can never acquire a second reading of the clock.
+    const renderSource = readFileSync("RendererWeb/src/mermaidRender.ts", "utf8");
+    const clockReads = renderSource.match(/Date\.now\(\)/g) ?? [];
+    expect(clockReads).toHaveLength(1);
+    expect(renderSource).toContain("`mm-mermaid-${generation}-${Date.now()}-${Math.random()");
+  });
+
   it("does not rebuild a full-DOM minimap clone twice before first reveal", () => {
     const source = readFileSync("RendererWeb/src/renderer.ts", "utf8");
     const renderMathStart = source.indexOf("function renderMath(): MathReadinessController");

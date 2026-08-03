@@ -1,10 +1,29 @@
 import { describe, expect, it } from "vitest";
 import {
+  LIVE_DOCUMENT_ROOT_SELECTOR,
   collectLiveDocumentBlockElements,
   createBlockElementIndex,
   findTopVisibleBlockIndexFromBlocks,
   getDocumentViewportTopCloneYFromIndex,
+  liveBlockSelectorForIndex,
+  liveDocumentBlockSelectorForTesting,
 } from "../src/topVisibleBlockIndex";
+
+// G-M8. The live-document root now has ONE spelling, composed into both selectors and
+// into the mermaid surface classifier. Extracting it must not change what either
+// selector resolves to, so both are pinned byte for byte against their pre-extraction
+// literals rather than against the constant they are now built from.
+describe("live document selectors", () => {
+  it("keeps both composed selectors byte-identical to their pre-extraction form", () => {
+    expect(LIVE_DOCUMENT_ROOT_SELECTOR).toBe("body > main.mm-document");
+    expect(liveDocumentBlockSelectorForTesting())
+      .toBe("body > main.mm-document [data-mm-block-index]:not(.is-rendered)");
+    expect(liveBlockSelectorForIndex(7))
+      .toBe('body > main.mm-document [data-mm-block-index="7"]:not(.is-rendered)');
+    expect(liveBlockSelectorForIndex("12"))
+      .toBe('body > main.mm-document [data-mm-block-index="12"]:not(.is-rendered)');
+  });
+});
 
 function setBlockGeometry(element: HTMLElement, top: number, height: number): void {
   Object.defineProperty(element, "offsetTop", {

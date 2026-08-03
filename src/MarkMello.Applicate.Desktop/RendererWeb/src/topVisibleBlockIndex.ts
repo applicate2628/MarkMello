@@ -1,9 +1,18 @@
+// The ONE spelling of "the live document root", i.e. the document the reader
+// scrolls, as opposed to the minimap's clone of it (which lives under
+// `aside.mm-minimap > div.mm-minimap-content`, a sibling of this root, so the
+// `body >` prefix excludes it). Every selector below composes this constant
+// instead of re-typing the literal: which element is the live root is a
+// cross-cutting invariant with one owner, and a third spelling would mean a
+// future change to it has to find three.
+export const LIVE_DOCUMENT_ROOT_SELECTOR = "body > main.mm-document";
+
 // `:not(.is-rendered)` excludes rendered Mermaid <pre> (renderer.css
 // `pre.mm-mermaid.is-rendered { display:none }`) natively in querySelectorAll,
 // so the monotonic block list is built WITHOUT reading layout. `is-rendered` is
 // mermaid-only (mermaidRender.ts, findBar SKIP_SELECTOR) and always display:none;
 // runtime-verified the only display:none [data-mm-block-index] blocks are these.
-const LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]:not(.is-rendered)";
+const LIVE_DOCUMENT_BLOCK_SELECTOR = `${LIVE_DOCUMENT_ROOT_SELECTOR} [data-mm-block-index]:not(.is-rendered)`;
 
 // Scoped selector for ONE block index that carries the SAME contract as
 // LIVE_DOCUMENT_BLOCK_SELECTOR: live document only (excludes minimap clones via `body >`)
@@ -12,7 +21,13 @@ const LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-ind
 // block to scrollIntoView). NOT for geometry-mapping paths that intentionally measure the hidden
 // rendered-mermaid box (see docScrollTopForCloneY) — those keep their own rendered-inclusive form.
 export function liveBlockSelectorForIndex(blockIndex: number | string): string {
-  return `body > main.mm-document [data-mm-block-index="${blockIndex}"]:not(.is-rendered)`;
+  return `${LIVE_DOCUMENT_ROOT_SELECTOR} [data-mm-block-index="${blockIndex}"]:not(.is-rendered)`;
+}
+
+// Exported for the byte-identity guard (G-M8): extracting the root constant must not
+// change what either composed selector resolves to.
+export function liveDocumentBlockSelectorForTesting(): string {
+  return LIVE_DOCUMENT_BLOCK_SELECTOR;
 }
 
 export type BlockElementIndex = {

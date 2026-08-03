@@ -9,7 +9,18 @@ import {
   normalizeWidthResizerVisibility,
   type WidthResizerVisibility
 } from "./widthResizerVisibility";
-import { isMermaidNodeNearViewport, renderMermaidNode, type MermaidApiLike } from "./mermaidRender";
+import {
+  isMermaidNodeNearViewport,
+  mirrorMermaidSlot,
+  renderMermaidNode,
+  type MermaidApiLike
+} from "./mermaidRender";
+import {
+  classifyMermaidSurface,
+  partitionMermaidNodesBySurface,
+  resolveLiveDocumentRoot,
+  resolveMermaidMirrors
+} from "./mermaidSurface";
 import { normalizeHljsLanguage } from "./hljsLanguage";
 import { runInitialRenderPipeline, type MathReadinessController, type RendererTheme } from "./initialRenderPipeline";
 import type {
@@ -938,6 +949,28 @@ function isNormalMermaidOwner(identity = documentIdentity): boolean {
     && documentIdentity === identity;
 }
 
+// The mirror port's implementation, injected into renderMermaidNode. Only a LIVE node
+// propagates: a follower never decides and therefore never renders, and an unscoped node
+// has no legitimate twin in the minimap's clone of the live document. The twin is looked
+// up FRESH by key at render time rather than read from
+// minimapCloneBlockElementIndex — that map is emptied by clearMinimapCloneReadCache at
+// three points, so a render landing in one of those windows would silently find no twin,
+// and the saving is one querySelectorAll against a ~160 ms mermaid.render.
+function resolveMermaidMirrorsForNode(node: HTMLElement): HTMLElement[] {
+  const followerRoot = minimapContent;
+  if (followerRoot === null) return [];
+  const liveRoot = resolveLiveDocumentRoot(document);
+  if (classifyMermaidSurface(node, { liveRoot, followerRoot }) !== "live") return [];
+  const mirrors = resolveMermaidMirrors(node, followerRoot);
+  // Posted even at zero, so "the resolver never ran" and "the pairing found no twin" are
+  // different observations rather than the same silence.
+  postPerfMark("mm-mermaid-mirrored", {
+    blockIndex: node.dataset["mmBlockIndex"] ?? null,
+    mirrors: mirrors.length
+  });
+  return mirrors;
+}
+
 function trackMermaidRenderCall(
   node: HTMLElement,
   generation: number,
@@ -948,7 +981,8 @@ function trackMermaidRenderCall(
     generation,
     () => mermaidRenderGeneration,
     mermaid,
-    invalidateTopVisibleBlockIndexCache
+    invalidateTopVisibleBlockIndexCache,
+    resolveMermaidMirrorsForNode
   ));
   activeMermaidRenderCalls.add(renderCall);
   void renderCall.finally(() => {
@@ -1010,15 +1044,33 @@ async function renderMermaidNodes(
   const generation = ++mermaidRenderGeneration;
   mermaidLazyRenderQueue = Promise.resolve();
   const viewportHeight = getViewportHeightForMermaid();
-  const eagerNodes = allNodes.filter(node =>
+  // ONE decision per diagram. The sweep that produced allNodes stays document-wide (the
+  // minimap clone is a live render target and every unscoped sweep is load-bearing for
+  // its truthfulness), so the same diagram arrives twice: once as its live element and
+  // once as the clone's copy of it. The clone's copy is a FOLLOWER — it is never
+  // measured, never observed, and never decided; it receives the live twin's rendered
+  // result instead. Only live and unscoped nodes reach the predicate below, so no
+  // getBoundingClientRect is ever taken on a clone node.
+  const surfaces = partitionMermaidNodesBySurface(allNodes, {
+    liveRoot: resolveLiveDocumentRoot(document),
+    followerRoot: minimapContent
+  });
+  const decidingNodes = surfaces.deciding;
+  const eagerNodes = decidingNodes.filter(node =>
     isMermaidNodeNearViewport(node, viewportHeight, MERMAID_EAGER_VIEWPORT_MARGIN_PX));
   const eagerSet = new Set(eagerNodes);
-  const lazyNodes = allNodes.filter(node => !eagerSet.has(node));
+  const lazyNodes = decidingNodes.filter(node => !eagerSet.has(node));
 
+  // total/eager/lazy now count DECISIONS, not swept nodes. `swept` keeps the old
+  // quantity under its own name so a gate comparing node counts across baseline and
+  // delivered arms reads the field that still means the same thing.
   postPerfMark(perfMarkName, {
-    total: allNodes.length,
+    total: decidingNodes.length,
     eager: eagerNodes.length,
-    lazy: lazyNodes.length
+    lazy: lazyNodes.length,
+    swept: allNodes.length,
+    follower: surfaces.follower,
+    unscoped: surfaces.unscoped
   });
   installLazyMermaidObserver(lazyNodes, generation, mermaid);
   if (eagerNodes.length === 0) return;
@@ -3139,6 +3191,42 @@ function cloneDocumentForMinimap(): HTMLElement | null {
   return clone;
 }
 
+// PULL — the second of propagation's two moments. The push (renderMermaidNode's mirror
+// install) covers every diagram that renders while a clone is mounted; this covers every
+// clone mounted after a diagram already rendered. Neither is a timer: one edge is a
+// render settling, the other is a mount.
+//
+// The pull is what closes the cache-restore hole. restoreMinimapSnapshot mounts a
+// fragment captured at some earlier instant, so a diagram that rendered after that
+// instant leaves a raw <pre> in the restored clone whose live twin is already
+// `is-rendered` — and nothing repairs it, because the resuming sweep selects
+// `pre.mm-mermaid:not(.is-rendered)`, which matches on the LIVE twin's state and
+// therefore structurally cannot reach the follower. Permanent live-ahead divergence with
+// no trigger. At the fresh-clone mount site the call is near-idempotent by construction
+// (a cloneNode(true) already carries the rendered slots), and it is made anyway so the
+// invariant holds by construction rather than by an argument about cloneNode — with the
+// side benefit that the fresh clone's slots become self-contained instead of sharing the
+// live document's SVG ids.
+function mirrorRenderedMermaidIntoMinimapClone(): void {
+  const followerRoot = minimapContent;
+  if (followerRoot === null) return;
+  const liveRoot = resolveLiveDocumentRoot(document);
+  if (liveRoot === null) return;
+  const renderedLiveNodes = liveRoot.querySelectorAll<HTMLElement>("pre.mm-mermaid.is-rendered");
+  if (renderedLiveNodes.length === 0) return;
+  let mirrored = 0;
+  for (const node of renderedLiveNodes) {
+    const mirrors = resolveMermaidMirrors(node, followerRoot);
+    if (mirrors.length === 0) continue;
+    mirrorMermaidSlot(node, mirrors);
+    mirrored++;
+  }
+  postPerfMark("mm-mermaid-mirror-pull", {
+    renderedLive: renderedLiveNodes.length,
+    mirrored
+  });
+}
+
 function refreshMinimapContent(phase: "A" | "B" = "A"): void {
   cancelDeferredMinimapContentRefresh();
   emitMark("mm-minimap-refresh-start", { phase });
@@ -3181,6 +3269,9 @@ function refreshMinimapContent(phase: "A" | "B" = "A"): void {
     minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
   }
   minimapContent.replaceChildren(clone);
+  // Before the index rebuild, whose invalidateMinimapCloneMeasuredGeometry must cover
+  // the clone's settled content — including anything this mount just mirrored in.
+  mirrorRenderedMermaidIntoMinimapClone();
   rebuildMinimapCloneBlockElementIndex(clone);
   updateMinimapVisibility(true);
   updateMinimapViewport({ skipVisibilityUpdate: true });
@@ -3251,6 +3342,7 @@ function restoreCachedMinimapContent(): boolean {
 
   minimapDocumentHeight = restored.documentHeight;
   minimapSourceReady = true;
+  mirrorRenderedMermaidIntoMinimapClone();
   rebuildMinimapCloneBlockElementIndex(minimapContent!);
   postCachedMinimapState(restored.lastPostedState);
   emitMark("mm-minimap-cache-hit", {
@@ -3790,6 +3882,10 @@ export function __testDocScrollTopForCloneYForTesting(root: Element, y: number):
 
 export function __testCloneDocumentForMinimapForTesting(): HTMLElement | null {
   return cloneDocumentForMinimap();
+}
+
+export function __testMirrorRenderedMermaidIntoMinimapCloneForTesting(): void {
+  mirrorRenderedMermaidIntoMinimapClone();
 }
 
 // Producer-capture test seams (design H2). These invoke the real,

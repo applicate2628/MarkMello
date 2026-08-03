@@ -154,7 +154,85 @@
     const rect = node.getBoundingClientRect();
     return rect.bottom >= -marginPx && rect.top <= viewportHeight + marginPx;
   }
-  async function renderMermaidNode(node, generation, getCurrentGeneration, mermaid, onLayoutBoxChange) {
+  var MIRROR_ID_SUFFIX = "-mm-mirror-";
+  var IDREF_ATTRIBUTES = /* @__PURE__ */ new Set([
+    "aria-labelledby",
+    "aria-describedby",
+    "aria-owns",
+    "aria-controls",
+    "aria-flowto"
+  ]);
+  var ID_REFERENCE_PATTERN = /#([A-Za-z0-9_\-\u0080-\uFFFF]+)/g;
+  function mermaidSlotHost(node) {
+    const sibling = node.nextElementSibling;
+    if (sibling === null || !(sibling instanceof HTMLElement)) return null;
+    return sibling.classList.contains("mm-mermaid-svg") ? sibling : null;
+  }
+  function makeCopiedSlotSelfContained(copy, suffix) {
+    const elements = [copy, ...Array.from(copy.querySelectorAll("*"))];
+    const renamed = /* @__PURE__ */ new Map();
+    for (const element of elements) {
+      const id = element.getAttribute("id");
+      if (id === null || id === "" || renamed.has(id)) continue;
+      renamed.set(id, id + suffix);
+    }
+    if (renamed.size === 0) return;
+    for (const element of elements) {
+      const id = element.getAttribute("id");
+      const renamedId = id === null ? void 0 : renamed.get(id);
+      if (renamedId !== void 0) element.setAttribute("id", renamedId);
+      for (const attribute of Array.from(element.attributes)) {
+        if (attribute.name === "id") continue;
+        const value = attribute.value;
+        const rewritten = rewriteIdReferences(value, renamed, IDREF_ATTRIBUTES.has(attribute.name));
+        if (rewritten === value) continue;
+        if (attribute.namespaceURI) element.setAttributeNS(attribute.namespaceURI, attribute.name, rewritten);
+        else element.setAttribute(attribute.name, rewritten);
+      }
+      if (element.tagName.toLowerCase() !== "style") continue;
+      const css = element.textContent ?? "";
+      const rewrittenCss = rewriteIdReferences(css, renamed, false);
+      if (rewrittenCss !== css) element.textContent = rewrittenCss;
+    }
+  }
+  function rewriteIdReferences(value, renamed, isIdRefList) {
+    if (isIdRefList) {
+      const trimmed = value.trim();
+      if (trimmed === "") return value;
+      return trimmed.split(/\s+/).map((token) => renamed.get(token) ?? token).join(" ");
+    }
+    if (!value.includes("#")) return value;
+    return value.replace(ID_REFERENCE_PATTERN, (match, name) => {
+      const renamedId = renamed.get(name);
+      return renamedId === void 0 ? match : `#${renamedId}`;
+    });
+  }
+  function mirrorMermaidSlot(node, mirrors) {
+    const sourceHost = mermaidSlotHost(node);
+    const sourceRendered = node.classList.contains("is-rendered");
+    for (let index = 0; index < mirrors.length; index++) {
+      const mirror = mirrors[index];
+      if (mirror === node) continue;
+      const existingHost = mermaidSlotHost(mirror);
+      if (!sourceRendered || sourceHost === null) {
+        existingHost?.remove();
+        mirror.classList.remove("is-rendered");
+        continue;
+      }
+      const copy = sourceHost.cloneNode(true);
+      makeCopiedSlotSelfContained(copy, `${MIRROR_ID_SUFFIX}${index}`);
+      if (existingHost === null) mirror.after(copy);
+      else existingHost.replaceWith(copy);
+      mirror.classList.add("is-rendered");
+    }
+  }
+  function propagateMermaidSlot(node, resolveMirrors) {
+    if (resolveMirrors === void 0) return;
+    const mirrors = resolveMirrors(node);
+    if (mirrors.length === 0) return;
+    mirrorMermaidSlot(node, mirrors);
+  }
+  async function renderMermaidNode(node, generation, getCurrentGeneration, mermaid, onLayoutBoxChange, resolveMirrors) {
     const codeEl = node.querySelector("code[data-mm-mermaid]");
     if (!codeEl) return;
     const source = codeEl.textContent ?? "";
@@ -163,9 +241,11 @@
       const wasRendered = node.classList.contains("is-rendered");
       renderOversizePlaceholder(node, source, cost);
       node.classList.add("is-rendered");
+      propagateMermaidSlot(node, resolveMirrors);
       if (!wasRendered) onLayoutBoxChange?.();
       return;
     }
+    let notifyLayoutBoxChange = false;
     try {
       const id = `mm-mermaid-${generation}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const { svg } = await mermaid.render(id, source);
@@ -179,15 +259,183 @@
       svgHost.innerHTML = svg;
       const wasRendered = node.classList.contains("is-rendered");
       node.classList.add("is-rendered");
-      if (!wasRendered) onLayoutBoxChange?.();
+      notifyLayoutBoxChange = !wasRendered;
     } catch {
       if (getCurrentGeneration() !== generation) return;
       const wasRendered = node.classList.contains("is-rendered");
       node.classList.remove("is-rendered");
       const sibling = node.nextElementSibling;
       if (sibling?.classList.contains("mm-mermaid-svg")) sibling.remove();
-      if (wasRendered) onLayoutBoxChange?.();
+      notifyLayoutBoxChange = wasRendered;
     }
+    propagateMermaidSlot(node, resolveMirrors);
+    if (notifyLayoutBoxChange) onLayoutBoxChange?.();
+  }
+
+  // RendererWeb/src/topVisibleBlockIndex.ts
+  var LIVE_DOCUMENT_ROOT_SELECTOR = "body > main.mm-document";
+  var LIVE_DOCUMENT_BLOCK_SELECTOR = `${LIVE_DOCUMENT_ROOT_SELECTOR} [data-mm-block-index]:not(.is-rendered)`;
+  function liveBlockSelectorForIndex(blockIndex) {
+    return `${LIVE_DOCUMENT_ROOT_SELECTOR} [data-mm-block-index="${blockIndex}"]:not(.is-rendered)`;
+  }
+  function collectLiveDocumentBlockElements(ownerDocument) {
+    return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR));
+  }
+  function createBlockElementIndex(elements) {
+    const elementsByBlockIndex = /* @__PURE__ */ new Map();
+    const positionsByBlockIndex = /* @__PURE__ */ new Map();
+    for (let position = 0; position < elements.length; position++) {
+      const element = elements[position];
+      const blockIndex = readBlockIndex(element);
+      if (blockIndex === null) {
+        continue;
+      }
+      if (!elementsByBlockIndex.has(blockIndex)) {
+        elementsByBlockIndex.set(blockIndex, element);
+        positionsByBlockIndex.set(blockIndex, position);
+      }
+    }
+    return { elements, elementsByBlockIndex, positionsByBlockIndex };
+  }
+  function findTopVisibleBlockIndexFromBlocks(blocks, scrollTop) {
+    if (blocks.length === 0) {
+      return null;
+    }
+    let lo = 0;
+    let hi = blocks.length - 1;
+    let firstAtOrBelowViewportTop = blocks.length;
+    while (lo <= hi) {
+      const mid = lo + (hi - lo >> 1);
+      const block = blocks[mid];
+      if (blockDocumentBottom(block) >= scrollTop) {
+        firstAtOrBelowViewportTop = mid;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    const index = firstAtOrBelowViewportTop === blocks.length ? blocks.length - 1 : firstAtOrBelowViewportTop;
+    return readBlockIndex(blocks[index]);
+  }
+  function getDocumentViewportTopCloneYFromIndex(input) {
+    if (input.topBlockIndex === null) {
+      return null;
+    }
+    const startPosition = input.documentBlocks.positionsByBlockIndex.get(input.topBlockIndex);
+    if (startPosition === void 0) {
+      return null;
+    }
+    for (let position = startPosition; position < input.documentBlocks.elements.length; position++) {
+      const documentBlock = input.documentBlocks.elements[position];
+      const rect = documentBlock.getBoundingClientRect();
+      if (rect.height <= 0 || rect.bottom < input.clientY) {
+        continue;
+      }
+      const blockIndex = readBlockIndex(documentBlock);
+      if (blockIndex === null) {
+        continue;
+      }
+      const cloneBlock = input.cloneBlocks.elementsByBlockIndex.get(blockIndex);
+      if (!cloneBlock) {
+        continue;
+      }
+      const cloneTop = elementTopWithinContainer(cloneBlock, input.cloneContainer);
+      if (cloneTop === null) {
+        continue;
+      }
+      const offset = input.clientY - rect.top;
+      const contribution = offset <= 0 ? offset : rect.height > 0 ? offset / rect.height * cloneBlock.offsetHeight : 0;
+      return cloneTop + contribution;
+    }
+    return null;
+  }
+  function readBlockIndex(block) {
+    const raw = block.dataset["mmBlockIndex"];
+    const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  function blockDocumentBottom(block) {
+    return blockDocumentTop(block) + block.offsetHeight;
+  }
+  function blockDocumentTop(block) {
+    let top = 0;
+    let current = block;
+    while (current !== null) {
+      top += current.offsetTop;
+      const nextOffsetParent = current.offsetParent;
+      current = nextOffsetParent instanceof HTMLElement ? nextOffsetParent : null;
+    }
+    return top;
+  }
+  function elementTopWithinContainer(element, container) {
+    let top = 0;
+    let current = element;
+    while (current !== null && current !== container) {
+      top += current.offsetTop;
+      const nextOffsetParent = current.offsetParent;
+      current = nextOffsetParent instanceof HTMLElement ? nextOffsetParent : null;
+    }
+    return current === container ? top : null;
+  }
+
+  // RendererWeb/src/mermaidSurface.ts
+  function resolveLiveDocumentRoot(ownerDocument) {
+    return ownerDocument.querySelector(LIVE_DOCUMENT_ROOT_SELECTOR);
+  }
+  function classifyMermaidSurface(node, roots) {
+    if (roots.liveRoot !== null && roots.liveRoot.contains(node)) {
+      return "live";
+    }
+    if (roots.followerRoot !== null && roots.followerRoot.contains(node)) {
+      return "follower";
+    }
+    return "unscoped";
+  }
+  function partitionMermaidNodesBySurface(nodes, roots) {
+    const deciding = [];
+    let live = 0;
+    let follower = 0;
+    let unscoped = 0;
+    for (const node of nodes) {
+      const surface = classifyMermaidSurface(node, roots);
+      if (surface === "follower") {
+        follower++;
+        continue;
+      }
+      if (surface === "live") {
+        live++;
+      } else {
+        unscoped++;
+      }
+      deciding.push(node);
+    }
+    return { deciding, live, follower, unscoped };
+  }
+  function resolveMermaidMirrors(node, followerRoot) {
+    if (followerRoot === null) {
+      return [];
+    }
+    const key = readMermaidBlockIndexKey(node);
+    if (key === null) {
+      return [];
+    }
+    const mirrors = [];
+    const candidates = followerRoot.querySelectorAll(
+      `pre.mm-mermaid[data-mm-block-index="${key}"]`
+    );
+    for (const candidate of candidates) {
+      if (candidate !== node) {
+        mirrors.push(candidate);
+      }
+    }
+    return mirrors;
+  }
+  function readMermaidBlockIndexKey(node) {
+    const raw = node.dataset["mmBlockIndex"];
+    if (raw === void 0) {
+      return null;
+    }
+    return /^\d+$/.test(raw) ? raw : null;
   }
 
   // RendererWeb/src/hljsLanguage.ts
@@ -1627,111 +1875,6 @@
     };
   }
 
-  // RendererWeb/src/topVisibleBlockIndex.ts
-  var LIVE_DOCUMENT_BLOCK_SELECTOR = "body > main.mm-document [data-mm-block-index]:not(.is-rendered)";
-  function liveBlockSelectorForIndex(blockIndex) {
-    return `body > main.mm-document [data-mm-block-index="${blockIndex}"]:not(.is-rendered)`;
-  }
-  function collectLiveDocumentBlockElements(ownerDocument) {
-    return Array.from(ownerDocument.querySelectorAll(LIVE_DOCUMENT_BLOCK_SELECTOR));
-  }
-  function createBlockElementIndex(elements) {
-    const elementsByBlockIndex = /* @__PURE__ */ new Map();
-    const positionsByBlockIndex = /* @__PURE__ */ new Map();
-    for (let position = 0; position < elements.length; position++) {
-      const element = elements[position];
-      const blockIndex = readBlockIndex(element);
-      if (blockIndex === null) {
-        continue;
-      }
-      if (!elementsByBlockIndex.has(blockIndex)) {
-        elementsByBlockIndex.set(blockIndex, element);
-        positionsByBlockIndex.set(blockIndex, position);
-      }
-    }
-    return { elements, elementsByBlockIndex, positionsByBlockIndex };
-  }
-  function findTopVisibleBlockIndexFromBlocks(blocks, scrollTop) {
-    if (blocks.length === 0) {
-      return null;
-    }
-    let lo = 0;
-    let hi = blocks.length - 1;
-    let firstAtOrBelowViewportTop = blocks.length;
-    while (lo <= hi) {
-      const mid = lo + (hi - lo >> 1);
-      const block = blocks[mid];
-      if (blockDocumentBottom(block) >= scrollTop) {
-        firstAtOrBelowViewportTop = mid;
-        hi = mid - 1;
-      } else {
-        lo = mid + 1;
-      }
-    }
-    const index = firstAtOrBelowViewportTop === blocks.length ? blocks.length - 1 : firstAtOrBelowViewportTop;
-    return readBlockIndex(blocks[index]);
-  }
-  function getDocumentViewportTopCloneYFromIndex(input) {
-    if (input.topBlockIndex === null) {
-      return null;
-    }
-    const startPosition = input.documentBlocks.positionsByBlockIndex.get(input.topBlockIndex);
-    if (startPosition === void 0) {
-      return null;
-    }
-    for (let position = startPosition; position < input.documentBlocks.elements.length; position++) {
-      const documentBlock = input.documentBlocks.elements[position];
-      const rect = documentBlock.getBoundingClientRect();
-      if (rect.height <= 0 || rect.bottom < input.clientY) {
-        continue;
-      }
-      const blockIndex = readBlockIndex(documentBlock);
-      if (blockIndex === null) {
-        continue;
-      }
-      const cloneBlock = input.cloneBlocks.elementsByBlockIndex.get(blockIndex);
-      if (!cloneBlock) {
-        continue;
-      }
-      const cloneTop = elementTopWithinContainer(cloneBlock, input.cloneContainer);
-      if (cloneTop === null) {
-        continue;
-      }
-      const offset = input.clientY - rect.top;
-      const contribution = offset <= 0 ? offset : rect.height > 0 ? offset / rect.height * cloneBlock.offsetHeight : 0;
-      return cloneTop + contribution;
-    }
-    return null;
-  }
-  function readBlockIndex(block) {
-    const raw = block.dataset["mmBlockIndex"];
-    const parsed = raw === void 0 ? Number.NaN : Number.parseInt(raw, 10);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  function blockDocumentBottom(block) {
-    return blockDocumentTop(block) + block.offsetHeight;
-  }
-  function blockDocumentTop(block) {
-    let top = 0;
-    let current = block;
-    while (current !== null) {
-      top += current.offsetTop;
-      const nextOffsetParent = current.offsetParent;
-      current = nextOffsetParent instanceof HTMLElement ? nextOffsetParent : null;
-    }
-    return top;
-  }
-  function elementTopWithinContainer(element, container) {
-    let top = 0;
-    let current = element;
-    while (current !== null && current !== container) {
-      top += current.offsetTop;
-      const nextOffsetParent = current.offsetParent;
-      current = nextOffsetParent instanceof HTMLElement ? nextOffsetParent : null;
-    }
-    return current === container ? top : null;
-  }
-
   // RendererWeb/src/printFit.ts
   var PRINT_FIT_ATTR = "data-mm-print-fit";
   var PRINT_FIT_SCALE_VAR = "--mm-print-fit-scale";
@@ -2381,13 +2524,26 @@
   function isNormalMermaidOwner(identity = documentIdentity) {
     return mermaidLifecycleState.owner === "normal" && mermaidLifecycleState.identity === identity && documentIdentity === identity;
   }
+  function resolveMermaidMirrorsForNode(node) {
+    const followerRoot = minimapContent;
+    if (followerRoot === null) return [];
+    const liveRoot = resolveLiveDocumentRoot(document);
+    if (classifyMermaidSurface(node, { liveRoot, followerRoot }) !== "live") return [];
+    const mirrors = resolveMermaidMirrors(node, followerRoot);
+    postPerfMark("mm-mermaid-mirrored", {
+      blockIndex: node.dataset["mmBlockIndex"] ?? null,
+      mirrors: mirrors.length
+    });
+    return mirrors;
+  }
   function trackMermaidRenderCall(node, generation, mermaid) {
     const renderCall = Promise.resolve().then(() => renderMermaidNode(
       node,
       generation,
       () => mermaidRenderGeneration,
       mermaid,
-      invalidateTopVisibleBlockIndexCache
+      invalidateTopVisibleBlockIndexCache,
+      resolveMermaidMirrorsForNode
     ));
     activeMermaidRenderCalls.add(renderCall);
     void renderCall.finally(() => {
@@ -2424,13 +2580,21 @@
     const generation = ++mermaidRenderGeneration;
     mermaidLazyRenderQueue = Promise.resolve();
     const viewportHeight = getViewportHeightForMermaid();
-    const eagerNodes = allNodes.filter((node) => isMermaidNodeNearViewport(node, viewportHeight, MERMAID_EAGER_VIEWPORT_MARGIN_PX));
+    const surfaces = partitionMermaidNodesBySurface(allNodes, {
+      liveRoot: resolveLiveDocumentRoot(document),
+      followerRoot: minimapContent
+    });
+    const decidingNodes = surfaces.deciding;
+    const eagerNodes = decidingNodes.filter((node) => isMermaidNodeNearViewport(node, viewportHeight, MERMAID_EAGER_VIEWPORT_MARGIN_PX));
     const eagerSet = new Set(eagerNodes);
-    const lazyNodes = allNodes.filter((node) => !eagerSet.has(node));
+    const lazyNodes = decidingNodes.filter((node) => !eagerSet.has(node));
     postPerfMark(perfMarkName, {
-      total: allNodes.length,
+      total: decidingNodes.length,
       eager: eagerNodes.length,
-      lazy: lazyNodes.length
+      lazy: lazyNodes.length,
+      swept: allNodes.length,
+      follower: surfaces.follower,
+      unscoped: surfaces.unscoped
     });
     installLazyMermaidObserver(lazyNodes, generation, mermaid);
     if (eagerNodes.length === 0) return;
@@ -4015,6 +4179,25 @@
     sanitizeMinimapCloneTree(clone);
     return clone;
   }
+  function mirrorRenderedMermaidIntoMinimapClone() {
+    const followerRoot = minimapContent;
+    if (followerRoot === null) return;
+    const liveRoot = resolveLiveDocumentRoot(document);
+    if (liveRoot === null) return;
+    const renderedLiveNodes = liveRoot.querySelectorAll("pre.mm-mermaid.is-rendered");
+    if (renderedLiveNodes.length === 0) return;
+    let mirrored = 0;
+    for (const node of renderedLiveNodes) {
+      const mirrors = resolveMermaidMirrors(node, followerRoot);
+      if (mirrors.length === 0) continue;
+      mirrorMermaidSlot(node, mirrors);
+      mirrored++;
+    }
+    postPerfMark("mm-mermaid-mirror-pull", {
+      renderedLive: renderedLiveNodes.length,
+      mirrored
+    });
+  }
   function refreshMinimapContent(phase = "A") {
     cancelDeferredMinimapContentRefresh();
     emitMark("mm-minimap-refresh-start", { phase });
@@ -4057,6 +4240,7 @@
       minimapContent.style.width = `${calculateDocumentContentWidthFromCssModel(true)}px`;
     }
     minimapContent.replaceChildren(clone);
+    mirrorRenderedMermaidIntoMinimapClone();
     rebuildMinimapCloneBlockElementIndex(clone);
     updateMinimapVisibility(true);
     updateMinimapViewport({ skipVisibilityUpdate: true });
@@ -4118,6 +4302,7 @@
     }
     minimapDocumentHeight = restored.documentHeight;
     minimapSourceReady = true;
+    mirrorRenderedMermaidIntoMinimapClone();
     rebuildMinimapCloneBlockElementIndex(minimapContent);
     postCachedMinimapState(restored.lastPostedState);
     emitMark("mm-minimap-cache-hit", {
@@ -4478,6 +4663,9 @@
   }
   function __testCloneDocumentForMinimapForTesting() {
     return cloneDocumentForMinimap();
+  }
+  function __testMirrorRenderedMermaidIntoMinimapCloneForTesting() {
+    mirrorRenderedMermaidIntoMinimapClone();
   }
   function __testEmitScrollForTesting() {
     postScroll(false);
