@@ -66,6 +66,15 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - The WebView renderer hides the document body, minimap, and width-resizer handle until the bootstrap pipeline finishes math + mermaid + code-block rendering and posts `layout-ready`. Without this gate the user briefly sees a fallback state on tab switch and fresh launch (web fonts not yet swapped, `\[ ... \]` math placeholders, raw mermaid source, width handle at a stale X coordinate). The reveal uses a 120ms CSS opacity transition shared by all three surfaces.
 - The hide-rule is scoped to `body > main.mm-document` (and the minimap aside, and the width-handle div) so that the minimap's cloned `.mm-document` subtree is not affected; the clone always renders at full opacity inside the minimap container.
 
+## Release Scope (v0.3.27-applicate)
+
+- The edit-preview renderer no longer holds a second rendered copy of a document nobody is editing. It is created and primed only when the session shows editing intent, so a reading-only session keeps one copy instead of two; on the heaviest measured document the edit-preview host dropped from 357.7 MB holding a full document to 35.3 MB holding zero document blocks, for a process-tree reduction of 341 to 370 MB. Verified in both Release and Debug builds.
+- The renderer document cache now evicts on a measured weight budget instead of a fixed count of four entries, so a session of small documents keeps more of them cached while a session of very heavy documents stops accumulating them past the memory the budget allows. Entry weight is measured from the rendered payload rather than estimated.
+- After the first document finishes painting, the other already-open tabs render their bodies in the background, so a later click on one of them lands on content that is already prepared instead of starting from nothing.
+- A document restored from the cache no longer warms itself before its first paint, removing layout work that delayed the moment the restored document became visible.
+- Table cells keep words whole instead of breaking them mid-word when a column is narrow.
+- Host diagnostics now tag every trace line with the identity of the WebView host that produced it, and the two previously unlogged tab-switch stages report their boundaries, so a slow tab switch can be attributed to a stage rather than inferred.
+
 ## Release Scope (v0.3.6-applicate)
 
 - The renderer find bar now keeps keyboard focus while typing past the first character and navigates between matches correctly. Matches are drawn with the CSS Custom Highlight API so the input caret and the match highlight no longer fight over the single document selection.
