@@ -68,6 +68,7 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 
 ## Release Scope (v0.3.29-applicate)
 
+- After a restart, the app now pre-loads in the background the documents the last session actually reached for, rather than the last few tabs in the strip. The pre-load was reading the recent list correctly but the list was being rebuilt in reverse tab order on restore, so the warming consistently favoured whatever happened to sit rightmost.
 - The recent-files list now records the document you last **looked at**, not merely the one you first opened. Switching between already-open tabs previously left the list untouched, so a document you had been reading for an hour could sit below one you opened once and closed. The menu's own wording already said "recently viewed"; the behaviour now matches it.
 - The width-adjustment handle no longer disappears after switching to a short document and back. It was hidden during the restore and, on documents with no minimap to rebuild, nothing ever brought it back for the rest of the session.
 - Tables no longer pay a style recalculation per cell every time a document is restored from the cache. On a table-heavy document the switch cost drops from about 80 ms to about 4 ms; on a very large table it was over a second.
