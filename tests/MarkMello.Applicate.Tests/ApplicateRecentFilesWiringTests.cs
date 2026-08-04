@@ -476,6 +476,34 @@ public sealed class ApplicateRecentFilesWiringTests
     }
 
     /// <summary>
+    /// B14 -- <c>work-items/bugs/2026-08-03-the-restore-seed-loop-does-not-apply-the-recent-list-cap.md</c>.
+    /// The cap is the seed's POSTCONDITION, not a side effect of a fold happening to run. B6 feeds an
+    /// over-length saved list too, but it also folds one open path -- and it is that FOLD which caps the
+    /// result there, so B6 stays green with the seed's own cap entirely absent. The shape that escapes is a
+    /// restore with an EMPTY open set and no argv document: nothing folds, nothing caps, and the
+    /// over-length list is what the convergence <c>SaveSession</c> then writes back. The store swallows
+    /// save failures (d11's accepted limitation), so that growth would be silent.
+    /// <para>
+    /// Pinned as a literal list rather than a count: trimming the HEAD satisfies a count assertion just as
+    /// well while discarding exactly the most-recent entries the list exists to hold.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void SeedCapsAnOverLengthSavedListWhenNothingIsFolded()
+    {
+        var savedRecent = Enumerable.Range(1, 20).Select(i => $@"C:\a\r{i}.md").ToList();
+        var recentPaths = new List<string>();
+
+        ApplicateMainWindow.SeedRecentPathsForRestore(
+            recentPaths,
+            savedRecent,
+            new List<string>(),
+            argvPath: null);
+
+        Assert.Equal(savedRecent.Take(ApplicateSession.MaxRecentPaths).ToList(), recentPaths);
+    }
+
+    /// <summary>
     /// B10 -- pins an implementation STYLE, not the single-owner guarantee. recentPaths is a captured
     /// local, so even a returning form would reassign the one shared closure field and every reader
     /// would still see exactly one list; claim 8's real enforcement is the marker's shape plus

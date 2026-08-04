@@ -2642,6 +2642,11 @@ public sealed class ApplicateMainWindow : MainWindow
     /// anyway (declared delta 2); it is display-pruned while missing, per d11 clause 6. Adding an
     /// existence filter here would silently re-hide that delta and defeat the whole hoist.
     /// </para>
+    /// <para>
+    /// POSTCONDITION: the result never exceeds <see cref="ApplicateSession.MaxRecentPaths"/>, whether or
+    /// not anything was folded. The persisted list is read as UNTRUSTED on this point -- every writer
+    /// caps it, but nothing enforced that on read.
+    /// </para>
     /// </summary>
     internal static void SeedRecentPathsForRestore(
         List<string> recentPaths,
@@ -2733,6 +2738,26 @@ public sealed class ApplicateMainWindow : MainWindow
         }
 
         Fold(argvPath);
+
+        // The cap is this seed's POSTCONDITION, never a side effect of a fold having happened to run.
+        // Every WRITER already respects MaxRecentPaths; the READER did not. A persisted list that is
+        // already over the cap -- hand-edited, merged, or written by an older build -- was copied in
+        // whole above and handed straight back to the convergence SaveSession, and the store swallows
+        // save failures (d11's accepted limitation), so the growth would be silent. The folds are the
+        // only other enforcement point on this path, and a restore with an empty saved open set and no
+        // argv document runs none of them.
+        //
+        // Only-forward: a restore that folds at all is byte-identical, because BuildRecentPaths already
+        // returns at most MaxRecentPaths entries and nothing after a fold grows the list -- so this
+        // RemoveRange is provably a no-op there. Trimming BEFORE the ranking above would NOT have been:
+        // two saved open paths both sitting past the cap would lose their persisted recency relative to
+        // each other and fall back to tab order, which is the very regression B12 fixed.
+        if (recentPaths.Count > ApplicateSession.MaxRecentPaths)
+        {
+            recentPaths.RemoveRange(
+                ApplicateSession.MaxRecentPaths,
+                recentPaths.Count - ApplicateSession.MaxRecentPaths);
+        }
     }
 
     /// <summary>
