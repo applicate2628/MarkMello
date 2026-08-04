@@ -66,6 +66,11 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - The WebView renderer hides the document body, minimap, and width-resizer handle until the bootstrap pipeline finishes math + mermaid + code-block rendering and posts `layout-ready`. Without this gate the user briefly sees a fallback state on tab switch and fresh launch (web fonts not yet swapped, `\[ ... \]` math placeholders, raw mermaid source, width handle at a stale X coordinate). The reveal uses a 120ms CSS opacity transition shared by all three surfaces.
 - The hide-rule is scoped to `body > main.mm-document` (and the minimap aside, and the width-handle div) so that the minimap's cloned `.mm-document` subtree is not affected; the clone always renders at full opacity inside the minimap container.
 
+## Release Scope (v0.3.30-applicate)
+
+- When the application dies unexpectedly it now leaves a record of why, in `applicate-crash.log` beside the settings in `%AppData%/MarkMello`. Previously the window simply vanished with nothing written anywhere — no message, no log, no trace — so a crash was indistinguishable from work that quietly did not happen. **This does not stop the application crashing**; it makes a crash explicable after the fact.
+- Five background operations that could previously take the whole window down when they failed now report the failure and leave the rest of the application running. The failure is written to the same record.
+
 ## Release Scope (v0.3.29-applicate)
 
 - After a restart, the app now pre-loads in the background the documents the last session actually reached for, rather than the last few tabs in the strip. The pre-load was reading the recent list correctly but the list was being rebuilt in reverse tab order on restore, so the warming consistently favoured whatever happened to sit rightmost.
