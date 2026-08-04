@@ -66,6 +66,35 @@ internal sealed record ApplicateFullRenderDeliveryHooks(
     Func<string, Task> InvokeRaw,
     Action<Exception?>? DeliveryObserved = null);
 
+internal enum ApplicateWebViewUserDataFolderOutcome
+{
+    /// <summary>The preferred folder validated; identical to the pre-2026-08-04 behaviour.</summary>
+    Primary,
+
+    /// <summary>The preferred folder was unusable and the alternate validated.</summary>
+    Alternate,
+
+    /// <summary>
+    /// Neither candidate validated. The PRIMARY is handed back regardless, so
+    /// this case assigns exactly what the pre-2026-08-04 code assigned and
+    /// lets the existing behaviour play out — the only difference is that the
+    /// reason is now on the record.
+    /// </summary>
+    NoUsableCandidate,
+}
+
+/// <param name="Folder">The folder to assign to <c>UserDataFolder</c>. Never null or empty.</param>
+/// <param name="Outcome">Which candidate won, or that neither did.</param>
+/// <param name="Detail">
+/// Exception type + HRESULT of each rejected candidate, for the trace. Never
+/// carries the folder PATH: these markers reach stderr and from there into bug
+/// reports, and the primary path embeds the operator's user name.
+/// </param>
+internal sealed record ApplicateWebViewUserDataFolderDecision(
+    string Folder,
+    ApplicateWebViewUserDataFolderOutcome Outcome,
+    string Detail);
+
 public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
 {
     private const double MaxRendererReportedMinimapReservedWidth = 2000;
@@ -334,6 +363,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         TraceDiagMs("startup-webview", "native-webview-ctor-end");
 
         _webView.EnvironmentRequested += OnEnvironmentRequested;
+        _webView.AdapterCreated += OnAdapterCreated;
         _webView.NavigationStarted += OnNavigationStarted;
         _webView.NavigationCompleted += OnNavigationCompleted;
         _webView.NewWindowRequested += OnNewWindowRequested;
@@ -2092,16 +2122,56 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         _renderCancellation = null;
     }
 
+    // Raised SYNCHRONOUSLY from inside Avalonia's WebViewAdapter.CreateFactory.
+    // The moment this handler returns, the options are frozen and control
+    // passes into the opaque region that ends either in an adapter or in
+    // nothing at all — so this method must never throw. It is an event handler
+    // on the startup path; an exception raised from here would turn a
+    // sometimes-working launch into an always-failing one.
     private void OnEnvironmentRequested(object? sender, WebViewEnvironmentRequestedEventArgs e)
     {
         TraceDiagMs("startup-webview", "environment-requested");
         e.EnableDevTools = false;
         if (e is WindowsWebView2EnvironmentRequestedEventArgs windows)
         {
-            windows.UserDataFolder = GetWebViewUserDataFolder();
+            var decision = WebViewUserDataFolderDecision.Value;
+            TraceDiagMs(
+                "startup-webview",
+                "webview-user-data-folder",
+                decision.Detail.Length > 0
+                    ? $"outcome={decision.Outcome} {decision.Detail}"
+                    : $"outcome={decision.Outcome}");
+            windows.UserDataFolder = decision.Folder;
+
+            // Routes controller creation through ICoreWebView2Environment10
+            // .CreateCoreWebView2ControllerOptions rather than the plain
+            // CreateCoreWebView2Controller entry point. Keep it set: a probe
+            // that omits it exercises a different COM path than the app does.
             windows.IsInPrivateModeEnabled = true;
         }
+
+        // The missing pair for "environment-requested", and the reason this
+        // change needs no timer. Logging on ENTERING the wait rather than on
+        // failing to leave it moves the decision out of the process: "started,
+        // never completed" becomes a question a human can answer afterwards
+        // from the log with unlimited time, instead of one the program has to
+        // answer from inside with a bounded budget it cannot justify.
+        //
+        // Pairs with "adapter-created" (OnAdapterCreated). Pair by COUNT, not
+        // by adjacency — this handler legitimately fires more than once per
+        // launch: once per host (the process runs two), again on reparent, and
+        // again with WebView1 args if the WebView2 runtime is not found. The
+        // kind= field names which of those a given marker is.
+        TraceDiagMs("startup-webview", "adapter-wait-entered", $"kind={e.GetType().Name}");
     }
+
+    // The arrival half of the pair. Avalonia consumes the adapter task inside
+    // NativeWebView.OnAttached (an async void that awaits CreateFactory), so
+    // our code cannot observe that task — but NativeWebView.AdapterCreated is
+    // a public event raised once the adapter exists and is wired, which is the
+    // same state transition observed from the supported seam. No fork needed.
+    private void OnAdapterCreated(object? sender, WebViewAdapterEventArgs e)
+        => TraceDiagMs("startup-webview", "adapter-created");
 
     private void OnNavigationStarted(object? sender, WebViewNavigationStartingEventArgs e)
     {
@@ -5400,11 +5470,159 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         return phase is "start" or "move" or "end";
     }
 
-    private static string GetWebViewUserDataFolder()
+    internal static string GetWebViewUserDataFolder()
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var root = string.IsNullOrWhiteSpace(localAppData) ? Path.GetTempPath() : localAppData;
         return Path.Combine(root, "MarkMello", "Applicate", "WebView2");
+    }
+
+    // The one alternate. Deliberately rooted at the temp path and given a
+    // DISTINCT leaf so it can never collide with the primary — including in
+    // the branch above where LocalApplicationData is empty and the primary is
+    // ALREADY temp-rooted. A colliding alternate would be worse than none:
+    // Avalonia's environment cache is keyed on the folder (see the comment on
+    // WebViewUserDataFolderDecision), so re-offering the same folder is a
+    // guaranteed no-op that would still read as a working fallback.
+    internal static string GetAlternateWebViewUserDataFolder()
+        => Path.Combine(Path.GetTempPath(), "MarkMello", "Applicate", "WebView2Alternate");
+
+    /// <summary>
+    /// Picks the WebView2 user-data folder, resolved ONCE per process.
+    ///
+    /// Once, not per call, because the folder is already a process-global
+    /// decision whether we treat it as one or not: Avalonia's
+    /// <c>CoreWebView2Environment.s_environments</c> is a process-wide
+    /// dictionary keyed by an options tuple whose equality includes
+    /// <c>UserDataFolder</c> (verified against Avalonia.Controls.WebView
+    /// 12.0.1). This process stands up TWO <c>ApplicateSharedWebViewHost</c>
+    /// instances and <c>OnEnvironmentRequested</c> fires once per host — and
+    /// again on reparent, and again for the WebView1 fallback args. Resolving
+    /// per call would let one transient probe failure hand the two hosts
+    /// DIFFERENT folders, which is not a degraded startup but a second browser
+    /// environment. One immutable decision keeps both hosts together.
+    ///
+    /// Immutable and computed once, so this is not process-global mutable
+    /// state; it is the composition-root-owned resolution of an input that is
+    /// constant for the process lifetime.
+    /// </summary>
+    private static readonly Lazy<ApplicateWebViewUserDataFolderDecision> WebViewUserDataFolderDecision =
+        new(
+            static () => ResolveWebViewUserDataFolder(
+                GetWebViewUserDataFolder(),
+                GetAlternateWebViewUserDataFolder()),
+            LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary>
+    /// Validates the user-data folder BEFORE it is assigned, and falls back to
+    /// one alternate rather than reporting a failure.
+    ///
+    /// WHY PREVENTION AND NOT DETECTION. Three confirmed stimuli make
+    /// CoreWebView2 environment creation fail when the folder is assigned
+    /// blind: the path already exists AS A FILE, its PARENT exists as a file,
+    /// or the drive does not exist. Those failures do not share a shape. One
+    /// faults loudly in about 150 ms; the other hangs — the browser host
+    /// process starts, fails to register its COM class object and never exits,
+    /// so the environment's completion handler is never invoked and startup
+    /// stalls with no exception, no event and no record on any channel.
+    /// Validating removes the stimulus instead of observing the consequence,
+    /// which is what makes it immune to that nondeterminism: it does not have
+    /// to guess which shape the failure will take. A detector would have to
+    /// decide from inside the process whether a signal that DOES sometimes
+    /// arrive is never going to — and a signal that sometimes arrives is a
+    /// race, not a decidable question (work-items/decisions/
+    /// 2026-08-04-no-timers-law-arrival-impossibility-criterion.md).
+    ///
+    /// Measured 2026-08-04 on Windows 11: <c>Directory.CreateDirectory</c> plus
+    /// a trial write turns every stimulus into a SYNCHRONOUS typed exception in
+    /// under 7 ms — path-is-a-file and parent-is-a-file give
+    /// <c>IOException</c> 0x800700B7, a missing drive gives
+    /// <c>DirectoryNotFoundException</c> 0x80070003, and a denied folder gives
+    /// <c>UnauthorizedAccessException</c> 0x80070005 (that fourth one faults
+    /// loudly rather than hanging, and is covered here as a free side effect).
+    ///
+    /// ONLY FORWARD. This cannot add a way for startup to fail. If neither
+    /// candidate validates it returns the PRIMARY — exactly what the previous
+    /// code assigned unconditionally — so every path either improves on the old
+    /// behaviour or reproduces it. Nothing here throws.
+    /// </summary>
+    internal static ApplicateWebViewUserDataFolderDecision ResolveWebViewUserDataFolder(
+        string primaryFolder,
+        string alternateFolder)
+    {
+        if (TryPrepareWebViewUserDataFolder(primaryFolder, out var primaryFailure))
+        {
+            return new ApplicateWebViewUserDataFolderDecision(
+                primaryFolder,
+                ApplicateWebViewUserDataFolderOutcome.Primary,
+                Detail: string.Empty);
+        }
+
+        if (TryPrepareWebViewUserDataFolder(alternateFolder, out var alternateFailure))
+        {
+            return new ApplicateWebViewUserDataFolderDecision(
+                alternateFolder,
+                ApplicateWebViewUserDataFolderOutcome.Alternate,
+                Detail: $"primary={primaryFailure}");
+        }
+
+        return new ApplicateWebViewUserDataFolderDecision(
+            primaryFolder,
+            ApplicateWebViewUserDataFolderOutcome.NoUsableCandidate,
+            Detail: $"primary={primaryFailure} alternate={alternateFailure}");
+    }
+
+    /// <summary>
+    /// True when WebView2 can be expected to stand a profile up in
+    /// <paramref name="folder"/>. Never throws.
+    /// </summary>
+    internal static bool TryPrepareWebViewUserDataFolder(string folder, out string failure)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(folder))
+            {
+                failure = "EmptyPath";
+                return false;
+            }
+
+            Directory.CreateDirectory(folder);
+
+            // CreateDirectory succeeding is NOT sufficient. It establishes that
+            // the path resolves to a directory, not that a profile can be
+            // written into it; the trial write is what covers a denied or
+            // read-only location. It is also the WEAKER of the two demands —
+            // anything that fails this one-byte write would certainly fail for
+            // the browser host, so this cannot reject a folder WebView2 would
+            // have accepted for permission reasons.
+            //
+            // The probe name carries the process id, not a fixed literal: two
+            // app processes starting together would otherwise collide on one
+            // path, and the loser's sharing violation would send it to the
+            // alternate folder for no real reason. Keying on the pid keeps the
+            // name set bounded (a crashed startup leaves at most one stale
+            // one-byte file, overwritten on the next run with that pid) rather
+            // than accumulating one per launch as a GUID would.
+            var probe = Path.Combine(folder, $".applicate-write-probe-{Environment.ProcessId}");
+            File.WriteAllBytes(probe, [0]);
+            File.Delete(probe);
+
+            failure = string.Empty;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // Deliberately broad, and that is the point rather than a shortcut.
+            // The measured shapes are IOException, DirectoryNotFoundException
+            // and UnauthorizedAccessException, but the CALLER's contract is
+            // "never throw on the startup path" (see OnEnvironmentRequested),
+            // so no exception type may be load-bearing here — a type this list
+            // missed would propagate out of an event handler and convert a
+            // sometimes-working launch into an always-failing one. The type is
+            // reported instead of caught by name.
+            failure = $"{ex.GetType().Name}:0x{ex.HResult:X8}";
+            return false;
+        }
     }
 
     private static async Task<string> WriteGeneratedDocumentAsync(string html, CancellationToken cancellationToken)
@@ -5500,6 +5718,7 @@ public sealed class ApplicateWebMarkdownDocumentView : UserControl, IDisposable
         CancelRender();
         DeleteCurrentGeneratedDocument();
         _webView.EnvironmentRequested -= OnEnvironmentRequested;
+        _webView.AdapterCreated -= OnAdapterCreated;
         _webView.NavigationStarted -= OnNavigationStarted;
         _webView.NavigationCompleted -= OnNavigationCompleted;
         _webView.NewWindowRequested -= OnNewWindowRequested;
