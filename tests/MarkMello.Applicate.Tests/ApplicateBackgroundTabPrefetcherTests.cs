@@ -373,14 +373,17 @@ public sealed class ApplicateBackgroundTabPrefetcherTests
     [Fact]
     public async Task CancellingAPassDoesNotCancelARenderTheUserIsWaitingOn()
     {
-        // The hazard this pins down: ApplicateRenderedBodyCache coalesces on a
-        // SHARED in-flight task (:63-79), and completes it as CANCELLED when the
-        // render's own token fires (:87-91) — which every other waiter then
-        // observes, whatever its own token says. The user's tab click is such a
-        // waiter, and clicking a tab is what raises ActiveDocumentChanged, one
-        // of the signals that cancels a pass. So a prefetch that threaded its
-        // pass token into the cache could abort the very render the user is
-        // waiting on.
+        // What this pins down: cancelling a pass must never fail a render the
+        // user is waiting on. The user's tab click joins the prefetch's
+        // in-flight render, and clicking a tab is itself one of the signals
+        // that cancels a pass — so the two meet on the primary path, not on
+        // some exotic interleaving.
+        //
+        // Two independent things hold it now: this pass hands
+        // CancellationToken.None to the cache, and ApplicateRenderedBodyCache
+        // cancels a shared render only when its LAST waiter withdraws. The
+        // assertion is on the observable outcome, so it stays meaningful if
+        // either one of those changes.
         var cache = new ApplicateRenderedBodyCache(maxEntries: 4);
         var prefetchRendering = new SemaphoreSlim(0);
         var release = new TaskCompletionSource();

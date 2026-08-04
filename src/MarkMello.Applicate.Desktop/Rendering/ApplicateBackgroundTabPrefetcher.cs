@@ -513,26 +513,18 @@ internal sealed class ApplicateBackgroundTabPrefetcher : IDisposable
                     },
                     // DELIBERATELY CancellationToken.None, not the pass token.
                     //
-                    // The cache coalesces on a shared in-flight task: a second
-                    // caller for the same key awaits the FIRST caller's task
-                    // (ApplicateRenderedBodyCache.cs:63-79). If that first
-                    // caller is this prefetch and its token fires, the cache
-                    // completes the shared task as CANCELLED (:87-91) — and
-                    // every other waiter observes that cancellation regardless
-                    // of its own token.
+                    // A render this pass has already STARTED is finished rather
+                    // than abandoned: the result is cached, and the document is
+                    // one the user has open. The work is bounded because the
+                    // worker loop stops DEQUEUING candidates on cancel, so at
+                    // most _maxConcurrency renders (2) run on past it.
                     //
-                    // The user's tab click is exactly such a waiter, and
-                    // clicking a tab raises ActiveDocumentChanged, which is one
-                    // of the signals that cancels this pass. Threading the pass
-                    // token in here would therefore let a prefetch abort the
-                    // very render the user is waiting on. A prefetch must never
-                    // be able to fail a user render.
-                    //
-                    // Cancellation is honoured where it is free of that hazard:
-                    // the worker loop stops DEQUEUING candidates, so at most
-                    // _maxConcurrency renders (2) run on to completion after a
-                    // cancel — bounded work, on documents the user has open,
-                    // whose results are still cached and still useful.
+                    // That is a prefetch policy choice and nothing more. It is
+                    // no longer holding a cache hazard shut:
+                    // ApplicateRenderedBodyCache runs a shared render on a token
+                    // it owns and cancels it only when the LAST waiter
+                    // withdraws, so a real token here could not abort a render
+                    // the user is waiting on either.
                     CancellationToken.None)
                 .ConfigureAwait(false);
 
