@@ -379,11 +379,12 @@ public sealed class ApplicateBackgroundTabPrefetcherTests
         // that cancels a pass — so the two meet on the primary path, not on
         // some exotic interleaving.
         //
-        // Two independent things hold it now: this pass hands
-        // CancellationToken.None to the cache, and ApplicateRenderedBodyCache
-        // cancels a shared render only when its LAST waiter withdraws. The
-        // assertion is on the observable outcome, so it stays meaningful if
-        // either one of those changes.
+        // In THIS ordering the cache's last-waiter rule alone holds the
+        // outcome: the user is already registered when the cancel lands, so the
+        // render survives whichever token this pass handed in. Measured rather
+        // than assumed — thread the pass token into GetOrRenderAsync and this
+        // test stays green. The ordering the token actually decides is the
+        // sibling below, CancellingAPassBeforeTheUserAsksStillLeavesTheRenderForThem.
         var cache = new ApplicateRenderedBodyCache(maxEntries: 4);
         var prefetchRendering = new SemaphoreSlim(0);
         var release = new TaskCompletionSource();
@@ -424,6 +425,74 @@ public sealed class ApplicateBackgroundTabPrefetcherTests
 
         var body = await userRender;
         await passTask;
+
+        Assert.False(userRenderStarted);
+        Assert.Equal("<h1>contested.md</h1>", body.BodyHtml);
+    }
+
+    [Fact]
+    public async Task CancellingAPassBeforeTheUserAsksStillLeavesTheRenderForThem()
+    {
+        // The sibling test above has the user join BEFORE the cancel, where the
+        // pass's CancellationToken.None and the cache's last-waiter rule BOTH
+        // hold the outcome. This is the ordering that separates them, and it is
+        // the one production actually takes: clicking a tab raises
+        // ActiveDocumentChanged, whose handler cancels the pass SYNCHRONOUSLY
+        // (ApplicateMainWindow.OnActiveDocumentChanged), while the activation
+        // path only reaches the cache several awaits later — shell navigate,
+        // then shell-ready (ApplicateWebMarkdownDocumentView:1577-1622). The
+        // pass therefore withdraws FIRST and the user arrives SECOND.
+        //
+        // THIS IS WHAT MAKES CancellationToken.None LOAD-BEARING AT THE
+        // GetOrRenderAsync CALL. Hand the pass token in instead and the
+        // prefetch's withdrawal is the LAST one: the cache cancels the shared
+        // render and drops its key, so the user — one instant away from asking
+        // for exactly that document — pays a full render from zero, having
+        // thrown away one that was nearly finished. That is backward on the
+        // click the whole feature exists to make faster.
+        //
+        // No timeout on the park: a wrong expectation must HANG and be seen,
+        // never pass because some delay happened to be long enough.
+        var cache = new ApplicateRenderedBodyCache(maxEntries: 4);
+        var prefetchRendering = new SemaphoreSlim(0);
+        var release = new TaskCompletionSource();
+        var renderer = new RecordingRenderer(async (_, _) =>
+        {
+            prefetchRendering.Release();
+            await release.Task.ConfigureAwait(false);
+        });
+        var documents = new FakeDocumentSource();
+        documents.Add("active.md", "# Active");
+        documents.Add("contested.md", "# Contested");
+
+        var prefetcher = CreatePrefetcher(cache, renderer, documents, maxConcurrency: 1);
+        var pass = new CancellationTokenSource();
+        var passTask = prefetcher.RunPassAsync(
+            Snapshot("active.md", "active.md", "contested.md"),
+            "test",
+            pass);
+
+        await prefetchRendering.WaitAsync();
+
+        // The pass is cancelled while its render is in flight and BEFORE anyone
+        // else has asked for the document — the "active-document-changed" edge.
+        pass.Cancel();
+        release.SetResult();
+        await passTask;
+        prefetcher.Dispose();
+
+        // Only now does the user's activation path reach the cache.
+        var userRenderStarted = false;
+        var body = await cache.GetOrRenderAsync(
+            new MarkdownSource("contested.md", "contested.md", "# Contested"),
+            ReadingPreferences.Default,
+            imageSourceResolver: null,
+            _ =>
+            {
+                userRenderStarted = true;
+                return Task.FromResult(Rendered("<h1>from zero</h1>"));
+            },
+            CancellationToken.None);
 
         Assert.False(userRenderStarted);
         Assert.Equal("<h1>contested.md</h1>", body.BodyHtml);

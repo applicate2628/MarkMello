@@ -519,12 +519,37 @@ internal sealed class ApplicateBackgroundTabPrefetcher : IDisposable
                     // worker loop stops DEQUEUING candidates on cancel, so at
                     // most _maxConcurrency renders (2) run on past it.
                     //
-                    // That is a prefetch policy choice and nothing more. It is
-                    // no longer holding a cache hazard shut:
-                    // ApplicateRenderedBodyCache runs a shared render on a token
-                    // it owns and cancels it only when the LAST waiter
-                    // withdraws, so a real token here could not abort a render
-                    // the user is waiting on either.
+                    // SETTLED, and still load-bearing — for a different reason
+                    // than it used to be. The old one is gone: the cache no
+                    // longer completes a shared render as cancelled for every
+                    // waiter, so a real token here could not abort a render the
+                    // user is ALREADY waiting on.
+                    //
+                    // It would abort one the user is about to want, which is the
+                    // same harm one instant earlier. Clicking a tab raises
+                    // ActiveDocumentChanged, and that handler cancels this pass
+                    // SYNCHRONOUSLY (ApplicateMainWindow.OnActiveDocumentChanged),
+                    // while the activation path only reaches the cache several
+                    // awaits later — shell navigate, then shell-ready. So on the
+                    // one edge that matters this pass withdraws FIRST and the
+                    // user arrives SECOND. With a real token that withdrawal is
+                    // the LAST one: the cache cancels the shared render and drops
+                    // its key, and the click that was about to join a nearly
+                    // finished render starts from zero instead. On the documents
+                    // this pass is worth running for that is 58-90 ms thrown
+                    // away, on precisely the click the feature exists to speed
+                    // up.
+                    //
+                    // What None costs in exchange is bounded and small: at most
+                    // _maxConcurrency (2) renders finish after a cancel, each
+                    // already inside the budget, each for a document the user has
+                    // open, and the cache's LRU caps what they can occupy.
+                    //
+                    // Pinned by CancellingAPassBeforeTheUserAsksStillLeavesTheRenderForThem,
+                    // which is red when this is the pass token. The sibling test
+                    // (…DoesNotCancelARenderTheUserIsWaitingOn) has the user join
+                    // BEFORE the cancel and passes either way — that ordering
+                    // does not decide this.
                     CancellationToken.None)
                 .ConfigureAwait(false);
 
