@@ -66,6 +66,16 @@ This fork keeps upstream MarkMello source files unchanged. Fork-specific behavio
 - The WebView renderer hides the document body, minimap, and width-resizer handle until the bootstrap pipeline finishes math + mermaid + code-block rendering and posts `layout-ready`. Without this gate the user briefly sees a fallback state on tab switch and fresh launch (web fonts not yet swapped, `\[ ... \]` math placeholders, raw mermaid source, width handle at a stale X coordinate). The reveal uses a 120ms CSS opacity transition shared by all three surfaces.
 - The hide-rule is scoped to `body > main.mm-document` (and the minimap aside, and the width-handle div) so that the minimap's cloned `.mm-document` subtree is not affected; the clone always renders at full opacity inside the minimap container.
 
+## Release Scope (v0.3.31-applicate)
+
+- The application no longer starts with a permanently blank document area when its browser profile folder is unusable — because a file sits where the folder should be, because the drive is gone, or because the folder cannot be written to. Previously the browser component could hang partway through starting up: the window opened, the document area stayed empty, and **nothing was written anywhere** — no message, no log entry, no crash record — so it read as the application being slow rather than broken. The folder is now checked before it is handed over, an alternate is used if the preferred one is unusable, and either way the reason is recorded. If neither folder works the behaviour is exactly what it was before, with the reason now on the record.
+- The startup log now marks both the moment the browser component is handed over and the moment it comes back, so a start that never finishes can be told apart from one that merely took a while. This is a diagnostic addition only; nothing waits on a clock.
+
+**Two latent faults were also closed. Neither had any effect you could have observed** — both were traps that a future feature would have armed, and they are recorded here for completeness rather than as fixes to anything you experienced:
+
+- A background operation could have cancelled a document render that you were waiting on, had anything ever passed it a cancellation. Renders are now shared properly: one is abandoned only when nobody at all is still waiting for it.
+- The recent-documents list was capped when it was written but not when it was read back, so a session file that arrived over-length from an older build or a hand edit would have been carried forward and saved again unchecked.
+
 ## Release Scope (v0.3.30-applicate)
 
 - When the application dies unexpectedly it now leaves a record of why, in `applicate-crash.log` beside the settings in `%AppData%/MarkMello`. Previously the window simply vanished with nothing written anywhere — no message, no log, no trace — so a crash was indistinguishable from work that quietly did not happen. **This does not stop the application crashing**; it makes a crash explicable after the fact.
